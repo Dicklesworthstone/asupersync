@@ -41,6 +41,7 @@ use crate::types::Time;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -114,6 +115,42 @@ pub struct HttpAutoShutdownStats {
     pub http2: ShutdownStats,
 }
 
+/// Optional overrides keep the inner listener's defaults authoritative.
+/// These cannot be fields of the exhaustively constructible public config.
+#[derive(Clone, Copy, Debug, Default)]
+struct Http2Options {
+    preface_timeout: Option<Duration>,
+    write_progress_timeout: Option<Duration>,
+    flow_control_progress_timeout: Option<Duration>,
+    keepalive: Option<(Duration, Duration)>,
+    max_in_flight_requests: Option<NonZeroUsize>,
+    max_connection_in_flight_requests: Option<NonZeroUsize>,
+}
+
+impl Http2Options {
+    fn apply<F>(self, mut listener: Http2Listener<F>) -> Http2Listener<F> {
+        if let Some(timeout) = self.preface_timeout {
+            listener = listener.preface_timeout(timeout);
+        }
+        if let Some(timeout) = self.write_progress_timeout {
+            listener = listener.write_progress_timeout(timeout);
+        }
+        if let Some(timeout) = self.flow_control_progress_timeout {
+            listener = listener.flow_control_progress_timeout(timeout);
+        }
+        if let Some((interval, timeout)) = self.keepalive {
+            listener = listener.keepalive(interval, timeout);
+        }
+        if let Some(max) = self.max_in_flight_requests {
+            listener = listener.max_in_flight_requests(max);
+        }
+        if let Some(max) = self.max_connection_in_flight_requests {
+            listener = listener.max_connection_in_flight_requests(max);
+        }
+        listener
+    }
+}
+
 /// One TCP listener serving HTTP/1.1 and HTTP/2; see the
 /// [module documentation](self).
 ///
@@ -123,10 +160,15 @@ pub struct HttpAutoShutdownStats {
 /// (`WebSocketUpgrade::on_upgrade_any`) run on these connections, so a Router
 /// built with `into_http1_handler()` serves WebSockets next to HTTP/2;
 /// TCP-typed actions are refused before the `101`.
+/// HTTP/2 keepalive, transport progress deadlines and request admission limits
+/// can be set with this listener's `http2_*` builders, for both cleartext and
+/// TLS connections. Other per-protocol settings live in
+/// [`HttpAutoListenerConfig`].
 pub struct HttpAutoListener<F> {
     listener: TcpListener,
     handler: Arc<F>,
     config: HttpAutoListenerConfig,
+    http2_options: Http2Options,
     shutdown_signal: ShutdownSignal,
     #[cfg(feature = "tls")]
     tls_acceptor: Option<TlsAcceptor>,
@@ -162,6 +204,7 @@ where
             listener,
             handler: Arc::new(handler),
             config,
+            http2_options: Http2Options::default(),
             shutdown_signal: ShutdownSignal::new(),
             #[cfg(feature = "tls")]
             tls_acceptor: None,
@@ -177,6 +220,68 @@ where
     #[must_use]
     pub fn with_tls(mut self, acceptor: TlsAcceptor) -> Self {
         self.tls_acceptor = Some(acceptor);
+        self
+    }
+
+    /// Bounds receipt of the HTTP/2 preface after protocol selection. The
+    /// inner listener's default is ten seconds. Cleartext detection already
+    /// reads the complete preface under [`HttpAutoListenerConfig::detect_timeout`];
+    /// this separate deadline also bounds a TLS client that negotiates `h2`
+    /// and then never sends its preface.
+    #[must_use]
+    pub fn http2_preface_timeout(mut self, timeout: Duration) -> Self {
+        self.http2_options.preface_timeout = Some(timeout);
+        self
+    }
+
+    /// Bounds an HTTP/2 transport write, flush or shutdown that makes no
+    /// progress. The inner listener's default is ten seconds; successful
+    /// writes to the handed-off transport renew the deadline. Applies after
+    /// TLS handoff as well as to cleartext connections.
+    #[must_use]
+    pub fn http2_write_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.http2_options.write_progress_timeout = Some(timeout);
+        self
+    }
+
+    /// Bounds an HTTP/2 response stalled by exhausted stream or connection
+    /// DATA credit. The inner listener's default is ten seconds. Only flushed
+    /// DATA for that stream renews the deadline; expiry cancels the stalled
+    /// stream and retains its owned cleanup while other streams keep running.
+    #[must_use]
+    pub fn http2_flow_control_progress_timeout(mut self, timeout: Duration) -> Self {
+        self.http2_options.flow_control_progress_timeout = Some(timeout);
+        self
+    }
+
+    /// Enables HTTP/2 server keepalive, including gRPC calls served on this
+    /// port. Sends a PING after `interval` without a frame from the client,
+    /// then closes the connection when no frame arrives within `timeout`.
+    /// Any frame renews liveness, as with [`Http2Listener::keepalive`]. Off by
+    /// default; zero durations are raised to one millisecond.
+    #[must_use]
+    pub fn http2_keepalive(mut self, interval: Duration, timeout: Duration) -> Self {
+        self.http2_options.keepalive = Some((interval, timeout));
+        self
+    }
+
+    /// Limits in-flight HTTP/2 requests across all this port's HTTP/2
+    /// connections, including cancellation cleanup and responses waiting to
+    /// flush. Excess requests receive REFUSED_STREAM. The inner listener's
+    /// default is 4,096. HTTP/1.1 admission uses its own configuration.
+    #[must_use]
+    pub fn http2_max_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.http2_options.max_in_flight_requests = Some(max);
+        self
+    }
+
+    /// Limits live HTTP/2 request coordinators on each connection. Resetting
+    /// a stream frees its slot only after its coordinator joins. The inner
+    /// listener's default is 256; this composes with the listener-wide limit
+    /// from [`Self::http2_max_in_flight_requests`].
+    #[must_use]
+    pub fn http2_max_connection_in_flight_requests(mut self, max: NonZeroUsize) -> Self {
+        self.http2_options.max_connection_in_flight_requests = Some(max);
         self
     }
 
@@ -224,11 +329,11 @@ where
         );
         let handler = Arc::clone(&self.handler);
         let http2_drain = self.config.http2.drain_timeout;
-        let http2 = Http2Listener::from_handoff(
+        let http2 = self.http2_options.apply(Http2Listener::from_handoff(
             Arc::clone(&http2_queue),
             move |request: Request| (*handler)(request),
             self.config.http2.clone(),
-        );
+        ));
         let mut shutdown = ProtocolShutdown {
             signal: self.shutdown_signal.clone(),
             http1: http1.connection_manager().clone(),
