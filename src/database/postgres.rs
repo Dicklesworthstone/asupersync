@@ -347,6 +347,8 @@ pub mod oid {
     pub const BYTEA: u32 = 17;
     /// Single character.
     pub const CHAR: u32 = 18;
+    /// System identifier (`name`), as in the catalog's `relname`.
+    pub const NAME: u32 = 19;
     /// Object identifier.
     pub const OID: u32 = 26;
     /// 16-bit integer.
@@ -387,6 +389,8 @@ pub mod oid {
     pub const BYTEA_ARRAY: u32 = 1001;
     /// `"char"[]`.
     pub const CHAR_ARRAY: u32 = 1002;
+    /// `name[]`.
+    pub const NAME_ARRAY: u32 = 1003;
     /// `int2[]`.
     pub const INT2_ARRAY: u32 = 1005;
     /// `int4[]`.
@@ -429,6 +433,7 @@ pub mod oid {
             BOOL_ARRAY => BOOL,
             BYTEA_ARRAY => BYTEA,
             CHAR_ARRAY => CHAR,
+            NAME_ARRAY => NAME,
             INT2_ARRAY => INT2,
             INT4_ARRAY => INT4,
             TEXT_ARRAY => TEXT,
@@ -1437,10 +1442,11 @@ fn array_length(value: usize, what: &str) -> Result<i32, PgError> {
 
 /// Element types whose text form is also their binary form, so an element
 /// that encodes itself as text is still valid inside a binary array.
+/// (`namerecv` reads the identifier's text, as `textrecv` does.)
 fn text_is_binary(element_oid: u32) -> bool {
     matches!(
         element_oid,
-        oid::TEXT | oid::VARCHAR | oid::BPCHAR | oid::JSON
+        oid::TEXT | oid::VARCHAR | oid::BPCHAR | oid::JSON | oid::NAME
     )
 }
 
@@ -8230,11 +8236,12 @@ impl PgConnection {
     }
 
     /// The Bind message for `stmt`. A binary `text[]` value (`Vec<String>`,
-    /// `Vec<&str>`) where the server typed the parameter `varchar[]` or
-    /// `bpchar[]` is sent as that array type: `array_recv` refuses a header
-    /// whose element type is not the parameter's (42804), although the
-    /// element bytes are the same. A scalar `String` binds to `varchar` here
-    /// already, and `execute_params` binds the array (br-asupersync-qml5yb).
+    /// `Vec<&str>`) where the server typed the parameter `varchar[]`,
+    /// `bpchar[]` or `name[]` (a catalog query's `relname = ANY($1)`) is sent
+    /// as that array type: `array_recv` refuses a header whose element type
+    /// is not the parameter's (42804), although the element bytes are the
+    /// same. A scalar `String` binds to `varchar` here already, and
+    /// `execute_params` binds the array (br-asupersync-qml5yb).
     fn bind_prepared(stmt: &PgStatement, params: &[&dyn ToSql]) -> Result<Vec<u8>, PgError> {
         let retyped: Vec<Option<TextArrayAs<'_>>> = params
             .iter()
@@ -8243,6 +8250,7 @@ impl PgConnection {
                 let element_oid = match expected {
                     oid::VARCHAR_ARRAY => oid::VARCHAR,
                     oid::BPCHAR_ARRAY => oid::BPCHAR,
+                    oid::NAME_ARRAY => oid::NAME,
                     _ => return None,
                 };
                 (param.type_oid() == oid::TEXT_ARRAY && param.format() == Format::Binary).then(

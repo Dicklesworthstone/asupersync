@@ -3293,7 +3293,8 @@ mod tests {
     /// through `prepare` where the server typed the parameter `varchar[]` or
     /// `bpchar[]`, `array_recv` refused them (42804: element type 25 instead
     /// of 1043). The Bind now carries the array with the parameter's element
-    /// type in its header and the same element bytes.
+    /// type in its header and the same element bytes. `name[]` (a catalog
+    /// query's `relname = ANY($1)`) is retyped the same way.
     #[test]
     fn prepared_text_arrays_bind_as_the_varchar_or_bpchar_array_the_server_inferred() {
         let statement = |param_oid| PgStatement {
@@ -3317,6 +3318,7 @@ mod tests {
             for (expected, element) in [
                 (oid::VARCHAR_ARRAY, oid::VARCHAR),
                 (oid::BPCHAR_ARRAY, oid::BPCHAR),
+                (oid::NAME_ARRAY, oid::NAME),
                 (oid::TEXT_ARRAY, oid::TEXT),
             ] {
                 let bind = PgConnection::bind_prepared(&statement(expected), &[value])

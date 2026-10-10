@@ -143,6 +143,52 @@ impl PgArrayElement for UserId {
     const ELEMENT_OID: u32 = oid::INT4;
 }
 
+/// A downstream `name` (system identifier) type whose `ToSql` sends its text,
+/// which is also the binary form of `name`.
+struct Ident(&'static str);
+
+impl ToSql for Ident {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        buf.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+    fn type_oid(&self) -> u32 {
+        oid::NAME
+    }
+    fn format(&self) -> Format {
+        Format::Text
+    }
+}
+
+impl PgArrayElement for Ident {
+    const ARRAY_OID: u32 = oid::NAME_ARRAY;
+    const ELEMENT_OID: u32 = oid::NAME;
+}
+
+/// qml5yb review follow-up: `name`'s binary form is its text (`namerecv`
+/// reads the identifier's text, as `textrecv` does). So a text-encoding
+/// `name` element binds inside a binary `name[]`, and a `name[]` result
+/// decodes into `Vec<String>`. Before, the bind refused the element as a
+/// text encoding, and `name[]` was not a known array type.
+#[test]
+fn a_name_array_binds_its_text_elements_and_decodes_as_strings() {
+    let mut expected = be(&[1, 0, oid::NAME.cast_signed(), 2, 1, 7]);
+    expected.extend_from_slice(b"pg_proc");
+    expected.extend(be(&[8]));
+    expected.extend_from_slice(b"pg_class");
+    assert_eq!(encode(&vec![Ident("pg_proc"), Ident("pg_class")]), expected);
+    assert_eq!(
+        Vec::<String>::from_sql(b"{pg_proc,pg_class}", oid::NAME_ARRAY, Format::Text)
+            .expect("name[] text output"),
+        ["pg_proc", "pg_class"]
+    );
+    assert_eq!(
+        Vec::<String>::from_sql(&expected, oid::NAME_ARRAY, Format::Binary)
+            .expect("name[] binary output"),
+        ["pg_proc", "pg_class"]
+    );
+}
+
 /// asupersync-qml5yb finding 6: arrays are sent in binary format, so a
 /// text-encoding element was copied in as is and the server read `b"1234"`
 /// as the int4 825373492: a wrong id stored or matched, with no error. Such
