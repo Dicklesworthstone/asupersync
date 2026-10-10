@@ -5119,6 +5119,34 @@ mod managed {
             let mut managed = topology(&["trigger", "sibling"], policy)
                 .bind_managed(vec![trigger_binding, sibling_binding], config(policy, 2))
                 .unwrap();
+            // The hook below blocks the sibling's worker thread until the
+            // controller drains that generation. The sibling's completion has
+            // just woken the controller into this worker's LIFO slot, which no
+            // other worker can take, so the block would strand the very task
+            // it waits for. Waking a parked helper from the executing sibling
+            // displaces the slot's task to the global lane (three_lane's
+            // claim_lifo_wake), where the other worker runs it.
+            let (helper_tx, helper_rx) = std::sync::mpsc::sync_channel::<Waker>(1);
+            let helper = runtime.handle().spawn(async move {
+                let mut parked = false;
+                std::future::poll_fn(move |task| {
+                    if parked {
+                        return std::task::Poll::Ready(());
+                    }
+                    parked = true;
+                    helper_tx
+                        .send(task.waker().clone())
+                        .expect("the test awaits the helper's waker");
+                    std::task::Poll::Pending
+                })
+                .await;
+            });
+            let helper_waker = Arc::new(Mutex::new(Some(
+                helper_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("the helper parks before the supervisor starts"),
+            )));
+            let hook_helper = Arc::clone(&helper_waker);
             managed.terminal_publication_hook = Some(Arc::new(
                 move |index, cx, generation, shutdown_requested| {
                     if index != 1 || generation.number != 1 {
@@ -5131,6 +5159,9 @@ mod managed {
                     let (cancel_tx, cancel_rx) = std::sync::mpsc::sync_channel(1);
                     let waker = Waker::from(Arc::new(CancellationWake(cancel_tx)));
                     let token = cx.refresh_cancel_waker(None, &waker);
+                    if let Some(helper) = hook_helper.lock().take() {
+                        helper.wake();
+                    }
                     // This hook runs after the real typed publication lock
                     // was released, but before the spawned future returns
                     // Ready to the runtime's completion observer. The test
@@ -5187,6 +5218,8 @@ mod managed {
                 .recv_timeout(Duration::from_secs(10))
                 .expect("supervisor drains all generations and publishes its report");
             runtime.block_on(owner);
+            runtime.block_on(helper);
+            assert!(helper_waker.lock().is_none(), "the hook woke the helper");
             let should_restart = terminal == NativePublishedTerminal::Failure;
             assert!(report.outcome.is_ok(), "{report:?}");
             assert_eq!(report.started, if should_restart { 4 } else { 3 });
