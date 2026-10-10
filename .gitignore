@@ -48,6 +48,8 @@ criterion/
 **/.beads/*.db-wal
 **/.beads/daemon.*
 **/.beads/.br-db-openers-*.lock
+**/.beads/.*.lock/
+**/.beads/.*.lock
 **/.beads/last-touched
 **/.beads/.local_version
 **/.beads/.br-wal-index-*/
