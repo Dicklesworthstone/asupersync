@@ -70,7 +70,7 @@ rather than "should generally handle Z."
 | C03.4 | MUST | Broadcast: all active receivers see every message sent after subscription |
 | C03.5 | MUST | Watch: receivers see the most recent value; `changed()` waits for updates |
 | C03.6 | MUST | Sender drop closes the channel; receivers observe closure |
-| C03.7 | MUST | All receivers drop → sender `send()` returns error |
+| C03.7 | MUST | All receivers drop → sender `send()` returns error (for mpsc, broadcast, and oneshot; `watch::Sender::send` retains the latest value per design and succeeds) |
 | C03.8 | SHOULD | `try_send()` and `try_recv()` are non-blocking variants |
 | C03.9 | Asupersync | Two-phase `reserve()`/`send()` for cancel-safe channel operations |
 
@@ -83,7 +83,7 @@ rather than "should generally handle Z."
 | C04.1 | MUST | `Mutex::lock()` provides exclusive access; drop releases lock |
 | C04.2 | MUST | `RwLock`: multiple concurrent readers OR one exclusive writer |
 | C04.3 | MUST | `Semaphore::acquire(n)` blocks until `n` permits available |
-| C04.4 | MUST | `Notify::notify_one()` wakes exactly one waiter (or stores permit if none waiting) |
+| C04.4 | MUST | `Notify::notify_one()` wakes exactly one waiter (or stores permit if none waiting; stores up to counter bounds rather than Tokio's single-permit cap) |
 | C04.5 | MUST | `Notify::notify_waiters()` wakes all current waiters |
 | C04.6 | MUST | `Barrier::wait()` blocks until N parties arrive |
 | C04.7 | MUST | `OnceCell::get_or_init()` executes initializer exactly once, even under contention |

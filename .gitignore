@@ -50,6 +50,7 @@ criterion/
 **/.beads/.br-db-openers-*.lock
 **/.beads/last-touched
 **/.beads/.local_version
+**/.beads/.br-wal-index-*/
 
 # Golden test artifacts (generated during test failures for diffing)
 tests/golden/**/*.actual

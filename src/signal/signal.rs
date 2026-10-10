@@ -813,9 +813,16 @@ impl FromIterator<SignalKind> for SignalMask {
 }
 
 /// RAII guard that restores a thread signal mask.
+///
+/// Signal masks are thread-local attributes (`pthread_sigmask`). This guard is
+/// intentionally `!Send` and `!Sync` so it cannot be transferred to another OS
+/// thread or held across an `.await` boundary on a multi-threaded runtime, where
+/// dropping it would restore the signal mask of an arbitrary worker thread
+/// (br-asupersync-abc5w5 LOW 7).
 #[derive(Debug)]
 pub struct SignalMaskGuard {
     previous: Option<SignalMask>,
+    _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl SignalMaskGuard {
@@ -823,6 +830,7 @@ impl SignalMaskGuard {
     fn new(previous: SignalMask) -> Self {
         Self {
             previous: Some(previous),
+            _not_send: std::marker::PhantomData,
         }
     }
 
@@ -1351,6 +1359,22 @@ mod tests {
             restored_blocked
         );
         crate::test_complete!("unix_signal_mask_unblock_guard_restores_blocked_mask");
+    }
+
+    #[test]
+    fn signal_mask_guard_is_not_send_or_sync() {
+        init_test("signal_mask_guard_is_not_send_or_sync");
+        // Verify SignalMaskGuard is zero-cost wrapped and retains thread-affinity.
+        // PhantomData<*mut ()> ensures SignalMaskGuard is neither Send nor Sync,
+        // preventing cross-thread drop from restoring the wrong thread's signal mask
+        // (br-asupersync-abc5w5 LOW 7).
+        crate::assert_with_log!(
+            std::mem::size_of::<SignalMaskGuard>() == std::mem::size_of::<Option<SignalMask>>(),
+            "SignalMaskGuard has zero-cost PhantomData layout",
+            true,
+            true
+        );
+        crate::test_complete!("signal_mask_guard_is_not_send_or_sync");
     }
 
     #[cfg(unix)]

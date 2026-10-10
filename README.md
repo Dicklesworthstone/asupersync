@@ -124,7 +124,7 @@ If you already know tokio, this section maps the primitives you use daily to the
 | `tokio::sync::RwLock` | `sync::RwLock` | `.read(&cx).await?` / `.write(&cx).await?`. Writer-preference fairness. |
 | `tokio::sync::Semaphore` | `sync::Semaphore` | `sem.acquire(&cx, n).await?`. Permit is an obligation released on drop. |
 | `tokio::sync::Barrier` | `sync::Barrier` | `barrier.wait(&cx).await?`. Leader election built in (`is_leader`). |
-| `tokio::sync::Notify` | `sync::Notify` | `notify.notified().await` / `notify.notify_one()` / `notify.notify_waiters()`. |
+| `tokio::sync::Notify` | `sync::Notify` | `notify.notified().await` / `notify.notify_one()` / `notify.notify_waiters()`. Differences: `notified()` registers on first poll (use `notified.as_mut().enable()` to arm on creation); `notify_one()` accumulates permits when no waiter is present. |
 | `tokio::sync::OnceCell` | `sync::OnceCell` | `cell.get_or_init(|| async { ... }).await`. Cancel-safe: failed init lets next caller retry. |
 | `tokio::task::yield_now()` | `yield_now()` | Identical concept -- yields to the scheduler. |
 
