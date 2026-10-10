@@ -13471,4 +13471,61 @@ mod tests {
         assert!(!conn.inner.needs_rollback, "no rollback is left for later");
         let _peer = responder.join().expect("the ROLLBACK reached the server");
     }
+
+    /// qml5yb (d0's bind-type MEDIUM): a binary number where the server
+    /// typed a date or time parameter of the same width is read as
+    /// microseconds or days since the server's epoch: `1_791_445_550i64` for
+    /// a `timestamp` stored 2000-01-01 00:29:51. `execute_params` refuses
+    /// the same bind (42804), so the prepared path refuses it too.
+    #[test]
+    fn prepared_bind_refuses_a_number_where_the_server_inferred_a_date_or_time() {
+        const TIME: u32 = 1083;
+        let statement = |param_oid| PgStatement {
+            name: "s1".to_string(),
+            sql: "INSERT INTO t VALUES ($1)".to_string(),
+            param_oids: vec![param_oid],
+            columns: Vec::new(),
+            session_generation: 0,
+        };
+        let epoch_seconds: i64 = 1_791_445_550;
+        let fractional_seconds: f64 = 1_791_445_550.5;
+        let days: i32 = 9_000;
+        let fractional_days: f32 = 9_000.5;
+        let refused: [(u32, &dyn ToSql); 8] = [
+            (oid::TIMESTAMP, &epoch_seconds),
+            (oid::TIMESTAMPTZ, &epoch_seconds),
+            (TIME, &epoch_seconds),
+            (oid::TIMESTAMP, &fractional_seconds),
+            (oid::TIMESTAMPTZ, &fractional_seconds),
+            (TIME, &fractional_seconds),
+            (oid::DATE, &days),
+            (oid::DATE, &fractional_days),
+        ];
+        for (expected, value) in refused {
+            let err = PgConnection::validate_prepared_bind_types(&statement(expected), &[value])
+                .expect_err("a number where the server inferred a date or time");
+            assert!(
+                matches!(err, PgError::Protocol(ref msg) if msg.contains("raw date or time")),
+                "{expected} <- {}: {err:?}",
+                value.type_oid()
+            );
+        }
+
+        // The number's own type, a NULL, and a width the server refuses
+        // itself bind as before.
+        let null_days: Option<i32> = None;
+        let unchanged: [(u32, &dyn ToSql); 4] = [
+            (oid::INT8, &epoch_seconds),
+            (oid::DATE, &null_days),
+            (oid::TIMESTAMP, &days),
+            (oid::DATE, &epoch_seconds),
+        ];
+        for (expected, value) in unchanged {
+            assert!(
+                PgConnection::validate_prepared_bind_types(&statement(expected), &[value]).is_ok(),
+                "{expected} <- {}",
+                value.type_oid()
+            );
+        }
+    }
 }

@@ -8189,20 +8189,33 @@ impl PgConnection {
     /// float where it inferred an integer, has the same width, so the server
     /// reads the bytes as the other type and stores a wrong value without
     /// an error: `100i64` for a `double precision` parameter stored
-    /// 4.94e-322. Those pairs are refused before anything is written, and so
-    /// is a `SystemTime` where the server inferred another built-in type.
-    /// NULLs carry no bytes and pass; other mismatches are left to the
-    /// server.
+    /// 4.94e-322. Those pairs are refused before anything is written. So is
+    /// a binary number where it inferred a date or time of the same width
+    /// (`i64` or `f64` for `timestamp`, `timestamptz` or `time`; `i32` or
+    /// `f32` for `date`), which the server reads as microseconds or days
+    /// since its epoch, and a `SystemTime` where it inferred another
+    /// built-in type. NULLs carry no bytes and pass; other mismatches are
+    /// left to the server.
     fn validate_prepared_bind_types(
         stmt: &PgStatement,
         params: &[&dyn ToSql],
     ) -> Result<(), PgError> {
         const INTEGERS: [u32; 3] = [oid::INT2, oid::INT4, oid::INT8];
         const FLOATS: [u32; 2] = [oid::FLOAT4, oid::FLOAT8];
+        // `time without time zone`, microseconds since midnight.
+        const TIME: u32 = 1083;
         for (position, (param, &expected)) in params.iter().zip(&stmt.param_oids).enumerate() {
             let sent = param.type_oid();
             let crossed = (INTEGERS.contains(&sent) && FLOATS.contains(&expected))
                 || (FLOATS.contains(&sent) && INTEGERS.contains(&expected));
+            // A number where the server typed a date or time of the same
+            // width: the server reads the eight bytes as microseconds since
+            // 2000-01-01 (or since midnight), or the four bytes as days since
+            // 2000-01-01, and stores whatever that is. `execute_params`
+            // refuses the same bind (42804).
+            let read_as_time = (matches!(sent, oid::INT8 | oid::FLOAT8)
+                && matches!(expected, oid::TIMESTAMP | oid::TIMESTAMPTZ | TIME))
+                || (matches!(sent, oid::INT4 | oid::FLOAT4) && expected == oid::DATE);
             // A `SystemTime` where the server typed another built-in type,
             // `timestamp without time zone` above all: the binary value would
             // be stored unconverted, as UTC wall-clock time, while the same
@@ -8214,7 +8227,7 @@ impl PgConnection {
                 && expected < FIRST_NORMAL_OBJECT_ID
                 && ((sent == oid::TIMESTAMPTZ && expected != oid::TIMESTAMPTZ)
                     || (sent == oid::TIMESTAMPTZ_ARRAY && expected != oid::TIMESTAMPTZ_ARRAY));
-            if !(crossed || misplaced_instant)
+            if !(crossed || read_as_time || misplaced_instant)
                 || param.format() != Format::Binary
                 || matches!(param.to_sql(&mut Vec::new())?, IsNull::Yes)
             {
@@ -8223,6 +8236,10 @@ impl PgConnection {
             let number = position + 1;
             let consequence = if crossed {
                 "the binary value would be stored as a different number".to_string()
+            } else if read_as_time {
+                "the server would read the binary number as a raw date or time, not \
+                 convert it"
+                    .to_string()
             } else {
                 format!("cast it (${number}::timestamptz) so the server converts the instant")
             };
