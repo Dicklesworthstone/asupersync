@@ -69,6 +69,10 @@ pub(super) trait LegacyCall: Send {
     fn message_bytes(&self) -> usize;
     /// Encoded response bytes a sink may hold unread before it waits.
     fn window_bytes(&self) -> usize;
+    /// Whether the owner admits a request message or the half-close now. A
+    /// native owner stops admitting once it has read the server's end, before
+    /// `poll_event` reports that end.
+    fn request_ready(&self) -> bool;
 }
 
 impl<IO, C> LegacyCall for NativeDuplexStream<IO, C>
@@ -123,6 +127,10 @@ where
     fn window_bytes(&self) -> usize {
         NativeDuplexStream::response_window_bytes(self)
     }
+
+    fn request_ready(&self) -> bool {
+        NativeDuplexStream::request_ready(self)
+    }
 }
 
 impl<IO, C> LegacyCall for NativeServerStream<IO, C>
@@ -173,6 +181,11 @@ where
 
     fn window_bytes(&self) -> usize {
         usize::MAX
+    }
+
+    // No sink sends on it; queue_message refuses on its own.
+    fn request_ready(&self) -> bool {
+        true
     }
 }
 
@@ -396,9 +409,12 @@ impl LegacyNativeCall {
             // response side drains it (it wakes the sink when it pops). The
             // sink does not poll the call there, so it checks the call's
             // cancellation and deadline itself: either ends the call.
+            // Once the owner holds the server's end, nothing is left to hold
+            // back and the rest is already read: the sink drives on to the end.
             if role == Role::Sink
                 && (state.responses.len() >= MAX_STREAM_BUFFERED
                     || state.buffered_bytes >= state.call.window_bytes())
+                && !owner_holds_end(state)
             {
                 let Err(status) = state.call.poll_gate(&mut call_task) else {
                     return Poll::Pending;
@@ -431,8 +447,11 @@ impl LegacyNativeCall {
                 Poll::Ready(None) => {
                     // The owner also reports `None` once it already ended,
                     // for example after refusing a queued message on
-                    // cancellation; its recorded status is the outcome.
-                    let status = state.call.status().unwrap_or_else(Status::ok);
+                    // cancellation; its recorded status is the outcome. Both
+                    // owners record one; an end without it is not a success.
+                    let status = state.call.status().unwrap_or_else(|| {
+                        Status::internal("native gRPC call ended without a status")
+                    });
                     state.finish(status);
                     self.wake_other(role);
                 }
@@ -462,7 +481,7 @@ impl LegacyNativeCall {
     ) -> Poll<Result<(), Status>> {
         let mut state = lock_unpoisoned(&self.state);
         if self
-            .drive(&mut state, task, Role::Sink, |state| state.request_ready)
+            .drive(&mut state, task, Role::Sink, request_admitted)
             .is_pending()
         {
             return Poll::Pending;
@@ -501,7 +520,7 @@ impl LegacyNativeCall {
             return Poll::Ready(Ok(()));
         }
         if self
-            .drive(&mut state, task, Role::Sink, |state| state.request_ready)
+            .drive(&mut state, task, Role::Sink, request_admitted)
             .is_pending()
         {
             return Poll::Pending;
@@ -567,7 +586,10 @@ impl LegacyNativeCall {
         {
             return Poll::Pending;
         }
-        let status = state.finished.clone().unwrap_or_else(Status::ok);
+        // drive returned Ready with `done` never true, so the call ended.
+        let status = state.finished.clone().unwrap_or_else(|| {
+            Status::internal("native gRPC client-streaming call has no final status")
+        });
         if status.code() != Code::Ok {
             return Poll::Ready(Err(status));
         }
@@ -609,6 +631,20 @@ impl LegacyNativeCall {
             self.fanout.wake_responses();
         }
     }
+}
+
+/// The sink may queue a message or the half-close: its request slot is free
+/// and the owner still admits one. An owner that read the server's end in the
+/// same read as a response refuses before it reports the end, so the sink
+/// drives on and answers with the end instead of that refusal.
+fn request_admitted(state: &CallState) -> bool {
+    state.request_ready && state.call.request_ready()
+}
+
+/// With the sink's slot free, the owner refuses a request only once it holds
+/// the server's end.
+fn owner_holds_end(state: &CallState) -> bool {
+    state.request_ready && !state.call.request_ready()
 }
 
 fn ended_call_status(status: &Status) -> Status {

@@ -3123,6 +3123,77 @@ fn unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error() {
     test_complete!("unary_reuse_keeps_a_connection_whose_call_ended_with_a_grpc_error");
 }
 
+/// br-asupersync-46olky L4: a unary call made by a cancelled task took each
+/// pooled connection, failed to read it (a cancelled task's reads are
+/// interrupted) and dropped it as broken, so one cancelled caller emptied the
+/// channel's pool. It now fails CANCELLED before it takes one.
+#[test]
+fn unary_reuse_keeps_its_connections_when_a_cancelled_task_calls() {
+    init_test("unary_reuse_keeps_its_connections_when_a_cancelled_task_calls");
+    let (address, accepted, settled) = unary_reuse_peer(ReusePeer::Serve);
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("cancelled caller runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("runtime block_on installs an ambient Cx");
+        let channel = Channel::builder(format!("http://127.0.0.1:{}", address.port()))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(10))
+            .reuse_connections(2)
+            .connect()
+            .await
+            .expect("cancelled caller channel");
+        let echo = |channel: Channel, payload: &'static [u8]| async move {
+            GrpcClient::new(channel)
+                .unary::<Bytes, Bytes>(
+                    "/test.Reuse/Echo",
+                    Request::new(Bytes::from_static(payload)),
+                )
+                .await
+        };
+        let first = echo(channel.clone(), b"first")
+            .await
+            .expect("the first call dials and pools its connection");
+        assert_eq!(first.get_ref(), &Bytes::from_static(b"first"));
+        while settled.recv_timeout(Duration::from_millis(200)).is_ok() {}
+
+        // The caller is cancelled while it waits, then calls.
+        let (started_tx, mut started_rx) = asupersync::channel::oneshot::channel();
+        let (_go_tx, mut go_rx) = asupersync::channel::oneshot::channel::<()>();
+        let cancelled_channel = channel.clone();
+        let mut call = cx
+            .spawn(move |call_cx| async move {
+                started_tx
+                    .send_blocking(())
+                    .expect("the test waits for the caller");
+                let _ = go_rx.recv(&call_cx).await;
+                echo(cancelled_channel, b"cancelled").await
+            })
+            .expect("spawn the cancelled caller");
+        started_rx.recv(&cx).await.expect("the caller started");
+        call.abort_with_reason(asupersync::types::CancelReason::user(
+            "the caller is cancelled before it calls",
+        ));
+        let status = call
+            .join(&cx)
+            .await
+            .expect("the cancelled caller returns its result")
+            .expect_err("a cancelled caller's call fails");
+        assert_eq!(status.code(), Code::Cancelled, "{status}");
+
+        // Its connection is still pooled: the next call reuses it.
+        let last = echo(channel, b"last").await.expect("the next call");
+        assert_eq!(last.get_ref(), &Bytes::from_static(b"last"));
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        1,
+        "the cancelled caller dropped the pooled connection"
+    );
+    test_complete!("unary_reuse_keeps_its_connections_when_a_cancelled_task_calls");
+}
+
 // ============================================================================
 // Legacy GrpcClient streaming methods over native HTTP/2 (br-asupersync-6pc7xg)
 // ============================================================================

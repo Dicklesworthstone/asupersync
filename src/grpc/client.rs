@@ -1684,6 +1684,10 @@ async fn native_h2_unary(
             "native HTTP/2 gRPC calls require runtime I/O authority",
         ));
     }
+    // A cancelled caller fails before it dials or takes a pooled connection:
+    // its reads are interrupted, so each connection it took would be dropped
+    // as broken, until the pool was empty.
+    super::native_stream::check_cancellation(&cx)?;
     let target = NativeH2Target::parse(
         channel.uri(),
         channel.config().use_tls,
@@ -2029,8 +2033,14 @@ async fn native_h2_unary_io(
     if let Some(pool) = &pool {
         // Stale idle connections are dropped; a call the server provably did
         // not process on a reused connection is retried once, on a fresh one.
+        // A caller cancelled meanwhile stops: it neither drops the other
+        // pooled connections nor dials.
+        let cancelled = || ambient_cancellation_status("native gRPC unary call");
         while let Some(mut conn) = pool.take(native_now()) {
             if conn.refresh().await.is_err() {
+                if let Some(status) = cancelled() {
+                    return Err(status);
+                }
                 continue;
             }
             match conn
@@ -2041,7 +2051,7 @@ async fn native_h2_unary_io(
                     pool_after_success(pool, conn, stream_id);
                     return outcome;
                 }
-                Err(failure) if failure.unprocessed => break,
+                Err(failure) if failure.unprocessed && cancelled().is_none() => break,
                 Err(failure) => return Err(failure.status),
             }
         }
@@ -4566,8 +4576,9 @@ mod tests {
             None
         }
 
+        // Recorded at the end, as both native owners do.
         fn status(&self) -> Option<Status> {
-            None
+            lock_unpoisoned(&self.0).ended.then(Status::ok)
         }
 
         fn cancel(&mut self) {}
@@ -4577,7 +4588,7 @@ mod tests {
             Ok(())
         }
 
-        // Server streaming: no sink waits on the window.
+        // Server streaming: no sink waits on the window or sends.
         fn message_bytes(&self) -> usize {
             0
         }
@@ -4585,6 +4596,196 @@ mod tests {
         fn window_bytes(&self) -> usize {
             usize::MAX
         }
+
+        fn request_ready(&self) -> bool {
+            true
+        }
+    }
+
+    /// A bidi call as the native duplex owner runs it, stepped by a test: the
+    /// send boundaries it will report, the responses it read, and the
+    /// server's end once read. Like the owner, it refuses a message or the
+    /// half-close from the moment it holds the end, before it reports it.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    struct Duplex {
+        flushes: usize,
+        request_pending: bool,
+        messages: VecDeque<u32>,
+        end: Option<Status>,
+        status: Option<Status>,
+        /// Unread response bytes a sink may hold (each message is 4).
+        window: usize,
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl Duplex {
+        fn admits(&self) -> bool {
+            !self.request_pending && self.end.is_none() && self.status.is_none()
+        }
+
+        fn admit(&mut self) -> Result<(), Status> {
+            if !self.admits() {
+                return Err(Status::failed_precondition(
+                    "native gRPC request slot is unavailable",
+                ));
+            }
+            self.request_pending = true;
+            Ok(())
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    struct DuplexCall(Arc<Mutex<Duplex>>);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl legacy_native::LegacyCall for DuplexCall {
+        fn poll_event(
+            &mut self,
+            _task: &mut Context<'_>,
+        ) -> Poll<Option<Result<legacy_native::LegacyEvent, Status>>> {
+            let mut call = lock_unpoisoned(&self.0);
+            if call.status.is_some() {
+                return Poll::Ready(None);
+            }
+            if call.flushes > 0 {
+                call.flushes -= 1;
+                call.request_pending = false;
+                return Poll::Ready(Some(Ok(legacy_native::LegacyEvent::RequestFlushed)));
+            }
+            if let Some(message) = call.messages.pop_front() {
+                let message = legacy_native::LegacyEvent::Message(Box::new(message));
+                return Poll::Ready(Some(Ok(message)));
+            }
+            if let Some(status) = call.end.take() {
+                call.status = Some(status.clone());
+                return Poll::Ready((status.code() != Code::Ok).then_some(Err(status)));
+            }
+            Poll::Pending
+        }
+
+        fn queue_message(&mut self, _message: Box<dyn Any + Send>) -> Result<(), Status> {
+            lock_unpoisoned(&self.0).admit()
+        }
+
+        fn close_requests(&mut self) -> Result<(), Status> {
+            lock_unpoisoned(&self.0).admit()
+        }
+
+        fn initial_metadata(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn trailers(&self) -> Option<Metadata> {
+            None
+        }
+
+        fn status(&self) -> Option<Status> {
+            lock_unpoisoned(&self.0).status.clone()
+        }
+
+        fn cancel(&mut self) {}
+
+        fn poll_gate(&mut self, _task: &mut Context<'_>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn message_bytes(&self) -> usize {
+            4
+        }
+
+        fn window_bytes(&self) -> usize {
+            lock_unpoisoned(&self.0).window
+        }
+
+        fn request_ready(&self) -> bool {
+            lock_unpoisoned(&self.0).admits()
+        }
+    }
+
+    /// br-asupersync-46olky L5: a response handle read the server's last
+    /// response and its end in one read, so the owner held the end without
+    /// having reported it. The sink's slot was free from an earlier send
+    /// boundary, so it queued at once, and the owner's refusal ("request slot
+    /// is unavailable") became the result of send and close instead of the
+    /// server's status. The sink now drives the call to that end, past a full
+    /// response window too: once the server ended, nothing is left to hold back.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_sink_answers_with_the_end_a_response_read_left_unreported() {
+        init_test("a_sink_answers_with_the_end_a_response_read_left_unreported");
+        let denied = Status::permission_denied("not yours");
+        // The server's end, the sink's window, and whether a response handle
+        // reads before the sink is used again.
+        for (end, window, read_first) in [
+            (denied.clone(), usize::MAX, true),
+            (Status::ok(), usize::MAX, true),
+            (denied, 4, false),
+        ] {
+            let duplex = Arc::new(Mutex::new(Duplex {
+                // The request headers' send boundary.
+                flushes: 1,
+                request_pending: true,
+                window,
+                ..Duplex::default()
+            }));
+            let call =
+                LegacyNativeCall::new(Box::new(DuplexCall(Arc::clone(&duplex))), LegacyShape::Bidi);
+            let mut sink = RequestSink::<u32>::native(Arc::clone(&call));
+            let mut responses = ResponseStream::<u32>::native(call);
+            let mut task = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                std::pin::pin!(sink.send(1)).poll(&mut task),
+                Poll::Ready(Ok(()))
+            ));
+
+            // One read: the first message's send boundary, two responses and
+            // the end.
+            {
+                let mut duplex = lock_unpoisoned(&duplex);
+                duplex.flushes = 1;
+                duplex.messages.extend([7, 8]);
+                duplex.end = Some(end.clone());
+            }
+            let mut expected = vec![7, 8];
+            if read_first {
+                // A response handle takes the first response; the end stays
+                // read but unreported.
+                assert!(matches!(
+                    poll_stream(&mut responses, Waker::noop()),
+                    Poll::Ready(Some(Ok(7)))
+                ));
+                assert!(lock_unpoisoned(&duplex).status.is_none());
+                expected.remove(0);
+            }
+
+            if end.code() == Code::Ok {
+                // The server finished first: the half-close has nothing to do.
+                let closed = std::pin::pin!(sink.close()).poll(&mut task);
+                assert!(matches!(closed, Poll::Ready(Ok(()))), "{closed:?}");
+            } else {
+                match std::pin::pin!(sink.send(2)).poll(&mut task) {
+                    Poll::Ready(Err(status)) => {
+                        assert_eq!(status.code(), Code::PermissionDenied, "{status:?}");
+                    }
+                    other => panic!("send after the end (window {window}): {other:?}"),
+                }
+            }
+            for message in expected {
+                assert!(matches!(
+                    poll_stream(&mut responses, Waker::noop()),
+                    Poll::Ready(Some(Ok(m))) if m == message
+                ));
+            }
+            match poll_stream(&mut responses, Waker::noop()) {
+                Poll::Ready(None) => assert_eq!(end.code(), Code::Ok),
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(status.code(), end.code(), "{status:?}");
+                }
+                other => panic!("the response stream ends with the server's status: {other:?}"),
+            }
+        }
+        crate::test_complete!("a_sink_answers_with_the_end_a_response_read_left_unreported");
     }
 
     /// Clones of a network call's response stream polled from two tasks
