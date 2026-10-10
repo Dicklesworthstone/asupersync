@@ -2,9 +2,12 @@
 
 use asupersync::atp::dedupe::build_canonical_dedup_payload_parts_if_smaller;
 use asupersync::atp::delta::{
-    ContentAddressedChunkStore, DeltaResyncFallbackReason, DeltaResyncMode,
-    PersistentChunkManifest, apply_delta_resync_transmission, build_delta_resync_transmission,
-    plan_incremental_resync, reconstruct_manifest_bytes,
+    ContentAddressedChunkStore, DeltaError, DeltaResyncFallbackReason, DeltaResyncMode,
+    DeltaResyncSendItem, PersistentChunkManifest, ReceiverCasCoverage,
+    apply_delta_resync_send_plan, apply_delta_resync_transmission, build_delta_resync_send_plan,
+    build_delta_resync_transmission, build_receiver_subchunk_signatures, decode_subdelta_ops,
+    encode_subdelta_ops, plan_incremental_resync, plan_incremental_resync_with_receiver_coverage,
+    reconstruct_manifest_bytes,
 };
 use asupersync::atp::delta_subchunk;
 use asupersync::atp::reconcile::{
@@ -288,4 +291,141 @@ fn public_dedup_canonical_parts_send_repeated_missing_payloads_once() {
     assert_eq!(report.duplicate_missing_chunks, 3);
     assert_eq!(report.reconcile.unique_payloads, 3);
     assert_eq!(report.reconcile.duplicate_logical_chunks, 3);
+}
+
+/// A peer's op count that the stream cannot hold is refused before allocating.
+/// It used to reach `Vec::with_capacity` and panic ("capacity overflow"), or
+/// abort the process for a count near 2^32 (br-asupersync-w6fnfy F1).
+#[test]
+fn public_subdelta_decode_refuses_an_op_count_the_bytes_cannot_hold() {
+    use delta_subchunk::SubDeltaOp;
+
+    let empty = encode_subdelta_ops(&[]).expect("encode an empty op stream");
+    let count_at = empty.len() - 8;
+    let mut huge = empty;
+    huge[count_at..].copy_from_slice(&u64::MAX.to_be_bytes());
+    assert_eq!(
+        decode_subdelta_ops(&huge),
+        Err(DeltaError::TruncatedManifest)
+    );
+
+    // Two ops declared, room for one.
+    let mut short = encode_subdelta_ops(&[SubDeltaOp::Literal(Vec::new())]).expect("encode");
+    short[count_at..count_at + 8].copy_from_slice(&2_u64.to_be_bytes());
+    assert_eq!(
+        decode_subdelta_ops(&short),
+        Err(DeltaError::TruncatedManifest)
+    );
+
+    // The smallest ops at the boundary still decode.
+    let ops = vec![SubDeltaOp::Literal(Vec::new()); 3];
+    let encoded = encode_subdelta_ops(&ops).expect("encode");
+    assert_eq!(decode_subdelta_ops(&encoded).expect("decode"), ops);
+}
+
+/// Sub-delta ops that build more than the target chunk are refused before
+/// they run, even when the peer's target hash matches the oversized output:
+/// a few op bytes could otherwise make the receiver build and store
+/// gigabytes per item (br-asupersync-w6fnfy F2).
+#[test]
+fn public_subdelta_output_must_be_exactly_the_target_chunk_size() {
+    use delta_subchunk::SubDeltaOp;
+    use sha2::{Digest, Sha256};
+
+    let old = pattern_bytes(64 * 1024, 17);
+    let mut new = old.clone();
+    for byte in &mut new[24 * 1024..25 * 1024] {
+        *byte ^= 0x5a;
+    }
+    let mut sender_store = ContentAddressedChunkStore::new();
+    let mut receiver_store = ContentAddressedChunkStore::new();
+    let sender = manifest(&mut sender_store, "tree-a", vec![new.as_slice()]);
+    let receiver = manifest(&mut receiver_store, "tree-a", vec![old.as_slice()]);
+    let base_plan = plan_incremental_resync_with_receiver_coverage(
+        &sender,
+        Some(&receiver),
+        &ReceiverCasCoverage::from_manifest(&receiver),
+    );
+    let signatures = build_receiver_subchunk_signatures(
+        &receiver,
+        &receiver_store,
+        delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+    )
+    .expect("receiver signatures");
+    let mut send_plan =
+        build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+            .expect("send plan");
+    let Some(DeltaResyncSendItem::SubchunkOps {
+        target_chunk,
+        base_chunk,
+        target_sha256,
+        encoded_ops,
+    }) = send_plan.items.first_mut()
+    else {
+        panic!("expected a sub-chunk op stream");
+    };
+    let target_index = target_chunk.index;
+    let target_size = target_chunk.size_bytes;
+    let base_len = u32::try_from(base_chunk.size_bytes).expect("base chunk length");
+    let ops = vec![
+        SubDeltaOp::Copy {
+            old_offset: 0,
+            len: base_len,
+        };
+        3
+    ];
+    *encoded_ops = encode_subdelta_ops(&ops).expect("encode oversized ops");
+    *target_sha256 = Sha256::digest(old.repeat(3)).into();
+
+    assert_eq!(
+        apply_delta_resync_send_plan(&sender, &receiver_store, &send_plan),
+        Err(DeltaError::ChunkPayloadSizeMismatch {
+            index: target_index,
+            expected: target_size,
+            actual: 3 * u64::from(base_len),
+        })
+    );
+}
+
+/// A peer's signature can give every block one weak checksum. diff tested
+/// every such block for every byte window of matching content, so a crafted
+/// signature made a sender spend O(windows x blocks). It now finds the
+/// contiguous and positional blocks by offset and keeps at most a few others
+/// per weak value (br-asupersync-w6fnfy F4).
+#[test]
+fn public_subchunk_diff_bounds_a_crafted_signatures_weak_fan_out() {
+    use delta_subchunk::{SubBlockSignature, SubDeltaOp};
+    use std::time::Duration;
+
+    let block = delta_subchunk::DEFAULT_SUBBLOCK_BYTES;
+    let honest = serde_json::to_value(delta_subchunk::signature(&vec![0_u8; block], block))
+        .expect("serialize a signature");
+    let zero_block = honest["blocks"][0].clone();
+    let blocks = 200_000_usize;
+    let crafted = serde_json::json!({
+        "block_size": block,
+        "total_len": block * blocks,
+        "blocks": (0..blocks)
+            .map(|index| {
+                let mut entry = zero_block.clone();
+                entry["strong"] = serde_json::json!(vec![0xee_u8; 16]);
+                entry["offset"] = serde_json::json!(index * block);
+                entry
+            })
+            .collect::<Vec<_>>(),
+    });
+    let signature: SubBlockSignature = serde_json::from_value(crafted).expect("crafted signature");
+    let new = vec![0_u8; 256 * 1024];
+    let expected = vec![SubDeltaOp::Literal(new.clone())];
+
+    let (done, finished) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let ops = delta_subchunk::diff(&new, &signature);
+        let _ = done.send(());
+        ops
+    });
+    finished
+        .recv_timeout(Duration::from_secs(20))
+        .expect("diff against the crafted signature finishes within 20 s");
+    assert_eq!(worker.join().expect("diff thread"), expected);
 }

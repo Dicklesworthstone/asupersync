@@ -470,6 +470,10 @@ pub struct WebSocket<IO> {
     pub(super) read_buf: BytesMut,
     /// Write buffer.
     pub(super) write_buf: BytesMut,
+    /// A retained Close still needs a successful transport flush. This stays
+    /// set after its last byte is written, survives split/reunite, and is
+    /// cleared by a successful flush or an abortive close.
+    pub(super) close_flush_pending: bool,
     /// Close handshake state.
     pub(super) close_handshake: CloseHandshake,
     /// Configuration.
@@ -513,6 +517,7 @@ where
             codec,
             read_buf: BytesMut::with_capacity(8192),
             write_buf: BytesMut::with_capacity(8192),
+            close_flush_pending: false,
             close_handshake: CloseHandshake::with_config(config.close_config.clone()),
             config,
             assembler: MessageAssembler::new(max_message_size),
@@ -686,8 +691,7 @@ where
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    self.close_handshake
-                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    self.force_close(CloseReason::new(super::CloseCode::Abnormal, None));
                     return Err(error);
                 }
             }
@@ -711,8 +715,7 @@ where
                     Ok(Some(())) => {}
                     Ok(None) => {
                         self.heartbeat.fail();
-                        self.close_handshake
-                            .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                        self.force_close(CloseReason::new(super::CloseCode::Abnormal, None));
                         return Err(super::heartbeat::timeout_error());
                     }
                     Err(WsError::Io(e))
@@ -737,15 +740,14 @@ where
                     Err(err) => {
                         // RFC 6455 §7.1.7, as for push_frame below.
                         self.codec.poison();
-                        self.close_handshake
-                            .force_close(CloseReason::new(err.as_close_code(), None));
+                        self.force_close(CloseReason::new(err.as_close_code(), None));
                         return Err(err);
                     }
                 }
             }
 
             let decoded = self.codec.decode(&mut self.read_buf).inspect_err(|error| {
-                self.close_handshake.force_close(CloseReason::new(error.as_close_code(), None));
+                self.force_close(CloseReason::new(error.as_close_code(), None));
             })?;
             if let Some(frame) = decoded {
                 // Handle control frames
@@ -772,7 +774,7 @@ where
                             .await;
                             if send_result?.is_none() {
                                 self.heartbeat.fail();
-                                self.close_handshake.force_close(CloseReason::new(
+                                self.force_close(CloseReason::new(
                                     super::CloseCode::Abnormal,
                                     None,
                                 ));
@@ -791,8 +793,7 @@ where
                             // no further peer data, including frames already
                             // buffered behind the violation.
                             self.codec.poison();
-                            self.close_handshake
-                                .force_close(CloseReason::new(err.as_close_code(), None));
+                            self.force_close(CloseReason::new(err.as_close_code(), None));
                             return Err(err);
                         }
                     },
@@ -816,8 +817,7 @@ where
                 };
                 if n == 0 {
                     // EOF - connection closed
-                    self.close_handshake
-                        .force_close(CloseReason::new(super::CloseCode::Abnormal, None));
+                    self.force_close(CloseReason::new(super::CloseCode::Abnormal, None));
                     return Ok(None);
                 }
             }
@@ -841,7 +841,7 @@ where
         {
             return result;
         }
-        self.close_handshake.force_close(CloseReason::going_away());
+        self.force_close(CloseReason::going_away());
         Ok(())
     }
 
@@ -861,7 +861,7 @@ where
             let time_now = current_time();
 
             if time_now >= deadline {
-                self.close_handshake.force_close(CloseReason::going_away());
+                self.force_close(CloseReason::going_away());
                 break;
             }
 
@@ -877,7 +877,7 @@ where
                     let time_now = current_time();
 
                     if time_now >= deadline {
-                        self.close_handshake.force_close(CloseReason::going_away());
+                        self.force_close(CloseReason::going_away());
                         break;
                     }
                     let remaining =
@@ -886,14 +886,14 @@ where
                     match crate::time::timeout(time_now, remaining, self.read_more(cx)).await {
                         Ok(Ok(n)) => {
                             if n == 0 {
-                                self.close_handshake.force_close(CloseReason::going_away());
+                                self.force_close(CloseReason::going_away());
                                 break;
                             }
                         }
                         Ok(Err(e)) => return Err(e),
                         Err(_) => {
                             // Timeout elapsed
-                            self.close_handshake.force_close(CloseReason::going_away());
+                            self.force_close(CloseReason::going_away());
                             break;
                         }
                     }
@@ -963,7 +963,7 @@ where
     async fn close_after_cancelled_send(&mut self, cx: &Cx, close_when_uncommitted: bool) {
         if self.write_buf.is_empty() && !close_when_uncommitted {
             let reason = self.close_handshake.cancellation_reason();
-            self.close_handshake.force_close(reason);
+            self.force_close(reason);
             return;
         }
 
@@ -996,6 +996,17 @@ where
             return Ok(());
         }
 
+        if self.close_handshake.state() == CloseState::Closed && self.close_flush_pending {
+            // A split receive can observe the peer's crossing Close and then
+            // be dropped while flushing our previously queued local Close.
+            // Reunite preserves those bytes, so a retry must flush them even
+            // though the handshake has already reached Closed. The flag also
+            // retains an unfinished final poll_flush with an empty buffer,
+            // without flushing again after success or an abortive close.
+            self.flush_write_buf_with_cx(op_cx).await?;
+            return Ok(());
+        }
+
         if let Some(frame) = self.close_handshake.initiate(reason) {
             // The Close goes into the retained write buffer before the first
             // await. The handshake is CloseSent from here on, so a close
@@ -1014,7 +1025,11 @@ where
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
         self.codec
-            .encode_with_entropy(frame, &mut self.write_buf, entropy)
+            .encode_with_entropy(frame, &mut self.write_buf, entropy)?;
+        if frame.opcode == Opcode::Close {
+            self.close_flush_pending = true;
+        }
+        Ok(())
     }
 
     fn encode_frame_bytes_with_entropy(
@@ -1099,6 +1114,7 @@ where
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
         .await?;
+        self.close_flush_pending = false;
 
         Ok(())
     }
@@ -1170,6 +1186,7 @@ where
             Pin::new(&mut self.io).poll_flush(task_cx)
         })
         .await?;
+        self.close_flush_pending = false;
 
         Ok(())
     }
@@ -1197,8 +1214,15 @@ where
 
     fn close_after_outbound_backpressure(&mut self) {
         if let Some(reason) = self.config.slow_consumer_close_reason() {
-            self.close_handshake.force_close(reason);
+            self.force_close(reason);
         }
+    }
+
+    fn force_close(&mut self, reason: CloseReason) {
+        // CloseHandshake preserves peer_reason on force_close; that reason
+        // alone must never authorize retrying a failed connection's writes.
+        self.close_flush_pending = false;
+        self.close_handshake.force_close(reason);
     }
 
     /// Internal: read more data into buffer.
@@ -1226,17 +1250,17 @@ where
 /// for the next frame from a silent peer is never re-polled on its own, so
 /// without this an external `cancel_with` went unnoticed until a frame finally
 /// arrived (or the OS TCP timeout). Mirrors the mysql/redis/nats guard.
-struct WsCancelWakerGuard<'a> {
+pub(super) struct WsCancelWakerGuard<'a> {
     cx: &'a Cx,
     token: Option<CancelWakerToken>,
 }
 
 impl<'a> WsCancelWakerGuard<'a> {
-    fn new(cx: &'a Cx) -> Self {
+    pub(super) fn new(cx: &'a Cx) -> Self {
         Self { cx, token: None }
     }
 
-    fn refresh(&mut self, waker: &std::task::Waker) {
+    pub(super) fn refresh(&mut self, waker: &std::task::Waker) {
         self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
     }
 }

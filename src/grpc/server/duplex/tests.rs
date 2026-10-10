@@ -766,6 +766,18 @@ fn literal(headers: &mut Vec<u8>, name: &str, value: &str) {
     headers.extend_from_slice(value.as_bytes());
 }
 
+/// `until` for a client running on the runtime under test: waits on the
+/// runtime's timer, so the server's tasks keep running meanwhile.
+async fn wait_until(predicate: impl Fn() -> bool) {
+    for _ in 0..LIMIT.as_millis() {
+        if predicate() {
+            return;
+        }
+        crate::time::sleep(crate::time::wall_now(), Duration::from_millis(1)).await;
+    }
+    panic!("legacy client witness watchdog");
+}
+
 fn until(predicate: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + LIMIT;
     while !predicate() {
@@ -1260,6 +1272,14 @@ fn legacy_client_case(workers: usize, case: LegacyCase) {
                         .await
                         .unwrap();
                     sink.send(Bytes::from(vec![7; PAYLOAD])).await.unwrap();
+                    // The second send completes only once the first message
+                    // left, which the running handler's reads make room for:
+                    // the cancel below lands mid-upload. Without this, on one
+                    // worker the cancel and the listener's force-close both
+                    // ran before the server read the request headers, and no
+                    // handler existed to retire (br-asupersync-k31km9).
+                    sink.send(Bytes::from_static(b"second")).await.unwrap();
+                    wait_until(|| inspected.messages.load(Ordering::SeqCst) >= 1).await;
                     // While the call lives, its codec is shared: a consuming
                     // native call on the same client refuses before dialing.
                     let cx = Cx::current().unwrap();
@@ -1276,6 +1296,10 @@ fn legacy_client_case(workers: usize, case: LegacyCase) {
                     assert_eq!(status.code(), Code::Cancelled);
                     let closed = sink.close().await.expect_err("close reports the cancel");
                     assert_eq!(closed.code(), Code::Cancelled);
+                    // The dropped call closed its connection: the server
+                    // retires the handler on that disconnect, before the
+                    // listener is stopped.
+                    wait_until(|| inspected.drops.load(Ordering::SeqCst) == 1).await;
                 }
             }
         };

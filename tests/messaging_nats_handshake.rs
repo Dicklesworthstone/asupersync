@@ -49,7 +49,9 @@
 //! window); one that answers them is kept, and a disabled keepalive sends none.
 
 use asupersync::cx::{ChildRegionSpec, Cx};
-use asupersync::messaging::nats::{NatsClient, NatsConfig, NatsError, NatsKeepalive};
+use asupersync::messaging::nats::{
+    NatsClient, NatsConfig, NatsConnectPolicy, NatsError, NatsKeepalive,
+};
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -652,6 +654,390 @@ fn closed_by_client(reader: &mut BufReader<std::net::TcpStream>, within: Duratio
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ConnectStall {
+    Info,
+    VerboseAck,
+    Confirmation,
+}
+
+fn assert_connection_attempt_timeout(stage: ConnectStall) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stalled handshake listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (stage_tx, stage_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept stalled handshake");
+        if matches!(stage, ConnectStall::Info) {
+            stream.write_all(b"INFO {").expect("write partial INFO");
+            stream.flush().expect("flush partial INFO");
+        } else {
+            send_info(&mut stream, "stalled-handshake");
+        }
+        let mut reader = BufReader::new(stream);
+        if !matches!(stage, ConnectStall::Info) {
+            assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        }
+        if matches!(stage, ConnectStall::Confirmation) {
+            assert_eq!(read_nats_line(&mut reader), "PING");
+        }
+        stage_tx.send(()).expect("publish handshake stage witness");
+        closed_by_client(&mut reader, Duration::from_secs(5))
+    });
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
+        config.verbose = matches!(stage, ConnectStall::VerboseAck);
+        config.auto_reconnect = false;
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_millis(500))
+            .with_connect_confirmation(matches!(stage, ConnectStall::Confirmation))
+            .with_keepalive(NatsKeepalive::disabled());
+        let result = NatsClient::connect_with_policy(&cx, config, policy)
+            .await
+            .map(drop);
+        let _ = done_tx.send(result);
+    });
+
+    let reached = stage_rx.recv_timeout(Duration::from_secs(3));
+    let result = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let closed = server.join().expect("stalled handshake peer joined");
+    assert!(reached.is_ok(), "the client never reached {stage:?}");
+    let error = result
+        .expect("connection attempt must finish")
+        .expect_err("a stalled handshake must time out");
+    assert!(error.is_timeout(), "{stage:?}: {error:?}");
+    assert!(closed, "{stage:?}: timed-out transport stayed open");
+    assert!(drained, "{stage:?}: runtime did not drain");
+}
+
+#[test]
+fn nats_connect_policy_bounds_a_partial_info_pm29wb() {
+    assert_connection_attempt_timeout(ConnectStall::Info);
+}
+
+#[test]
+fn nats_connect_policy_bounds_the_verbose_ack_pm29wb() {
+    assert_connection_attempt_timeout(ConnectStall::VerboseAck);
+}
+
+#[test]
+fn nats_connect_policy_bounds_the_confirmation_pong_pm29wb() {
+    assert_connection_attempt_timeout(ConnectStall::Confirmation);
+}
+
+#[test]
+fn nats_connect_confirmation_handles_server_ping_and_preserves_flush_order_pm29wb() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind confirmation listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept confirmation client");
+        send_info(&mut stream, "confirmed");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        reader
+            .get_mut()
+            .write_all(b"PING\r\n+OK\r\nPONG\r\n")
+            .expect("confirm CONNECT with an interleaved server PING");
+        reader.get_mut().flush().expect("flush confirmation");
+        assert_eq!(read_nats_line(&mut reader), "PONG");
+        // A later flush must wait for its own PONG, after the one consumed
+        // by connection confirmation.
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        reader
+            .get_mut()
+            .write_all(b"PONG\r\n")
+            .expect("confirm flush");
+        reader.get_mut().flush().expect("flush PONG");
+        closed_by_client(&mut reader, Duration::from_secs(5))
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_secs(3))
+            .with_connect_confirmation(true)
+            .with_keepalive(NatsKeepalive::disabled());
+        let mut client = NatsClient::connect_with_policy(&cx, config, policy)
+            .await
+            .expect("confirmed connection");
+        client.ping(&cx).await.expect("flush after confirmation");
+        client.close(&cx).await.expect("close confirmed connection");
+        let _ = done_tx.send(());
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert!(server.join().expect("confirmation peer joined"));
+    assert!(completed.is_ok(), "confirmed client did not finish");
+    assert!(drained, "confirmation runtime did not drain");
+}
+
+#[test]
+fn nats_connect_confirmation_returns_the_authentication_refusal_pm29wb() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind refusing handshake listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept refusing handshake");
+        send_info(&mut stream, "refused-before-use");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        reader
+            .get_mut()
+            .write_all(b"-ERR 'Authorization Violation'\r\n")
+            .expect("write authentication refusal");
+        reader.get_mut().flush().expect("flush refusal");
+        closed_by_client(&mut reader, Duration::from_secs(5))
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_secs(3))
+            .with_connect_confirmation(true);
+        let result = NatsClient::connect_with_policy(&cx, config, policy)
+            .await
+            .map(drop);
+        let _ = done_tx.send(result);
+    });
+    let result = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    assert!(server.join().expect("refusing peer joined"));
+    assert!(
+        matches!(
+            result,
+            Ok(Err(NatsError::Server(ref message))) if message == "Authorization Violation"
+        ),
+        "expected the server's authentication refusal, got {result:?}"
+    );
+    assert!(drained, "refusing runtime did not drain");
+}
+
+#[test]
+fn nats_connect_policy_cancels_a_parked_confirmation_pm29wb() {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind cancellable handshake listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let (ping_tx, ping_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept cancellable handshake");
+        send_info(&mut stream, "cancel-confirmation");
+        let mut reader = BufReader::new(stream);
+        assert!(read_nats_line(&mut reader).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut reader), "PING");
+        ping_tx.send(()).expect("publish peer confirmation PING");
+        closed_by_client(&mut reader, Duration::from_secs(5))
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (owner_tx, owner_rx) = mpsc::channel();
+    let (poll_waker_tx, poll_waker_rx) = mpsc::channel();
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let (done_tx, done_rx) = mpsc::channel();
+    let peer_ping_seen = Arc::new(AtomicBool::new(false));
+    let connection_peer_ping_seen = Arc::clone(&peer_ping_seen);
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let owner = cx
+            .open_child_region(ChildRegionSpec::inherit())
+            .await
+            .expect("open connection owner");
+        owner_tx
+            .send(owner.cx().clone())
+            .expect("publish connection owner");
+        let config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_secs(3_600))
+            .with_connect_confirmation(true);
+        let mut poll_waker_tx = Some(poll_waker_tx);
+        let mut parked_tx = Some(parked_tx);
+        let result = {
+            let connect = NatsClient::connect_with_policy(owner.cx(), config, policy);
+            let mut connect = std::pin::pin!(connect);
+            std::future::poll_fn(|task_cx| {
+                // Sample before polling: the witness must come from a real
+                // Pending poll after the assertion side observed the PING.
+                let after_peer_ping = connection_peer_ping_seen.load(Ordering::Acquire);
+                let result = connect.as_mut().poll(task_cx);
+                if result.is_pending()
+                    && let Some(poll_waker_tx) = poll_waker_tx.take()
+                {
+                    let _ = poll_waker_tx.send(task_cx.waker().clone());
+                }
+                if after_peer_ping
+                    && result.is_pending()
+                    && let Some(parked_tx) = parked_tx.take()
+                {
+                    let _ = parked_tx.send(());
+                }
+                result
+            })
+            .await
+            .map(drop)
+        };
+        owner
+            .close()
+            .await
+            .expect("connection owner reaches quiescence");
+        let _ = done_tx.send(result);
+    });
+    let owner = owner_rx.recv_timeout(Duration::from_secs(3));
+    let ping = ping_rx.recv_timeout(Duration::from_secs(3));
+    let initial_poll = poll_waker_rx.recv_timeout(Duration::from_secs(3));
+    if let (Ok(()), Ok(waker)) = (&ping, &initial_poll) {
+        peer_ping_seen.store(true, Ordering::Release);
+        // The socket may have parked before the peer reported its PING.
+        // One explicit wake establishes a subsequent Pending boundary; after
+        // that boundary only cancellation can release this silent handshake.
+        waker.wake_by_ref();
+    }
+    let parked = parked_rx.recv_timeout(Duration::from_secs(3));
+    if let (Ok(owner), Ok(())) = (&owner, &parked) {
+        owner.cancel_with(
+            asupersync::types::CancelKind::User,
+            Some("cancel confirmed NATS connect"),
+        );
+    }
+    let result = done_rx.recv_timeout(Duration::from_secs(6));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let closed = server.join().expect("cancellable handshake peer joined");
+    assert!(owner.is_ok(), "connection owner was not admitted");
+    assert!(ping.is_ok(), "confirmation never reached the peer");
+    assert!(initial_poll.is_ok(), "connection was never polled");
+    assert!(
+        parked.is_ok(),
+        "connection never parked after confirmation PING"
+    );
+    assert!(
+        matches!(result, Ok(Err(NatsError::Cancelled))),
+        "expected domain cancellation from the parked connection, got {result:?}"
+    );
+    assert!(closed, "cancelled handshake transport stayed open");
+    assert!(drained, "cancelled connection runtime did not drain");
+}
+
+#[test]
+fn nats_connect_policy_times_out_reconnects_and_exhausts_the_attempt_limit_pm29wb() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind reconnect timeout listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let server = thread::spawn(move || {
+        let mut first =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept initial connection");
+        send_info(&mut first, "initial");
+        let mut first = BufReader::new(first);
+        assert!(read_nats_line(&mut first).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut first), "PING");
+        first
+            .get_mut()
+            .write_all(b"PONG\r\n")
+            .expect("confirm initial CONNECT");
+        first.get_mut().flush().expect("flush initial confirmation");
+        assert_eq!(read_nats_line(&mut first), "SUB events.kept 1");
+        drop(first);
+
+        let mut second =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept first reconnect");
+        // Leave an incomplete INFO in the failed attempt's input buffer.
+        second
+            .write_all(b"INFO {")
+            .expect("write partial reconnect INFO");
+        second.flush().expect("flush partial reconnect INFO");
+        let second_closed =
+            closed_by_client(&mut BufReader::new(second), Duration::from_secs(5));
+
+        let mut third =
+            accept_within(&listener, Duration::from_secs(5)).expect("accept second reconnect");
+        send_info(&mut third, "second-attempt");
+        let mut third = BufReader::new(third);
+        assert!(read_nats_line(&mut third).starts_with("CONNECT "));
+        assert_eq!(read_nats_line(&mut third), "PING");
+        // No PONG: confirmation must finish before any subscription replay.
+        let mut unexpected = String::new();
+        let third_closed = matches!(third.read_line(&mut unexpected), Ok(0));
+        let extra_attempt = accept_within(&listener, Duration::from_millis(300)).is_some();
+        (second_closed, third_closed, unexpected, extra_attempt)
+    });
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let (done_tx, done_rx) = mpsc::channel();
+    let task = runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let mut config = NatsConfig::from_url(&format!("nats://{addr}")).expect("parse URL");
+        config.reconnect_delay = Duration::from_millis(100);
+        config.max_reconnect_delay = Duration::from_millis(200);
+        config.max_reconnect_attempts = 2;
+        let policy = NatsConnectPolicy::new()
+            .with_timeout(Duration::from_millis(500))
+            .with_connect_confirmation(true)
+            .with_keepalive(NatsKeepalive::disabled());
+        let mut client = NatsClient::connect_with_policy(&cx, config, policy)
+            .await
+            .expect("establish initial connection");
+        let mut subscription = client
+            .subscribe(&cx, "events.kept")
+            .await
+            .expect("subscribe before reconnect");
+        let closed = subscription.next(&cx).await.map(|message| message.is_none());
+        drop(client);
+        let _ = done_tx.send(closed);
+    });
+    let completed = done_rx.recv_timeout(Duration::from_secs(12));
+    drop(task);
+    let drained = runtime.shutdown_timeout(Duration::from_secs(3));
+    let (second_closed, third_closed, unexpected, extra_attempt) =
+        server.join().expect("reconnect timeout peer joined");
+    assert!(
+        second_closed,
+        "partial-INFO attempt was not closed on timeout"
+    );
+    assert!(
+        third_closed,
+        "unconfirmed reconnect was not closed on timeout"
+    );
+    assert!(
+        unexpected.is_empty(),
+        "subscription replay preceded confirmation: {unexpected:?}"
+    );
+    assert!(!extra_attempt, "max_reconnect_attempts=2 was ignored");
+    assert!(
+        matches!(completed, Ok(Ok(true))),
+        "subscription did not terminate after reconnect exhaustion: {completed:?}"
+    );
+    assert!(drained, "reconnect timeout runtime did not drain");
 }
 
 #[test]
