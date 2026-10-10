@@ -261,6 +261,35 @@ fn recv_error_returns_a_pending_socket_error_instead_of_spinning() {
     });
 }
 
+/// br-asupersync-vs1vdk U1: with set_recverr on, recv_error read and
+/// discarded a pending socket error, taking it for the shadow of a report it
+/// had already delivered. But dequeuing a report clears that error, so with
+/// the queue empty it is the only record: here the ICMP error arrived before
+/// IP_RECVERR was set. It was lost and recv_error waited forever.
+#[test]
+fn recv_error_returns_a_socket_error_that_predates_set_recverr() {
+    on_runtime(async {
+        let dead = closed_port("127.0.0.1");
+        let mut socket = UdpSocket::bind(("127.0.0.1", 0)).await.unwrap();
+        socket.connect(dead).await.unwrap();
+        socket.send(b"to a closed port").await.unwrap();
+        // Loopback answers within the send; leave margin so the error is in
+        // the socket's error field before IP_RECVERR is turned on.
+        std::thread::sleep(Duration::from_millis(100));
+        socket.set_recverr(true).unwrap();
+        let mut buf = [0_u8; 32];
+        let error = timeout(
+            wall_now(),
+            Duration::from_secs(2),
+            socket.recv_error(&mut buf),
+        )
+        .await
+        .expect("recv_error must return the pending error, not wait for another")
+        .expect_err("no queued report, only the pending socket error");
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
+    });
+}
+
 #[test]
 fn icmpv6_port_unreachable_reaches_recv_error_on_runtime_reactor() {
     if std::net::UdpSocket::bind("[::1]:0").is_err() {

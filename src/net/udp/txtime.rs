@@ -614,17 +614,22 @@ impl UdpSocket {
                 // error field, which MSG_ERRQUEUE does not clear. Re-arming on
                 // it would spin, so read and clear it with SO_ERROR.
                 //
-                // On sockets without IP_RECVERR, this is the only way the error
-                // is surfaced, so return it as an Err. On sockets with
-                // IP_RECVERR, any sk_err cleared here is a duplicate of the
-                // ICMP error already delivered via MSG_ERRQUEUE, so discard it
-                // and re-arm to avoid duplicate error delivery.
+                // Dequeuing a report already clears the error field, so with
+                // the queue empty a nonzero error is the only record of it: no
+                // IP_RECVERR, an error that arrived before set_recverr, or a
+                // report the kernel could not queue (receive buffer full).
+                // Return it. If a report was queued between the two reads, the
+                // error was that report's shadow: return the report instead,
+                // so the error is delivered once.
                 match socket::getsockopt(&*self.inner, sockopt::SocketError) {
                     Ok(0) => {}
                     Ok(code) => {
-                        if !self.recverr() {
-                            return Poll::Ready(Err(io::Error::from_raw_os_error(code)));
-                        }
+                        return Poll::Ready(match recv_error_once(self.inner.as_raw_fd(), buf) {
+                            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                Err(io::Error::from_raw_os_error(code))
+                            }
+                            report => report,
+                        });
                     }
                     Err(errno) => return Poll::Ready(Err(io::Error::from(errno))),
                 }
