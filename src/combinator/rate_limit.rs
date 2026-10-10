@@ -914,16 +914,17 @@ impl RateLimiter {
     pub fn reset(&self) {
         let initial_tokens = self.policy.burst;
 
+        // Refill, clear and zero under the queue lock (taken before `state`,
+        // the order process_queue uses), so no enqueue, grant or cancel lands
+        // between them. A grant between a refill and the clear took tokens for
+        // an entry the clear then dropped, leaving the bucket short.
+        let mut queue = self.wait_queue.write();
         {
             let mut state = self.state.lock();
             state.tokens = initial_tokens;
             state.fractional = 0;
             state.last_refill = 0;
         }
-
-        // Clear and zero under one lock so no enqueue, grant or cancel lands
-        // between them.
-        let mut queue = self.wait_queue.write();
         queue.clear();
         self.pending_queue_count.store(0, Ordering::Relaxed);
         drop(queue);
@@ -949,15 +950,38 @@ impl fmt::Debug for RateLimiter {
 pub struct SlidingWindowRateLimiter {
     policy: RateLimitPolicy,
 
-    /// Timestamps of recent operations: (timestamp_millis, cost).
-    window: RwLock<VecDeque<(u64, u32)>>,
-
-    // NOTE: Previously had window_cost: AtomicU32 shadow counter, but this
-    // created race conditions. Now we compute cost from window contents directly.
+    /// Recent operations and their summed cost, under one lock.
+    window: RwLock<SlidingWindow>,
 
     // Atomic counters
     total_allowed: AtomicU64,
     total_rejected: AtomicU64,
+}
+
+/// The operations a sliding window still counts, with their total cost.
+#[derive(Default)]
+struct SlidingWindow {
+    /// Timestamps of recent operations: (timestamp_millis, cost).
+    entries: VecDeque<(u64, u32)>,
+    /// Sum of the entries' costs. It changes only with `entries`, under the
+    /// same lock: an atomic shadow counter beside the lock used to race, and
+    /// re-summing the entries cost O(rate) on every call.
+    cost: u64,
+}
+
+impl SlidingWindow {
+    /// Drop the entries a window of `period_millis` no longer covers at
+    /// `now_millis`. A zero period never expires anything.
+    fn expire(&mut self, now_millis: u64, period_millis: u64) {
+        while let Some(&(t, c)) = self.entries.front() {
+            if period_millis > 0 && now_millis.saturating_sub(t) >= period_millis {
+                self.entries.pop_front();
+                self.cost -= u64::from(c);
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 impl SlidingWindowRateLimiter {
@@ -969,7 +993,7 @@ impl SlidingWindowRateLimiter {
             // Policy limits describe admitted work, not an allocation request.
             // Grow with actual accepted operations so extreme but valid limits
             // cannot force a multi-gigabyte constructor allocation.
-            window: RwLock::new(VecDeque::new()),
+            window: RwLock::new(SlidingWindow::default()),
             total_allowed: AtomicU64::new(0),
             total_rejected: AtomicU64::new(0),
         }
@@ -981,12 +1005,6 @@ impl SlidingWindowRateLimiter {
         &self.policy.name
     }
 
-    /// Compute current cost from window contents.
-    /// This replaces the previous window_cost atomic to avoid race conditions.
-    fn compute_window_cost(window: &std::collections::VecDeque<(u64, u32)>) -> u64 {
-        window.iter().map(|(_, cost)| u64::from(*cost)).sum()
-    }
-
     /// Try to acquire without waiting.
     #[must_use]
     #[allow(clippy::significant_drop_tightening, clippy::cast_possible_truncation)]
@@ -996,22 +1014,13 @@ impl SlidingWindowRateLimiter {
 
         // Single lock acquisition: cleanup expired + check usage + add entry
         let mut window = self.window.write();
-
-        // Cleanup expired entries inline.
-        while let Some((t, _c)) = window.front() {
-            if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
-                window.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        // Compute current usage directly from window contents.
-        let usage = Self::compute_window_cost(&window);
+        window.expire(now_millis, period_millis);
+        let usage = window.cost;
 
         if usage.saturating_add(u64::from(cost)) <= u64::from(self.policy.rate) {
             if cost > 0 {
-                window.push_back((now_millis, cost));
+                window.entries.push_back((now_millis, cost));
+                window.cost += u64::from(cost);
             }
             drop(window);
             self.total_allowed.fetch_add(1, Ordering::Relaxed);
@@ -1037,17 +1046,9 @@ impl SlidingWindowRateLimiter {
         let period_millis = period_to_millis_ceil(self.policy.period);
 
         let mut window = self.window.write();
+        window.expire(now_millis, period_millis);
 
-        // Inline cleanup
-        while let Some((t, _c)) = window.front() {
-            if period_millis > 0 && now_millis.saturating_sub(*t) >= period_millis {
-                window.pop_front();
-            } else {
-                break;
-            }
-        }
-
-        let usage = Self::compute_window_cost(&window);
+        let usage = window.cost;
         let requested = usage.saturating_add(u64::from(cost));
         if requested <= u64::from(self.policy.rate) {
             return Duration::ZERO;
@@ -1060,7 +1061,7 @@ impl SlidingWindowRateLimiter {
         // Find when enough capacity frees up
         let needed = requested.saturating_sub(u64::from(self.policy.rate));
         let mut freed = 0u64;
-        for (t, c) in window.iter() {
+        for (t, c) in &window.entries {
             freed = freed.saturating_add(u64::from(*c));
             if freed >= needed {
                 // This entry will expire at t + period
@@ -1092,7 +1093,8 @@ impl SlidingWindowRateLimiter {
     /// Reset the sliding window.
     pub fn reset(&self) {
         let mut window = self.window.write();
-        window.clear();
+        window.entries.clear();
+        window.cost = 0;
         drop(window);
     }
 }
@@ -1550,6 +1552,45 @@ mod tests {
         resetter.join().expect("resetter thread");
         rl.reset();
         assert!(rl.try_acquire(1, now), "the fast path stays open");
+    }
+
+    #[test]
+    fn reset_racing_a_grant_leaves_the_bucket_full() {
+        // br-asupersync-e9gn8y L3: reset refilled the bucket, released the
+        // state lock, then cleared the queue. A process_queue in between
+        // granted the queued waiter from the fresh tokens and the clear dropped
+        // that grant, so the bucket stayed short after the reset. Either order
+        // of the two whole operations leaves it full. The window is narrow,
+        // so this loops.
+        let now = Time::from_millis(0);
+        for _ in 0..20_000 {
+            let rl = Arc::new(RateLimiter::new(RateLimitPolicy {
+                rate: 1,
+                burst: 1,
+                wait_strategy: WaitStrategy::Block,
+                ..Default::default()
+            }));
+            assert!(rl.try_acquire(1, now));
+            let entry_id = rl.enqueue(1, now).expect("queued behind the empty bucket");
+            assert_ne!(entry_id, IMMEDIATE_ACQUIRE_SENTINEL);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let granter = {
+                let rl = Arc::clone(&rl);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = rl.process_queue(now);
+                })
+            };
+            barrier.wait();
+            rl.reset();
+            granter.join().expect("granter thread");
+            assert_eq!(
+                rl.available_tokens(),
+                1,
+                "a grant the reset discarded kept its token"
+            );
+        }
     }
 
     #[test]
@@ -2338,8 +2379,79 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(max_rate.window.read().capacity(), 0);
-        assert_eq!(max_burst.window.read().capacity(), 0);
+        assert_eq!(max_rate.window.read().entries.capacity(), 0);
+        assert_eq!(max_burst.window.read().entries.capacity(), 0);
+    }
+
+    #[test]
+    fn sliding_window_cost_total_matches_a_full_resum() {
+        // br-asupersync-e9gn8y L4: the window's cost was re-summed over every
+        // entry on each call, O(rate) under the write lock. The running total
+        // must make exactly the decisions the full re-sum made, through admits,
+        // refusals, zero-cost calls, expiry and a reset.
+        let policy = RateLimitPolicy {
+            rate: 10,
+            period: Duration::from_millis(100),
+            ..Default::default()
+        };
+        let rl = SlidingWindowRateLimiter::new(policy.clone());
+        let mut model: VecDeque<(u64, u32)> = VecDeque::new();
+        let (mut admitted, mut refused) = (0, 0);
+        for step in 0..200u64 {
+            let now = step * 7;
+            let cost = u32::try_from(step % 5).unwrap();
+            if step == 120 {
+                rl.reset();
+                model.clear();
+            }
+            model.retain(|&(t, _)| now - t < 100);
+            let used: u64 = model.iter().map(|&(_, c)| u64::from(c)).sum();
+            let expected = used + u64::from(cost) <= u64::from(policy.rate);
+            let expected_wait = if expected {
+                Duration::ZERO
+            } else {
+                let needed = used + u64::from(cost) - u64::from(policy.rate);
+                let mut freed = 0;
+                let (t, _) = model
+                    .iter()
+                    .find(|&&(_, c)| {
+                        freed += u64::from(c);
+                        freed >= needed
+                    })
+                    .copied()
+                    .expect("a refused cost within the rate frees up");
+                Duration::from_millis(t + 100 - now)
+            };
+            assert_eq!(
+                rl.time_until_available(cost, Time::from_millis(now)),
+                expected_wait,
+                "step {step}: wait for cost {cost} with {used} in the window"
+            );
+            assert_eq!(
+                rl.try_acquire(cost, Time::from_millis(now)),
+                expected,
+                "step {step}: cost {cost} with {used} in the window"
+            );
+            if expected {
+                admitted += 1;
+                if cost > 0 {
+                    model.push_back((now, cost));
+                }
+            } else {
+                refused += 1;
+            }
+            let window = rl.window.read();
+            assert_eq!(window.entries, model, "step {step}");
+            assert_eq!(
+                window.cost,
+                model.iter().map(|&(_, c)| u64::from(c)).sum::<u64>(),
+                "step {step}"
+            );
+        }
+        assert!(
+            admitted > 50 && refused > 20,
+            "{admitted} admitted, {refused} refused"
+        );
     }
 
     #[test]

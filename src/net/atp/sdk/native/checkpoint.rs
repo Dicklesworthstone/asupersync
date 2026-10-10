@@ -50,6 +50,10 @@ pub enum NativeCheckpointError {
     #[error("invalid checkpoint: {0}")]
     Invalid(&'static str),
     /// Another cooperating handle/process owns this checkpoint.
+    ///
+    /// The lock is an OS file lock on an open file description. A subprocess
+    /// spawned while a handle holds it keeps a copy until the child executes its
+    /// program, so `Busy` can be transient if another thread spawns processes.
     #[error("checkpoint is already in use")]
     Busy,
     /// Current endpoint, TLS server name, or local SDK identity differs.

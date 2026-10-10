@@ -538,9 +538,11 @@ fn map_error_code(code: RDKafkaErrorCode, topic: Option<&str>) -> KafkaError {
         RDKafkaErrorCode::InvalidTopic | RDKafkaErrorCode::UnknownTopic => {
             KafkaError::InvalidTopic(topic.unwrap_or("unknown").to_string())
         }
-        // Refused credentials or ACLs: retrying the same request cannot help.
+        // Refused credentials, ACLs or SASL exchanges are never retried; timeouts are (is_timeout).
         RDKafkaErrorCode::Authentication
         | RDKafkaErrorCode::SaslAuthenticationFailed
+        | RDKafkaErrorCode::UnsupportedSASLMechanism
+        | RDKafkaErrorCode::IllegalSASLState
         | RDKafkaErrorCode::TopicAuthorizationFailed
         | RDKafkaErrorCode::GroupAuthorizationFailed
         | RDKafkaErrorCode::ClusterAuthorizationFailed
@@ -548,8 +550,6 @@ fn map_error_code(code: RDKafkaErrorCode, topic: Option<&str>) -> KafkaError {
         | RDKafkaErrorCode::DelegationTokenAuthorizationFailed => {
             KafkaError::Authentication(format!("{code:?}"))
         }
-        // A delivery or request that ran out of time is a timeout (still
-        // retryable), so `is_timeout` reports it.
         RDKafkaErrorCode::MessageTimedOut
         | RDKafkaErrorCode::RequestTimedOut
         | RDKafkaErrorCode::OperationTimedOut => {
@@ -3636,6 +3636,8 @@ mod tests {
         for code in [
             RDKafkaErrorCode::Authentication,
             RDKafkaErrorCode::SaslAuthenticationFailed,
+            RDKafkaErrorCode::UnsupportedSASLMechanism,
+            RDKafkaErrorCode::IllegalSASLState,
             RDKafkaErrorCode::TopicAuthorizationFailed,
             RDKafkaErrorCode::GroupAuthorizationFailed,
             RDKafkaErrorCode::ClusterAuthorizationFailed,
@@ -3695,6 +3697,20 @@ mod tests {
             map_rdkafka_error(&client_other_err, None),
             KafkaError::Broker(_)
         ));
+
+        // 4. A coded refusal of the SASL exchange stays a non-retryable
+        // Authentication error, as the "SASL" substring match classified it
+        // before typed codes were preferred.
+        for code in [
+            RDKafkaErrorCode::UnsupportedSASLMechanism,
+            RDKafkaErrorCode::IllegalSASLState,
+        ] {
+            let error = map_rdkafka_error(&RdKafkaError::MetadataFetch(code), None);
+            assert!(
+                matches!(error, KafkaError::Authentication(_)) && !error.is_retryable(),
+                "{code:?} -> {error:?}"
+            );
+        }
     }
 
     #[test]
