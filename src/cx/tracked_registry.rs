@@ -20,7 +20,7 @@ use super::Cx;
 use super::registry::{NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryHandle};
 use crate::record::{ObligationAbortReason, ObligationKind};
 use crate::runtime::obligation_mailbox::{
-    ObligationAdmissionError, ObligationMailbox, ObligationToken,
+    ObligationAdmissionError, ObligationMailbox, ObligationToken, ObligationTransferError,
 };
 use crate::types::{RegionId, TaskId, Time};
 use parking_lot::Mutex;
@@ -49,6 +49,8 @@ pub enum TrackedNameError {
     /// Cleanup freed the name, but the runtime did not accept settlement.
     /// The runtime may be gone or the original holder may already have leaked it.
     SettlementRejected,
+    /// A lease transfer between task contexts was refused.
+    Transfer(ObligationTransferError),
 }
 
 impl std::fmt::Display for TrackedNameError {
@@ -62,6 +64,7 @@ impl std::fmt::Display for TrackedNameError {
             Self::TimerRequired => f.write_str("name wait deadline requires an explicit timer driver"),
             Self::Registry(error) => std::fmt::Display::fmt(error, f),
             Self::SettlementRejected => f.write_str("name removed but runtime settlement refused"),
+            Self::Transfer(error) => write!(f, "name lease transfer: {error}"),
         }
     }
 }
@@ -71,6 +74,7 @@ impl std::error::Error for TrackedNameError {
         match self {
             Self::Admission(error) => Some(error),
             Self::Registry(error) => Some(error),
+            Self::Transfer(error) => Some(error),
             _ => None,
         }
     }
@@ -116,10 +120,28 @@ impl TrackedNameRegistry {
         RegistryHandle::new(Arc::new(self.clone()))
     }
 
-    /// Looks up an active name. No runtime or global registry is inferred.
+    /// Looks up an active name without checking the caller's runtime domain.
+    ///
+    /// # Limitations
+    ///
+    /// This method performs an ambient lookup that ignores the caller's
+    /// runtime domain. Because independent runtimes assign identical task IDs
+    /// sequentially, a task ID returned from this method may alias a task in
+    /// another runtime. For runtime-domain validation, use [`Self::whereis_cx`].
     #[must_use]
     pub fn whereis(&self, name: &str) -> Option<TaskId> {
         self.inner.lock().whereis(name)
+    }
+
+    /// Looks up an active name scoped to the caller's runtime domain.
+    ///
+    /// If this registry is bound to a runtime and `cx` belongs to a different
+    /// runtime, returns `Err(TrackedNameError::DifferentRuntime)`.
+    /// If `cx` has no runtime-wired identity, returns `Err(TrackedNameError::RuntimeRequired)`.
+    /// Otherwise, returns `Ok(self.whereis(name))`.
+    pub fn whereis_cx(&self, cx: &Cx, name: &str) -> Result<Option<TaskId>, TrackedNameError> {
+        self.check_runtime(cx)?;
+        Ok(self.whereis(name))
     }
 
     /// Publishes a name owned by `cx` and returns its runtime-accounted guard.
@@ -153,6 +175,25 @@ impl TrackedNameRegistry {
             lease: Some(lease),
             obligation: admission.token.take(),
         })
+    }
+
+    pub(crate) fn check_runtime(&self, cx: &Cx) -> Result<(), TrackedNameError> {
+        let (gateway, _) = cx
+            .obligation_transfer_destination()
+            .map_err(|err| match err {
+                crate::runtime::obligation_mailbox::ObligationAdmissionError::RuntimeUnavailable => {
+                    TrackedNameError::RuntimeRequired
+                }
+                other => TrackedNameError::Admission(other),
+            })?;
+        let identity = Arc::downgrade(gateway.mailbox());
+        let binding = self.runtime.lock();
+        match binding.as_ref() {
+            Some(previous) if !Weak::ptr_eq(previous, &identity) => {
+                Err(TrackedNameError::DifferentRuntime)
+            }
+            _ => Ok(()),
+        }
     }
 
     fn bind_runtime(&self, cx: &Cx) -> Result<(), TrackedNameError> {
@@ -327,6 +368,48 @@ impl TrackedNameLease {
         self.resolve(Some(ObligationAbortReason::Explicit))
     }
 
+    /// Transfers this lease and its runtime obligation to a new task context.
+    ///
+    /// The destination context must belong to the same runtime domain.
+    /// On success, the underlying runtime obligation is transferred to `destination`,
+    /// the registry entry is rebound to `destination.task_id()` and `destination.region_id()`,
+    /// and `whereis` / `whereis_cx` will subsequently return the new task ID.
+    ///
+    /// If the transfer fails, the lease remains owned by the original task context.
+    pub fn try_transfer(&mut self, destination: &Cx) -> Result<(), TrackedNameError> {
+        self.registry.check_runtime(destination)?;
+        let Some(token) = self.obligation.take() else {
+            return Err(TrackedNameError::Cancelled);
+        };
+        let new_token = match token.try_transfer(destination) {
+            Ok(new_tok) => new_tok,
+            Err(failure) => {
+                let (reason, original_token) = failure.into_parts();
+                self.obligation = Some(original_token);
+                return Err(TrackedNameError::Transfer(reason));
+            }
+        };
+        let Some(lease) = self.lease.as_mut() else {
+            self.obligation = Some(new_token);
+            return Err(TrackedNameError::Cancelled);
+        };
+        let result = self.registry.inner.lock().rebind_lease(
+            lease,
+            destination.task_id(),
+            destination.region_id(),
+        );
+        match result {
+            Ok(()) => {
+                self.obligation = Some(new_token);
+                Ok(())
+            }
+            Err(err) => {
+                self.obligation = Some(new_token);
+                Err(TrackedNameError::Registry(err))
+            }
+        }
+    }
+
     fn resolve(&mut self, abort: Option<ObligationAbortReason>) -> Result<(), TrackedNameError> {
         let Some(mut lease) = self.lease.take() else {
             return Ok(());
@@ -453,12 +536,25 @@ mod authority_tests {
         assert_eq!(first.task_id(), second.task_id());
         assert_eq!(first.region_id(), second.region_id());
         let names = TrackedNameRegistry::new();
-        names.register(&first, "worker").unwrap().release().unwrap();
+        let mut lease = names.register(&first, "worker").unwrap();
         let clone = names.clone();
+        // Lookups:
+        // Ambient whereis returns raw TaskId without runtime domain validation:
+        assert_eq!(clone.whereis("worker"), Some(first.task_id()));
+        // whereis_cx validates runtime domain: caller in first runtime succeeds:
+        assert_eq!(clone.whereis_cx(&first, "worker"), Ok(Some(first.task_id())));
+        // whereis_cx rejects caller from second runtime:
+        assert_eq!(clone.whereis_cx(&second, "worker"), Err(TrackedNameError::DifferentRuntime));
+        // Cross-runtime transfer is refused:
+        assert_eq!(lease.try_transfer(&second), Err(TrackedNameError::DifferentRuntime));
+        lease.release().unwrap();
+
         assert!(matches!(clone.register(&second, "worker"), Err(TrackedNameError::DifferentRuntime)));
         assert!(matches!(clone.reserve(&second, "startup"), Err(TrackedNameError::DifferentRuntime)));
         assert_eq!(clone.whereis("worker"), None);
         assert_eq!(clone.whereis("startup"), None);
+        assert_eq!(clone.whereis_cx(&first, "worker"), Ok(None));
+        assert_eq!(clone.whereis_cx(&second, "worker"), Err(TrackedNameError::DifferentRuntime));
         // Failed cross-runtime attempts must not retain the second runtime's quota.
         TrackedNameRegistry::new().register(&second, "worker").unwrap().release().unwrap();
         names.register(&first, "worker").unwrap().release().unwrap();

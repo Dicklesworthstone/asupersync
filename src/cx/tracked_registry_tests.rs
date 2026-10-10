@@ -290,3 +290,42 @@ fn a_released_name_is_free_only_with_its_quota_returned() {
     );
     finish(lab, &cx, handle, 2);
 }
+
+#[test]
+fn lease_transfer_rebinds_name_to_child_task_without_leak_or_settlement_rejection() {
+    let (mut lab, parent_cx, mut parent_handle) = fixture(2);
+    let region = parent_cx.region_id();
+    let (child_task, mut child_handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .unwrap();
+    let child_cx = lab.state.task(child_task).unwrap().cx.clone().unwrap();
+
+    let names = TrackedNameRegistry::new();
+    let mut lease = names.register(&parent_cx, "service").unwrap();
+    assert_eq!(names.whereis("service"), Some(parent_cx.task_id()));
+    assert_eq!(names.whereis_cx(&parent_cx, "service").unwrap(), Some(parent_cx.task_id()));
+    assert_eq!(lease.holder(), parent_cx.task_id());
+
+    // Transfer lease to child
+    lease.try_transfer(&child_cx).expect("transfer must succeed within same runtime");
+    assert_eq!(names.whereis("service"), Some(child_cx.task_id()));
+    assert_eq!(names.whereis_cx(&child_cx, "service").unwrap(), Some(child_cx.task_id()));
+    assert_eq!(lease.holder(), child_cx.task_id());
+    assert_eq!(lease.region(), child_cx.region_id());
+
+    // Parent completes and is retired
+    flush(&mut lab);
+    lab.scheduler.lock().schedule(parent_cx.task_id(), 0);
+    let _steps = lab.run_until_idle();
+    assert!(parent_handle.try_join().unwrap().is_some());
+    // Parent completed without leaking the lease obligation because ownership was transferred!
+    assert_eq!(lab.state.leak_count(), 0);
+
+    // Child releases lease
+    lease.release().expect("child lease release must succeed without settlement rejection");
+    assert_eq!(names.whereis("service"), None);
+
+    // Child completes and verifies all invariants and stats
+    finish(lab, &child_cx, child_handle, 1);
+}

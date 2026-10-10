@@ -187,6 +187,12 @@ impl NameLease {
         self.token.is_some()
     }
 
+    /// Rebinds this lease to a new holder task and region (internal to registry transfer).
+    pub(crate) fn rebind(&mut self, new_holder: TaskId, new_region: RegionId) {
+        self.holder = new_holder;
+        self.region = new_region;
+    }
+
     /// Release the name (commit the obligation).
     ///
     /// The obligation is committed. The registry entry is not removed:
@@ -1341,6 +1347,43 @@ impl NameRegistry {
         // sidesteps name-clone churn (force_unregister_and_grant
         // takes &str directly without re-reading entry).
         self.force_unregister_and_grant(name, now)
+    }
+
+    /// Rebinds an active lease to a new holder and region.
+    ///
+    /// This updates the holder identity in the registry so that subsequent lookups
+    /// reflect the new task, and updates the `NameLease` so that subsequent
+    /// ownership checks (e.g. on unregistration) succeed for the new holder.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NameLeaseError::NotFound`] if the name is no longer registered,
+    /// or [`NameLeaseError::PermissionDenied`] if the active entry no longer
+    /// matches the supplied lease.
+    pub fn rebind_lease(
+        &mut self,
+        lease: &mut NameLease,
+        new_holder: TaskId,
+        new_region: RegionId,
+    ) -> Result<(), NameLeaseError> {
+        let Some(entry) = self.leases.get_mut(lease.name()) else {
+            return Err(NameLeaseError::NotFound {
+                name: lease.name().to_string(),
+            });
+        };
+        if entry.holder != lease.holder()
+            || entry.region != lease.region()
+            || entry.acquired_at != lease.acquired_at()
+        {
+            return Err(NameLeaseError::PermissionDenied {
+                name: lease.name().to_string(),
+            });
+        }
+        entry.holder = new_holder;
+        entry.region = new_region;
+        lease.rebind(new_holder, new_region);
+        self.emit_name_change(lease.name(), new_holder, new_region, NameOwnershipKind::Acquired);
+        Ok(())
     }
 
     /// Check the waiter queue for a name and grant to the first eligible waiter.
