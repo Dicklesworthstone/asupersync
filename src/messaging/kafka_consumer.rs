@@ -784,10 +784,8 @@ struct BrokerConsumerContext {
     counters: Arc<RebalanceCounters>,
 }
 
-/// Live counters behind [`RebalanceStats`].
-///
-/// Shared between the consumer and its rebalance context (librdkafka owns
-/// the context; the consumer keeps a second handle to read them).
+/// Live counters behind [`RebalanceStats`], shared by the consumer and its
+/// rebalance context (librdkafka owns the context; the consumer reads these).
 #[cfg(feature = "kafka")]
 #[derive(Debug, Default)]
 struct RebalanceCounters {
@@ -795,6 +793,9 @@ struct RebalanceCounters {
     eager_assigns: std::sync::atomic::AtomicU64,
     incremental_unassigns: std::sync::atomic::AtomicU64,
     eager_unassigns: std::sync::atomic::AtomicU64,
+    /// Partitions the group assigned through the callback and has not revoked;
+    /// an explicit `KafkaConsumer::rebalance` leaves this count untouched.
+    group_partitions: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     native_drop_thread: Mutex<Option<(std::thread::ThreadId, Option<String>)>>,
 }
@@ -872,22 +873,26 @@ impl ConsumerContext for BrokerConsumerContext {
         let result = match (err, self.cooperative) {
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, true) => {
                 counters.incremental_assigns.fetch_add(1, Ordering::Relaxed);
+                counters.group_assigned(tpl.count(), false);
                 base_consumer.incremental_assign(tpl)
             }
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS, false) => {
                 counters.eager_assigns.fetch_add(1, Ordering::Relaxed);
+                counters.group_assigned(tpl.count(), true);
                 base_consumer.assign(tpl)
             }
             (RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS, true) => {
                 counters
                     .incremental_unassigns
                     .fetch_add(1, Ordering::Relaxed);
+                counters.group_revoked(tpl.count());
                 base_consumer.incremental_unassign(tpl)
             }
             // Eager revoke and every other outcome: drop the whole assignment,
             // exactly what the stock handler does.
             _ => {
                 counters.eager_unassigns.fetch_add(1, Ordering::Relaxed);
+                counters.group_revoked(usize::MAX);
                 base_consumer.unassign()
             }
         };
@@ -911,24 +916,19 @@ const LEAVE_GROUP_DRAIN_POLLS: usize = 100;
 /// call is routed back to the very queue the dropping thread is polling and
 /// blocks forever. Leaving the group here, before the handle is closed, keeps
 /// that path from ever being taken. Records surfaced while draining belong to
-/// a consumer that is closing without commit and are discarded.
+/// a consumer that is closing without commit and are discarded. An eager member
+/// also drains when only the group holds its partitions: an explicit empty
+/// rebalance clears the local assignment alone (see `holds_partitions`).
 #[cfg(feature = "kafka")]
 fn leave_group_bounded(consumer: &BaseConsumer<BrokerConsumerContext>) {
-    let had_assignment = consumer
-        .assignment()
-        .map(|assignment| assignment.count() > 0)
-        .unwrap_or(false);
+    let had_assignment = holds_partitions(consumer);
     consumer.unsubscribe();
     if !had_assignment {
         return;
     }
     for _ in 0..LEAVE_GROUP_DRAIN_POLLS {
         let _ = consumer.poll(Duration::from_millis(50));
-        let still_assigned = consumer
-            .assignment()
-            .map(|assignment| assignment.count() > 0)
-            .unwrap_or(false);
-        if !still_assigned {
+        if !holds_partitions(consumer) {
             break;
         }
     }
@@ -2624,6 +2624,52 @@ fn validate_partition_number(partition: i32) -> Result<(), KafkaError> {
     }
 }
 
+#[cfg(feature = "kafka")]
+impl RebalanceCounters {
+    /// Records partitions the group assigned through the rebalance callback:
+    /// an eager assignment replaces the previous one, a cooperative one adds.
+    fn group_assigned(&self, partitions: usize, replace: bool) {
+        if replace {
+            self.group_partitions.store(partitions, Ordering::Release);
+        } else {
+            self.group_partitions
+                .fetch_add(partitions, Ordering::AcqRel);
+        }
+    }
+
+    /// Records partitions the group revoked through the callback; `usize::MAX`
+    /// revokes all of them.
+    fn group_revoked(&self, partitions: usize) {
+        let mut held = self.group_partitions.load(Ordering::Acquire);
+        while let Err(actual) = self.group_partitions.compare_exchange_weak(
+            held,
+            held.saturating_sub(partitions),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            held = actual;
+        }
+    }
+}
+
+/// Whether this member still holds partitions: in its local assignment, or, for
+/// an eager member, assigned by the group through the rebalance callback and not
+/// yet revoked there (an explicit empty rebalance clears only the local
+/// assignment). The eager callback answers a revoke with `unassign()`, which
+/// succeeds whatever is assigned locally. A cooperative member answers with
+/// `incremental_unassign(revoked)`, and draining that revoke after an explicit
+/// empty rebalance hung in `native_empty_rebalance_cooperative_releases_assignment`,
+/// so a cooperative member keeps the local-assignment test.
+#[cfg(feature = "kafka")]
+fn holds_partitions(consumer: &BaseConsumer<BrokerConsumerContext>) -> bool {
+    let context = consumer.context();
+    consumer
+        .assignment()
+        .map(|assignment| assignment.count() > 0)
+        .unwrap_or(false)
+        || (!context.cooperative && context.counters.group_partitions.load(Ordering::Acquire) > 0)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -3513,6 +3559,69 @@ mod tests {
     #[test]
     fn native_empty_rebalance_eager_releases_assignment() {
         check_native_empty_rebalance("range", KafkaRebalanceProtocol::Eager);
+    }
+
+    /// br-asupersync-bi2462.115: an explicit empty rebalance clears only the
+    /// local assignment; the group still owns this member's partition, so the
+    /// `unsubscribe()` in close() queues an eager revoke. close() must run that
+    /// revoke through the callback. Left queued, it fires inside
+    /// `rd_kafka_consumer_close` when the native handle drops, and blocks there.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn close_after_an_empty_rebalance_drains_the_group_revoke() {
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "empty-rebalance-close";
+        cluster.create_topic(topic, 1, 1).unwrap();
+        let config = ConsumerConfig::new(
+            vec![cluster.bootstrap_servers()],
+            "empty-rebalance-close-group",
+        )
+        .force_real_kafka(true)
+        .with_property("group.protocol", "classic")
+        .with_property("partition.assignment.strategy", "range")
+        .with_property("enable.auto.commit", "false");
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(config).unwrap();
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+            let started = std::time::Instant::now();
+            while consumer.assigned_partitions().is_empty()
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                consumer
+                    .poll(&cx, Duration::from_millis(100))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(consumer.assigned_partitions(), vec![(topic.to_string(), 0)]);
+            let (native, _) = consumer.broker_backend().unwrap();
+            let group = || {
+                native
+                    .context()
+                    .counters
+                    .group_partitions
+                    .load(Ordering::Acquire)
+            };
+            assert_eq!(
+                group(),
+                1,
+                "the group's assignment came through the callback"
+            );
+            consumer.rebalance(&cx, &[]).await.unwrap();
+            assert!(consumer.assigned_partitions().is_empty());
+            assert_eq!(
+                group(),
+                1,
+                "an explicit rebalance leaves the group's assignment"
+            );
+            let before = consumer.rebalance_stats();
+            consumer.close(&cx).await.unwrap();
+            let after = consumer.rebalance_stats();
+            assert!(
+                after.eager_unassigns > before.eager_unassigns,
+                "close() left the group's revoke queued: {before:?} -> {after:?}"
+            );
+            assert_eq!(group(), 0, "the revoke released the group's assignment");
+        });
     }
 
     #[test]
