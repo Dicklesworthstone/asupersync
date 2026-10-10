@@ -370,6 +370,10 @@ static FALLBACK_THREAD_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// Tasks waiting for a fallback thread while all of them are busy.
 static FALLBACK_WAITERS: Mutex<VecDeque<Waker>> = Mutex::new(VecDeque::new());
 
+/// Fallback threads whose waiter was dropped or unwound before the thread
+/// finished. They are joined once finished and never detached (GitHub #80).
+static UNJOINED_FALLBACK_THREADS: Mutex<Vec<thread::JoinHandle<()>>> = Mutex::new(Vec::new());
+
 /// Claims a fallback thread slot, or parks the caller until one is released.
 ///
 /// A waiter used to yield and re-poll itself while the cap was full, so every
@@ -707,11 +711,53 @@ impl Drop for FallbackGuard {
     }
 }
 
+/// Owns a fallback thread's handle so the thread is joined, never detached.
+///
+/// Dropping a `JoinHandle` detaches its thread, and detaching a thread that is
+/// exiting at that moment can fault inside `pthread_detach` on glibc before
+/// 2.43 (BZ19951, GitHub #80). When the waiter finishes, unwinds or is dropped,
+/// a finished thread (its closure has returned) is joined at once; the join
+/// only waits out its thread-local destructors. One still running its closure
+/// is parked rather than waited for, so no caller (including an executor
+/// thread) waits on user work. A later fallback spawn joins it once finished.
+struct FallbackThread(Option<thread::JoinHandle<()>>);
+
+impl Drop for FallbackThread {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            if handle.is_finished() {
+                let _ = handle.join();
+            } else {
+                UNJOINED_FALLBACK_THREADS.lock().push(handle);
+            }
+        }
+    }
+}
+
+/// Joins the parked fallback threads that have finished.
+fn join_finished_fallback_threads() {
+    let finished: Vec<thread::JoinHandle<()>> = {
+        let mut parked = UNJOINED_FALLBACK_THREADS.lock();
+        if parked.is_empty() {
+            return;
+        }
+        let (finished, running) = std::mem::take(&mut *parked)
+            .into_iter()
+            .partition(|handle| handle.is_finished());
+        *parked = running;
+        finished
+    };
+    for handle in finished {
+        let _ = handle.join();
+    }
+}
+
 pub(crate) async fn spawn_blocking_on_thread<F, T>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
+    join_finished_fallback_threads();
     // Wait until we are under the fallback thread limit to prevent unbounded
     // thread creation when no blocking pool is available.
     std::future::poll_fn(|context| {
@@ -743,7 +789,12 @@ where
         });
 
     match thread_result {
-        Ok(_) => rx.await,
+        Ok(handle) => {
+            let worker = FallbackThread(Some(handle));
+            let value = rx.await;
+            drop(worker);
+            value
+        }
         Err(_err) => {
             release_fallback_slot(&FALLBACK_THREAD_COUNT, &FALLBACK_WAITERS);
             let f = f_cell
@@ -925,6 +976,109 @@ mod tests {
             crate::assert_with_log!(result.is_err(), "is error", true, result.is_err());
         });
         crate::test_complete!("spawn_blocking_io_propagates_error");
+    }
+
+    /// The fallback thread's handle while it is parked, if it is.
+    fn parked_fallback_thread(id: thread::ThreadId) -> Option<bool> {
+        UNJOINED_FALLBACK_THREADS
+            .lock()
+            .iter()
+            .find(|handle| handle.thread().id() == id)
+            .map(thread::JoinHandle::is_finished)
+    }
+
+    /// Waits until a parked fallback thread has finished, then makes another
+    /// fallback spawn and checks that it joined (and so un-parked) the thread.
+    fn the_next_fallback_spawn_joins(id: thread::ThreadId) {
+        let start = std::time::Instant::now();
+        while parked_fallback_thread(id) == Some(false) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "worker never finished"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        future::block_on(spawn_blocking(|| ()));
+        assert_eq!(
+            parked_fallback_thread(id),
+            None,
+            "a finished parked thread was not joined"
+        );
+    }
+
+    thread_local! {
+        /// Set by a test closure on its fallback thread; dropped as that thread exits.
+        static SLOW_EXIT: std::cell::RefCell<Option<SlowExit>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// Keeps a thread inside its exit for 200 ms, so the window in which a
+    /// dropped `JoinHandle` would detach an exiting thread is easy to hit, then
+    /// records that the thread's exit got that far.
+    struct SlowExit(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for SlowExit {
+        fn drop(&mut self) {
+            std::thread::sleep(Duration::from_millis(200));
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// GitHub #80 (BZ19951): spawn_blocking's no-runtime fallback dropped its
+    /// thread's JoinHandle when the result arrived, detaching a thread that was
+    /// exiting at that moment, which can fault in pthread_detach on glibc before
+    /// 2.43. Called as the reporter did (no asupersync context, a plain
+    /// block_on), the worker spends 200 ms in its exit. When spawn_blocking
+    /// returns it must have joined the thread (its exit completed) or parked
+    /// its handle, never dropped it. `is_finished` turns true once the closure
+    /// returns, before thread-local destructors run, so either is possible.
+    #[test]
+    fn the_fallback_thread_is_never_detached_while_it_exits() {
+        init_test("the_fallback_thread_is_never_detached_while_it_exits");
+        assert!(
+            Cx::current().is_none(),
+            "the fallback path needs no context"
+        );
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let marker = Arc::clone(&exited);
+        let (value, worker) = future::block_on(spawn_blocking(move || {
+            SLOW_EXIT.with(|slot| *slot.borrow_mut() = Some(SlowExit(marker)));
+            (7, std::thread::current().id())
+        }));
+        assert_eq!(value, 7);
+        let joined = exited.load(std::sync::atomic::Ordering::Acquire);
+        let parked = parked_fallback_thread(worker).is_some();
+        assert!(
+            joined || parked,
+            "the exiting fallback thread's handle was dropped (detached): neither joined nor parked"
+        );
+        if parked {
+            the_next_fallback_spawn_joins(worker);
+        }
+        crate::test_complete!("the_fallback_thread_is_never_detached_while_it_exits");
+    }
+
+    /// The same for a waiter dropped before the result (soft cancellation): the
+    /// closure keeps running and its thread is parked, not detached.
+    #[test]
+    fn a_dropped_fallback_waiter_parks_its_running_thread() {
+        init_test("a_dropped_fallback_waiter_parks_its_running_thread");
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let mut waiter = Box::pin(spawn_blocking(move || {
+            started_tx.send(std::thread::current().id()).unwrap();
+            let _ = release_rx.recv();
+        }));
+        assert!(future::block_on(future::poll_once(&mut waiter)).is_none());
+        let worker = started_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        drop(waiter);
+        assert_eq!(
+            parked_fallback_thread(worker),
+            Some(false),
+            "a dropped waiter's running thread was detached instead of parked"
+        );
+        release_tx.send(()).unwrap();
+        the_next_fallback_spawn_joins(worker);
+        crate::test_complete!("a_dropped_fallback_waiter_parks_its_running_thread");
     }
 
     #[test]
