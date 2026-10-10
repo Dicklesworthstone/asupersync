@@ -16,7 +16,7 @@ use super::{
     CancelWakerToken, Cx, DynamicChildId, DynamicSupervisor, DynamicSupervisorError,
     DynamicWorkerConfig,
 };
-use crate::supervision::{ChildName, ManagedChildFactory, ManagedGeneration};
+use crate::supervision::{ChildName, ManagedChildFactory, ManagedChildFuture, ManagedGeneration};
 use crate::sync::Notify;
 use crate::types::{CancelReason, Outcome, PanicPayload};
 use parking_lot::Mutex;
@@ -40,7 +40,9 @@ pub enum WorkerReadinessPhase {
     Stopping,
     /// The body was retired. Its descendants/finalizers may still be draining.
     Retired,
-    /// No factory or active body remains. This is NOT region quiescence.
+    /// No active body or future generation remains: the factory was permanently
+    /// retired by its controller or its owner was dropped. Its allocation may
+    /// still be retained. This is NOT region quiescence.
     Closed,
     /// The factory contract was violated by an overlapping or stale generation.
     InvalidGeneration,
@@ -253,16 +255,39 @@ impl FactoryOwner {
     }
 }
 
+fn close_factory(shared: &Shared) {
+    {
+        let mut state = shared.state.lock();
+        state.factory_alive = false;
+        if !state.active && state.snapshot.phase != WorkerReadinessPhase::InvalidGeneration {
+            state.snapshot.phase = WorkerReadinessPhase::Closed;
+        }
+    }
+    notify(shared);
+}
+
 impl Drop for FactoryOwner {
     fn drop(&mut self) {
-        {
-            let mut state = self.0.state.lock();
-            state.factory_alive = false;
-            if !state.active && state.snapshot.phase != WorkerReadinessPhase::InvalidGeneration {
-                state.snapshot.phase = WorkerReadinessPhase::Closed;
-            }
-        }
-        notify(&self.0);
+        close_factory(&self.0);
+    }
+}
+
+// Retaining a factory after a policy stop must not promise a future generation
+// to readiness observers. This also wraps dependency-gated factories, whose
+// initializer may never have been invoked when the controller retires them.
+struct ReadinessFactory<F> {
+    inner: F,
+    readiness: WorkerReadiness,
+}
+
+impl<E, F: ManagedChildFactory<E>> ManagedChildFactory<E> for ReadinessFactory<F> {
+    fn start(&self, cx: Cx, generation: ManagedGeneration) -> ManagedChildFuture<E> {
+        self.inner.start(cx, generation)
+    }
+
+    fn retired(&self) {
+        close_factory(&self.readiness.shared);
+        self.inner.retired();
     }
 }
 
@@ -402,7 +427,7 @@ where
             observe(&cx, &guard, running).await
         }
     };
-    (factory, readiness)
+    (ReadinessFactory { inner: factory, readiness: readiness.clone() }, readiness)
 }
 
 impl<E: Send + 'static> DynamicSupervisor<E> {

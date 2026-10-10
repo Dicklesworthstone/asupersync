@@ -1877,6 +1877,18 @@ mod managed {
     pub trait ManagedChildFactory<E>: Send + Sync + 'static {
         /// Construct one generation using its registered task authority.
         fn start(&self, cx: Cx, generation: ManagedGeneration) -> ManagedChildFuture<E>;
+
+        /// Withdraw any promise of another generation after permanent retirement.
+        ///
+        /// The managed controller calls this once per binding when it will never
+        /// invoke `start` again, after draining any admitted generation. It also
+        /// retires bindings that cannot be started and those left at shutdown.
+        /// A temporary gap between restart generations does not call this hook.
+        /// It runs without runtime or supervisor locks and must return promptly.
+        /// A panic becomes a supervisor panic while the remaining children drain.
+        /// Dropping an abandoned controller still uses normal factory ownership;
+        /// this notification is not an asynchronous cleanup or quiescence receipt.
+        fn retired(&self) {}
     }
 
     impl<E, F, Fut> ManagedChildFactory<E> for F
@@ -2351,6 +2363,7 @@ mod managed {
         running: Vec<Option<RunningChild<E>>>,
         latest: Vec<Option<ManagedChildCompletion<E>>>,
         numbers: Vec<u64>,
+        retired: Vec<bool>,
         ready: Vec<(usize, ManagedGeneration)>,
         cancel_waker: Option<crate::cx::cx::CancelWakerToken>,
         tracker: RestartTracker,
@@ -2414,6 +2427,7 @@ mod managed {
                 running: (0..count).map(|_| None).collect(),
                 latest: (0..count).map(|_| None).collect(),
                 numbers: vec![0; count],
+                retired: vec![false; count],
                 ready: Vec::new(),
                 cancel_waker: None,
                 tracker,
@@ -2491,6 +2505,24 @@ mod managed {
             if let Some(source) = cleanup {
                 self.escalate(source);
             }
+        }
+
+        fn retire_factory(&mut self, index: usize) -> bool {
+            if std::mem::replace(&mut self.retired[index], true) {
+                return true;
+            }
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                self.supervisor.bindings[index].factory.retired();
+            }));
+            if let Err(payload) = result {
+                if matches!(self.report.outcome, Outcome::Panicked(_)) {
+                    std::mem::forget(payload);
+                } else {
+                    self.report.outcome = Outcome::Panicked(panic_payload(payload));
+                }
+                return false;
+            }
+            true
         }
 
         fn trace(&self, action: &str, index: usize, identity: ManagedGeneration) {
@@ -3131,6 +3163,9 @@ mod managed {
                     return;
                 }
                 if !self.supervisor.children[index].start_immediately {
+                    if !self.retire_factory(index) {
+                        return;
+                    }
                     continue;
                 }
                 if let Some(dependency) = self.dependency_unavailable(index) {
@@ -3142,6 +3177,9 @@ mod managed {
                             });
                         return;
                     }
+                    if !self.retire_factory(index) {
+                        return;
+                    }
                     continue;
                 }
                 if let Err(error) = self.start(index).await {
@@ -3150,6 +3188,9 @@ mod managed {
                         return;
                     } else if let Err(cleanup) = self.drain(index).await {
                         self.record_error(cleanup);
+                        return;
+                    }
+                    if !self.retire_factory(index) {
                         return;
                     }
                 }
@@ -3164,6 +3205,9 @@ mod managed {
                 if !eligible {
                     if let Err(error) = self.drain(failed).await {
                         self.record_error(error);
+                        return;
+                    }
+                    if !self.retire_factory(failed) {
                         return;
                     }
                     continue;
@@ -3190,6 +3234,9 @@ mod managed {
                         if self.supervisor.config.escalation == EscalationPolicy::Stop {
                             if let Err(error) = self.drain(failed).await {
                                 self.record_error(error);
+                                return;
+                            }
+                            if !self.retire_factory(failed) {
                                 return;
                             }
                             continue;
@@ -3284,17 +3331,19 @@ mod managed {
                 // An already completed but unobserved normal transient child
                 // must stay stopped. Derive eligibility only after real joins
                 // using the atomic shutdown-versus-terminal ordering.
-                let restart: Vec<_> = affected
-                    .iter()
-                    .copied()
-                    .filter(|&index| {
-                        let mode = self.supervisor.bindings[index].mode;
-                        let completed = self.latest[index].as_ref().expect("drained generation");
-                        mode != ManagedRestartMode::Temporary
-                            && (completed.shutdown_requested_before_completion
-                                || mode.eligible(completed))
-                    })
-                    .collect();
+                let mut restart = Vec::with_capacity(affected.len());
+                for &index in &affected {
+                    let mode = self.supervisor.bindings[index].mode;
+                    let completed = self.latest[index].as_ref().expect("drained generation");
+                    if mode != ManagedRestartMode::Temporary
+                        && (completed.shutdown_requested_before_completion
+                            || mode.eligible(completed))
+                    {
+                        restart.push(index);
+                    } else if !self.retire_factory(index) {
+                        return;
+                    }
+                }
                 if restart.len() != affected.len() {
                     // A temporary or completed transient child stays stopped.
                     if let Some(tap) = self.tap.as_mut() {
@@ -3334,6 +3383,9 @@ mod managed {
                         if let Some(tap) = self.tap.as_mut() {
                             tap.retire();
                         }
+                        if !self.retire_factory(index) {
+                            return;
+                        }
                         continue;
                     }
                     if !counted {
@@ -3364,6 +3416,9 @@ mod managed {
                         // An optional child whose start failed stays stopped.
                         if let Some(tap) = self.tap.as_mut() {
                             tap.retire();
+                        }
+                        if !self.retire_factory(index) {
+                            return;
                         }
                     } else if let Some(tap) = self.tap.as_mut() {
                         tap.restarted(index, attempt);
@@ -3398,6 +3453,7 @@ mod managed {
                 if let Err(error) = self.drain(index).await {
                     self.record_error(error);
                 }
+                self.retire_factory(index);
             }
             if let Some(region) = self.root.take() {
                 match region.close_with_outcome().await {
@@ -3632,6 +3688,76 @@ mod managed {
                 .expect("actual managed controller finished");
             clean(&mut lab, root);
             result
+        }
+
+        struct RetirementProbe {
+            started: Arc<AtomicUsize>,
+            retired: Arc<AtomicUsize>,
+            panic_on_retirement: bool,
+        }
+
+        impl ManagedChildFactory<()> for RetirementProbe {
+            fn start(&self, _: Cx, _: ManagedGeneration) -> ManagedChildFuture<()> {
+                self.started.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Outcome::Ok(()) })
+            }
+
+            fn retired(&self) {
+                assert_eq!(self.retired.fetch_add(1, Ordering::SeqCst), 0);
+                assert!(!self.panic_on_retirement, "retirement callback panic");
+            }
+        }
+
+        #[test]
+        fn managed_factory_retirement_follows_final_policy_decision_once() {
+            let started = Arc::new(AtomicUsize::new(0));
+            let retired = Arc::new(AtomicUsize::new(0));
+            let probe = RetirementProbe {
+                started: Arc::clone(&started),
+                retired: Arc::clone(&retired),
+                panic_on_retirement: false,
+            };
+            let report = run_case(move |cx| async move {
+                let managed = topology(&["child"], RestartPolicy::OneForOne)
+                    .bind_managed(
+                        vec![ManagedChildBinding::new("child", ManagedRestartMode::Permanent, probe)],
+                        config(RestartPolicy::OneForOne, 1),
+                    ).unwrap();
+                managed.run(&cx).await
+            });
+            assert!(report.outcome.is_ok());
+            assert_eq!((report.started, report.joined, report.restart_batches), (2, 2, 1));
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            assert_eq!(retired.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn managed_retirement_panic_still_drains_and_retires_other_factories() {
+            let started = Arc::new(AtomicUsize::new(0));
+            let first = Arc::new(AtomicUsize::new(0));
+            let second = Arc::new(AtomicUsize::new(0));
+            let bindings = vec![
+                ManagedChildBinding::new("first", ManagedRestartMode::Temporary, RetirementProbe {
+                    started: Arc::clone(&started),
+                    retired: Arc::clone(&first),
+                    panic_on_retirement: true,
+                }),
+                ManagedChildBinding::new("second", ManagedRestartMode::Temporary, RetirementProbe {
+                    started: Arc::clone(&started),
+                    retired: Arc::clone(&second),
+                    panic_on_retirement: true,
+                }),
+            ];
+            let report = run_case(move |cx| async move {
+                let managed = topology(&["first", "second"], RestartPolicy::OneForOne)
+                    .bind_managed(bindings, config(RestartPolicy::OneForOne, 1)).unwrap();
+                managed.run(&cx).await
+            });
+            assert!(report.outcome.is_panicked());
+            assert_eq!((report.started, report.joined), (2, 2));
+            assert_eq!(started.load(Ordering::SeqCst), 2);
+            assert_eq!(first.load(Ordering::SeqCst), 1);
+            assert_eq!(second.load(Ordering::SeqCst), 1);
         }
 
         #[test]
