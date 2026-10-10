@@ -885,13 +885,19 @@ impl Detection {
     async fn detect(&self, stream: TcpStream, peer: SocketAddr) {
         #[cfg(feature = "tls")]
         if let Some(acceptor) = &self.tls {
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+            let stream = super::handoff::SocketByteCounter::new(stream, std::sync::Arc::clone(&counter));
             let bound = acceptor.handshake_timeout().unwrap_or(self.timeout);
             let Ok(Ok(tls)) = crate::time::timeout(now(), bound, acceptor.accept(stream)).await
             else {
                 return;
             };
             let http2 = tls.alpn_protocol() == Some(b"h2".as_slice());
-            self.push(http2, Box::new(tls), peer);
+            self.push(
+                http2,
+                super::handoff::HandoffStream::with_socket_counter(Box::new(tls), counter),
+                peer,
+            );
             return;
         }
         let mut stream = stream;
@@ -905,7 +911,11 @@ impl Detection {
         let Ok(Ok(Some(http2))) = decided else {
             return;
         };
-        self.push(http2, Box::new(Prefixed::new(seen, stream)), peer);
+        self.push(
+            http2,
+            super::handoff::HandoffStream::new(Box::new(Prefixed::new(seen, stream))),
+            peer,
+        );
     }
 
     fn push(&self, http2: bool, stream: super::handoff::HandoffStream, peer: SocketAddr) {

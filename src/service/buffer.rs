@@ -755,7 +755,7 @@ mod tests {
         let waker = noop_waker();
         assert!(matches!(
             Pin::new(&mut response).poll(&mut Context::from_waker(&waker)),
-            Poll::Ready(Err(BufferError::Inner(super::super::LoadShedError::Overloaded)))
+            Poll::Ready(Err(BufferError::Inner(super::super::LoadShedError::Overloaded(_))))
         ));
         assert_eq!(released.load(Ordering::SeqCst), 1);
         assert!(buffer.is_empty());

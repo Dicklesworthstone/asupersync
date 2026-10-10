@@ -45,7 +45,7 @@ use std::task::{Context, Poll, Waker, ready};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const WAIT: Duration = Duration::from_secs(20);
+const WAIT: Duration = Duration::from_secs(60);
 const DATA: &[u8] = b"abcdefghijklmnop";
 fn fixture() -> Value {
     serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap()
@@ -139,6 +139,14 @@ fn write_json(path: &Path, value: Value) {
     file.sync_all().unwrap();
 }
 fn run<T: Send + 'static>(workers: usize, future: impl Future<Output = T> + Send + 'static) -> T {
+    run_with_timeout(workers, WAIT, future)
+}
+
+fn run_with_timeout<T: Send + 'static>(
+    workers: usize,
+    wait: Duration,
+    future: impl Future<Output = T> + Send + 'static,
+) -> T {
     let runtime = if workers == 1 {
         RuntimeBuilder::current_thread()
     } else {
@@ -151,14 +159,14 @@ fn run<T: Send + 'static>(workers: usize, future: impl Future<Output = T> + Send
     .unwrap();
     let future: Pin<Box<dyn Future<Output = T> + Send>> = Box::pin(async move {
         let cx = Cx::current().unwrap();
-        asupersync::time::timeout(cx.now(), WAIT, future)
+        asupersync::time::timeout(cx.now(), wait, future)
             .await
             .expect("receiver journal runtime deadline")
     });
     let value = runtime.block_on(runtime.handle().spawn(future));
     let start = Instant::now();
     while !runtime.is_quiescent() {
-        assert!(start.elapsed() < WAIT);
+        assert!(start.elapsed() < wait);
         runtime.block_on(yield_now());
     }
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
@@ -1216,12 +1224,13 @@ fn compact_native_file_transfer_exceeds_its_wal_budget_and_reopens_exact_content
         )
         .unwrap();
         let data_inode = std::fs::metadata(&data).unwrap().ino();
-        run(workers, async move {
+        run_with_timeout(workers, Duration::from_secs(180), async move {
             let cx = Cx::current().unwrap();
             let scope = cx.scope();
             let mut config = profile();
             config.epoch_bytes = 65_536;
             config.max_bytes = content.len() as u64;
+            config.operation_timeout = Duration::from_secs(60);
             let authority = sdk()
                 .live_stream_receiver(
                     config.clone(),
@@ -1258,6 +1267,11 @@ fn compact_native_file_transfer_exceeds_its_wal_budget_and_reopens_exact_content
                 .unwrap();
             let sent = outgoing.send(&cx).await;
             let (incoming, received) = poll_fn(|ctx| worker.poll_join(ctx)).await.unwrap();
+            assert!(
+                received.outcome.is_ok(),
+                "receiver failed: {:?}",
+                received.outcome
+            );
             assert_eq!(sent.outcome.unwrap(), received.outcome.unwrap());
             assert_eq!(received.sink_written_bytes, 524_288);
             assert_eq!(

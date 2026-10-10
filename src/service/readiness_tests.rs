@@ -54,7 +54,7 @@ fn shed_idle_clone_cannot_keep_the_semaphore_queue_head() {
     assert!(ready_now(&mut shed));
     assert!(matches!(
         poll(&mut shed.call(2)),
-        Poll::Ready(Err(LoadShedError::Overloaded))
+        Poll::Ready(Err(LoadShedError::Overloaded(_)))
     ));
     assert!(matches!(poll(&mut active), Poll::Ready(Ok(1))));
     assert_eq!(semaphore.available_permits(), 1);

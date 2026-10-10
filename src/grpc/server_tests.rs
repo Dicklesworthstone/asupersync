@@ -1865,6 +1865,23 @@ mod tests {
             .build();
         assert_eq!(server.config().keepalive_interval_ms, Some(5000));
         assert_eq!(server.config().keepalive_timeout_ms, Some(2000));
+        assert_eq!(
+            server.http2_keepalive_settings(),
+            Some((Duration::from_millis(5000), Duration::from_millis(2000)))
+        );
+
+        // Clamping to minimum 1000ms interval and defaulting 0 timeout to 20000ms
+        let server_clamped = Server::builder()
+            .keepalive_interval(500)
+            .keepalive_timeout(0)
+            .build();
+        assert_eq!(
+            server_clamped.http2_keepalive_settings(),
+            Some((Duration::from_millis(1000), Duration::from_millis(20000)))
+        );
+
+        let server_none = Server::builder().build();
+        assert_eq!(server_none.http2_keepalive_settings(), None);
     }
 
     #[test]

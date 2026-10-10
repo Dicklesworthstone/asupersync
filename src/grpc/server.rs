@@ -1415,26 +1415,37 @@ impl Server {
         Ok(())
     }
 
-    /// Applies [`ServerConfig::keepalive_interval_ms`] and
-    /// [`ServerConfig::keepalive_timeout_ms`] to a native listener this server
-    /// binds (br-asupersync-y6naky).
-    #[cfg(not(target_arch = "wasm32"))]
-    fn with_http2_keepalive<F>(&self, listener: Http2Listener<F>) -> Http2Listener<F> {
-        // grpc-go's floor for the server interval and its default timeout.
+    /// Returns the HTTP/2 keepalive settings configured for this server,
+    /// mapped according to gRPC conventions (minimum 1 s interval, default 20 s timeout).
+    ///
+    /// This can be passed to [`crate::http::HttpAutoListener::http2_keepalive`]
+    /// when serving gRPC on a shared port (br-asupersync-wsuqsw).
+    #[must_use]
+    pub fn http2_keepalive_settings(&self) -> Option<(Duration, Duration)> {
         const MIN_INTERVAL_MS: u64 = 1_000;
         const DEFAULT_TIMEOUT_MS: u64 = 20_000;
-        let Some(interval_ms) = self.config.keepalive_interval_ms else {
-            return listener;
-        };
+        let interval_ms = self.config.keepalive_interval_ms?;
         let timeout_ms = self
             .config
             .keepalive_timeout_ms
             .filter(|&ms| ms > 0)
             .unwrap_or(DEFAULT_TIMEOUT_MS);
-        listener.keepalive(
+        Some((
             Duration::from_millis(interval_ms.max(MIN_INTERVAL_MS)),
             Duration::from_millis(timeout_ms),
-        )
+        ))
+    }
+
+    /// Applies [`ServerConfig::keepalive_interval_ms`] and
+    /// [`ServerConfig::keepalive_timeout_ms`] to a native listener this server
+    /// binds (br-asupersync-y6naky).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn with_http2_keepalive<F>(&self, listener: Http2Listener<F>) -> Http2Listener<F> {
+        if let Some((interval, timeout)) = self.http2_keepalive_settings() {
+            listener.keepalive(interval, timeout)
+        } else {
+            listener
+        }
     }
 
     /// Bind the production native HTTP/2 transport and decode unary gRPC
