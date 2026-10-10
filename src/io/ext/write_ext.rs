@@ -93,7 +93,11 @@ pub trait AsyncWriteExt: AsyncWrite {
     /// Write some bytes from `buf`, returning the number of bytes written.
     ///
     /// Returns 0 only if `buf` is empty or the writer is closed.
-    /// Not cancel-safe.
+    ///
+    /// # Cancel Safety
+    ///
+    /// This method is cancel-safe: if dropped while waiting for write readiness,
+    /// no bytes have been written and no data is lost.
     fn write<'a>(&'a mut self, buf: &'a [u8]) -> Write<'a, Self>
     where
         Self: Unpin,

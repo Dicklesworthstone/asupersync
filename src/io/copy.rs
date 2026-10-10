@@ -17,6 +17,11 @@
 //! futures make a bounded best-effort attempt to drain private read-ahead when
 //! they are polled after cancellation. A race/select that drops the future
 //! without another poll cannot run that drain.
+//!
+//! Cooperative cancellation returns [`std::io::ErrorKind::Interrupted`].
+//! Callers with a retry loop on `Interrupted` must check whether context
+//! cancellation was requested (e.g. via `cx.is_cancel_requested()`), as
+//! retrying while cancelled will immediately fail again without yielding.
 
 use super::{AsyncRead, AsyncWrite, ReadBuf};
 use std::future::Future;

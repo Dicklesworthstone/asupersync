@@ -30,7 +30,12 @@ macro_rules! read_int_trait_method {
 pub trait AsyncReadExt: AsyncRead {
     /// Read some bytes into `buf`, returning the number of bytes read.
     ///
-    /// Returns 0 on EOF. Not cancel-safe.
+    /// Returns 0 on EOF.
+    ///
+    /// # Cancel Safety
+    ///
+    /// This method is cancel-safe: if dropped while waiting for data, no bytes
+    /// have been read from the underlying stream and no data is lost.
     fn read<'a>(&'a mut self, buf: &'a mut [u8]) -> Read<'a, Self>
     where
         Self: Unpin,
