@@ -509,7 +509,9 @@ fn unresolved_effect_stays_in_doubt_after_process_restart_and_retention() {
                 assert!(diagnostic.contains(&DurableRemoteError::InDoubt.to_string()),
                     "the durable owner must refuse uncertainty, not fail TLS/admission: {diagnostic}");
             }
-            other => panic!("uncertain execution must not become a replay or a new result: {other:?}"),
+            other @ RemoteServiceWireResponse::Outcome { .. } => {
+                panic!("uncertain execution must not become a replay or a new result: {other:?}")
+            }
         }
         restarted.finish();
         files.assert_one_effect();

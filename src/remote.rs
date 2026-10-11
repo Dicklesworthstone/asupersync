@@ -5464,9 +5464,13 @@ async fn remote_service_dispatch_with_lease(
 ) -> Result<RemoteOutcome, RemoteComputationDispatchError> {
     let accepted_at = cx.now();
     let expires_at = accepted_at + remote_service_clamp_lease(request.lease);
-    let child_budget = cx.budget().tightened_by_timeout(accepted_at, request.lease);
+    // The lease race below is the one expiry authority, as in the V3 session:
+    // at the deadline it cancels the region with the lease reason. A budget
+    // deadline at the same instant let the runtime's proactive deadline
+    // (br-asupersync-pev2xi) cancel the task first, so the computation's own
+    // reaction to that cancellation was reported instead of the lease expiry.
     let child = cx
-        .open_child_region(ChildRegionSpec::inherit().with_budget(child_budget))
+        .open_child_region(ChildRegionSpec::inherit())
         .await
         .map_err(|error| remote_service_execution_lifecycle_error("create child region", error))?;
     let child_region_id = child.region_id();
