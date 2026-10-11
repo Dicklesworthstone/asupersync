@@ -403,6 +403,11 @@ pub struct TimerWheel {
     /// higher-level or overflow timer can be minutes or days; this bounds how
     /// many accumulate (br-asupersync-m85zfi).
     cancelled_since_compaction: usize,
+    /// With `Some`, the wakers of the entries this wheel drops (cancelled,
+    /// stale or cleared) are kept here until [`Self::take_dropped_wakers`];
+    /// with `None` they drop in place. See
+    /// [`Self::with_deferred_waker_drops`].
+    dropped_wakers: Option<WakerBatch>,
 }
 
 impl TimerWheel {
@@ -447,6 +452,69 @@ impl TimerWheel {
             max_wheel_duration_ns,
             max_timer_duration_ns,
             cancelled_since_compaction: 0,
+            dropped_wakers: None,
+        }
+    }
+
+    /// Makes the wheel keep the wakers of the entries it drops (cancelled,
+    /// stale or cleared) for [`Self::take_dropped_wakers`], instead of
+    /// dropping them in place.
+    ///
+    /// A waker can own the last reference to a task, and dropping that task
+    /// drops its futures; a `Sleep` among them cancels its timer, which
+    /// re-enters whatever lock guards this wheel. The timer driver guards it
+    /// with a mutex, so it drops these wakers only after releasing that mutex
+    /// (br-asupersync-m85zfi LOW 5).
+    #[must_use]
+    pub(crate) fn with_deferred_waker_drops(mut self) -> Self {
+        self.dropped_wakers = Some(WakerBatch::new());
+        self
+    }
+
+    /// Takes the wakers of the entries dropped since the last call, for the
+    /// caller to drop once it has released its lock. Always empty unless the
+    /// wheel was built with [`Self::with_deferred_waker_drops`].
+    #[must_use]
+    pub(crate) fn take_dropped_wakers(&mut self) -> WakerBatch {
+        self.dropped_wakers
+            .as_mut()
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+
+    /// Disposes of an entry the wheel no longer stores: its waker is kept
+    /// for [`Self::take_dropped_wakers`] when drops are deferred, and drops
+    /// here otherwise.
+    fn discard(&mut self, entry: TimerEntry) {
+        if let Some(dropped) = self.dropped_wakers.as_mut() {
+            dropped.push(entry.waker);
+        }
+    }
+
+    /// Discards every stored entry: ready, overflow and every slot.
+    fn discard_stored_entries(&mut self) {
+        let Self {
+            ready,
+            overflow,
+            levels,
+            dropped_wakers,
+            ..
+        } = self;
+        if let Some(dropped) = dropped_wakers.as_mut() {
+            dropped.extend(ready.drain(..).map(|entry| entry.waker));
+            dropped.extend(overflow.drain().map(|entry| entry.entry.waker));
+        } else {
+            ready.clear();
+            overflow.clear();
+        }
+        for level in levels.iter_mut() {
+            for slot in &mut level.slots {
+                match dropped_wakers.as_mut() {
+                    Some(dropped) => dropped.extend(slot.drain(..).map(|entry| entry.waker)),
+                    None => slot.clear(),
+                }
+            }
+            level.occupied = [0u64; BITMAP_WORDS];
         }
     }
 
@@ -477,14 +545,7 @@ impl TimerWheel {
     /// Removes all timers from the wheel.
     pub fn clear(&mut self) {
         self.active.clear();
-        self.ready.clear();
-        self.overflow.clear();
-        for level in &mut self.levels {
-            for slot in &mut level.slots {
-                slot.clear();
-            }
-            level.occupied = [0u64; BITMAP_WORDS];
-        }
+        self.discard_stored_entries();
         self.cancelled_since_compaction = 0;
     }
 
@@ -689,7 +750,9 @@ impl TimerWheel {
                 min_deadline = Some(min_deadline.map_or(entry.deadline, |c| c.min(entry.deadline)));
                 break;
             }
-            let _ = self.overflow.pop();
+            if let Some(stale) = self.overflow.pop() {
+                self.discard(stale.entry);
+            }
         }
 
         min_deadline
@@ -878,6 +941,8 @@ impl TimerWheel {
         for entry in bucket {
             if self.is_live(&entry) {
                 self.insert_entry(entry);
+            } else {
+                self.discard(entry);
             }
         }
 
@@ -890,6 +955,7 @@ impl TimerWheel {
         let now = self.current_time();
         for entry in bucket {
             if !self.is_live(&entry) {
+                self.discard(entry);
                 continue;
             }
             if entry.deadline <= now {
@@ -911,6 +977,8 @@ impl TimerWheel {
                 let entry = self.overflow.pop().expect("peeked entry missing");
                 if self.is_live(&entry.entry) {
                     self.insert_entry(entry.entry);
+                } else {
+                    self.discard(entry.entry);
                 }
             } else {
                 break;
@@ -942,6 +1010,7 @@ impl TimerWheel {
         #[allow(clippy::iter_with_drain)]
         for entry in ready.drain(..) {
             if !self.is_live(&entry) {
+                self.discard(entry);
                 continue;
             }
 
@@ -1098,14 +1167,7 @@ impl TimerWheel {
     }
 
     fn purge_inactive_storage(&mut self) {
-        self.ready.clear();
-        self.overflow.clear();
-        for level in &mut self.levels {
-            for slot in &mut level.slots {
-                slot.clear();
-            }
-            level.occupied = [0u64; BITMAP_WORDS];
-        }
+        self.discard_stored_entries();
         self.cancelled_since_compaction = 0;
     }
 
@@ -1114,22 +1176,43 @@ impl TimerWheel {
     /// last compaction exceed twice the live timers plus a constant, so the
     /// cost is amortized O(1) per cancel.
     fn compact_inactive_storage(&mut self) {
-        let active = &self.active;
+        let Self {
+            active,
+            ready,
+            overflow,
+            levels,
+            dropped_wakers,
+            ..
+        } = self;
         let live = |entry: &TimerEntry| {
             active
                 .get(entry.id as usize)
                 .is_some_and(|generation| *generation == entry.generation)
         };
-        self.ready.retain(|entry| live(entry));
-        let overflow = std::mem::take(&mut self.overflow).into_vec();
-        self.overflow = overflow
-            .into_iter()
-            .filter(|entry| live(&entry.entry))
-            .collect();
-        for level in &mut self.levels {
+        let mut discard = |entry: TimerEntry| {
+            if let Some(dropped) = dropped_wakers.as_mut() {
+                dropped.push(entry.waker);
+            }
+        };
+        // `extract_if` keeps the live entries in their order, as `retain` did.
+        ready
+            .extract_if(.., |entry| !live(entry))
+            .for_each(&mut discard);
+        let mut kept = Vec::with_capacity(overflow.len());
+        for entry in std::mem::take(overflow).into_vec() {
+            if live(&entry.entry) {
+                kept.push(entry);
+            } else {
+                discard(entry.entry);
+            }
+        }
+        *overflow = BinaryHeap::from(kept);
+        for level in levels.iter_mut() {
             for slot in 0..SLOTS_PER_LEVEL {
                 if level.is_occupied(slot) {
-                    level.slots[slot].retain(|entry| live(entry));
+                    level.slots[slot]
+                        .extract_if(.., |entry| !live(entry))
+                        .for_each(&mut discard);
                     if level.slots[slot].is_empty() {
                         level.clear_occupied(slot);
                     }

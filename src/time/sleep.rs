@@ -924,14 +924,14 @@ impl Sleep {
 
                     state.timer_driver = Some(timer.clone());
 
-                    // Record whether THIS registration is clamped: the wheel fires
-                    // early at `now + max_timer_duration` when the true deadline is
-                    // farther out than the driver can represent. Computed at
-                    // registration time (mirrors the wheel's own clamp test) so the
-                    // flag matches the actual handle, not a later recomputation
+                    // Record whether THIS registration may be clamped: the wheel fires
+                    // early at its current 1 ms tick plus `max_timer_duration`, and that
+                    // tick can be up to 1 ms behind `now`, so the horizon here is one
+                    // tick shorter (br-asupersync-m85zfi LOW 2). Computed at registration
+                    // so the flag matches the actual handle, not a later recomputation
                     // (br-asupersync-sleep-horizon-early-youlxs).
-                    let horizon_ns =
-                        u64::try_from(timer.max_timer_duration().as_nanos()).unwrap_or(u64::MAX);
+                    let horizon_ns = u64::try_from(timer.max_timer_duration().as_nanos())
+                        .map_or(u64::MAX, |ns| ns.saturating_sub(1_000_000));
                     let registered_partial = self.deadline > now.saturating_add_nanos(horizon_ns);
 
                     let mut armed = false;
@@ -2024,6 +2024,82 @@ mod tests {
         );
 
         crate::test_complete!("sleep_beyond_max_horizon_re_registers_and_does_not_fire_early");
+    }
+
+    #[test]
+    fn sleep_of_exactly_the_horizon_from_mid_tick_does_not_complete_early() {
+        init_test("sleep_of_exactly_the_horizon_from_mid_tick_does_not_complete_early");
+
+        // The wheel clamps a registration against its current 1 ms tick, which
+        // can be up to 1 ms behind the clock. A sleep of exactly the 7-day
+        // horizon started 0.5 ms into a tick is clamped to fire 0.5 ms before
+        // its deadline; that fire must re-arm the sleep, not complete it
+        // (br-asupersync-m85zfi LOW 2).
+        const HORIZON_NS: u64 = 7 * 24 * 60 * 60 * 1_000_000_000;
+        const MID_TICK_NS: u64 = 500_000;
+
+        let clock = Arc::new(VirtualClock::new());
+        clock.set(Time::from_nanos(MID_TICK_NS));
+        let timer = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let mut sleep = Sleep::after(timer.now(), Duration::from_nanos(HORIZON_NS));
+        let deadline = Time::from_nanos(MID_TICK_NS + HORIZON_NS);
+        crate::assert_with_log!(
+            sleep.deadline() == deadline,
+            "deadline is the horizon past mid-tick",
+            deadline,
+            sleep.deadline()
+        );
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let first = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            first.is_pending(),
+            "first poll pending",
+            true,
+            first.is_pending()
+        );
+
+        // The clamped timer fires at tick 0 plus the horizon, 0.5 ms early.
+        clock.set(Time::from_nanos(HORIZON_NS));
+        let fired = timer.process_timers();
+        crate::assert_with_log!(fired == 1, "the clamped timer fires early", 1, fired);
+        let early = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            early.is_pending(),
+            "must NOT complete 0.5 ms before the deadline",
+            true,
+            early.is_pending()
+        );
+        crate::assert_with_log!(
+            timer.pending_count() == 1,
+            "re-registered for the true deadline",
+            1,
+            timer.pending_count()
+        );
+
+        clock.set(deadline);
+        let _ = timer.process_timers();
+        let done = Pin::new(&mut sleep).poll(&mut task_cx);
+        crate::assert_with_log!(
+            done.is_ready(),
+            "ready at the deadline",
+            true,
+            done.is_ready()
+        );
+
+        crate::test_complete!("sleep_of_exactly_the_horizon_from_mid_tick_does_not_complete_early");
     }
 
     #[test]

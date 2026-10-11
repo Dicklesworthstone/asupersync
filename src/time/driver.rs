@@ -509,7 +509,9 @@ impl<T: TimeSource> TimerDriver<T> {
         let now = clock.now();
         Self {
             clock,
-            wheel: Mutex::new(TimerWheel::with_config(now, config, coalescing)),
+            wheel: Mutex::new(
+                TimerWheel::with_config(now, config, coalescing).with_deferred_waker_drops(),
+            ),
             observed_deadline: AtomicU64::new(u64::MAX),
             armed: AtomicBool::new(false),
             deadline_reactors: Mutex::new(Vec::new()),
@@ -521,6 +523,17 @@ impl<T: TimeSource> TimerDriver<T> {
     #[inline]
     fn publish_armed(&self, wheel: &TimerWheel) {
         self.armed.store(!wheel.is_empty(), Ordering::Release);
+    }
+
+    /// Releases the wheel lock, then drops the wakers of the entries the
+    /// wheel discarded (cancelled, stale or cleared) while it was held. A
+    /// waker can own the last reference to a task whose drop cancels a timer
+    /// here; dropped under the lock, that re-entry would deadlock
+    /// (br-asupersync-m85zfi LOW 5).
+    fn unlock(mut wheel: parking_lot::MutexGuard<'_, TimerWheel>) {
+        let dropped = wheel.take_dropped_wakers();
+        drop(wheel);
+        drop(dropped);
     }
 
     /// Returns the current time from the underlying clock.
@@ -543,7 +556,7 @@ impl<T: TimeSource> TimerDriver<T> {
         let handle = wheel.register(deadline, waker);
         self.publish_armed(&wheel);
         let earlier = self.advance_reactor_deadline(&mut wheel, deadline);
-        drop(wheel);
+        Self::unlock(wheel);
         if earlier {
             self.wake_deadline_reactors();
         }
@@ -569,7 +582,7 @@ impl<T: TimeSource> TimerDriver<T> {
             (*handle, false)
         };
         self.publish_armed(&wheel);
-        drop(wheel);
+        Self::unlock(wheel);
         if earlier {
             self.wake_deadline_reactors();
         }
@@ -638,6 +651,7 @@ impl<T: TimeSource> TimerDriver<T> {
             let mut wheel = self.wheel.lock();
             let cancelled = wheel.cancel(handle);
             self.publish_armed(&wheel);
+            Self::unlock(wheel);
             cancelled
         };
         if cancelled {
@@ -655,6 +669,7 @@ impl<T: TimeSource> TimerDriver<T> {
         let deadline = wheel.next_deadline().map(|deadline| deadline.max(now));
         self.observed_deadline
             .store(deadline.map_or(u64::MAX, Time::as_nanos), Ordering::Relaxed);
+        Self::unlock(wheel);
         deadline
     }
 
@@ -703,6 +718,7 @@ impl<T: TimeSource> TimerDriver<T> {
         }
         let expired = wheel.collect_expired(self.clock.now());
         self.publish_armed(&wheel);
+        Self::unlock(wheel);
         expired
     }
 
@@ -725,6 +741,7 @@ impl<T: TimeSource> TimerDriver<T> {
         let mut wheel = self.wheel.lock();
         wheel.clear();
         self.publish_armed(&wheel);
+        Self::unlock(wheel);
     }
 }
 
@@ -2015,6 +2032,128 @@ mod tests {
             after_clear
         );
         crate::test_complete!("timer_driver_idle_process_timers_takes_no_wheel_lock");
+    }
+
+    /// Records, when its last clone drops, whether the driver's wheel lock
+    /// was free at that moment. A waker can own the last reference to a task
+    /// whose drop cancels a timer, re-entering the driver: dropped under the
+    /// wheel lock, that would deadlock (br-asupersync-m85zfi LOW 5).
+    struct LockProbeWaker {
+        driver: std::sync::Weak<TimerDriver>,
+        drops: Arc<Mutex<Vec<bool>>>,
+    }
+
+    // Not a no-op waker by accident: what the probe measures is its Drop.
+    #[allow(clippy::manual_noop_waker)]
+    impl Wake for LockProbeWaker {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for LockProbeWaker {
+        fn drop(&mut self) {
+            // After the driver itself is gone there is no lock to observe.
+            if let Some(driver) = self.driver.upgrade() {
+                let lock_free = driver.wheel.try_lock().is_some();
+                self.drops.lock().push(lock_free);
+            }
+        }
+    }
+
+    fn lock_probe_waker(driver: &Arc<TimerDriver>, drops: &Arc<Mutex<Vec<bool>>>) -> Waker {
+        Arc::new(LockProbeWaker {
+            driver: Arc::downgrade(driver),
+            drops: Arc::clone(drops),
+        })
+        .into()
+    }
+
+    /// Takes the probe drops recorded since the last call and asserts that
+    /// there was at least one (planted negative: the path under test really
+    /// discarded a waker) and that each saw the wheel lock free.
+    fn assert_probes_dropped_unlocked(path: &str, drops: &Arc<Mutex<Vec<bool>>>) {
+        let seen = std::mem::take(&mut *drops.lock());
+        tracing::info!(path, dropped = seen.len(), ?seen, "probe waker drops");
+        crate::assert_with_log!(
+            !seen.is_empty(),
+            format!("{path}: the discarded probe waker dropped"),
+            "at least one drop",
+            seen.len()
+        );
+        crate::assert_with_log!(
+            seen.iter().all(|lock_free| *lock_free),
+            format!("{path}: every discarded waker dropped after the wheel lock was released"),
+            "all true",
+            seen
+        );
+    }
+
+    #[test]
+    fn timer_driver_drops_discarded_wakers_after_releasing_the_wheel_lock() {
+        init_test("timer_driver_drops_discarded_wakers_after_releasing_the_wheel_lock");
+        let drops = Arc::new(Mutex::new(Vec::new()));
+
+        // Cancelling the last timer purges the wheel's storage.
+        let driver = Arc::new(TimerDriver::new());
+        let handle = driver.register(Time::from_secs(1), lock_probe_waker(&driver, &drops));
+        assert!(driver.cancel(&handle));
+        assert_probes_dropped_unlocked("cancel of the last timer", &drops);
+
+        // update() cancels the entry it replaces.
+        let driver = Arc::new(TimerDriver::new());
+        let handle = driver.register(Time::from_secs(1), lock_probe_waker(&driver, &drops));
+        let _updated = driver.update(&handle, Time::from_secs(2), futures_waker());
+        assert_probes_dropped_unlocked("update", &drops);
+
+        // clear() drops every stored entry.
+        let driver = Arc::new(TimerDriver::new());
+        let _handle = driver.register(Time::from_secs(1), lock_probe_waker(&driver, &drops));
+        driver.clear();
+        assert_probes_dropped_unlocked("clear", &drops);
+
+        // A cancelled entry stays in its slot while another timer is live,
+        // until process_timers reaches that slot.
+        let clock = Arc::new(VirtualClock::new());
+        let driver = Arc::new(TimerDriver::with_clock(clock.clone()));
+        let handle = driver.register(Time::from_millis(10), lock_probe_waker(&driver, &drops));
+        let _live = driver.register(Time::from_secs(60), futures_waker());
+        assert!(driver.cancel(&handle));
+        assert!(
+            drops.lock().is_empty(),
+            "the cancelled entry is still stored"
+        );
+        clock.advance(20_000_000);
+        assert_eq!(driver.process_timers(), 0);
+        assert_probes_dropped_unlocked("process_timers sweeping a cancelled entry", &drops);
+
+        // A cancelled timer beyond the wheel's range sits in overflow until
+        // next_deadline pops it from the top.
+        let driver = Arc::new(TimerDriver::new());
+        let far = driver.register(
+            Time::from_secs(2 * 24 * 60 * 60),
+            lock_probe_waker(&driver, &drops),
+        );
+        let _live = driver.register(Time::from_secs(60), futures_waker());
+        assert!(driver.cancel(&far));
+        assert!(
+            drops.lock().is_empty(),
+            "the cancelled overflow entry is still stored"
+        );
+        assert_eq!(driver.next_deadline(), Some(Time::from_secs(60)));
+        assert_probes_dropped_unlocked("next_deadline popping a cancelled overflow entry", &drops);
+
+        // Compaction, once cancellations outnumber twice the live timers
+        // plus the slack.
+        let driver = Arc::new(TimerDriver::new());
+        let _live = driver.register(Time::from_secs(60), futures_waker());
+        let handles: Vec<_> = (0..1_100)
+            .map(|_| driver.register(Time::from_secs(30), lock_probe_waker(&driver, &drops)))
+            .collect();
+        for handle in &handles {
+            assert!(driver.cancel(handle));
+        }
+        assert_probes_dropped_unlocked("compaction", &drops);
+
+        crate::test_complete!("timer_driver_drops_discarded_wakers_after_releasing_the_wheel_lock");
     }
 
     #[test]
