@@ -1387,6 +1387,71 @@ fn a_bisect_probe_builds_only_the_targets_that_own_the_red() {
     );
 }
 
+/// A red only the head run saw is probed once more at the head before a commit is
+/// named. A test that fails once on a loaded worker lands on the head with every probe
+/// clear (147.139 blamed a beads-only commit); it is filed as flaky, P1, with no culprit.
+#[test]
+fn a_head_only_red_is_confirmed_before_the_head_commit_is_blamed() {
+    let scenario = |head_runs: Value| {
+        json!({
+            "plan": {
+                "commits": (1..=5u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+                "lanes": [{
+                    "id": "targeted-tests[default]", "kind": "test",
+                    "argv": ["cargo", "test", "--test", "alpha_native", "--test", "beta_native", "--test", "gamma_native"],
+                    "expected_targets": ["alpha_native", "beta_native", "gamma_native"],
+                }],
+            },
+            "state": {"known_reds": {}},
+            "lane_logs": {"targeted-tests[default]": {
+                sha(3): {"log": beta_log(false, false)},
+                sha(4): {"log": beta_log(false, false)},
+                sha(5): head_runs,
+            }},
+        })
+    };
+
+    let flaky = evaluate(&scenario(json!([
+        {"log": beta_log(true, true)},
+        {"log": beta_log(false, false)},
+    ])));
+    let lane = receipt(&flaky, "targeted-tests[default]");
+    assert_eq!(lane["not_reproduced"], true, "{flaky:#}");
+    assert!(lane["culprit"].is_null(), "{flaky:#}");
+    assert_eq!(lane["culprit_exact"], false);
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    let confirm = probes.last().expect("confirm probe");
+    assert_eq!(confirm["sha"], sha(5));
+    assert_eq!(confirm["confirm"], true);
+    assert_eq!(confirm["verdict"], "green");
+    assert_eq!(confirm["command"], "cargo test --test beta_native");
+    let payload = &flaky["bead_payloads"][0];
+    assert!(
+        payload["title"]
+            .as_str()
+            .expect("title")
+            .starts_with("[main-watchdog] FLAKY targeted-tests[default] at "),
+        "{payload:#}"
+    );
+    assert_eq!(payload["priority"], 1);
+    assert!(payload["culprit"].is_null());
+    assert!(
+        payload["labels"]
+            .as_array()
+            .expect("labels")
+            .contains(&json!("flaky"))
+    );
+
+    // A red the head commit caused fails again and is blamed on it.
+    let real = evaluate(&scenario(json!({"log": beta_log(true, true)})));
+    let lane = receipt(&real, "targeted-tests[default]");
+    assert_eq!(lane["not_reproduced"], false, "{real:#}");
+    assert_eq!(lane["culprit"], sha(5));
+    assert_eq!(lane["culprit_exact"], true);
+    assert_eq!(real["bead_payloads"][0]["priority"], 0);
+    assert_eq!(real["bead_payloads"][0]["culprit"], sha(5));
+}
+
 #[test]
 fn a_targeted_green_heals_only_the_targets_it_ran() {
     let lane = json!({

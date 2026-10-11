@@ -1126,8 +1126,26 @@ def run_engine(
             if new_targets:
                 index, exact, probes = bisect_first_red(lane, batch, runner, new_targets, target_exists)
                 pre_existing = False
+                not_reproduced = False
                 base = plan.get("since")
-                if index == 0 and base:
+                if exact and index == len(batch) - 1 and lane["kind"] == "test":
+                    # Every probe below the head was clear, so only the head run saw this red.
+                    # A test that fails once on a loaded worker lands here too (147.139 blamed
+                    # a beads-only commit), so the head is probed once more before it is named.
+                    kind, again = probe(lane, head, runner, new_targets, target_exists)
+                    probes.append(
+                        {
+                            "sha": head,
+                            "verdict": again["verdict"] if again else "target-absent",
+                            "command": again["command"] if again else None,
+                            "confirm": True,
+                        }
+                    )
+                    if kind == "clear":
+                        not_reproduced = True
+                    elif kind == "undecided":
+                        exact = False
+                if index == 0 and base and not not_reproduced:
                     # Red at the first commit of the batch: it may predate the batch.
                     kind, base_outcome = probe(lane, base, runner, new_targets, target_exists)
                     probes.append(
@@ -1144,7 +1162,17 @@ def run_engine(
                         exact = False
                 culprit = commits[batch[index]]
                 payload = bead_payload(lane, culprit, outcome, batch, new_targets)
-                if pre_existing:
+                if not_reproduced:
+                    payload["title"] = payload["title"].replace("[main-watchdog] RED ", "[main-watchdog] FLAKY ", 1)
+                    payload["description"] = (
+                        f"**Not reproduced:** red in the head run at `{head}`, but it passed when the head was probed "
+                        "again, and every earlier probe was clear. No commit is blamed: the test depends on timing or "
+                        "load. The commit named below is only where the red was seen.\n\n" + payload["description"]
+                    )
+                    payload["priority"] = 1
+                    payload["labels"] = [*payload["labels"], "flaky"]
+                    payload["culprit"] = None
+                elif pre_existing:
                     payload["title"] = payload["title"].replace(
                         f"at {culprit['sha'][:9]}", f"already red at batch base {base[:9]}"
                     )
@@ -1156,16 +1184,18 @@ def run_engine(
                 elif not exact:
                     payload["title"] = payload["title"].replace(f"at {culprit['sha'][:9]}", f"in {batch[0][:9]}..{culprit['sha'][:9]}")
                 payloads.append(payload)
+                blamed = not (pre_existing or not_reproduced)
                 receipt.update(
                     new_red=sorted(new_targets),
-                    culprit=None if pre_existing else culprit["sha"],
-                    culprit_exact=exact and not pre_existing,
+                    culprit=culprit["sha"] if blamed else None,
+                    culprit_exact=exact and blamed,
                     pre_existing=pre_existing,
+                    not_reproduced=not_reproduced,
                     bisect_probes=probes,
                 )
                 for target in new_targets:
                     lane_known[target] = {
-                        "culprit": None if pre_existing else culprit["sha"],
+                        "culprit": culprit["sha"] if blamed else None,
                         "first_seen": now,
                         "bead": None,
                         "signature": payload["signature"],
@@ -2820,6 +2850,7 @@ def main(argv: list[str]) -> int:
         logs = scenario["lane_logs"]
 
         absent = {sha: set(names) for sha, names in scenario.get("absent_targets", {}).items()}
+        runs: dict[tuple[str, str], int] = {}
 
         def fake_runner(lane: dict[str, Any], sha: str) -> tuple[str, int]:
             # Like cargo: asking for a target that does not exist at `sha` fails the invocation.
@@ -2829,6 +2860,11 @@ def main(argv: list[str]) -> int:
                     name = argv[index + 1]
                     return f"error: no test target named `{name}` in `asupersync` package\n  Remote command finished: exit=101 in 1ms\n", 101
             entry = logs.get(lane["id"], {}).get(sha)
+            if isinstance(entry, list):
+                # Successive runs at one commit (a flaky target): one entry per run, the last repeats.
+                count = runs.get((lane["id"], sha), 0)
+                runs[(lane["id"], sha)] = count + 1
+                entry = entry[min(count, len(entry) - 1)]
             if entry is None:
                 return "", 103
             return entry["log"], entry.get("client_exit", 0)
