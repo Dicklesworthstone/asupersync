@@ -1515,10 +1515,12 @@ fn manifest_refusal_reason(error: &QuicTransportError) -> String {
 
 /// Tells the sender why the receiver will not take the transfer, with the
 /// failed-commit Proof it already understands (`committed: false` plus a
-/// reason), then Close. Before this the receiver returned the error and
-/// dropped the connection, and the sender saw only silence until its idle
-/// timeout (360 s by default, br-asupersync-nnm3gw). Best effort: the refusal
-/// is still the error the caller returns, whether or not the Proof gets through.
+/// reason). Before this the receiver returned the error and dropped the
+/// connection, and the sender saw only silence until its idle timeout (360 s
+/// by default, br-asupersync-nnm3gw). No Close follows the Proof: it could
+/// only arrive behind the Proof, and a spray sender that read both in one
+/// pass failed on the Close and lost the reason. Best effort: the refusal is
+/// still the error the caller returns, whether or not the Proof gets through.
 async fn refuse_transfer_in_band(
     cx: &Cx,
     link: &mut QuicLink,
@@ -1553,12 +1555,19 @@ async fn refuse_transfer_in_band(
         return;
     }
     let proof_frames = link.last_flushed_stream_frames();
-    // Bounded, unlike the terminal-proof wait of a completed transfer: that
-    // wait restarts whenever packets arrive, and a sender still streaming (or
-    // credit-blocked and sending keep-alives) never reads the Proof, so a
+    // Bounded in time, unlike the terminal-proof wait of a completed transfer:
+    // that wait restarts whenever packets arrive, and a sender still streaming
+    // (or credit-blocked and sending keep-alives) never reads the Proof, so a
     // refusal would hold the receiver, and a listener serving transfers one at
-    // a time, until the sender's own idle timeout.
-    for _ in 0..REFUSAL_CLOSE_WAIT_ROUNDS {
+    // a time, until the sender's own idle timeout. Packets arriving do not end
+    // a round early: a busy sender used to see the Proof retransmitted
+    // back-to-back and the receiver gone within milliseconds, before the Proof
+    // could be acknowledged across a real RTT. ACKs go out every round, so the
+    // sender's in-flight accounting keeps moving until it reads the refusal.
+    let started = cx.now();
+    let deadline = started + NEEDMORE_PTO * REFUSAL_CLOSE_WAIT_ROUNDS;
+    let mut retransmit_at = started + NEEDMORE_PTO;
+    loop {
         if cx.checkpoint().is_err() {
             return;
         }
@@ -1573,19 +1582,27 @@ async fn refuse_transfer_in_band(
                 Err(_) => return,
             }
         }
-        if link.pump_inbound_for(cx, NEEDMORE_PTO).await.is_err() {
+        let now = cx.now();
+        if now >= deadline {
             return;
         }
-        if link
-            .retransmit_stream_frames(cx, &proof_frames, "refusal_proof_pto")
-            .await
-            .is_err()
-        {
+        if now >= retransmit_at {
+            if link
+                .retransmit_stream_frames(cx, &proof_frames, "refusal_proof_pto")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            retransmit_at = now + NEEDMORE_PTO;
+        } else if link.flush(cx).await.is_err() {
+            return;
+        }
+        let wait = Duration::from_nanos(retransmit_at.min(deadline).duration_since(now));
+        if link.pump_inbound_for(cx, wait).await.is_err() {
             return;
         }
     }
-    let _ = super::send_native_close(cx, &mut link.conn, control);
-    let _ = link.flush(cx).await;
 }
 
 fn same_need_more_request_shape(left: &QuicNeedMore, right: &QuicNeedMore) -> bool {
@@ -8266,6 +8283,7 @@ async fn wait_source_stream_send_admission(
         if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
             pending_stall = classify_source_stream_admission(true, true, true);
             drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+            check_source_stream_control(cx, link, control, early).await?;
             continue;
         }
         let credit_remaining = link.conn.stream_send_credit_remaining(stream);
@@ -8324,13 +8342,12 @@ async fn wait_source_stream_send_admission(
         }
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
         let pumped = link.pump_inbound_for(cx, SOURCE_STREAM_PTO).await?;
-        // A receiver that refused the transfer grants no more credit, so a
-        // credit-blocked sender is where a refusal would otherwise go unheard
-        // until the idle timeout. Only that case reads control here; a
-        // transfer that never waits on credit is untouched.
-        if !credit_ok {
-            check_source_stream_control(cx, link, control, early).await?;
-        }
+        // A receiver that refused the transfer grants no more credit and,
+        // once it gives up, acknowledges nothing, so a sender held here for
+        // either reason is where a refusal would otherwise go unheard until
+        // the idle timeout. Every waiting round reads control; a transfer that
+        // never waits here is untouched.
+        check_source_stream_control(cx, link, control, early).await?;
         // Give never-yet-sent pending frames (e.g. a tree manifest's tail on
         // the control stream) a shot at whatever cwnd the latest ACKs freed:
         // the gate's non-stall path otherwise never flushes, so pending
@@ -12741,6 +12758,126 @@ mod gh67_liveness_tests {
                 (4..=8).contains(&packets),
                 "expected roughly one keep-alive per 200 ms over 1.1 s, got {packets}"
             );
+        });
+    }
+
+    /// asupersync-nnm3gw (review MEDIUMs 1 and 3): a refusing receiver waits
+    /// its whole bound for the sender's Close however busy the sender is, and
+    /// sends the Proof alone. This sender keeps the receiver's socket busy and
+    /// reads control only at the end, as a v0.4.x source-stream sender does.
+    /// Each packet used to end a wait round, so the receiver left within
+    /// milliseconds, and the Close it sent behind the Proof made a spray sender
+    /// that read both in one pass fail on the Close instead of the reason.
+    #[test]
+    fn a_refusing_receiver_waits_its_bound_for_a_busy_sender_and_sends_only_the_proof() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig::default();
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let bound = NEEDMORE_PTO * REFUSAL_CLOSE_WAIT_ROUNDS;
+            let receiver = async {
+                let started = Instant::now();
+                let reason = "nnm3gw test refusal".to_string();
+                refuse_transfer_in_band(&cx, &mut server, &mut server_control, reason).await;
+                started.elapsed()
+            };
+            let busy_sender = async {
+                let started = Instant::now();
+                while started.elapsed() < bound + Duration::from_secs(1) {
+                    send_and_flush_native_keep_alive(&cx, &mut client, &mut client_control)
+                        .await
+                        .unwrap();
+                    client
+                        .pump_inbound_for(&cx, Duration::from_millis(50))
+                        .await
+                        .unwrap();
+                }
+                let mut frames = Vec::new();
+                while let Some(frame) = client_control.try_recv(&cx, &mut client.conn).unwrap() {
+                    frames.push(frame);
+                }
+                frames
+            };
+            let (waited, frames) = zip(receiver, busy_sender).await;
+            assert!(
+                waited >= bound.saturating_sub(Duration::from_millis(250)),
+                "a busy sender cut the refusal wait short: {waited:?} of {bound:?}"
+            );
+            assert!(waited < bound + Duration::from_secs(2), "{waited:?}");
+            let kinds: Vec<FrameType> = frames.iter().map(Frame::frame_type).collect();
+            assert_eq!(
+                kinds,
+                vec![FrameType::Proof],
+                "the refusal Proof alone, no Close"
+            );
+            let receipt = super::super::parse_json::<ReceiveReceipt>(&frames[0]).unwrap();
+            assert!(!receipt.committed);
+            assert_eq!(receipt.reason.as_deref(), Some("nnm3gw test refusal"));
+        });
+    }
+
+    /// asupersync-nnm3gw (review MEDIUM 2): a source-stream sender held by its
+    /// unacked-bytes cap, with credit to spare, reads control too. A refusing
+    /// receiver that has stopped acknowledging leaves a sender exactly there,
+    /// and it used to read control only while credit-blocked, so it waited out
+    /// its idle timeout without the receiver's reason.
+    #[test]
+    fn a_sender_held_by_its_unacked_cap_hears_a_refusal() {
+        block_on(async {
+            let cx = Cx::for_testing();
+            let config = QuicConfig {
+                idle_timeout: Duration::from_secs(3),
+                ..QuicConfig::default()
+            };
+            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
+            let (mut client_control, mut server_control) =
+                opened_control_streams(&cx, &mut client, &mut server).await;
+            let refusal = ReceiveReceipt {
+                committed: false,
+                bytes_received: 0,
+                files: 0,
+                sha_ok: false,
+                merkle_ok: false,
+                symbols_accepted: 0,
+                feedback_rounds: 0,
+                decode_count: 0,
+                decode_micros: 0,
+                reason: Some("nnm3gw unacked refusal".to_string()),
+                committed_paths: Vec::new(),
+            };
+            let proof = super::super::json_frame(FrameType::Proof, &refusal).unwrap();
+            server_control.send(&cx, &mut server.conn, &proof).unwrap();
+            server.flush(&cx).await.unwrap();
+            // No credit minimum, but more bytes in flight than the cap admits.
+            client.stream_unacked_bytes = client
+                .source_stream_unacked_admission_max()
+                .saturating_add(1);
+            let stream = client_control.stream;
+            let mut early = None;
+            let started = Instant::now();
+            let result = wait_source_stream_send_admission(
+                &cx,
+                &mut client,
+                &mut client_control,
+                &mut early,
+                stream,
+                0,
+                &config,
+            )
+            .await;
+            let elapsed = started.elapsed();
+            match result {
+                Err(QuicTransportError::Integrity(reason)) => {
+                    assert_eq!(reason, "nnm3gw unacked refusal");
+                }
+                other => {
+                    panic!("the held sender must report the refusal: {other:?} after {elapsed:?}")
+                }
+            }
+            assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+            assert!(early.is_none());
         });
     }
 }
