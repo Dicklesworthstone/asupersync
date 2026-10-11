@@ -1769,6 +1769,56 @@ impl KafkaConsumer {
                     } else {
                         consumer.unassign().map_err(map_consumer_error)
                     }
+                } else if matches!(
+                    consumer.rebalance_protocol(),
+                    rdkafka::consumer::RebalanceProtocol::Cooperative
+                ) {
+                    let current = consumer.assignment().map_err(map_consumer_error)?;
+                    let mut to_unassign = TopicPartitionList::new();
+                    for elem in current.elements() {
+                        let in_target = assignment_list.iter().any(|tpo| {
+                            tpo.topic == elem.topic() && tpo.partition == elem.partition()
+                        });
+                        if !in_target {
+                            to_unassign.add_partition(elem.topic(), elem.partition());
+                        }
+                    }
+                    if to_unassign.count() > 0 {
+                        consumer
+                            .incremental_unassign(&to_unassign)
+                            .map_err(map_consumer_error)?;
+                    }
+
+                    let mut to_assign = TopicPartitionList::new();
+                    for tpo in &assignment_list {
+                        let already_assigned = current.elements().iter().any(|elem| {
+                            elem.topic() == tpo.topic && elem.partition() == tpo.partition
+                        });
+                        if !already_assigned {
+                            to_assign
+                                .add_partition_offset(
+                                    &tpo.topic,
+                                    tpo.partition,
+                                    Offset::Offset(tpo.offset),
+                                )
+                                .map_err(map_consumer_error)?;
+                        } else {
+                            consumer
+                                .seek(
+                                    &tpo.topic,
+                                    tpo.partition,
+                                    Offset::Offset(tpo.offset),
+                                    Duration::from_secs(1),
+                                )
+                                .map_err(map_consumer_error)?;
+                        }
+                    }
+                    if to_assign.count() > 0 {
+                        consumer
+                            .incremental_assign(&to_assign)
+                            .map_err(map_consumer_error)?;
+                    }
+                    Ok(())
                 } else {
                     let mut tpl = TopicPartitionList::new();
                     for tpo in &assignment_list {
@@ -3553,6 +3603,74 @@ mod tests {
     #[test]
     fn native_empty_rebalance_cooperative_releases_assignment() {
         check_native_empty_rebalance("cooperative-sticky", KafkaRebalanceProtocol::Cooperative);
+    }
+
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn native_manual_rebalance_cooperative_modifies_assignment() {
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "coop-manual-rebalance";
+        cluster.create_topic(topic, 2, 1).unwrap();
+        let config =
+            ConsumerConfig::new(vec![cluster.bootstrap_servers()], "coop-manual-rebalance-group")
+                .force_real_kafka(true)
+                .with_property("group.protocol", "classic")
+                .with_property("partition.assignment.strategy", "cooperative-sticky")
+                .with_property("enable.auto.commit", "false");
+        run_test_with_cx(|cx| async move {
+            let consumer = KafkaConsumer::new(config).unwrap();
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+            let started = std::time::Instant::now();
+            while consumer.assigned_partitions().is_empty()
+                && started.elapsed() < Duration::from_secs(30)
+            {
+                consumer
+                    .poll(&cx, Duration::from_millis(100))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                consumer.rebalance_protocol(),
+                KafkaRebalanceProtocol::Cooperative
+            );
+            let (native, broker_ops) = consumer.broker_backend().unwrap();
+            let initial_count = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            assert_eq!(initial_count, 2);
+
+            // Rebalance manually to only partition 0
+            let tpo0 = TopicPartitionOffset::new(topic, 0, 0);
+            let result = consumer
+                .rebalance(&cx, &[tpo0.clone()])
+                .await
+                .expect("manual cooperative rebalance must succeed");
+            assert_eq!(consumer.assigned_partitions(), vec![(topic.to_string(), 0)]);
+            let native_after = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            assert_eq!(native_after, 1);
+            assert_eq!(result.assigned, vec![(topic.to_string(), 0)]);
+            assert_eq!(result.revoked, vec![(topic.to_string(), 1)]);
+
+            // Rebalance manually back to partitions 0 and 1
+            let tpo1 = TopicPartitionOffset::new(topic, 1, 0);
+            let result2 = consumer
+                .rebalance(&cx, &[tpo0, tpo1])
+                .await
+                .expect("manual cooperative rebalance to both partitions must succeed");
+            assert_eq!(consumer.assigned_partitions().len(), 2);
+            let native_after2 = {
+                let _guard = broker_ops.lock();
+                native.assignment().unwrap().count()
+            };
+            assert_eq!(native_after2, 2);
+            assert_eq!(result2.revoked, Vec::<(String, i32)>::new());
+
+            consumer.close(&cx).await.unwrap();
+        });
     }
 
     #[cfg(feature = "kafka")]
