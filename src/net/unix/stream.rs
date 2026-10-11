@@ -946,10 +946,13 @@ impl UnixStream {
         interest: Interest,
         owner: u64,
     ) -> Poll<io::Result<T>> {
-        let (armed, stranded) =
+        let (armed, stranded, displaced) =
             self.registration
                 .lock()
                 .arm_shared(&*self.inner, interest, owner, cx.waker());
+        // The registration lock was released at the end of the statement
+        // above; the waker this call replaced drops only now.
+        drop(displaced);
         for waiter in stranded {
             waiter.wake();
         }
@@ -1318,6 +1321,73 @@ mod tests {
                 0,
                 "a dropped call leaves no entry behind"
             );
+        }
+
+        /// A waker that records, when its last clone drops, whether the
+        /// stream's registration lock was free at that moment.
+        struct LockProbe {
+            stream: &'static UnixStream,
+            lock_was_free: Arc<std::sync::Mutex<Option<bool>>>,
+        }
+
+        // Not a no-op waker by accident: what the probe measures is its Drop.
+        #[allow(clippy::manual_noop_waker)]
+        impl std::task::Wake for LockProbe {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        impl Drop for LockProbe {
+            fn drop(&mut self) {
+                let free = self.stream.registration.try_lock().is_some();
+                *self.lock_was_free.lock().expect("probe lock") = Some(free);
+            }
+        }
+
+        /// Review of 740b44300: a re-poll with another waker replaced the
+        /// call's entry and dropped the old waker while the stream's
+        /// registration lock was still held. That waker can own the last
+        /// reference to a task (br-asupersync-9kb866), so it drops after the
+        /// lock is released now.
+        #[test]
+        fn a_replaced_ancillary_waker_drops_after_the_registration_lock() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (stream, _peer) = UnixStream::pair().expect("socket pair");
+            let stream: &'static UnixStream = Box::leak(Box::new(stream));
+            let lock_was_free = Arc::new(std::sync::Mutex::new(None));
+            let first = Waker::from(Arc::new(LockProbe {
+                stream,
+                lock_was_free: Arc::clone(&lock_was_free),
+            }));
+            let (_second_signal, second, _second_rx) = signal_waker();
+            let mut buf = [0u8; 16];
+            let mut ancillary = SocketAncillary::new(64);
+            let mut call = Box::pin(stream.recv_with_ancillary(&mut buf, &mut ancillary));
+
+            assert!(
+                call.as_mut()
+                    .poll(&mut Context::from_waker(&first))
+                    .is_pending()
+            );
+            drop(first);
+            assert_eq!(
+                *lock_was_free.lock().expect("probe lock"),
+                None,
+                "the call's entry still holds the first waker"
+            );
+            assert!(
+                call.as_mut()
+                    .poll(&mut Context::from_waker(&second))
+                    .is_pending()
+            );
+            assert_eq!(
+                *lock_was_free.lock().expect("probe lock"),
+                Some(true),
+                "the replaced waker dropped with the registration lock free"
+            );
+            drop(call);
         }
     }
 

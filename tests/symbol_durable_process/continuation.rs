@@ -217,6 +217,7 @@ fn manifest(bytes: &[u8], expected: SnapshotIdentity) -> RecoveryManifest {
 
 #[test]
 fn recovered_application_resumes_tcp_suffix_after_replica_crash_under_persistent_membership() {
+    let _serial = super::serial();
     for workers in [1, 2] {
         let sink = Sink::new(0, 12, false);
         let path = journal_path(); let replica = Process::start(&path, "create");
@@ -263,6 +264,7 @@ fn recovered_application_resumes_tcp_suffix_after_replica_crash_under_persistent
 
 #[test]
 fn network_recovery_rejects_wrong_workload_and_small_snapshot_budget_without_resumed_effects() {
+    let _serial = super::serial();
     let path = journal_path(); let replica = Process::start(&path, "create");
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); listener.set_nonblocking(true).unwrap();
     let endpoint = listener.local_addr().unwrap();
@@ -301,6 +303,7 @@ impl Drop for Revoker {
 
 #[test]
 fn revoked_restored_work_closes_a_genuinely_parked_tcp_effect_before_reporting() {
+    let _serial = super::serial();
     let sink = Sink::new(5, 6, true);
     let path = journal_path(); let replica = Process::start(&path, "create");
     let runtime = RuntimeBuilder::current_thread().build().unwrap();

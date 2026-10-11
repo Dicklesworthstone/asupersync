@@ -44,6 +44,16 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const PREFIX: &str = "ASUP_DURABLE_";
+/// Every test here drives receiver child processes, TLS sockets and
+/// multi-worker runtimes. Run concurrently on a loaded host they miss their
+/// connect and readiness budgets (refused connections, timeouts), and each
+/// passes alone, so the tests hold this lock for their whole run.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 fn limits() -> DurableSymbolLimits {
     DurableSymbolLimits {
         batch: SymbolBatchLimits { max_encoded_bytes: 32768, max_symbols: 64,
@@ -239,6 +249,7 @@ fn transport(cx: &Cx, endpoint: SocketAddr) -> RemoteSymbolTransport {
 
 #[test]
 fn acknowledged_snapshot_survives_replica_process_crash_and_recovers_over_mtls() {
+    let _serial = serial();
     for workers in [1, 2] {
         let path = journal_path();
         let first = Process::start(&path, "create");
@@ -298,6 +309,7 @@ fn acknowledged_snapshot_survives_replica_process_crash_and_recovers_over_mtls()
 
 #[test]
 fn durable_network_service_without_a_blocking_pool_refuses_without_disk_append() {
+    let _serial = serial();
     let path = journal_path();
     let process = Process::start(&path, "no-pool");
     let before = std::fs::metadata(&path).unwrap().len();
@@ -319,6 +331,7 @@ fn durable_network_service_without_a_blocking_pool_refuses_without_disk_append()
 
 #[test]
 fn persisted_manifest_recovers_after_replica_crash_without_retaining_batch_parameters() {
+    let _serial = serial();
     use asupersync::distributed::symbol_service::checkpoint::{
         CheckpointAuthority, CheckpointConfig, CheckpointError, ManifestLimits, RecoveryManifest,
     };
@@ -390,6 +403,7 @@ fn persisted_manifest_recovers_after_replica_crash_without_retaining_batch_param
 
 #[test]
 fn invalid_snapshot_key_never_publishes_a_checkpoint_to_a_live_replica() {
+    let _serial = serial();
     use asupersync::distributed::symbol_service::checkpoint::{CheckpointAuthority, CheckpointConfig, CheckpointError, ManifestLimits};
     let path = journal_path(); let process = Process::start(&path, "create");
     let initial_length = std::fs::metadata(&path).unwrap().len();

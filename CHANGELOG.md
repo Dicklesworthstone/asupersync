@@ -423,6 +423,25 @@ accepts raw data when the zlib header check fails. Code that calls
 `DeflateCompressor` directly now gets zlib framing; see
 `docs/http_deflate_compatibility.md` (`asupersync-zodgeb`).
 
+### Behavior change — a prepared PostgreSQL bind refuses a raw number for a date, time or `money` parameter
+
+Prepared statements (`prepare`, then `execute_prepared` or `query_prepared`)
+now refuse these binds before anything is sent:
+
+- a binary `i64` or `f64` where the server typed the parameter `timestamp`,
+  `timestamptz` or `time`;
+- an `i32` or `f32` where it typed `date`;
+- an `f64` where it typed `money`.
+
+The server read the number's bytes as its own encoding (microseconds or days
+since 2000-01-01, or cents) and stored whatever that came to. A Unix epoch in
+seconds became a time in the first hour of 2000-01-01. `execute_params`
+already refused the same binds.
+
+Code that deliberately sent PostgreSQL's raw encoding this way now gets an
+error. To keep doing it, bind a `ToSql` whose `type_oid` reports the
+parameter's type, or bind the value as text (`qml5yb`).
+
 ### Native GenServers and actors
 
 `Cx::spawn_gen_server`, `Cx::spawn_actor` and `Cx::spawn_supervised_actor`
@@ -1230,6 +1249,9 @@ Security:
   path for the life of the process (`dofi11`).
 - `ObligationLedger::try_commit` and `try_abort` return `NotFound`,
   `NotPending` or `TokenMismatch` where they panicked (`rrtgoy`).
+- Entry macros: `#[asupersync::main]` and `#[asupersync::test]` no longer
+  trip `clippy::result_large_err` in the caller's crate for an entry that
+  returns `Result<(), asupersync::Error>`.
 
 ### UDP launch-time sends and the socket error queue (Linux, GH #73)
 

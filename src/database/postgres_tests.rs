@@ -13480,6 +13480,7 @@ mod tests {
     #[test]
     fn prepared_bind_refuses_a_number_where_the_server_inferred_a_date_or_time() {
         const TIME: u32 = 1083;
+        const MONEY: u32 = 790;
         let statement = |param_oid| PgStatement {
             name: "s1".to_string(),
             sql: "INSERT INTO t VALUES ($1)".to_string(),
@@ -13491,7 +13492,7 @@ mod tests {
         let fractional_seconds: f64 = 1_791_445_550.5;
         let days: i32 = 9_000;
         let fractional_days: f32 = 9_000.5;
-        let refused: [(u32, &dyn ToSql); 8] = [
+        let refused: [(u32, &dyn ToSql); 9] = [
             (oid::TIMESTAMP, &epoch_seconds),
             (oid::TIMESTAMPTZ, &epoch_seconds),
             (TIME, &epoch_seconds),
@@ -13500,25 +13501,52 @@ mod tests {
             (TIME, &fractional_seconds),
             (oid::DATE, &days),
             (oid::DATE, &fractional_days),
+            (MONEY, &fractional_seconds),
         ];
         for (expected, value) in refused {
             let err = PgConnection::validate_prepared_bind_types(&statement(expected), &[value])
                 .expect_err("a number where the server inferred a date or time");
             assert!(
-                matches!(err, PgError::Protocol(ref msg) if msg.contains("raw date or time")),
+                matches!(err, PgError::Protocol(ref msg) if msg.contains("as that type, not convert it")),
                 "{expected} <- {}: {err:?}",
                 value.type_oid()
             );
         }
 
-        // The number's own type, a NULL, and a width the server refuses
-        // itself bind as before.
-        let null_days: Option<i32> = None;
-        let unchanged: [(u32, &dyn ToSql); 4] = [
+        /// A NULL that reports `int8`. `Option::<i64>::None` reports OID 0,
+        /// so it would never reach the NULL check.
+        struct NullInt8;
+        impl ToSql for NullInt8 {
+            fn to_sql(&self, _buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+                Ok(IsNull::Yes)
+            }
+            fn type_oid(&self) -> u32 {
+                oid::INT8
+            }
+        }
+        /// The escape hatch for a value meant as the raw encoding: a `ToSql`
+        /// that reports the parameter's own type.
+        struct RawTimestamp(i64);
+        impl ToSql for RawTimestamp {
+            fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+                buf.extend_from_slice(&self.0.to_be_bytes());
+                Ok(IsNull::No)
+            }
+            fn type_oid(&self) -> u32 {
+                oid::TIMESTAMP
+            }
+        }
+
+        // The number's own type, a NULL, a width the server refuses itself,
+        // an integer count of cents, and a value typed as the parameter bind
+        // as before.
+        let unchanged: [(u32, &dyn ToSql); 6] = [
             (oid::INT8, &epoch_seconds),
-            (oid::DATE, &null_days),
+            (oid::TIMESTAMP, &NullInt8),
             (oid::TIMESTAMP, &days),
             (oid::DATE, &epoch_seconds),
+            (MONEY, &epoch_seconds),
+            (oid::TIMESTAMP, &RawTimestamp(epoch_seconds)),
         ];
         for (expected, value) in unchanged {
             assert!(
