@@ -1161,7 +1161,7 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         // 1. Spawn primary
         let mut h1 = self
             .spawn_registered(state, cx, primary)
-            .map_err(|_| JoinError::Cancelled(CancelReason::resource_unavailable()))?;
+            .map_err(|err| JoinError::Cancelled(spawn_error_to_cancel_reason(err)))?;
 
         // 2. Race primary vs delay.
         // Scope the pinned join future so we can safely reuse h1 afterwards.
@@ -1230,54 +1230,58 @@ impl<'scope, P: Policy> Scope<'scope, P> {
             }
             Either::Right(()) => {
                 // Timeout fired. Spawn backup.
-                let Ok(h2) = self.spawn_registered(state, cx, backup) else {
-                    // Cancellation can arrive between selecting the delay and
-                    // admitting its backup. Preserve the owner attribution and
-                    // full drain guarantee on that refusal as well.
-                    if cx.is_cancel_requested() && cx.checkpoint().is_err() {
-                        let participants = [h1.task_id()];
-                        let race_id = self.record_loser_drain_start(cx, participants.to_vec());
-                        let reason = cx
-                            .cancel_reason()
-                            .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"));
-                        return Err(Self::drain_owner_cancelled_race(
-                            cx,
-                            &mut [h1],
-                            &participants,
-                            race_id,
-                            reason,
-                        )
-                        .await);
-                    }
-                    // Backup admission failed after primary already started.
-                    // Request cancellation on primary to avoid orphaned work.
-                    h1.abort_with_reason(CancelReason::resource_unavailable());
-
-                    if scheduler_drives_current_task() {
-                        // In scheduler-backed runtime execution, fully drain the
-                        // cancelled primary before returning.
-                        match h1.join(cx).await {
-                            Ok(res) => return Ok(res),
-                            Err(JoinError::Panicked(p)) => return Err(JoinError::Panicked(p)),
-                            Err(JoinError::Cancelled(_) | JoinError::PolledAfterCompletion) => {}
+                let h2 = match self.spawn_registered(state, cx, backup) {
+                    Ok(handle) => handle,
+                    Err(spawn_err) => {
+                        // Cancellation can arrive between selecting the delay and
+                        // admitting its backup. Preserve the owner attribution and
+                        // full drain guarantee on that refusal as well.
+                        if cx.is_cancel_requested() && cx.checkpoint().is_err() {
+                            let participants = [h1.task_id()];
+                            let race_id = self.record_loser_drain_start(cx, participants.to_vec());
+                            let reason = cx
+                                .cancel_reason()
+                                .unwrap_or_else(|| CancelReason::user("hedge owner cancelled"));
+                            return Err(Self::drain_owner_cancelled_race(
+                                cx,
+                                &mut [h1],
+                                &participants,
+                                race_id,
+                                reason,
+                            )
+                            .await);
                         }
-                    } else {
-                        // In no-scheduler contexts (e.g. direct unit-test block_on),
-                        // full join can deadlock because nothing drives stored tasks.
-                        // Keep this as best-effort and return promptly.
-                        let mut drain = std::pin::pin!(h1.join(cx));
-                        let waker = std::task::Waker::noop();
-                        let mut poll_cx = Context::from_waker(waker);
-                        match drain.as_mut().poll(&mut poll_cx) {
-                            std::task::Poll::Ready(Ok(res)) => return Ok(res),
-                            std::task::Poll::Ready(Err(JoinError::Panicked(p))) => {
-                                return Err(JoinError::Panicked(p));
+                        // Backup admission failed after primary already started.
+                        // Request cancellation on primary to avoid orphaned work.
+                        let reason = spawn_error_to_cancel_reason(spawn_err);
+                        h1.abort_with_reason(reason.clone());
+
+                        if scheduler_drives_current_task() {
+                            // In scheduler-backed runtime execution, fully drain the
+                            // cancelled primary before returning.
+                            match h1.join(cx).await {
+                                Ok(res) => return Ok(res),
+                                Err(JoinError::Panicked(p)) => return Err(JoinError::Panicked(p)),
+                                Err(JoinError::Cancelled(_) | JoinError::PolledAfterCompletion) => {}
                             }
-                            _ => {}
+                        } else {
+                            // In no-scheduler contexts (e.g. direct unit-test block_on),
+                            // full join can deadlock because nothing drives stored tasks.
+                            // Keep this as best-effort and return promptly.
+                            let mut drain = std::pin::pin!(h1.join(cx));
+                            let waker = std::task::Waker::noop();
+                            let mut poll_cx = Context::from_waker(waker);
+                            match drain.as_mut().poll(&mut poll_cx) {
+                                std::task::Poll::Ready(Ok(res)) => return Ok(res),
+                                std::task::Poll::Ready(Err(JoinError::Panicked(p))) => {
+                                    return Err(JoinError::Panicked(p));
+                                }
+                                _ => {}
+                            }
                         }
-                    }
 
-                    return Err(JoinError::Cancelled(CancelReason::resource_unavailable()));
+                        return Err(JoinError::Cancelled(reason));
+                    }
                 };
 
                 self.race(cx, h1, h2).await
@@ -1700,6 +1704,23 @@ impl<P: Policy> std::fmt::Debug for Scope<'_, P> {
 // Executable M-of-N quorum and sequential first-ok
 // =============================================================================
 
+/// Maps a runtime [`SpawnError`] to the corresponding attribution-accurate [`CancelReason`].
+fn spawn_error_to_cancel_reason(err: SpawnError) -> CancelReason {
+    match err {
+        SpawnError::RegionClosed(region) | SpawnError::RegionNotFound(region) => {
+            CancelReason::parent_cancelled().with_region(region)
+        }
+        SpawnError::RuntimeUnavailable => CancelReason::parent_cancelled(),
+        SpawnError::RegionAtCapacity { region, .. }
+        | SpawnError::AuthorizationDenied { region, .. } => {
+            CancelReason::resource_unavailable().with_region(region)
+        }
+        SpawnError::LocalSchedulerUnavailable
+        | SpawnError::NameRegistrationFailed { .. }
+        | SpawnError::AdmissionSlotAlreadyReserved { .. } => CancelReason::resource_unavailable(),
+    }
+}
+
 /// Folds a spawned branch's join result into the four-valued [`Outcome`]
 /// lattice consumed by the quorum / first-ok aggregators.
 fn branch_join_to_outcome<T, E>(joined: Result<Result<T, E>, JoinError>) -> Outcome<T, E> {
@@ -1964,8 +1985,8 @@ impl<P: Policy> Scope<'_, P> {
         for branch in branches {
             match cx.spawn_in_cancellation_dominant(self, branch) {
                 Ok(handle) => handles.push(handle),
-                Err(_spawn_err) => {
-                    let reason = CancelReason::resource_unavailable();
+                Err(spawn_err) => {
+                    let reason = spawn_error_to_cancel_reason(spawn_err);
                     for handle in &handles {
                         handle.abort_with_reason(reason.clone());
                     }
@@ -2058,10 +2079,10 @@ impl<P: Policy> Scope<'_, P> {
 
             let mut attempt = match cx.spawn_in_cancellation_dominant(self, factory) {
                 Ok(handle) => AbortUnfinishedOnDrop(vec![handle]),
-                Err(_spawn_err) => {
+                Err(spawn_err) => {
                     failures.push((
                         index,
-                        FirstOkFailure::Cancelled(CancelReason::resource_unavailable()),
+                        FirstOkFailure::Cancelled(spawn_error_to_cancel_reason(spawn_err)),
                     ));
                     return first_ok_to_result(FirstOkResult::failure(failures, total));
                 }
@@ -4424,4 +4445,50 @@ mod tests {
              (orphan TaskRecord not cleaned up: before={tasks_before} after={tasks_after})",
         );
     }
+
+    #[test]
+    fn spawn_error_to_cancel_reason_mapping_accuracy() {
+        let region = RegionId::new_for_test(42, 0);
+
+        let r1 = spawn_error_to_cancel_reason(SpawnError::RegionClosed(region));
+        assert_eq!(r1.kind(), CancelKind::ParentCancelled);
+        assert_eq!(r1.origin_region(), region);
+
+        let r2 = spawn_error_to_cancel_reason(SpawnError::RegionNotFound(region));
+        assert_eq!(r2.kind(), CancelKind::ParentCancelled);
+        assert_eq!(r2.origin_region(), region);
+
+        let r3 = spawn_error_to_cancel_reason(SpawnError::RuntimeUnavailable);
+        assert_eq!(r3.kind(), CancelKind::ParentCancelled);
+
+        let r4 = spawn_error_to_cancel_reason(SpawnError::RegionAtCapacity {
+            region,
+            limit: 10,
+            live: 10,
+        });
+        assert_eq!(r4.kind(), CancelKind::ResourceUnavailable);
+        assert_eq!(r4.origin_region(), region);
+
+        let r5 = spawn_error_to_cancel_reason(SpawnError::AuthorizationDenied {
+            region,
+            cx_id: "test".to_string(),
+        });
+        assert_eq!(r5.kind(), CancelKind::ResourceUnavailable);
+        assert_eq!(r5.origin_region(), region);
+
+        let r6 = spawn_error_to_cancel_reason(SpawnError::LocalSchedulerUnavailable);
+        assert_eq!(r6.kind(), CancelKind::ResourceUnavailable);
+
+        let r7 = spawn_error_to_cancel_reason(SpawnError::NameRegistrationFailed {
+            name: "svc".to_string(),
+            reason: "dup".to_string(),
+        });
+        assert_eq!(r7.kind(), CancelKind::ResourceUnavailable);
+
+        let r8 = spawn_error_to_cancel_reason(SpawnError::AdmissionSlotAlreadyReserved {
+            task_id: TaskId::new_for_test(1, 0),
+        });
+        assert_eq!(r8.kind(), CancelKind::ResourceUnavailable);
+    }
 }
+

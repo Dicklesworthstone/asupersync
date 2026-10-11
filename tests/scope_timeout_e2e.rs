@@ -208,3 +208,54 @@ fn late_ok_produced_during_drain_is_not_lost() {
         TimedResult::TimedOut(err) => panic!("a late Ok must not be reported as a timeout: {err}"),
     }
 }
+
+#[test]
+fn dropping_scope_timeout_future_aborts_spawned_task() {
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let started = Arc::new(AtomicUsize::new(0));
+    let cancelled_clone = Arc::clone(&cancelled);
+    let started_clone = Arc::clone(&started);
+    let cancelled_check = Arc::clone(&cancelled);
+
+    run_on_production(move |cx| async move {
+        let scope = cx.scope();
+        let timeout_fut = scope.timeout::<(), (), _, _>(
+            &cx,
+            Duration::from_secs(30),
+            move |task_cx| async move {
+                started_clone.store(1, Ordering::SeqCst);
+                park_until_cancelled(&task_cx).await;
+                cancelled_clone.store(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+        let mut timeout_pinned = std::pin::pin!(timeout_fut);
+        // Poll once so the operation is spawned and starts running.
+        let _ = std::future::poll_fn(|poll_cx| {
+            let _ = timeout_pinned.as_mut().poll(poll_cx);
+            Poll::Ready(())
+        })
+        .await;
+
+        while started.load(Ordering::SeqCst) == 0 {
+            yield_now().await;
+        }
+
+        // Now drop the pinned Scope::timeout future!
+        drop(timeout_pinned);
+
+        // Yield to allow the background task to receive abort and execute its park_until_cancelled
+        for _ in 0..100 {
+            if cancelled_check.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+    });
+
+    assert_eq!(
+        cancelled.load(Ordering::SeqCst),
+        1,
+        "dropping a Scope::timeout future must abort the spawned task"
+    );
+}
