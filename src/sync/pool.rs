@@ -435,6 +435,10 @@ pub struct PooledResource<R> {
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
     return_wakers: Option<ReturnWakers>,
+    /// Closed flag of the owning pool: when the pool is closed while this
+    /// resource is checked out, returns discard immediately rather than
+    /// lingering in the channel (br-asupersync-myvrjv L1).
+    closed: Option<Arc<AtomicBool>>,
     /// Caller-flagged "this resource is broken, do not re-pool" bit.
     /// Set via [`mark_broken`](Self::mark_broken). When `true`, the
     /// `Drop` impl routes through `discard_inner` instead of
@@ -485,6 +489,7 @@ impl<R> PooledResource<R> {
             created_at,
             time_getter,
             return_wakers: None,
+            closed: None,
             is_broken: false,
         }
     }
@@ -495,6 +500,14 @@ impl<R> PooledResource<R> {
     /// acquirers.
     fn with_return_notify(mut self, wakers: ReturnWakers) -> Self {
         self.return_wakers = Some(wakers);
+        self
+    }
+
+    /// Attach the pool closed flag from a [`GenericPool`].
+    /// Returning a resource after the pool is closed discards it
+    /// immediately rather than lingering in the channel (br-asupersync-myvrjv L1).
+    fn with_closed(mut self, closed: Arc<AtomicBool>) -> Self {
+        self.closed = Some(closed);
         self
     }
 
@@ -614,6 +627,19 @@ impl<R> PooledResource<R> {
 
     fn return_inner(&mut self) {
         if self.return_obligation.is_discharged() {
+            return;
+        }
+
+        // If the pool was closed while this resource was checked out, do not
+        // send the resource into the return channel where it would linger until
+        // some future pool call. Instead, discard it immediately and drop the
+        // resource locally (br-asupersync-myvrjv L1).
+        if self
+            .closed
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Acquire))
+        {
+            self.discard_inner();
             return;
         }
 
@@ -1607,7 +1633,7 @@ where
     /// `process_returns` call.
     return_wakers: ReturnWakers,
     /// Lock-free snapshot of `GenericPoolState::closed` (monotone false→true).
-    closed: AtomicBool,
+    closed: Arc<AtomicBool>,
     /// Optional metrics handle for observability.
     #[cfg(feature = "metrics")]
     metrics: Option<PoolMetricsHandle>,
@@ -1647,7 +1673,7 @@ where
             time_getter,
             health_check_fn: None,
             return_wakers: Arc::new(PoolMutex::new(SmallVec::new())),
-            closed: AtomicBool::new(false),
+            closed: Arc::new(AtomicBool::new(false)),
             #[cfg(feature = "metrics")]
             metrics: None,
         }
@@ -2476,7 +2502,8 @@ where
                         created_at,
                         self.time_getter,
                     )
-                    .with_return_notify(Arc::clone(&self.return_wakers));
+                    .with_return_notify(Arc::clone(&self.return_wakers))
+                    .with_closed(Arc::clone(&self.closed));
                     checkout.commit();
 
                     // Count the acquisition only after responsibility has
@@ -2575,7 +2602,8 @@ where
                         acquired_at,
                         self.time_getter,
                     )
-                    .with_return_notify(Arc::clone(&self.return_wakers));
+                    .with_return_notify(Arc::clone(&self.return_wakers))
+                    .with_closed(Arc::clone(&self.closed));
                     checkout
                         .expect("committed creation slot arms active checkout guard")
                         .commit();
@@ -2683,7 +2711,8 @@ where
                 created_at,
                 self.time_getter,
             )
-            .with_return_notify(Arc::clone(&self.return_wakers));
+            .with_return_notify(Arc::clone(&self.return_wakers))
+            .with_closed(Arc::clone(&self.closed));
             checkout.commit();
 
             // Count the acquisition only after responsibility has transferred

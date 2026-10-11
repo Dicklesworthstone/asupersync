@@ -5243,4 +5243,97 @@ mod tests {
         assert_eq!(stats.active, 0, "its slot is released");
         crate::test_complete!("return_to_pool_discards_a_resource_marked_broken");
     }
+
+    #[test]
+    fn return_after_pool_close_destroys_resource_immediately_without_later_pool_call() {
+        init_test("return_after_pool_close_destroys_resource_immediately_without_later_pool_call");
+
+        struct TrackDrop(Arc<AtomicBool>);
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_clone = Arc::clone(&dropped);
+        let factory = move || {
+            let d = Arc::clone(&dropped_clone);
+            async move { Ok::<_, PoolError>(TrackDrop(d)) }
+        };
+
+        let pool = GenericPool::new(factory, PoolConfig::with_max_size(2));
+        let cx = Cx::for_testing();
+        let resource =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
+
+        futures_lite::future::block_on(pool.close());
+        assert!(!dropped.load(Ordering::Acquire), "resource still held by caller");
+
+        // Return the resource after close
+        resource.return_to_pool();
+
+        // Crucial invariant (br-asupersync-myvrjv L1):
+        // The resource MUST be dropped immediately upon return, WITHOUT needing
+        // a subsequent pool.stats() or other pool operation to drain the return channel.
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "resource must be destroyed immediately when returned to closed pool"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0, "active decremented");
+        assert_eq!(stats.idle, 0, "no idle resources");
+
+        crate::test_complete!(
+            "return_after_pool_close_destroys_resource_immediately_without_later_pool_call"
+        );
+    }
+
+    #[test]
+    fn drop_after_pool_close_destroys_resource_immediately_without_later_pool_call() {
+        init_test("drop_after_pool_close_destroys_resource_immediately_without_later_pool_call");
+
+        struct TrackDrop(Arc<AtomicBool>);
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_clone = Arc::clone(&dropped);
+        let factory = move || {
+            let d = Arc::clone(&dropped_clone);
+            async move { Ok::<_, PoolError>(TrackDrop(d)) }
+        };
+
+        let pool = GenericPool::new(factory, PoolConfig::with_max_size(2));
+        let cx = Cx::for_testing();
+        let resource =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
+
+        futures_lite::future::block_on(pool.close());
+        assert!(!dropped.load(Ordering::Acquire), "resource still held by caller");
+
+        // Drop the resource wrapper after close
+        drop(resource);
+
+        // Crucial invariant (br-asupersync-myvrjv L1):
+        // The resource MUST be dropped immediately upon drop, WITHOUT needing
+        // a subsequent pool.stats() or other pool operation to drain the return channel.
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "resource must be destroyed immediately when dropped after pool close"
+        );
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 0, "active decremented");
+        assert_eq!(stats.idle, 0, "no idle resources");
+
+        crate::test_complete!(
+            "drop_after_pool_close_destroys_resource_immediately_without_later_pool_call"
+        );
+    }
 }
+
