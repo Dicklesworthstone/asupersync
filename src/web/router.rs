@@ -155,6 +155,7 @@ pub struct RouteBodyPolicyInfo {
 pub struct MethodRouter {
     handlers: HashMap<String, Box<dyn Handler>>,
     method_not_allowed: Box<dyn Handler>,
+    allow_state: Arc<std::sync::RwLock<String>>,
     body_policy: Option<RequestBodyPolicy>,
 }
 
@@ -168,9 +169,11 @@ impl MethodRouter {
     /// Create an empty method router. Add only the methods this route accepts.
     #[must_use]
     pub fn new() -> Self {
+        let allow_state = Arc::new(std::sync::RwLock::new(String::new()));
         Self {
             handlers: HashMap::with_capacity(4),
-            method_not_allowed: Box::new(MethodNotAllowedHandler::new(String::new())),
+            method_not_allowed: Box::new(MethodNotAllowedHandler::new(Arc::clone(&allow_state))),
+            allow_state,
             body_policy: None,
         }
     }
@@ -179,7 +182,9 @@ impl MethodRouter {
     fn on(mut self, method: &str, handler: impl Handler) -> Self {
         self.handlers
             .insert(method.to_uppercase(), Box::new(handler));
-        self.method_not_allowed = Box::new(MethodNotAllowedHandler::new(self.allow_header()));
+        if let Ok(mut guard) = self.allow_state.write() {
+            *guard = self.allow_header();
+        }
         self
     }
 
@@ -230,6 +235,9 @@ impl MethodRouter {
     /// method answers, as it did when each registration was a separate route
     /// matched in order. A body policy is kept from this router, or taken
     /// from `other` if this one has none.
+    ///
+    /// Preserves existing middleware wrapping on `method_not_allowed`
+    /// (br-asupersync-vftw38 item 8).
     fn merge(&mut self, other: Self) {
         for (method, handler) in other.handlers {
             self.handlers.entry(method).or_insert(handler);
@@ -237,7 +245,9 @@ impl MethodRouter {
         if self.body_policy.is_none() {
             self.body_policy = other.body_policy;
         }
-        self.method_not_allowed = Box::new(MethodNotAllowedHandler::new(self.allow_header()));
+        if let Ok(mut guard) = self.allow_state.write() {
+            *guard = self.allow_header();
+        }
     }
 
     /// Apply a monotonic request-body policy to every method on this route.
@@ -268,7 +278,7 @@ impl MethodRouter {
             .collect();
         let method_not_allowed = std::mem::replace(
             &mut self.method_not_allowed,
-            Box::new(MethodNotAllowedHandler::new(String::new())),
+            Box::new(MethodNotAllowedHandler::new(Arc::clone(&self.allow_state))),
         );
         self.method_not_allowed = wrap(method_not_allowed);
     }
@@ -331,11 +341,11 @@ impl MethodRouter {
 }
 
 struct MethodNotAllowedHandler {
-    allow: String,
+    allow: Arc<std::sync::RwLock<String>>,
 }
 
 impl MethodNotAllowedHandler {
-    fn new(allow: String) -> Self {
+    fn new(allow: Arc<std::sync::RwLock<String>>) -> Self {
         Self { allow }
     }
 }
@@ -346,7 +356,11 @@ impl Handler for MethodNotAllowedHandler {
         _cx: &Cx,
         _req: Request,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send + '_>> {
-        let allow = self.allow.clone();
+        let allow = self
+            .allow
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
         Box::pin(async move {
             let mut resp = StatusCode::METHOD_NOT_ALLOWED.into_response();
             if !allow.is_empty() {
@@ -473,6 +487,21 @@ enum Segment {
 }
 
 impl RoutePattern {
+    /// Check whether two route patterns have equivalent segment shapes,
+    /// so registering e.g. `/users/:id` and `/users/:user_id` merges methods
+    /// rather than creating a duplicate shadowed route (br-asupersync-vftw38 item 7).
+    fn is_equivalent(&self, other: &Self) -> bool {
+        if self.segments.len() != other.segments.len() {
+            return false;
+        }
+        self.segments.iter().zip(&other.segments).all(|(s1, s2)| match (s1, s2) {
+            (Segment::Literal(a), Segment::Literal(b)) => a == b,
+            (Segment::Param(_), Segment::Param(_)) => true,
+            (Segment::Wildcard, Segment::Wildcard) => true,
+            _ => false,
+        })
+    }
+
     /// Parse a route pattern string.
     fn parse(pattern: &str) -> Self {
         let segments = pattern
@@ -516,6 +545,11 @@ impl RoutePattern {
         // test); the matcher must agree to keep the routing
         // surface consistent.
         if path.contains("//") {
+            return None;
+        }
+        // Targets without a leading slash (like "admin/x" or asterisk-form "*")
+        // do not match origin-form resource routes (br-asupersync-vftw38 item 12).
+        if !path.starts_with('/') {
             return None;
         }
         let path_segments: SmallVec<[&str; 8]> =
@@ -3060,10 +3094,12 @@ impl Router {
         // `.route("/a", post(..))`) adds its methods to the existing route.
         // Kept separate, the first registration always matched and answered
         // the second one's methods with 405.
+        // Equivalent patterns (e.g. `/users/:id` and `/users/:user_id`) also
+        // merge rather than shadowing each other (br-asupersync-vftw38 item 7).
         if let Some((_, existing)) = self
             .routes
             .iter_mut()
-            .find(|(registered, _)| registered.segments == pattern.segments)
+            .find(|(registered, _)| registered.is_equivalent(&pattern))
         {
             existing.merge(method_router);
             return self;
@@ -3073,10 +3109,60 @@ impl Router {
     }
 
     /// Mount a sub-router at the given prefix.
+    ///
+    /// The prefix is normalized to always begin with `/` (br-asupersync-vftw38 item 9).
+    /// If another router was already mounted at this exact prefix, their routes and
+    /// mounts merge rather than the first shadowing the second (br-asupersync-vftw38 item 7).
     #[must_use]
     pub fn nest(mut self, prefix: &str, router: Self) -> Self {
-        self.nested.push((prefix.to_string(), router));
+        let prefix = normalize_nest_prefix(prefix);
+        if let Some((_, existing)) = self
+            .nested
+            .iter_mut()
+            .find(|(existing_prefix, _)| existing_prefix == &prefix)
+        {
+            existing.merge_router(router);
+            return self;
+        }
+        self.nested.push((prefix, router));
         self
+    }
+
+    /// Merge another router's routes, nested mounts, and fallback into this router
+    /// (br-asupersync-vftw38 item 7).
+    fn merge_router(&mut self, other: Self) {
+        for (pattern, method_router) in other.routes {
+            if let Some((_, existing)) = self
+                .routes
+                .iter_mut()
+                .find(|(registered, _)| registered.is_equivalent(&pattern))
+            {
+                existing.merge(method_router);
+            } else {
+                self.routes.push((pattern, method_router));
+            }
+        }
+        for (prefix, nested) in other.nested {
+            if let Some((_, existing)) = self
+                .nested
+                .iter_mut()
+                .find(|(existing_prefix, _)| existing_prefix == &prefix)
+            {
+                existing.merge_router(nested);
+            } else {
+                self.nested.push((prefix, nested));
+            }
+        }
+        if self.fallback.is_none() {
+            self.fallback = other.fallback;
+        }
+        self.extensions.extend_from(&other.extensions);
+        if self.body_policy.is_none() {
+            self.body_policy = other.body_policy;
+        }
+        if self.server_body_policy.is_none() {
+            self.server_body_policy = other.server_body_policy;
+        }
     }
 
     /// Let this router's mounts compete with its own routes by specificity.
@@ -4801,6 +4887,16 @@ fn normalize_route_pattern(pattern: &str) -> String {
     }
 }
 
+fn normalize_nest_prefix(prefix: &str) -> String {
+    if prefix.is_empty() || prefix == "/" {
+        "/".to_string()
+    } else if prefix.starts_with('/') {
+        prefix.to_string()
+    } else {
+        format!("/{prefix}")
+    }
+}
+
 /// Strip a prefix from a path, returning the remainder.
 fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
     let normalized_path = if path.is_empty() { "/" } else { path };
@@ -4812,7 +4908,14 @@ fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
     }
 
     let requires_slash_boundary = prefix.ends_with('/');
-    let normalized_prefix = prefix.trim_end_matches('/');
+    let trimmed = prefix.trim_end_matches('/');
+    let normalized_prefix_buf;
+    let normalized_prefix = if trimmed.starts_with('/') {
+        trimmed
+    } else {
+        normalized_prefix_buf = format!("/{trimmed}");
+        &normalized_prefix_buf
+    };
 
     if normalized_path == normalized_prefix {
         if requires_slash_boundary {
@@ -7870,6 +7973,82 @@ mod tests {
                 resp.headers.get("x-trace-id").map(String::as_str),
                 Some("req-1")
             );
+        }
+
+        #[test]
+        fn equivalent_route_patterns_merge_methods_asupersync_vftw38_item7() {
+            let router = Router::new()
+                .route("/users/:id", get(FnHandler::new(ok_handler)))
+                .route("/users/:user_id", post(FnHandler::new(created_handler)));
+
+            let get_resp = router.handle(Request::new("GET", "/users/42"));
+            assert_eq!(get_resp.status, StatusCode::OK);
+
+            let post_resp = router.handle(Request::new("POST", "/users/42"));
+            assert_eq!(post_resp.status, StatusCode::CREATED);
+
+            let del_resp = router.handle(Request::new("DELETE", "/users/42"));
+            assert_eq!(del_resp.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(del_resp.header_value("allow"), Some("GET, POST"));
+        }
+
+        #[test]
+        fn duplicate_nest_prefixes_merge_subrouters_asupersync_vftw38_item7() {
+            let r1 = Router::new().route("/users", get(FnHandler::new(ok_handler)));
+            let r2 = Router::new().route("/items", get(FnHandler::new(created_handler)));
+
+            let router = Router::new().nest("/api", r1).nest("/api", r2);
+
+            let resp1 = router.handle(Request::new("GET", "/api/users"));
+            assert_eq!(resp1.status, StatusCode::OK);
+
+            let resp2 = router.handle(Request::new("GET", "/api/items"));
+            assert_eq!(resp2.status, StatusCode::CREATED);
+        }
+
+        #[test]
+        fn merge_preserves_method_not_allowed_layers_asupersync_vftw38_item8() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/item", get(FnHandler::new(ok_handler)))
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)))
+                .route("/item", post(FnHandler::new(created_handler)));
+
+            let resp = router.handle(Request::new("DELETE", "/item"));
+            assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(resp.header_value("allow"), Some("GET, POST"));
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "method-not-allowed must retain layer wrapping across merge"
+            );
+        }
+
+        #[test]
+        fn nest_prefix_without_leading_slash_normalizes_asupersync_vftw38_item9() {
+            let sub = Router::new().route("/profile", get(FnHandler::new(ok_handler)));
+            let router = Router::new().nest("api", sub);
+
+            let resp = router.handle(Request::new("GET", "/api/profile"));
+            assert_eq!(resp.status, StatusCode::OK);
+        }
+
+        #[test]
+        fn non_slash_and_asterisk_targets_do_not_match_resource_routes_asupersync_vftw38_item12() {
+            let router = Router::new()
+                .route("/:slug", get(FnHandler::new(ok_handler)))
+                .nest("/admin", Router::new().route("/x", get(FnHandler::new(created_handler))));
+
+            // OPTIONS * must not match /:slug
+            let resp_star = router.handle(Request::new("OPTIONS", "*"));
+            assert_ne!(resp_star.status, StatusCode::OK);
+            assert_eq!(resp_star.status, StatusCode::NOT_FOUND);
+
+            // "admin/x" without leading slash must not match /admin/x or /:slug
+            let resp_noslash = router.handle(Request::new("GET", "admin/x"));
+            assert_ne!(resp_noslash.status, StatusCode::OK);
+            assert_ne!(resp_noslash.status, StatusCode::CREATED);
+            assert_eq!(resp_noslash.status, StatusCode::NOT_FOUND);
         }
     }
 }
