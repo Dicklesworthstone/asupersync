@@ -1309,12 +1309,82 @@ fn bisect_probes_only_request_targets_that_exist_at_the_probed_commit() {
         "a commit without the failing target cannot hold its red and is not run"
     );
 
-    // Without the filter, cargo refuses the probe's target list. That must read as
-    // undecided (a range), never as a confident culprit.
+    // Without the filter, cargo refuses a probe that asks for the red target before the
+    // commit that added it. That must read as undecided (a range), never as a confident
+    // culprit. (Probes ask only for the red target, so `newer_contract` is never asked.)
     let unfiltered = evaluate(&new_target_mid_batch_scenario(true));
     let lane = receipt(&unfiltered, "targeted-tests[default]");
     assert_eq!(lane["culprit_exact"], false, "{unfiltered:#}");
-    assert_eq!(lane["bisect_probes"][0]["verdict"], "no-evidence");
+    assert_eq!(lane["bisect_probes"][0]["verdict"], "red", "{unfiltered:#}");
+    assert_eq!(lane["bisect_probes"][1]["sha"], sha(2));
+    assert_eq!(lane["bisect_probes"][1]["verdict"], "no-evidence");
+}
+
+fn beta_log(red: bool, with_others: bool) -> String {
+    let mut log = String::new();
+    if with_others {
+        log.push_str("     Running tests/alpha_native.rs (x)\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
+    }
+    log.push_str("     Running tests/beta_native.rs (x)\nrunning 2 tests\n");
+    if red {
+        log.push_str("test beta_case ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n");
+    } else {
+        log.push_str("test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n");
+    }
+    if with_others {
+        log.push_str("     Running tests/gamma_native.rs (x)\nrunning 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n");
+    }
+    log.push_str(if red {
+        "  Remote command finished: exit=101 in 1000ms\n"
+    } else {
+        "  Remote command finished: exit=0 in 1000ms\n"
+    });
+    log
+}
+
+/// A bisect probe builds only the binaries that own the new red, not every target the
+/// batch touched: each `--test X` is its own binary, so the red tests run as in the full
+/// lane. On 10-11 each full-lane probe of a ~30-target lane took about 45 min.
+#[test]
+fn a_bisect_probe_builds_only_the_targets_that_own_the_red() {
+    let lane = json!({
+        "id": "targeted-tests[tls]", "kind": "test",
+        "argv": ["cargo", "test", "--features", "tls", "--test", "alpha_native", "--test", "beta_native", "--test", "gamma_native"],
+        "expected_targets": ["alpha_native", "beta_native", "gamma_native"],
+    });
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=5u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-tests[tls]": {
+            sha(2): {"log": beta_log(false, false)},
+            sha(3): {"log": beta_log(true, false)},
+            sha(5): {"log": beta_log(true, true)},
+        }},
+    }));
+    let lane = receipt(&result, "targeted-tests[tls]");
+    assert_eq!(
+        lane["new_red"],
+        json!(["beta_native::beta_case"]),
+        "{result:#}"
+    );
+    assert_eq!(lane["culprit"], sha(3), "{result:#}");
+    assert_eq!(lane["culprit_exact"], true, "{result:#}");
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes.len(), 2, "{result:#}");
+    for probe in probes {
+        assert_eq!(
+            probe["command"], "cargo test --features tls --test beta_native",
+            "a probe keeps the lane's flags and builds only the red target: {result:#}"
+        );
+    }
+    assert_eq!(
+        lane["command"],
+        "cargo test --features tls --test alpha_native --test beta_native --test gamma_native",
+        "the head run still covers every target"
+    );
 }
 
 #[test]
