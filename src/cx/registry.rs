@@ -1692,6 +1692,18 @@ impl Default for NameRegistry {
     }
 }
 
+/// A lease granted to a waiter that never collected it (its task was
+/// cancelled, say) can no longer be collected once the registry is gone. It
+/// is aborted, as [`NameRegistry::cancel_wait_for`] aborts one; dropped armed,
+/// its obligation token would panic with ASUP-E101 (br-asupersync-in4gh8 L2).
+impl Drop for NameRegistry {
+    fn drop(&mut self) {
+        for mut grant in self.granted.drain(..) {
+            let _ = grant.lease.abort();
+        }
+    }
+}
+
 // NameRegistry is a valid registry capability, so it can be stored in a
 // RegistryHandle and carried by Cx for capability propagation (bd-2ukjr).
 impl RegistryCap for NameRegistry {}
@@ -3663,6 +3675,41 @@ mod tests {
         granted_lease.release().unwrap();
 
         crate::test_complete!("collision_wait_grants_on_unregister");
+    }
+
+    #[test]
+    fn dropping_the_registry_aborts_a_grant_nobody_collected() {
+        init_test("dropping_the_registry_aborts_a_grant_nobody_collected");
+
+        let mut reg = NameRegistry::new();
+        let mut lease = reg
+            .register("svc", tid(1), rid(0), Time::from_secs(1))
+            .unwrap();
+        let outcome = reg
+            .register_with_policy(
+                "svc",
+                tid(2),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(60),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        reg.unregister_owned_and_grant(&lease, Time::from_secs(10))
+            .unwrap();
+        lease.release().expect("lease release should succeed");
+        assert_eq!(reg.whereis("svc"), Some(tid(2)), "the waiter was granted");
+
+        // The waiter never collects its grant (its task was cancelled, say),
+        // and the registry goes away with the armed lease inside it.
+        let dropped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(reg)));
+        assert!(
+            dropped.is_ok(),
+            "dropping the registry must abort the uncollected grant, not panic with ASUP-E101"
+        );
+        crate::test_complete!("dropping_the_registry_aborts_a_grant_nobody_collected");
     }
 
     #[test]

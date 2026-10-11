@@ -2855,12 +2855,20 @@ where
         let lease_slot = Arc::new(parking_lot::Mutex::new(named_handle.take_lease()));
         let lease_slot_for_finalizer = Arc::clone(&lease_slot);
         let registry_for_finalizer = Arc::clone(&self.registry);
+        // The finalizer runs at region close without the runtime state, so it
+        // reads the runtime's clock itself: a waiter's deadline is judged at
+        // the time of release. A fixed 1 s clock granted the name to waiters
+        // long expired and refused ones still waiting (br-asupersync-in4gh8 L1).
+        let clock = state.timer_driver().cloned();
         let finalizer_registered = scope.defer_sync(state, move || {
             let lease_to_resolve = lease_slot_for_finalizer.lock().take();
             if let Some(mut lease) = lease_to_resolve {
+                let release_now = clock
+                    .as_ref()
+                    .map_or(now, crate::time::TimerDriverHandle::now);
                 let _ = registry_for_finalizer
                     .lock()
-                    .unregister_owned_and_grant(&lease, Time::from_nanos(1_000_000_000));
+                    .unregister_owned_and_grant(&lease, release_now);
                 let _ = lease.release();
             }
         });
@@ -8100,6 +8108,123 @@ mod tests {
         );
 
         crate::test_complete!("named_start_helper_supervisor_stop_cleans_registry");
+    }
+
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn named_start_helper_grants_a_waiting_task_by_the_runtime_clock() {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!("named_start_helper_grants_a_waiting_task_by_the_runtime_clock");
+        use crate::cx::registry::{NameCollisionOutcome, NameCollisionPolicy};
+
+        #[derive(Debug)]
+        struct Noop;
+
+        impl GenServer for Noop {
+            type Call = ();
+            type Reply = ();
+            type Cast = ();
+            type Info = SystemMsg;
+
+            fn handle_call(
+                &mut self,
+                _cx: &Cx,
+                _request: (),
+                reply: Reply<()>,
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                let _ = reply.send(());
+                Box::pin(async {})
+            }
+
+            fn handle_cast(
+                &mut self,
+                _cx: &Cx,
+                _msg: (),
+            ) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
+                Box::pin(async {})
+            }
+        }
+
+        let registry: Arc<parking_lot::Mutex<crate::cx::NameRegistry>> =
+            Arc::new(parking_lot::Mutex::new(crate::cx::NameRegistry::new()));
+
+        let budget = Budget::new().with_poll_quota(100_000);
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let root = runtime.state.create_root_region(budget);
+        let cx = Cx::for_testing();
+
+        let child = crate::supervision::ChildSpec::new(
+            "svc_child",
+            named_gen_server_start(Arc::clone(&registry), "svc", 16, || Noop),
+        );
+        let compiled = crate::supervision::SupervisorBuilder::new("svc_supervisor")
+            .child(child)
+            .compile()
+            .expect("compile supervisor");
+        let supervisor = compiled
+            .spawn(&mut runtime.state, &cx, root, budget)
+            .expect("spawn supervisor");
+        let child_task = supervisor.started[0].task_id;
+        assert_eq!(registry.lock().whereis("svc"), Some(child_task));
+
+        // Another task waits for the name until 0.5 s of runtime time. The
+        // runtime clock is still near zero when the server stops, so the wait
+        // is live; the old fixed 1 s release clock judged it expired
+        // (br-asupersync-in4gh8 L1).
+        let waiter = TaskId::new_for_test(9_999, 0);
+        let waiter_region = crate::types::RegionId::new_for_test(9_999, 0);
+        let start_now = runtime
+            .state
+            .timer_driver()
+            .map_or(runtime.state.now, crate::time::TimerDriverHandle::now);
+        assert!(
+            start_now < Time::from_millis(500),
+            "the runtime clock starts near zero: {start_now:?}"
+        );
+        let outcome = registry
+            .lock()
+            .register_with_policy(
+                "svc",
+                waiter,
+                waiter_region,
+                start_now,
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_millis(500),
+                },
+            )
+            .expect("enqueue the waiter");
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+
+        let cancel_effects = runtime.state.cancel_request(
+            supervisor.region,
+            &crate::types::CancelReason::user("stop"),
+            None,
+        );
+        let (tasks_to_schedule, wake_effects) = cancel_effects.into_parts();
+        {
+            let mut scheduler = runtime.scheduler.lock();
+            for (task_id, priority) in tasks_to_schedule {
+                scheduler.schedule_cancel(task_id, priority);
+            }
+        }
+        wake_effects.dispatch();
+        runtime.run_until_quiescent();
+
+        let mut registry = registry.lock();
+        assert_eq!(
+            registry.whereis("svc"),
+            Some(waiter),
+            "the server's release grants the name to the live waiter"
+        );
+        let mut granted = registry
+            .take_granted_for("svc", waiter, waiter_region)
+            .expect("the grant waits for the waiter");
+        granted
+            .lease
+            .release()
+            .expect("the waiter resolves its lease");
+
+        crate::test_complete!("named_start_helper_grants_a_waiting_task_by_the_runtime_clock");
     }
 
     #[test]
