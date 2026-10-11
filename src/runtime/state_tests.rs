@@ -3473,6 +3473,171 @@ fn cancel_request_strengthens_existing_reason() {
     crate::test_complete!("cancel_request_strengthens_existing_reason");
 }
 
+fn requested_cleanup(state: &RuntimeState, task: TaskId) -> (&CancelReason, Budget) {
+    match &state.task(task).expect("live cleanup task").state {
+        TaskState::CancelRequested { reason, cleanup_budget }
+        | TaskState::Cancelling { reason, cleanup_budget }
+        | TaskState::Finalizing { reason, cleanup_budget } => (reason, *cleanup_budget),
+        other => panic!("expected cancellation cleanup, got {other:?}"),
+    }
+}
+
+#[test]
+fn shutdown_cleanup_budget_survives_truncated_descendant_causes() {
+    let mut state = RuntimeState::new();
+    state.set_cancel_attribution_config(CancelAttributionConfig::new(2, usize::MAX));
+    let root = state.create_root_region(Budget::INFINITE);
+    let root_task = insert_task(&mut state, root);
+    let mut leaf = root;
+    for _ in 0..20 {
+        leaf = create_child_region(&mut state, leaf);
+    }
+    let leaf_task = insert_task(&mut state, leaf);
+    let shutdown = CancelReason::shutdown().with_timestamp(Time::from_nanos(123));
+    let (scheduled, wakes) = state.cancel_request(root, &shutdown, None).into_parts();
+    for task in [root_task, leaf_task] {
+        let (_, budget) = requested_cleanup(&state, task);
+        assert_eq!(budget.poll_quota, 50);
+        assert_eq!(budget.priority, 255);
+        assert!(scheduled.contains(&(task, 255)));
+    }
+    let (reason, _) = requested_cleanup(&state, leaf_task);
+    assert_eq!(reason.kind, CancelKind::ParentCancelled);
+    assert!(reason.any_truncated());
+    assert!(reason.chain_depth() <= 2);
+    assert!(!reason.any_cause_is(CancelKind::Shutdown));
+    assert_eq!(reason.timestamp, shutdown.timestamp);
+    wakes.dispatch();
+}
+
+#[test]
+fn shutdown_cleanup_budget_preserves_descendant_ceilings_and_absolute_deadlines() {
+    for child_polls in [0, 7] {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let grandchild = create_child_region(&mut state, child);
+        let sibling = create_child_region(&mut state, root);
+        let tasks = [root, child, grandchild, sibling]
+            .map(|region| insert_task(&mut state, region));
+        let root_ceiling = Budget::INFINITE
+            .with_poll_quota(33)
+            .with_cost_quota(55)
+            .with_deadline(Time::from_nanos(2000));
+        let child_ceiling = Budget::INFINITE
+            .with_poll_quota(child_polls)
+            .with_cost_quota(0)
+            .with_deadline(Time::from_nanos(500));
+        assert!(state.region(child).unwrap().tighten_shutdown_budget(child_ceiling));
+        assert!(state.region(grandchild).unwrap().tighten_shutdown_budget(Budget::INFINITE));
+        state.now = Time::from_nanos(100);
+        let shutdown = CancelReason::shutdown().with_timestamp(state.now);
+        let (_, wakes) = state
+            .cancel_request_with_shutdown_budget(root, &shutdown, None, Some(root_ceiling))
+            .into_parts();
+        wakes.dispatch();
+        let expected = [
+            root_ceiling.with_priority(255),
+            child_ceiling.with_priority(255),
+            child_ceiling.with_priority(255),
+            root_ceiling.with_priority(255),
+        ];
+        for (task, budget) in tasks.into_iter().zip(expected) {
+            assert_eq!(requested_cleanup(&state, task).1, budget);
+        }
+
+        // A later weaker command must not restart the clock or replenish any
+        // dimension, including an explicitly exhausted descendant ceiling.
+        state.now = Time::from_nanos(10_000);
+        let later = CancelReason::user("later close").with_timestamp(state.now);
+        let (_, wakes) = state
+            .cancel_request_with_shutdown_budget(root, &later, None, Some(Budget::INFINITE))
+            .into_parts();
+        wakes.dispatch();
+        for (task, budget) in tasks.into_iter().zip(expected) {
+            assert_eq!(requested_cleanup(&state, task).1, budget);
+        }
+        assert_eq!(state.region(root).unwrap().shutdown_budget(), Some(root_ceiling));
+        assert_eq!(state.region(child).unwrap().shutdown_budget(), Some(child_ceiling));
+        assert_eq!(state.region(grandchild).unwrap().shutdown_budget(), Some(child_ceiling));
+    }
+}
+
+#[test]
+fn repeated_subtree_shutdown_tightens_every_cleanup_phase_without_rewriting_attribution() {
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::INFINITE);
+    let child = create_child_region(&mut state, root);
+    let leaf = create_child_region(&mut state, child);
+    let tasks = std::array::from_fn::<_, 3, _>(|_| insert_task(&mut state, leaf));
+    let first = CancelReason::user("earlier request").with_timestamp(Time::from_nanos(10));
+    let (_, wakes) = state.cancel_request(root, &first, None).into_parts();
+    wakes.dispatch();
+    for task in [tasks[1], tasks[2]] {
+        assert!(state.task_mut(task).unwrap().acknowledge_cancel().is_some());
+    }
+    assert!(state.task_mut(tasks[2]).unwrap().cleanup_done());
+    let first_reason = requested_cleanup(&state, tasks[0]).0.clone();
+    assert_eq!(first_reason.kind, CancelKind::ParentCancelled);
+    for task in tasks {
+        assert_eq!(requested_cleanup(&state, task).1.poll_quota, 200);
+    }
+
+    let shutdown = CancelReason::shutdown().with_timestamp(Time::from_nanos(20));
+    let (scheduled, wakes) = state.cancel_request(root, &shutdown, None).into_parts();
+    wakes.dispatch();
+    for task in tasks {
+        let (reason, budget) = requested_cleanup(&state, task);
+        assert_eq!(reason, &first_reason, "same-kind attribution still keeps the earlier request");
+        assert_eq!(budget, shutdown.cleanup_budget());
+        assert!(scheduled.contains(&(task, 255)), "tightening must republish cleanup urgency");
+    }
+    assert!(matches!(state.task(tasks[0]).unwrap().state, TaskState::CancelRequested { .. }));
+    assert!(matches!(state.task(tasks[1]).unwrap().state, TaskState::Cancelling { .. }));
+    assert!(matches!(state.task(tasks[2]).unwrap().state, TaskState::Finalizing { .. }));
+
+    let weaker = CancelReason::timeout().with_timestamp(Time::from_nanos(30));
+    let (scheduled, wakes) = state.cancel_request(root, &weaker, None).into_parts();
+    wakes.dispatch();
+    assert!(scheduled.is_empty(), "a weaker repeat adds no cancellation publication");
+    for task in tasks {
+        assert_eq!(requested_cleanup(&state, task).1, shutdown.cleanup_budget());
+    }
+}
+
+#[test]
+fn cascading_cleanup_preserves_non_shutdown_reason_budgets() {
+    for kind in [
+        CancelKind::User,
+        CancelKind::Timeout,
+        CancelKind::Deadline,
+        CancelKind::PollQuota,
+        CancelKind::CostBudget,
+        CancelKind::FailFast,
+        CancelKind::RaceLost,
+        CancelKind::ParentCancelled,
+        CancelKind::ResourceUnavailable,
+        CancelKind::LinkedExit,
+    ] {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(&mut state, root);
+        let root_task = insert_task(&mut state, root);
+        let child_task = insert_task(&mut state, child);
+        let reason = CancelReason::new(kind);
+        let (_, wakes) = state.cancel_request(root, &reason, None).into_parts();
+        let (root_reason, root_budget) = requested_cleanup(&state, root_task);
+        assert_eq!(root_reason, &reason);
+        assert_eq!(root_budget, reason.cleanup_budget());
+        let (child_reason, child_budget) = requested_cleanup(&state, child_task);
+        assert_eq!(child_reason.kind, CancelKind::ParentCancelled);
+        assert_eq!(child_reason.origin_region, root);
+        assert_eq!(child_reason.root_cause(), &reason);
+        assert_eq!(child_budget, CancelReason::parent_cancelled().cleanup_budget());
+        wakes.dispatch();
+    }
+}
+
 #[test]
 fn can_region_finalize_with_all_tasks_done() {
     init_test("can_region_finalize_with_all_tasks_done");

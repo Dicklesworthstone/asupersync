@@ -7676,9 +7676,10 @@ impl RuntimeState {
         // This is required for building proper cause chains.
         regions_to_cancel.sort_by_key(|node| node.depth);
 
-        // Build a map of region -> cancel reason for cause chain construction.
-        // Each child region's reason chains to its parent's reason.
-        let mut region_reasons: HashMap<RegionId, CancelReason> =
+        // Keep cleanup urgency separate from the diagnostic cause chain: a
+        // descendant's ParentCancelled reason (or a truncated chain) must not
+        // relax the budget of the cancellation that reached its parent.
+        let mut region_reasons: HashMap<RegionId, (CancelReason, Budget)> =
             HashMap::with_capacity(regions_to_cancel.len());
         // This shutdown-budget map needs no allocation when no region has an
         // explicit ceiling. Still visit every descendant to retain its own
@@ -7733,7 +7734,7 @@ impl RuntimeState {
                 // — a clear signal that something is wrong, instead of
                 // a misleading "looks like the root" chain.
                 let parent_reason = match region_reasons.get(&parent_id) {
-                    Some(r) => r.clone(),
+                    Some((r, _)) => r.clone(),
                     None => {
                         // br-asupersync-u5jdvw: the tnk8ny error!-level
                         // diagnostic was lost when the 118ayd lock
@@ -7773,8 +7774,17 @@ impl RuntimeState {
                     .with_cause_limited(reason.clone(), &self.cancel_attribution)
             };
 
-            // Store this region's reason for child chain building
-            region_reasons.insert(rid, region_reason.clone());
+            // Meet the immediate reason's budget with its parent's effective
+            // budget before the next generation truncates diagnostic causes.
+            // Explicit shutdown ceilings are still applied independently below.
+            let cleanup_budget = region_reason.cleanup_budget();
+            let cleanup_budget = node
+                .parent
+                .and_then(|parent| region_reasons.get(&parent))
+                .map_or(cleanup_budget, |(_, inherited)| {
+                    cleanup_budget.combine_untraced(*inherited)
+                });
+            region_reasons.insert(rid, (region_reason.clone(), cleanup_budget));
             let region_cancel_kind = region_reason.kind;
 
             self.record_trace_event(|seq| {
@@ -7843,18 +7853,18 @@ impl RuntimeState {
                 region.copy_task_ids_into(&mut task_id_buf);
             }
 
-            // Get the region's cancel reason with proper cause chain
-            let task_reason = region_reasons
+            // Attribution remains local; cleanup urgency carries every parent.
+            let (task_reason, cleanup_budget) = region_reasons
                 .get(&rid)
                 .cloned()
-                .unwrap_or_else(|| reason.clone());
+                .unwrap_or_else(|| (reason.clone(), reason.cleanup_budget()));
 
             for &task_id in &task_id_buf {
                 let Some((effects, task_budget_res, task_live)) =
                     tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
-                        let task_budget = shutdown_budgets.get(&rid).copied().map_or_else(
-                            || task_reason.cleanup_budget(),
-                            |ceiling| task_reason.cleanup_budget().combine_untraced(ceiling),
+                        let task_budget = shutdown_budgets.get(&rid).copied().map_or(
+                            cleanup_budget,
+                            |ceiling| cleanup_budget.combine_untraced(ceiling),
                         );
                         let effects = task.request_cancel_with_budget_and_publication(
                             task_reason.clone(),

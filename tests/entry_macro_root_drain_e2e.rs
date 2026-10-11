@@ -330,6 +330,107 @@ fn drain_root_region_reports_quiescent_for_cooperative_work_current_thread() {
 }
 
 #[test]
+fn root_shutdown_preserves_urgency_through_nested_regions() {
+    use asupersync::cx::ChildRegionSpec;
+    use asupersync::types::{CancelKind, CancelReason};
+
+    // br-asupersync-exeimj M2: a root shutdown must not become a looser
+    // cleanup budget merely because the work belongs to a descendant region.
+    for workers in [1, 2] {
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::multi_thread().worker_threads(workers)
+        };
+        let runtime = builder.build().expect("build runtime");
+        let parked = Arc::new(AtomicUsize::new(0));
+        let (regions, mut probes) = runtime.block_on(async {
+            let cx = Cx::current().expect("root context");
+            let child = cx
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("child region");
+            let grandchild = child
+                .cx()
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .expect("grandchild region");
+            let mut probes = Vec::new();
+            for context in [&cx, child.cx(), grandchild.cx()] {
+                let parked = Arc::clone(&parked);
+                probes.push(
+                    context
+                        .spawn(move |task_cx| async move {
+                            let mut announced = false;
+                            let mut cancelled = std::pin::pin!(task_cx.cancelled());
+                            std::future::poll_fn(|task| {
+                                let result = cancelled.as_mut().poll(task);
+                                if result.is_pending() && !announced {
+                                    announced = true;
+                                    parked.fetch_add(1, Ordering::Release);
+                                }
+                                result
+                            })
+                            .await;
+                            task_cx.checkpoint().expect_err("shutdown delivered");
+                            // Acknowledgement is applied after this Pending.
+                            // Observe the actual cleanup Cx on the next poll.
+                            yield_now().await;
+                            (
+                                task_cx.region_id(),
+                                task_cx.cancel_reason().expect("shutdown reason"),
+                                task_cx.budget(),
+                            )
+                        })
+                        .expect("spawn cleanup probe"),
+                );
+            }
+            for _ in 0..100_000 {
+                if parked.load(Ordering::Acquire) == probes.len() {
+                    break;
+                }
+                yield_now().await;
+            }
+            assert_eq!(parked.load(Ordering::Acquire), 3, "all probes parked");
+            assert!(probes.iter().all(|probe| !probe.is_finished()));
+            // Retain both handles so their Drop cannot request an earlier close.
+            ([child, grandchild], probes)
+        });
+
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(!report.has_pending_obligation_posts);
+        let completed: Vec<_> = probes
+            .iter_mut()
+            .map(|probe| {
+                probe
+                    .try_join()
+                    .expect("acknowledged cancellation preserves the typed result")
+                    .expect("quiescence published every cleanup result")
+            })
+            .collect();
+        let expected_budget = CancelReason::shutdown().cleanup_budget();
+        for (depth, (region, reason, budget)) in completed.iter().enumerate() {
+            assert_eq!(*budget, expected_budget, "workers={workers}, depth={depth}");
+            if depth == 0 {
+                assert_eq!(reason.kind, CancelKind::Shutdown);
+            } else {
+                assert_eq!(reason.kind, CancelKind::ParentCancelled);
+                assert_eq!(reason.origin_region, completed[depth - 1].0);
+                assert_eq!(reason.root_cause(), &completed[0].1);
+                assert_eq!(*region, regions[depth - 1].region_id());
+            }
+        }
+        drop(regions);
+    }
+}
+
+#[test]
 fn drain_root_region_times_out_within_bound_for_non_cooperative_work() {
     let runtime = RuntimeBuilder::multi_thread()
         .build()
