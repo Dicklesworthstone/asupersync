@@ -3424,6 +3424,13 @@ impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
                     let mut inner = self.pool.inner.lock();
                     inner.total = inner.total.saturating_sub(1);
                     self.pool.wake_next_async_pool_waiter_locked(&mut inner);
+                    drop(inner);
+                    // Counted like every other discard, as the sync pool's
+                    // safe_discard_connection does.
+                    self.pool
+                        .stats
+                        .total_discards
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
         }
@@ -4036,6 +4043,11 @@ mod tests {
                 usize::from(!pooled),
                 "{case}"
             );
+            assert_eq!(
+                pool.stats().total_discards,
+                u64::from(!pooled),
+                "{case}: a discarded connection is counted"
+            );
         }
 
         // Dropping the guard keeps the deferred behavior: no reset runs.
@@ -4075,6 +4087,7 @@ mod tests {
         }
         assert_eq!(pool.stats().idle, 0, "a cancelled reset never pools it");
         assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().total_discards, 1, "and counts it discarded");
         assert_eq!(pool.manager.disconnects.load(Ordering::SeqCst), 1);
         assert_eq!(pool.manager.release_checks.load(Ordering::SeqCst), 1);
         crate::test_complete!("a_cancelled_reset_and_return_discards_the_connection");
