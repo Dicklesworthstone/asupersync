@@ -3873,4 +3873,123 @@ mod tests {
         assert_eq!(applied.whole_chunk_count, 0);
         assert_eq!(applied.wire_payload_bytes, wire_payload.wire_payload_bytes);
     }
+
+    #[test]
+    fn test_reconstruct_manifest_bytes_fails_closed_before_allocating() {
+        let mut store = ContentAddressedChunkStore::new();
+        let payload = b"correct payload chunk";
+        let manifest = ingest_manifest(&mut store, "test-reconstruct", vec![payload]);
+
+        let empty_store = ContentAddressedChunkStore::new();
+        let err = reconstruct_manifest_bytes(&manifest, &empty_store).unwrap_err();
+        assert!(matches!(err, DeltaError::MissingChunk { index: 0, .. }));
+
+        // Corrupted payload size in store
+        let mut corrupt_size_store = ContentAddressedChunkStore::new();
+        corrupt_size_store
+            .chunks
+            .insert(manifest.chunks[0].content_id.clone(), b"wrong".to_vec());
+        let err = reconstruct_manifest_bytes(&manifest, &corrupt_size_store).unwrap_err();
+        assert!(matches!(
+            err,
+            DeltaError::ChunkPayloadSizeMismatch { index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn test_apply_delta_resync_send_plan_rejects_whole_chunk_mismatch_without_polluting_store() {
+        let mut sender_store = ContentAddressedChunkStore::new();
+        let sender = ingest_manifest(
+            &mut sender_store,
+            "tree-whole-chunk-check",
+            vec![b"original chunk payload content"],
+        );
+        let receiver_store = ContentAddressedChunkStore::new();
+        let target_chunk = sender.chunks[0].clone();
+
+        // 1. Size mismatch
+        let mut plan = DeltaResyncSendPlan {
+            base_plan: plan_incremental_resync(&sender, None, &receiver_store),
+            items: vec![DeltaResyncSendItem::WholeChunk {
+                chunk: target_chunk.clone(),
+                payload: b"short".to_vec(),
+            }],
+            payload_bytes: 5,
+            whole_chunk_bytes: 5,
+        };
+        let err = apply_delta_resync_send_plan(&sender, &receiver_store, &plan).unwrap_err();
+        assert!(matches!(
+            err,
+            DeltaError::ChunkPayloadSizeMismatch { index: 0, .. }
+        ));
+
+        // 2. Hash mismatch (same size, wrong bytes)
+        let wrong_payload = vec![0x7f; target_chunk.size_bytes as usize];
+        let wrong_id = ContentId::from_bytes(&wrong_payload);
+        plan.items = vec![DeltaResyncSendItem::WholeChunk {
+            chunk: target_chunk,
+            payload: wrong_payload,
+        }];
+        let err = apply_delta_resync_send_plan(&sender, &receiver_store, &plan).unwrap_err();
+        assert!(matches!(
+            err,
+            DeltaError::ChunkPayloadHashMismatch { index: 0, .. }
+        ));
+        assert!(!receiver_store.contains(&wrong_id));
+    }
+
+    #[test]
+    fn test_subchunk_planning_framing_overhead_prefers_whole_chunk() {
+        let target_payload = (0..256)
+            .map(|idx| ((idx * 11 + idx / 7 + 13) % 251) as u8)
+            .collect::<Vec<_>>();
+        let base_payload = target_payload.clone();
+
+        let mut receiver_store = ContentAddressedChunkStore::new();
+        let receiver = ingest_manifest(
+            &mut receiver_store,
+            "framing-overhead",
+            vec![&base_payload],
+        );
+        let signatures = build_receiver_subchunk_signatures(
+            &receiver,
+            &receiver_store,
+            delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+        )
+        .expect("receiver signatures");
+
+        // Target chunk where diff saves fewer than SUBDELTA_FRAMING_OVERHEAD_BYTES (84 bytes)
+        // With an 80-byte target, whole chunk is 61 + 80 = 141 bytes,
+        // whereas subchunk ops wire framing alone is 145 bytes.
+        let small_target = (0..80)
+            .map(|idx| ((idx * 13 + idx / 5 + 17) % 251) as u8)
+            .collect::<Vec<_>>();
+        let small_chunk = CasChunkRef::from_bytes(0, 0, &small_target).expect("chunk ref");
+        let item = build_delta_resync_send_item(&small_chunk, &small_target, &receiver, &signatures)
+            .expect("build send item");
+        assert!(
+            matches!(item, DeltaResyncSendItem::WholeChunk { .. }),
+            "expected WholeChunk due to 84-byte subdelta framing overhead"
+        );
+    }
+
+    #[test]
+    fn test_content_addressed_chunk_store_contains_and_coverage() {
+        let mut store = ContentAddressedChunkStore::new();
+        let payload = b"hello test payload";
+        let content_id = ContentId::from_bytes(payload);
+
+        assert!(!store.contains(&content_id));
+        assert!(!store.contains_coverage(&content_id));
+
+        // Insert verified coverage only (no chunk payload stored)
+        store.insert_verified_coverage(content_id.clone(), payload.len() as u64);
+        assert!(!store.contains(&content_id));
+        assert!(store.contains_coverage(&content_id));
+
+        // Insert actual payload
+        store.insert(payload).expect("insert payload");
+        assert!(store.contains(&content_id));
+        assert!(store.contains_coverage(&content_id));
+    }
 }

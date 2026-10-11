@@ -429,3 +429,97 @@ fn public_subchunk_diff_bounds_a_crafted_signatures_weak_fan_out() {
         .expect("diff against the crafted signature finishes within 20 s");
     assert_eq!(worker.join().expect("diff thread"), expected);
 }
+
+/// A public caller can call reconstruct_manifest_bytes on an unverified manifest.
+/// It must fail closed on missing or corrupted chunks before allocating memory (br-asupersync-w6fnfy F6).
+#[test]
+fn public_reconstruct_manifest_bytes_fails_closed_before_allocating() {
+    let mut store = ContentAddressedChunkStore::new();
+    let data = pattern_bytes(64 * 1024, 7);
+    let sender = manifest(&mut store, "unverified-reconstruct", fixed_chunks(&data, 64 * 1024));
+
+    let empty_store = ContentAddressedChunkStore::new();
+    let err = reconstruct_manifest_bytes(&sender, &empty_store).unwrap_err();
+    assert!(matches!(err, DeltaError::MissingChunk { index: 0, .. }));
+}
+
+/// WholeChunk payloads in apply_delta_resync_send_plan must match the target chunk's
+/// size and hash, rejecting forged or mismatched payloads before polluting the store (br-asupersync-w6fnfy F6).
+#[test]
+fn public_apply_send_plan_rejects_whole_chunk_payload_mismatch_without_polluting_store() {
+    let mut sender_store = ContentAddressedChunkStore::new();
+    let data = pattern_bytes(16 * 1024, 9);
+    let sender = manifest(&mut sender_store, "whole-chunk-verify", fixed_chunks(&data, 16 * 1024));
+    let receiver_store = ContentAddressedChunkStore::new();
+
+    let base_plan = plan_incremental_resync(&sender, None, &receiver_store);
+    let target_chunk = sender.chunks[0].clone();
+
+    // 1. Mismatched length
+    let mismatched_plan = asupersync::atp::delta::DeltaResyncSendPlan {
+        base_plan: base_plan.clone(),
+        items: vec![DeltaResyncSendItem::WholeChunk {
+            chunk: target_chunk.clone(),
+            payload: vec![0x42; 8 * 1024],
+        }],
+        payload_bytes: 8 * 1024,
+        whole_chunk_bytes: 8 * 1024,
+    };
+    let err = apply_delta_resync_send_plan(&sender, &receiver_store, &mismatched_plan).unwrap_err();
+    assert!(matches!(err, DeltaError::ChunkPayloadSizeMismatch { index: 0, .. }));
+
+    // 2. Mismatched hash
+    let wrong_payload = vec![0x42; 16 * 1024];
+    let wrong_id = asupersync::atp::object::ContentId::from_bytes(&wrong_payload);
+    let hash_mismatch_plan = asupersync::atp::delta::DeltaResyncSendPlan {
+        base_plan,
+        items: vec![DeltaResyncSendItem::WholeChunk {
+            chunk: target_chunk,
+            payload: wrong_payload,
+        }],
+        payload_bytes: 16 * 1024,
+        whole_chunk_bytes: 16 * 1024,
+    };
+    let err = apply_delta_resync_send_plan(&sender, &receiver_store, &hash_mismatch_plan).unwrap_err();
+    assert!(matches!(err, DeltaError::ChunkPayloadHashMismatch { index: 0, .. }));
+    assert!(!receiver_store.contains(&wrong_id));
+}
+
+/// When a sub-delta would save less than the 84-byte framing overhead difference
+/// between SubchunkOps (145 B) and WholeChunk (61 B), the planner selects WholeChunk (br-asupersync-w6fnfy F5).
+#[test]
+fn public_subchunk_planning_accounts_for_per_item_framing_overhead() {
+    let mut sender_store = ContentAddressedChunkStore::new();
+    let mut receiver_store = ContentAddressedChunkStore::new();
+
+    // Small 64-byte file where whole chunk on wire is 61 + 64 = 125 bytes,
+    // whereas subchunk ops framing alone is 145 bytes.
+    let base = pattern_bytes(64, 41);
+    let mut new = base.clone();
+    new[0] ^= 0x01; // 1 byte changed
+
+    let sender = manifest(&mut sender_store, "framing-test", vec![&new]);
+    let receiver = manifest(&mut receiver_store, "framing-test", vec![&base]);
+
+    let base_plan = plan_incremental_resync_with_receiver_coverage(
+        &sender,
+        Some(&receiver),
+        &ReceiverCasCoverage::from_manifest(&receiver),
+    );
+    let signatures = build_receiver_subchunk_signatures(
+        &receiver,
+        &receiver_store,
+        delta_subchunk::DEFAULT_SUBBLOCK_BYTES,
+    )
+    .expect("signatures");
+
+    let send_plan = build_delta_resync_send_plan(&base_plan, &sender_store, &receiver, &signatures)
+        .expect("send plan");
+
+    // Must be WholeChunk, because SubchunkOps framing is 145 B > 125 B
+    assert_eq!(send_plan.items.len(), 1);
+    assert!(
+        matches!(send_plan.items[0], DeltaResyncSendItem::WholeChunk { .. }),
+        "expected WholeChunk because subdelta framing overhead exceeds total whole chunk size"
+    );
+}
