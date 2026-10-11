@@ -56,6 +56,16 @@ pub struct NativeH3ListenerConfig {
     pub request_timeout: Duration,
     /// Cancellation grace for request work and its region finalizers.
     pub request_drain_timeout: Duration,
+    /// Optional idle lifetime after authenticated H3 initialization and after
+    /// the last request region closes. `None` preserves an unlimited
+    /// application idle lifetime; a configured duration must be nonzero.
+    ///
+    /// Request assembly, handlers, response producers and region cleanup
+    /// suspend this timer and retain their existing request/cleanup deadlines.
+    /// QUIC PINGs, acknowledgements and H3 control traffic do not extend it.
+    /// Expiry sends GOAWAY, then closes this peer with H3_NO_ERROR after its
+    /// output drains. `request_drain_timeout` bounds that final output drain.
+    pub application_idle_timeout: Option<Duration>,
     /// Maximum time to drain requests after the shutdown future completes.
     pub drain_timeout: Duration,
     /// Maximum buffered response body retained after a handler returns.
@@ -105,6 +115,7 @@ impl Default for NativeH3ListenerConfig {
             application_batch_size: 8,
             request_timeout: Duration::from_secs(30),
             request_drain_timeout: Duration::from_millis(100),
+            application_idle_timeout: None,
             drain_timeout: Duration::from_secs(5),
             max_buffered_response_bytes: 16 * 1024 * 1024,
             max_total_buffered_response_bytes: 64 * 1024 * 1024,
@@ -125,6 +136,10 @@ pub struct NativeH3ListenerReport {
     pub accepted_connections: u64,
     /// Failed admissions or connection-local protocol/transport failures.
     pub failed_connections: u64,
+    /// Connections retired by the configured application idle timeout.
+    /// These clean retirements do not count as failed connections or a
+    /// listener-wide drain timeout, even if their final output drain expires.
+    pub idle_connection_timeouts: u64,
     /// Responses drained and request regions successfully closed.
     pub completed_requests: u64,
     /// Requests refused before scheduler admission.
@@ -231,6 +246,9 @@ impl NativeH3Listener {
             || config.endpoint.max_connections == 0
             || config.request_timeout.is_zero()
             || config.request_drain_timeout.is_zero()
+            || config
+                .application_idle_timeout
+                .is_some_and(|timeout| timeout.is_zero())
             || config.drain_timeout.is_zero()
             || config
                 .streaming_request_body_buffer_bytes
@@ -1141,6 +1159,8 @@ struct ListenerConnection {
     retiring: bool,
     retirement_forced: bool,
     retirement_deadline: Option<ServerRequestDeadline>,
+    application_idle_deadline: Option<ServerRequestDeadline>,
+    idle_retirement: bool,
     next_request: u64,
     live: bool,
     goaway_sent: bool,
@@ -1310,6 +1330,8 @@ impl ListenerState {
                         retiring: false,
                         retirement_forced: false,
                         retirement_deadline: None,
+                        application_idle_deadline: None,
+                        idle_retirement: false,
                         next_request: 0,
                         live: true,
                         goaway_sent: false,
@@ -1363,6 +1385,7 @@ impl ListenerState {
                         connection.live = false;
                         connection.assembly.clear();
                         connection.retirement_deadline = None;
+                        connection.application_idle_deadline = None;
                         self.report.failed_connections =
                             self.report.failed_connections.saturating_add(1);
                         let protected_close = close_code.is_some_and(|code| {
@@ -1460,6 +1483,15 @@ impl ListenerState {
                     }
                 }
             });
+            // Requests keep their connection alive until the complete region
+            // close receipt, including descendants and finalizers. Check
+            // idleness after ingress and ownership retirement so newly
+            // observed request work wins over an idle deadline in this poll.
+            if connection.poll_application_idle(cx, &self.config, self.draining, task_cx) {
+                self.report.idle_connection_timeouts =
+                    self.report.idle_connection_timeouts.saturating_add(1);
+                progress = true;
+            }
             if connection.live
                 && connection.retiring
                 && connection.requests.is_empty()
@@ -1477,6 +1509,7 @@ impl ListenerState {
                         // protected H3_NO_ERROR close through its drain period.
                         connection.live = false;
                         connection.retirement_deadline = None;
+                        connection.application_idle_deadline = None;
                         retired_connection = true;
                         progress = true;
                     }
@@ -1510,6 +1543,46 @@ impl ListenerState {
 }
 
 impl ListenerConnection {
+    fn poll_application_idle(
+        &mut self,
+        cx: &Cx,
+        config: &NativeH3ListenerConfig,
+        draining: bool,
+        task_cx: &mut TaskContext<'_>,
+    ) -> bool {
+        let Some(timeout) = config.application_idle_timeout else {
+            return false;
+        };
+        if !self.live
+            || draining
+            || self.retiring
+            || !self.requests.is_empty()
+            || !self.assembly.is_empty()
+        {
+            self.application_idle_deadline = None;
+            return false;
+        }
+        if self.application_idle_deadline.is_none() {
+            self.application_idle_deadline = cx
+                .timer_driver()
+                .map(|timer| ServerRequestDeadline::new(timer, cx.now() + timeout));
+        }
+        if !self
+            .application_idle_deadline
+            .as_mut()
+            .is_some_and(|deadline| Pin::new(deadline).poll(task_cx).is_ready())
+        {
+            return false;
+        }
+        self.application_idle_deadline = None;
+        self.idle_retirement = true;
+        self.retiring = true;
+        self.retirement_deadline = cx.timer_driver().map(|timer| {
+            ServerRequestDeadline::new(timer, cx.now() + config.request_drain_timeout)
+        });
+        true
+    }
+
     fn poll_request_inputs(
         &mut self,
         cx: &Cx,
@@ -1602,6 +1675,7 @@ impl ListenerConnection {
                     .refuse_request(cx, &mut self.session, connection, id, reason, true)?;
                 report.refused_requests = report.refused_requests.saturating_add(1);
             } else {
+                self.application_idle_deadline = None;
                 connection.configure_stream_receive_window(cx, id, config.receive_window_bytes)?;
                 let budget = cx
                     .budget()
@@ -1709,7 +1783,9 @@ impl ListenerConnection {
         {
             self.retirement_deadline = None;
             self.retirement_forced = true;
-            report.drain_timed_out = true;
+            if !self.idle_retirement {
+                report.drain_timed_out = true;
+            }
             for request in self.requests.values_mut() {
                 request.cancel(cx, config.request_drain_timeout);
             }

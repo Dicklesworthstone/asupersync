@@ -488,6 +488,334 @@ mod native_h3_listener_live {
             .await;
         }
 
+        async fn send_control_keepalive(cx: &Cx, owner: &mut NativeQuicUdpConnection) {
+            // The existing client initializer opens its control stream first
+            // (client unidirectional stream 2). An ignored GREASE frame keeps
+            // authenticated QUIC traffic flowing without opening a request.
+            // This is a legal H3 control frame, not a second SETTINGS frame.
+            owner
+                .connection_mut()
+                .write_stream(cx, StreamId(2), Bytes::from_static(&[0x21, 0]), false)
+                .unwrap();
+            owner.flush(cx).await.unwrap();
+        }
+
+        async fn keep_control_only_connection_open(
+            cx: &Cx,
+            owner: &mut NativeQuicUdpConnection,
+            session: &mut NativeH3Session,
+            duration: Duration,
+        ) {
+            let until = cx.now() + duration;
+            while cx.now() < until {
+                send_control_keepalive(cx, owner).await;
+                owner
+                    .drive_io_once(cx, Duration::from_millis(20))
+                    .await
+                    .unwrap();
+                assert!(
+                    !owner.connection().close_was_peer_initiated(),
+                    "active request ownership must suspend application idle retirement"
+                );
+                assert!(
+                    drain_h3_events(cx, session, owner.connection_mut()).is_empty(),
+                    "control traffic must not cause a request response or idle GOAWAY"
+                );
+            }
+        }
+
+        async fn receive_application_idle_close(
+            cx: &Cx,
+            owner: &mut NativeQuicUdpConnection,
+            session: &mut NativeH3Session,
+            expected_goaway: u64,
+        ) -> usize {
+            let mut goaway = false;
+            let mut control_writes = 0;
+            loop {
+                if !goaway {
+                    send_control_keepalive(cx, owner).await;
+                    control_writes += 1;
+                }
+                owner
+                    .drive_io_once(cx, Duration::from_millis(20))
+                    .await
+                    .unwrap();
+                if owner.connection().close_was_peer_initiated() {
+                    assert!(goaway, "cooperative idle retirement must deliver GOAWAY first");
+                    assert_eq!(
+                        owner.connection().inner().transport().close_code(),
+                        Some(0x100),
+                        "application idleness closes this peer with H3_NO_ERROR"
+                    );
+                    return control_writes;
+                }
+                for event in drain_h3_events(cx, session, owner.connection_mut()) {
+                    match event {
+                        NativeH3Event::Goaway(id) => {
+                            assert_eq!(id, expected_goaway);
+                            assert!(!goaway, "idle expiry is recorded once");
+                            goaway = true;
+                        }
+                        other => panic!("unexpected idle retirement event: {other:?}"),
+                    }
+                }
+                owner.flush(cx).await.unwrap();
+            }
+        }
+
+        #[test]
+        fn authenticated_listener_application_idle_timeout_ignores_control_traffic_and_is_opt_in() {
+            const IDLE: Duration = Duration::from_millis(200);
+            for workers in [1, 2] {
+                for enabled in [false, true] {
+                    run(workers, async move {
+                        let cx = Cx::current().unwrap();
+                        let mut listener_config = config(8);
+                        assert!(listener_config.application_idle_timeout.is_none());
+                        if enabled {
+                            listener_config.application_idle_timeout = Some(IDLE);
+                        }
+                        listener_config.request_drain_timeout = Duration::from_secs(1);
+                        let listener = bind(&cx, Router::new(), listener_config).await;
+                        let address = listener.local_addr();
+                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let serving = listener.serve_with_shutdown(&cx, async {
+                            shutdown_rx.recv(&cx).await.unwrap();
+                        });
+                        let client = async {
+                            let (mut owner, mut session) = connect(&cx, address, 90).await;
+                            // Receiving SETTINGS above witnesses initialized
+                            // H3 ownership before testing its idle lifetime.
+                            if enabled {
+                                let writes = receive_application_idle_close(
+                                    &cx,
+                                    &mut owner,
+                                    &mut session,
+                                    0,
+                                )
+                                .await;
+                                assert!(writes > 0, "authenticated control traffic was sent");
+                                shutdown_tx.send(&cx, ()).unwrap();
+                            } else {
+                                keep_control_only_connection_open(
+                                    &cx,
+                                    &mut owner,
+                                    &mut session,
+                                    IDLE * 2,
+                                )
+                                .await;
+                                shutdown_tx.send(&cx, ()).unwrap();
+                                acknowledge_shutdown_goaway(
+                                    &cx,
+                                    &mut owner,
+                                    &mut session,
+                                    0,
+                                    None,
+                                )
+                                .await;
+                            }
+                        };
+                        let (report, ()) = zip(serving, client).await;
+                        let report = report.unwrap();
+                        assert_eq!(report.accepted_connections, 1);
+                        assert_eq!(report.idle_connection_timeouts, u64::from(enabled));
+                        assert_eq!(report.failed_connections, 0);
+                        assert_eq!(report.completed_requests, 0);
+                        assert_eq!(report.cancelled_requests, 0);
+                        assert_eq!(report.refused_requests, 0);
+                        assert!(!report.drain_timed_out);
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn authenticated_listener_idle_timer_waits_for_live_body_and_region_cleanup() {
+            const IDLE: Duration = Duration::from_millis(200);
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let (body_parked_tx, mut body_parked_rx) =
+                        asupersync::channel::oneshot::channel();
+                    let body_parked = Arc::new(Mutex::new(Some(body_parked_tx)));
+                    let (cleanup_parked_tx, mut cleanup_parked_rx) =
+                        asupersync::channel::oneshot::channel();
+                    let cleanup_parked = Arc::new(Mutex::new(Some(cleanup_parked_tx)));
+                    let (cleanup_release_tx, cleanup_release_rx) =
+                        asupersync::channel::oneshot::channel::<()>();
+                    let cleanup_release = Arc::new(Mutex::new(Some(cleanup_release_rx)));
+                    let retired = Arc::new(AtomicUsize::new(0));
+                    let handler_retired = Arc::clone(&retired);
+                    let router = Router::new().route(
+                        "/owned",
+                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                            move |request_cx: Cx, mut body: StreamingRawBody| {
+                                let mut body_parked = body_parked.lock().unwrap().take();
+                                let mut cleanup_parked = cleanup_parked.lock().unwrap().take();
+                                let mut cleanup_release =
+                                    cleanup_release.lock().unwrap().take().unwrap();
+                                let retired = Arc::clone(&handler_retired);
+                                async move {
+                                    let mut received = Vec::new();
+                                    loop {
+                                        let frame = std::future::poll_fn(|task_cx| {
+                                            let poll = Pin::new(&mut body).poll_frame(task_cx);
+                                            if poll.is_pending()
+                                                && let Some(signal) = body_parked.take()
+                                            {
+                                                signal
+                                                    .send(&request_cx, request_cx.clone())
+                                                    .unwrap();
+                                            }
+                                            poll
+                                        })
+                                        .await;
+                                        let Some(frame) = frame else { break };
+                                        let Frame::Data(bytes) = frame.unwrap() else {
+                                            panic!("idle ownership upload has no trailers");
+                                        };
+                                        received.extend_from_slice(bytes.chunk());
+                                    }
+                                    assert_eq!(received, b"owned upload");
+                                    let (started_tx, mut started_rx) =
+                                        asupersync::channel::oneshot::channel();
+                                    let _descendant = request_cx
+                                        .spawn(move |child_cx| async move {
+                                            let _retired = ProducerRetired(retired);
+                                            let mut started = Some(started_tx);
+                                            let mut cancelled = std::pin::pin!(child_cx.cancelled());
+                                            std::future::poll_fn(|task_cx| {
+                                                let poll = cancelled.as_mut().poll(task_cx);
+                                                if poll.is_pending()
+                                                    && let Some(signal) = started.take()
+                                                {
+                                                    signal.send(&child_cx, ()).unwrap();
+                                                }
+                                                poll
+                                            })
+                                            .await;
+                                            assert!(child_cx.checkpoint().is_err());
+                                            std::future::poll_fn(|task_cx| {
+                                                let poll = cleanup_release
+                                                    .poll_recv_uninterruptible(task_cx);
+                                                if poll.is_pending()
+                                                    && let Some(signal) = cleanup_parked.take()
+                                                {
+                                                    signal.send_blocking(child_cx.clone()).unwrap();
+                                                }
+                                                poll
+                                            })
+                                            .await
+                                            .unwrap();
+                                        })
+                                        .unwrap();
+                                    started_rx.recv(&request_cx).await.unwrap();
+                                    Response::new(StatusCode::OK, "owner still draining")
+                                }
+                            },
+                        )),
+                    );
+                    let mut listener_config = config(16);
+                    listener_config.application_idle_timeout = Some(IDLE);
+                    listener_config.request_drain_timeout = Duration::from_secs(5);
+                    let listener = bind(&cx, router, listener_config).await;
+                    let address = listener.local_addr();
+                    let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                    let serving = listener.serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    });
+                    let client = async {
+                        let (mut owner, mut session) = connect(&cx, address, 91).await;
+                        let stream = open_upload(&cx, &mut owner, "/owned", Some(12)).await;
+                        let request_cx: Cx = body_parked_rx.recv(&cx).await.unwrap();
+                        assert!(!request_cx.is_cancel_requested());
+                        keep_control_only_connection_open(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            IDLE * 2,
+                        )
+                        .await;
+                        assert!(!request_cx.is_cancel_requested());
+                        write_data(&cx, &mut owner, stream, b"owned upload", true).await;
+                        receive_response(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            stream,
+                            &H3ResponseHead::new(200, Vec::new()).unwrap(),
+                            b"owner still draining",
+                        )
+                        .await;
+                        let child_cx: Cx = cleanup_parked_rx.recv(&cx).await.unwrap();
+                        assert_eq!(child_cx.region_id(), request_cx.region_id());
+                        assert!(child_cx.is_cancel_requested());
+                        assert_eq!(retired.load(Ordering::SeqCst), 0);
+                        keep_control_only_connection_open(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            IDLE * 2,
+                        )
+                        .await;
+                        assert_eq!(retired.load(Ordering::SeqCst), 0);
+                        cleanup_release_tx.send(&cx, ()).unwrap();
+                        wait_region_closed(&request_cx).await;
+                        assert_eq!(retired.load(Ordering::SeqCst), 1);
+                        receive_application_idle_close(
+                            &cx,
+                            &mut owner,
+                            &mut session,
+                            stream.0 + 4,
+                        )
+                        .await;
+                        shutdown_tx.send(&cx, ()).unwrap();
+                    };
+                    let (report, ()) = zip(serving, client).await;
+                    let report = report.unwrap();
+                    assert_eq!(report.accepted_connections, 1);
+                    assert_eq!(report.idle_connection_timeouts, 1);
+                    assert_eq!(report.completed_requests, 1);
+                    assert_eq!(report.cancelled_requests, 0);
+                    assert_eq!(report.failed_request_cleanups, 0);
+                    assert_eq!(report.failed_connections, 0);
+                    assert_eq!(report.refused_requests, 0);
+                    assert!(!report.drain_timed_out);
+                });
+            }
+        }
+
+        #[test]
+        fn authenticated_listener_rejects_zero_application_idle_timeout_before_binding() {
+            run(1, async {
+                let cx = Cx::current().unwrap();
+                let mut listener_config = config(8);
+                listener_config.application_idle_timeout = Some(Duration::ZERO);
+                let result = NativeH3Listener::bind(
+                    &cx,
+                    "127.0.0.1:0".parse().unwrap(),
+                    Router::new(),
+                    server_config(
+                        vec![certificate("server")],
+                        leaf_key(),
+                        vec![H3_ALPN.to_vec()],
+                    )
+                    .unwrap(),
+                    transport_parameters(listener_config.endpoint.connection_config),
+                    listener_config,
+                )
+                .await;
+                assert!(matches!(
+                    result,
+                    Err(asupersync::web::NativeH3ListenerError::Endpoint(
+                        asupersync::net::quic_native::ManagedEndpointError::InvalidConfig(_)
+                    ))
+                ));
+                assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+            });
+        }
+
         #[test]
         fn authenticated_listener_streams_prefix_before_fin_current_thread() {
             prefix_before_fin(1);
