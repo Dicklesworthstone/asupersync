@@ -347,6 +347,7 @@ fn registered_native_execution_persists_before_return_and_replays_after_restart(
 }
 
 #[test]
+#[allow(clippy::async_yields_async)]
 fn queued_admission_drop_retains_journal_and_file_lock_until_worker_retirement() {
         for workers in [1, 2] {
             let (file, journal) = JournalFile::create();
