@@ -1282,13 +1282,11 @@ where
                 validate_host_header(&req.headers, &self.config.allowed_hosts)
             {
                 state.phase = ConnectionPhase::Writing;
-                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let reject_resp = Response {
                     status: rejection.status(),
                     reason: rejection.reason().to_string(),
                     version: req.version,
                     headers: vec![
-                        ("date".to_string(), date_str),
                         (
                             "content-type".to_string(),
                             "text/plain; charset=utf-8".to_string(),
@@ -1727,13 +1725,11 @@ where
             if let Err(rejection) =
                 validate_host_header(&head.headers, &self.config.allowed_hosts)
             {
-                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let response = Response {
                     status: rejection.status(),
                     reason: rejection.reason().to_string(),
                     version: head.version,
                     headers: vec![
-                        ("date".to_owned(), date_str),
                         (
                             "content-type".to_owned(),
                             "text/plain; charset=utf-8".to_owned(),
@@ -2110,13 +2106,11 @@ where
     let _in_flight = InFlightRequestGuard::acquire(in_flight_requests.as_ref());
 
     if let Err(rejection) = validate_host_header(&head.headers, &config.allowed_hosts) {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
         let mut response = Response {
             status: rejection.status(),
             reason: rejection.reason().to_string(),
             version: head.version,
             headers: vec![
-                ("date".to_owned(), date_str),
                 (
                     "content-type".to_owned(),
                     "text/plain; charset=utf-8".to_owned(),
@@ -2415,8 +2409,6 @@ fn live_sse_head_only_response(version: Version) -> Response {
         .filter(|(name, _)| !name.eq_ignore_ascii_case("connection"))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-    response.headers.push(("date".to_owned(), date_str));
     add_connection_close(&mut response);
     response
 }
@@ -2436,10 +2428,6 @@ fn validate_produced_response_head(
         .retain(|(name, _)| !name.eq_ignore_ascii_case("connection"));
     head.headers
         .push(("Connection".to_owned(), "close".to_owned()));
-    if head.status >= 200 && !head.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("date")) {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-        head.headers.push(("date".to_owned(), date_str));
-    }
 
     let mut content_length = None;
     let mut transfer_encoding = None;
@@ -3203,13 +3191,11 @@ fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
         | HttpError::PrefetchedDataRemaining(_)
         | HttpError::TooManyInformationalResponses { .. } => return None,
     };
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Some(Response {
         status,
         reason: String::new(),
         version: Version::Http11,
         headers: vec![
-            ("date".to_string(), date_str),
             (
                 "content-type".to_string(),
                 "text/plain; charset=utf-8".to_string(),
@@ -3508,18 +3494,14 @@ async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) ->
 /// Minimal `text/plain` response for server-hop terminal outcomes
 /// (handler panic → 500, request budget deadline → 503).
 fn hop_error_response(version: Version, status: u16, body: &str) -> Response {
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Response {
         status,
         reason: String::new(),
         version,
-        headers: vec![
-            ("date".to_string(), date_str),
-            (
-                "content-type".to_string(),
-                "text/plain; charset=utf-8".to_string(),
-            ),
-        ],
+        headers: vec![(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        )],
         body: body.as_bytes().to_vec(),
         trailers: Vec::new(),
     }
@@ -4050,17 +4032,11 @@ fn finalize_response_persistence(
         resp.version = Version::Http10;
     }
 
-    // RFC 9110 §6.6.1: An origin server MUST generate a Date header field in all
-    // non-1xx responses when its clock is available.
-    if resp.status >= 200
-        && !resp
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("date"))
-    {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-        resp.headers.push(("date".to_string(), date_str));
-    }
+    // No Date header is generated. RFC 9110 §6.6.1 forbids one from a server
+    // without a clock that approximates UTC, and this server's clock is the
+    // runtime's (wall_now: timer or process-relative time, virtual in the
+    // lab), not UTC: formatting it gave dates in January 1970. A handler that
+    // has a UTC clock can set Date itself with format_unix_nanos_http_date.
 
     let close_after = close_after || response_requests_close(resp);
     if close_after {
@@ -6662,12 +6638,9 @@ mod tests {
 
         assert!(!close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "keep-alive")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "keep-alive");
     }
 
     #[test]
@@ -6678,12 +6651,9 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
     }
 
     #[test]
@@ -6694,27 +6664,28 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http11);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
     }
 
     #[test]
-    fn finalize_response_persistence_generates_date_header() {
+    fn finalize_response_persistence_never_invents_a_date_header() {
+        // The server's clock is not UTC (wall_now is timer or process time),
+        // so it must not invent a Date (RFC 9110 §6.6.1); formatting it gave
+        // dates in January 1970.
         let mut resp = Response::new(200, "OK", Vec::new());
         finalize_response_persistence(Version::Http11, &mut resp, false);
-        let date_header = resp
-            .headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("date"));
-        assert!(date_header.is_some());
-        let date_val = &date_header.unwrap().1;
-        assert!(date_val.ends_with(" GMT"));
+        assert!(
+            !resp
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("date")),
+            "the server injected a Date: {:?}",
+            resp.headers
+        );
 
-        // If Date is already provided, it MUST be preserved rather than overwritten
+        // A Date the handler set is kept, exactly once.
         let mut resp_with_date = Response::new(200, "OK", Vec::new())
             .with_header("Date", "Sun, 06 Nov 1994 08:49:37 GMT");
         finalize_response_persistence(Version::Http11, &mut resp_with_date, false);
