@@ -1252,6 +1252,25 @@ Security:
 - wasm32: a `RuntimeBuilder` runtime's timer clock reads the host's monotonic
   time. Before, the clock was never fed and stayed at zero, so every nonzero
   sleep or timeout waited forever (`fqdvqn`).
+- Timer driver: the wakers of cancelled, stale or cleared timers drop after
+  the driver releases its wheel lock. A waker that held the last reference to
+  a task whose drop cancels a timer used to deadlock there (`m85zfi`).
+- A `sleep` of exactly the maximum timer duration (7 days by default) started
+  partway into a 1 ms tick completed up to 1 ms early. It now completes at its
+  deadline (`m85zfi`).
+- Name registry: dropping a `NameRegistry` that still holds a lease granted to
+  a waiter that never collected it aborts that lease. Before, the lease's
+  obligation token panicked with ASUP-E101 (`in4gh8`).
+- A named GenServer started with `named_gen_server_start` judges waiting
+  tasks' deadlines by the runtime clock when it releases its name. Before, a
+  fixed 1 s clock refused waiters still waiting and granted the name to ones
+  long expired (`in4gh8`).
+- atpd-live: `resume-receiver --resolve-finalizing` completes a journaled
+  receiver that a crash left in `Finalizing`. It re-hashes the retained data
+  against the final intent, records `Committed`, and restores only the
+  final-Proof exchange. Without the flag, `Finalizing` is still refused.
+  `receive-journaled` refuses a leftover journal, data or intent path before
+  creating anything, instead of stranding an empty pair (`6g13fc`).
 - Entry macros: `#[asupersync::main]` and `#[asupersync::test]` no longer
   trip `clippy::result_large_err` in the caller's crate for an entry that
   returns `Result<(), asupersync::Error>`.
