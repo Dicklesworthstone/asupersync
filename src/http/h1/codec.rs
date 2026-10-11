@@ -26,6 +26,12 @@ const MAX_HEADERS: usize = 128;
 /// Maximum allowed request line length.
 const MAX_REQUEST_LINE: usize = 8192;
 
+/// Empty lines ignored before a request-line (RFC 9112 §2.2 asks for at
+/// least one; Apache also stops at ten). More is a malformed request. Every
+/// read of an incomplete head walks this prefix again, so an unbounded run
+/// trickled in by a peer cost a pass over up to 64 KiB of buffer per read.
+const MAX_LEADING_EMPTY_LINES: usize = 10;
+
 /// HTTP/1.1 protocol errors.
 #[derive(Debug)]
 pub enum HttpError {
@@ -226,10 +232,7 @@ impl Http1Codec {
     /// Returns `false` once the head's end is buffered, so the full
     /// inspection runs exactly once per head.
     fn head_still_incomplete(&mut self, src: &[u8]) -> Result<bool, HttpError> {
-        let mut non_crlf_start = 0;
-        while src[non_crlf_start..].starts_with(b"\r\n") {
-            non_crlf_start += 2;
-        }
+        let non_crlf_start = leading_empty_lines_len(src);
         // A caller that drained or replaced the buffer starts a new scan.
         let scanned = if self.head_scanned > src.len() {
             0
@@ -320,11 +323,22 @@ impl Default for Http1Codec {
 /// match as an empty header block delimiter.
 #[inline]
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    let mut start = 0;
-    while buf[start..].starts_with(b"\r\n") {
-        start += 2;
-    }
+    let start = leading_empty_lines_len(buf);
     memmem::find(&buf[start..], b"\r\n\r\n").map(|idx| start + idx + 4)
+}
+
+/// Length of the empty lines ignored at the start of `buf`: at most
+/// [`MAX_LEADING_EMPTY_LINES`] of them.
+#[inline]
+fn leading_empty_lines_len(buf: &[u8]) -> usize {
+    let mut len = 0;
+    for _ in 0..MAX_LEADING_EMPTY_LINES {
+        if !buf[len..].starts_with(b"\r\n") {
+            break;
+        }
+        len += 2;
+    }
+    len
 }
 
 /// Find the position of the first CRLF (`\r\n`) in `buf`.
@@ -1388,11 +1402,7 @@ fn inspect_request_head_parts(
         }
         // Preserve request-line limit behavior for incomplete heads while
         // avoiding an extra scan on the common fully-buffered decode path.
-        let mut unparsed_start = 0;
-        while src[unparsed_start..].starts_with(b"\r\n") {
-            unparsed_start += 2;
-        }
-        let unparsed = &src[unparsed_start..];
+        let unparsed = &src[leading_empty_lines_len(src)..];
         if unparsed.len() > MAX_REQUEST_LINE {
             match find_crlf(unparsed) {
                 Some(line_end) if line_end > MAX_REQUEST_LINE => {
@@ -1418,10 +1428,11 @@ fn inspect_request_head_parts(
     let mut request_line_start = 0;
     let mut request_line_end = None;
     for pos in crlf_positions.by_ref() {
-        if pos == request_line_start {
+        if pos == request_line_start && request_line_start < 2 * MAX_LEADING_EMPTY_LINES {
             // RFC 9112 §2.2: A server that is expecting to receive and parse a
             // request-line SHOULD ignore at least one empty line (CRLF) received
-            // prior to the request-line.
+            // prior to the request-line. Past the allowance the empty line is
+            // the request-line, which is malformed.
             request_line_start = pos + 2;
         } else {
             request_line_end = Some(pos);
@@ -2065,6 +2076,49 @@ mod tests {
             assert_eq!(head.uri, "/stream");
             assert_eq!(kind, StreamingBodyKind::Empty);
         }
+    }
+
+    /// asupersync-8udzw7 (review of f5e6fda16): the RFC 9112 §2.2 allowance
+    /// of empty lines before a request-line is bounded. A longer run is a
+    /// malformed request, refused as soon as it passes the allowance; the
+    /// unbounded skip buffered a trickled run up to 64 KiB, walking it again
+    /// on every read.
+    #[test]
+    fn a_run_of_leading_empty_lines_past_the_allowance_is_refused_at_once() {
+        let mut ten = b"\r\n".repeat(MAX_LEADING_EMPTY_LINES);
+        ten.extend_from_slice(b"GET /ten HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let req = decode_one(&mut Http1Codec::new(), &ten)
+            .unwrap()
+            .expect("the allowed empty lines are ignored");
+        assert_eq!(req.uri, "/ten");
+
+        let mut eleven = b"\r\n".repeat(MAX_LEADING_EMPTY_LINES + 1);
+        eleven.extend_from_slice(b"GET /eleven HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(matches!(
+            decode_one(&mut Http1Codec::new(), &eleven),
+            Err(HttpError::BadRequestLine)
+        ));
+
+        let mut codec = Http1Codec::new();
+        let mut buf = BytesMut::new();
+        let mut refused_at = None;
+        for (fed, byte) in b"\r\n".repeat(2048).into_iter().enumerate() {
+            buf.extend_from_slice(&[byte]);
+            match codec.decode(&mut buf) {
+                Ok(None) => {}
+                Ok(Some(req)) => panic!("a run of empty lines decoded as {req:?}"),
+                Err(err) => {
+                    assert!(matches!(err, HttpError::BadRequestLine), "{err:?}");
+                    refused_at = Some(fed + 1);
+                    break;
+                }
+            }
+        }
+        let refused_at = refused_at.expect("a trickled run of empty lines must be refused");
+        assert!(
+            refused_at <= 2 * (MAX_LEADING_EMPTY_LINES + 2),
+            "refused only after {refused_at} bytes"
+        );
     }
 
     /// Feed `raw` one byte per decode call, as a peer trickling its request
