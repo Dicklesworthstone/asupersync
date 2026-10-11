@@ -15,6 +15,7 @@ use super::global_queue::{CountReservation, GlobalFifoQueue};
 const READY_COMBINER_IN_FLIGHT_THRESHOLD: usize = 4;
 const READY_COMBINER_BACKLOG_THRESHOLD: usize = 256;
 const READY_COMBINER_MAX_BATCH: usize = 64;
+const READY_COMBINER_MAX_PENDING: usize = READY_COMBINER_MAX_BATCH;
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -313,24 +314,17 @@ impl GlobalInjector {
             .fetch_add(1, Ordering::Relaxed);
 
         if let Some(mut pending) = self.ready_combiner.pending.try_lock() {
-            if self.ready_combiner.active.load(Ordering::Acquire) {
+            // The owner releases active while holding this same lock. An
+            // accepted entry therefore belongs to its bounded final flush,
+            // or to a successor that has already claimed the empty buffer.
+            if self.ready_combiner.active.load(Ordering::Acquire)
+                && pending.len() < READY_COMBINER_MAX_PENDING
+            {
                 pending.push(entry);
-                // Double-check active state after pushing to prevent race condition
-                // where combiner sets active=false between our check and push.
-                if self.ready_combiner.active.load(Ordering::Acquire) {
-                    self.ready_combiner
-                        .deferred_injections
-                        .fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                // Race detected: combiner became inactive, remove OUR entry from pending and fallback
-                // Only pop if the last entry is the one we just pushed (FIFO ordering protection)
-                if pending
-                    .last()
-                    .is_some_and(|last| last.task == entry.task && last.priority == entry.priority)
-                {
-                    pending.pop();
-                }
+                self.ready_combiner
+                    .deferred_injections
+                    .fetch_add(1, Ordering::Relaxed);
+                return;
             }
         }
 
@@ -344,30 +338,27 @@ impl GlobalInjector {
         let mut batch = Vec::with_capacity(READY_COMBINER_MAX_BATCH);
         batch.push(first);
 
-        loop {
-            {
-                let mut pending = self.ready_combiner.pending.lock();
-                let take = READY_COMBINER_MAX_BATCH.saturating_sub(batch.len());
-                if take > 0 {
-                    let drain_len = take.min(pending.len());
-                    batch.extend(pending.drain(..drain_len));
-                }
-            }
-
-            self.publish_ready_batch(&mut batch);
-
+        {
             let mut pending = self.ready_combiner.pending.lock();
-            if pending.is_empty() {
-                self.ready_combiner.active.store(false, Ordering::Release);
-                self.ready_combiner
-                    .mode_exits
-                    .fetch_add(1, Ordering::Relaxed);
-                break;
-            }
-
-            let take = READY_COMBINER_MAX_BATCH.min(pending.len());
+            let take = (READY_COMBINER_MAX_BATCH - 1).min(pending.len());
             batch.extend(pending.drain(..take));
         }
+        self.publish_ready_batch(&mut batch);
+
+        // Continuous arrivals must not keep the injecting worker or reactor
+        // inside wake() forever. Take the entire bounded remainder and end
+        // this tenure before publishing it. Later arrivals either belong to
+        // a successor or publish directly; no entry needs a future injection
+        // to make progress. Each tenure publishes at most two 64-entry batches.
+        {
+            let mut pending = self.ready_combiner.pending.lock();
+            batch.append(&mut pending);
+            self.ready_combiner.active.store(false, Ordering::Release);
+            self.ready_combiner
+                .mode_exits
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        self.publish_ready_batch(&mut batch);
     }
 
     fn publish_ready_batch(&self, batch: &mut Vec<PriorityTask>) {
@@ -385,9 +376,16 @@ impl GlobalInjector {
             .fetch_add(count, Ordering::Relaxed);
 
         let mut reservation = self.ready_queue.reserve_count(count);
+        #[cfg(test)]
+        let mut observed = false;
         for entry in batch.drain(..) {
             self.ready_queue.push_uncounted(entry);
             reservation.publish_one();
+            #[cfg(test)]
+            if !observed {
+                observed = true;
+                tests::observe_ready_combiner_publication(self);
+            }
         }
     }
 
@@ -661,6 +659,44 @@ mod tests {
     use std::thread;
     use std::time::Instant;
 
+    thread_local! {
+        static READY_PUBLICATION_HOOK: std::cell::RefCell<
+            Option<Box<dyn FnMut(&GlobalInjector)>>,
+        > = const { std::cell::RefCell::new(None) };
+    }
+
+    struct ReadyPublicationHook;
+
+    impl Drop for ReadyPublicationHook {
+        fn drop(&mut self) {
+            let hook = READY_PUBLICATION_HOOK.with(|slot| slot.borrow_mut().take());
+            drop(hook);
+        }
+    }
+
+    fn on_ready_publication(hook: impl FnMut(&GlobalInjector) + 'static) -> ReadyPublicationHook {
+        READY_PUBLICATION_HOOK.with(|slot| {
+            assert!(slot.borrow().is_none(), "one publication observer per thread");
+            *slot.borrow_mut() = Some(Box::new(hook));
+        });
+        ReadyPublicationHook
+    }
+
+    pub(super) fn observe_ready_combiner_publication(injector: &GlobalInjector) {
+        // Observe the first actual enqueue of each batch, while a reserved
+        // suffix can still be unpublished. Retire the RefCell borrow before
+        // callbacks: a successor may publish reentrantly, but only the outer
+        // tenure invokes this hook.
+        let hook = READY_PUBLICATION_HOOK
+            .try_with(|slot| slot.borrow_mut().take())
+            .ok()
+            .flatten();
+        if let Some(mut hook) = hook {
+            hook(injector);
+            READY_PUBLICATION_HOOK.with(|slot| *slot.borrow_mut() = Some(hook));
+        }
+    }
+
     fn task(id: u32) -> TaskId {
         TaskId::new_for_test(1, id)
     }
@@ -742,6 +778,11 @@ mod tests {
         assert_eq!(
             snapshot.current_in_flight, 0,
             "ready injection in-flight count should converge to zero"
+        );
+        assert!(snapshot.max_batch <= READY_COMBINER_MAX_BATCH);
+        assert!(
+            snapshot.flushes <= snapshot.mode_entries * 2,
+            "each combiner tenure publishes at most two bounded batches"
         );
 
         println!(
@@ -1309,6 +1350,221 @@ mod tests {
                 "scenario should report an in-flight pressure metric"
             );
         }
+    }
+
+    #[test]
+    fn ready_combiner_pending_cap_preserves_fallback_and_cancelled_entry_accounting() {
+        let injector = GlobalInjector::new();
+        let publications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&publications);
+        let _hook = on_ready_publication(move |injector| {
+            if observed.fetch_add(1, Ordering::Relaxed) != 0 {
+                return;
+            }
+            for id in 1..=READY_COMBINER_MAX_PENDING + 8 {
+                injector.inject_ready_contentious(PriorityTask {
+                    task: task(u32::try_from(id).expect("bounded task id")),
+                    priority: 90,
+                });
+            }
+            // Cancellation may add a higher-lane copy while the old ready
+            // entry is still deferred. Both lane counters must remain exact.
+            injector.inject_cancel(task(1), 255);
+            let snapshot = injector.ready_combiner_snapshot();
+            assert_eq!(snapshot.pending_len, READY_COMBINER_MAX_PENDING);
+            assert_eq!(snapshot.deferred_injections, READY_COMBINER_MAX_PENDING);
+            assert_eq!(snapshot.fallback_injections, 8);
+            assert_eq!(snapshot.ready_len, 9);
+        });
+
+        injector.inject_ready_contentious(PriorityTask {
+            task: task(0),
+            priority: 90,
+        });
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(publications.load(Ordering::Relaxed), 2);
+        assert_eq!(snapshot.mode_entries, 1);
+        assert_eq!(snapshot.mode_exits, 1);
+        assert_eq!(snapshot.pending_len, 0);
+        assert_eq!(snapshot.combined_injections, READY_COMBINER_MAX_PENDING + 1);
+        assert_eq!(snapshot.fallback_injections, 8);
+        assert_eq!(snapshot.ready_len, READY_COMBINER_MAX_PENDING + 9);
+        assert_eq!(
+            injector.pop_cancel().expect("cancel lane progresses").task,
+            task(1)
+        );
+        assert!(injector.pop_cancel().is_none());
+        let ready = std::iter::from_fn(|| injector.pop_ready())
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        let unique = ready.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(ready.len(), READY_COMBINER_MAX_PENDING + 9);
+        assert_eq!(unique.len(), ready.len());
+        assert!(
+            unique.contains(&task(1)),
+            "cancellation retains its old ready copy"
+        );
+        assert!(injector.is_empty());
+        assert_eq!(injector.ready_count(), 0);
+    }
+
+    #[test]
+    fn ready_combiner_tenure_ends_despite_continuous_reentrant_arrivals() {
+        let injector = GlobalInjector::new();
+        let publications = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&publications);
+        let _hook = on_ready_publication(move |injector| {
+            let publication = observed.fetch_add(1, Ordering::Relaxed);
+            if injector.ready_combiner.active.load(Ordering::Acquire) {
+                // Finite on the old loop too: it publishes 17 batches before
+                // returning, so the old code fails the work bound, not a timer.
+                if publication < 16 {
+                    for offset in 0..READY_COMBINER_MAX_PENDING {
+                        injector.inject_ready_contentious(PriorityTask {
+                            task: task(
+                                u32::try_from(
+                                    100 + publication * READY_COMBINER_MAX_PENDING + offset,
+                                )
+                                .unwrap(),
+                            ),
+                            priority: 60,
+                        });
+                    }
+                }
+            } else {
+                // The former owner has released active before its final
+                // publication returns. Direct publication and a successor
+                // can interleave with its still-reserved suffix.
+                injector.inject_ready(task(10_001), 80);
+                injector.inject_ready_contentious(PriorityTask {
+                    task: task(10_000),
+                    priority: 70,
+                });
+            }
+        });
+
+        injector.inject_ready_contentious(PriorityTask {
+            task: task(99),
+            priority: 50,
+        });
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(publications.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            snapshot.mode_entries, 2,
+            "the successor claimed its own tenure"
+        );
+        assert_eq!(snapshot.mode_exits, 2);
+        assert_eq!(snapshot.pending_len, 0);
+        assert!(!injector.ready_combiner.active.load(Ordering::Acquire));
+        assert_eq!(snapshot.ready_len, READY_COMBINER_MAX_PENDING + 3);
+        assert_eq!(snapshot.direct_injections, 1);
+        assert_eq!(snapshot.combined_injections + 1, snapshot.ready_len);
+        let ready = std::iter::from_fn(|| injector.pop_ready())
+            .map(|entry| entry.task)
+            .collect::<Vec<_>>();
+        assert_eq!(ready.len(), READY_COMBINER_MAX_PENDING + 3);
+        assert_eq!(
+            ready.iter().copied().collect::<HashSet<_>>().len(),
+            ready.len()
+        );
+        assert!(ready.contains(&task(99)));
+        assert!(ready.contains(&task(10_000)));
+        assert_eq!(
+            &ready[..5],
+            &[task(99), task(100), task(10_001), task(10_000), task(101)]
+        );
+        assert_eq!(injector.ready_count(), 0);
+        eprintln!(
+            "READY_COMBINER_BOUNDED snapshot={snapshot:?} published={}",
+            ready.len()
+        );
+    }
+
+    #[test]
+    fn ready_combiner_native_producers_preserve_control_progress_and_queue_counts() {
+        use std::time::Duration;
+
+        const PRODUCERS: usize = 8;
+        const PREFIX: usize = 512;
+        const ITEMS: usize = 1_024;
+        let injector = Arc::new(GlobalInjector::new());
+        let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+        thread::scope(|threads| {
+            // Dropping the release senders on failure also releases every
+            // parked producer; scoped threads always retire before this returns.
+            let mut releases = Vec::new();
+            for producer in 0..PRODUCERS {
+                let injector = Arc::clone(&injector);
+                let parked = parked_tx.clone();
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                releases.push(release_tx);
+                threads.spawn(move || {
+                    for offset in 0..PREFIX {
+                        injector.inject_ready(contention_task(producer, offset), 80);
+                    }
+                    parked.send(producer).expect("publish prefix completion");
+                    if release_rx.recv_timeout(Duration::from_secs(5)).is_err() {
+                        return;
+                    }
+                    for offset in PREFIX..ITEMS {
+                        injector.inject_ready(contention_task(producer, offset), 80);
+                    }
+                });
+            }
+            for _ in 0..PRODUCERS {
+                parked_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("every native producer published its prefix");
+            }
+            assert_eq!(injector.ready_count(), PRODUCERS * PREFIX);
+            injector.inject_cancel(contention_task(0, 0), 255);
+            injector.inject_timed(contention_task(1, 0), Time::ZERO);
+            for release in releases {
+                release.send(()).expect("release native producer");
+            }
+            assert_eq!(
+                injector
+                    .pop_cancel()
+                    .expect("cancel lane progresses with a ready backlog")
+                    .task,
+                contention_task(0, 0)
+            );
+            assert_eq!(
+                injector
+                    .pop_timed_if_due(Time::ZERO)
+                    .expect("due timer progresses with a ready backlog")
+                    .task,
+                contention_task(1, 0)
+            );
+        });
+
+        let snapshot = injector.ready_combiner_snapshot();
+        assert_eq!(snapshot.ready_len, PRODUCERS * ITEMS);
+        assert_eq!(snapshot.pending_len, 0);
+        assert_eq!(snapshot.current_in_flight, 0);
+        assert_eq!(snapshot.mode_entries, snapshot.mode_exits);
+        assert!(snapshot.flushes <= snapshot.mode_entries * 2);
+        assert!(snapshot.max_batch <= READY_COMBINER_MAX_BATCH);
+        assert_eq!(
+            snapshot.direct_injections
+                + snapshot.fallback_injections
+                + snapshot.combined_injections,
+            PRODUCERS * ITEMS
+        );
+        let mut seen = HashSet::new();
+        while let Some(entry) = injector.pop_ready() {
+            assert!(seen.insert(entry.task), "ready entry was published twice");
+        }
+        for producer in 0..PRODUCERS {
+            for offset in 0..ITEMS {
+                assert!(seen.contains(&contention_task(producer, offset)));
+            }
+        }
+        assert_eq!(seen.len(), PRODUCERS * ITEMS);
+        assert!(injector.is_empty());
+        eprintln!("READY_COMBINER_NATIVE producers={PRODUCERS} items={ITEMS} snapshot={snapshot:?}");
     }
 
     // =========================================================================
