@@ -3508,14 +3508,18 @@ async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) ->
 /// Minimal `text/plain` response for server-hop terminal outcomes
 /// (handler panic → 500, request budget deadline → 503).
 fn hop_error_response(version: Version, status: u16, body: &str) -> Response {
+    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Response {
         status,
         reason: String::new(),
         version,
-        headers: vec![(
-            "content-type".to_string(),
-            "text/plain; charset=utf-8".to_string(),
-        )],
+        headers: vec![
+            ("date".to_string(), date_str),
+            (
+                "content-type".to_string(),
+                "text/plain; charset=utf-8".to_string(),
+            ),
+        ],
         body: body.as_bytes().to_vec(),
         trailers: Vec::new(),
     }
@@ -4044,6 +4048,18 @@ fn finalize_response_persistence(
 ) -> bool {
     if request_version == Version::Http10 {
         resp.version = Version::Http10;
+    }
+
+    // RFC 9110 §6.6.1: An origin server MUST generate a Date header field in all
+    // non-1xx responses when its clock is available.
+    if resp.status >= 200
+        && !resp
+            .headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("date"))
+    {
+        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
+        resp.headers.push(("date".to_string(), date_str));
     }
 
     let close_after = close_after || response_requests_close(resp);
