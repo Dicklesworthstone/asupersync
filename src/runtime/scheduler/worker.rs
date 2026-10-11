@@ -2735,6 +2735,115 @@ mod tests {
     }
 
     #[test]
+    fn native_legacy_completion_lifecycle_observers_preserve_retirement_and_waiters() {
+        use crate::runtime::state::completion_observer_test_support::LifecycleCompletionMetrics;
+        use crate::runtime::{RuntimeState, config::ObligationLeakResponse};
+        use crate::sync::ContendedMutex;
+        use crate::types::Budget;
+        use std::sync::mpsc as probe;
+
+        for panic_metrics in [false, true] {
+            let metrics = LifecycleCompletionMetrics::new(panic_metrics);
+            let mut runtime = RuntimeState::new_with_metrics(metrics.clone());
+            runtime.set_obligation_leak_response(ObligationLeakResponse::Recover);
+            let root = runtime.create_root_region(Budget::INFINITE);
+            let child = runtime.create_child_region(root, Budget::INFINITE).unwrap();
+            let parked = Arc::new(AtomicBool::new(false));
+            let task_parked = Arc::clone(&parked);
+            let (release, mut receive) = crate::channel::oneshot::channel::<()>();
+            let (task, mut handle) = runtime
+                .create_task(child, Budget::INFINITE, async move {
+                    let mut receive = std::pin::pin!(receive.recv_uninterruptible());
+                    std::future::poll_fn(|cx| {
+                        let result = receive.as_mut().poll(cx);
+                        if result.is_pending() {
+                            task_parked.store(true, Ordering::Release);
+                        }
+                        result
+                    })
+                    .await
+                    .expect("release after native Pending");
+                    37_u8
+                })
+                .unwrap();
+            let (healthy, mut healthy_handle) = runtime
+                .create_task(root, Budget::INFINITE, async { 19_u8 })
+                .unwrap();
+            runtime.task_mut(task).unwrap().add_waiter(healthy);
+            runtime
+                .create_obligation(crate::record::ObligationKind::SendPermit, task, child, None)
+                .unwrap();
+            runtime.region(child).unwrap().seal(root);
+            let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+            metrics.arm(&state, child, task);
+            let global = Arc::new(GlobalQueue::new());
+            let worker = Worker::new(
+                0,
+                Vec::new(),
+                Arc::clone(&global),
+                Arc::clone(&state),
+                Arc::new(AtomicBool::new(false)),
+            );
+            std::thread::scope(|scope| {
+                let (done, observed) = probe::channel();
+                let (drive, commands) = probe::channel();
+                scope.spawn(move || {
+                    worker.execute(task);
+                    done.send(task).unwrap();
+                    commands.recv().unwrap();
+                    assert_eq!(
+                        global.pop(),
+                        Some(task),
+                        "the real oneshot wake queued the task"
+                    );
+                    worker.execute(task);
+                    assert_eq!(
+                        global.pop(),
+                        Some(healthy),
+                        "the completion waiter was published"
+                    );
+                    worker.execute(healthy);
+                    done.send(healthy).unwrap();
+                });
+                assert_eq!(observed.recv_timeout(Duration::from_secs(2)).unwrap(), task);
+                assert!(parked.load(Ordering::Acquire));
+                assert_eq!(state.lock().unwrap().pending_obligation_count(), 1);
+                release.send_blocking(()).unwrap();
+                drive.send(()).unwrap();
+                assert_eq!(
+                    observed.recv_timeout(Duration::from_secs(2)).unwrap(),
+                    healthy
+                );
+            });
+            let cx = crate::cx::Cx::for_testing();
+            assert_eq!(
+                futures_lite::future::block_on(handle.join(&cx)).unwrap(),
+                37
+            );
+            assert_eq!(
+                futures_lite::future::block_on(healthy_handle.join(&cx)).unwrap(),
+                19
+            );
+            metrics.assert_completed("discharged");
+            let mut runtime = state.lock().unwrap();
+            assert_eq!(
+                runtime.task_completion_observer_panic_count(),
+                u64::from(panic_metrics)
+            );
+            assert_eq!(runtime.pending_obligation_count(), 0);
+            assert!(runtime.region(root).unwrap().task_ids().is_empty());
+            assert!(
+                runtime
+                    .region(root)
+                    .unwrap()
+                    .begin_close_without_subscriber(None)
+            );
+            runtime.advance_region_state(root);
+            assert!(runtime.region(root).is_none());
+        }
+    }
+
+    #[test]
     fn legacy_guard_drop_suppresses_completion_observer_payload() {
         use crate::record::task::TaskRecord;
         use crate::runtime::RuntimeState;

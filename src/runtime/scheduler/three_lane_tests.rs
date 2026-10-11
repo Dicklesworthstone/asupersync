@@ -10438,6 +10438,299 @@ fn persistent_completion_observer_panics_do_not_kill_three_lane_worker() {
     assert_eq!(runtime.task_completion_observer_panic_count(), 2);
 }
 
+fn run_native_completion_lifecycle_observers(
+    worker_count: usize,
+    sharded: bool,
+    panic_metrics: bool,
+    response: crate::runtime::config::ObligationLeakResponse,
+    trace_observer: bool,
+) {
+    use crate::runtime::state::completion_observer_test_support::LifecycleCompletionMetrics;
+    use std::sync::mpsc as probe;
+
+    let metrics = LifecycleCompletionMetrics::new(panic_metrics);
+    let mut runtime = RuntimeState::new_with_metrics(metrics.clone());
+    runtime.set_obligation_leak_response(response);
+    let root = runtime.create_root_region(Budget::INFINITE);
+    let child = runtime.create_child_region(root, Budget::INFINITE).unwrap();
+    let parked = Arc::new(AtomicBool::new(false));
+    let task_parked = Arc::clone(&parked);
+    let (release, mut receive) = crate::channel::oneshot::channel::<()>();
+    let (task, mut handle) = runtime
+        .create_task(child, Budget::INFINITE, async move {
+            let mut receive = std::pin::pin!(receive.recv_uninterruptible());
+            std::future::poll_fn(|cx| {
+                let result = receive.as_mut().poll(cx);
+                if result.is_pending() {
+                    task_parked.store(true, Ordering::Release);
+                }
+                result
+            })
+            .await
+            .expect("release task after its real Pending poll");
+            73_u8
+        })
+        .unwrap();
+    let (healthy, mut healthy_handle) = runtime
+        .create_task(root, Budget::INFINITE, async { 91_u8 })
+        .unwrap();
+    runtime.task_mut(task).unwrap().add_waiter(healthy);
+    runtime.region(child).unwrap().seal(root);
+    let state = Arc::new(ContendedMutex::new("runtime_state", runtime));
+    let shards = sharded.then(|| {
+        let mut state = state.lock().unwrap();
+        let shards = Arc::new(crate::runtime::ShardedState::new(
+            state.trace_handle(),
+            state.metrics_provider(),
+            state.sharded_construction_config(),
+        ));
+        state.install_shard_tables(Arc::clone(&shards));
+        shards
+    });
+    if let Some(shards) = &shards {
+        move_runtime_task_to_shard(&state, &shards.task_shard_handle(), task);
+        move_runtime_task_to_shard(&state, &shards.task_shard_handle(), healthy);
+    }
+    {
+        let mut state = state.lock().unwrap();
+        let obligation = state
+            .create_obligation(crate::record::ObligationKind::SendPermit, task, child, None)
+            .unwrap();
+        if trace_observer {
+            // Force the lifecycle validator's invalid transition branch. Its
+            // own logger must not reenter under either the validator mutex or
+            // RuntimeState, before the outer diagnostic gets deferred.
+            state
+                .cancel_protocol_validator()
+                .lock()
+                .remove_obligation(obligation);
+        }
+    }
+    metrics.arm(&state, child, task);
+    let mut scheduler = match &shards {
+        Some(shards) => ThreeLaneScheduler::new_with_sharded_state(
+            worker_count,
+            &state,
+            shards,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        ),
+        None => ThreeLaneScheduler::new_with_options(
+            worker_count,
+            &state,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        ),
+    };
+    scheduler.inject_ready(task, 50);
+
+    #[cfg(feature = "tracing-integration")]
+    let trace_audit = Arc::new(CompletionLifecycleTraceAudit::default());
+    #[cfg(feature = "tracing-integration")]
+    let dispatch = {
+        use tracing_subscriber::prelude::*;
+        trace_observer.then(|| {
+            tracing::Dispatch::new(
+                tracing_subscriber::registry().with(CompletionLifecycleLayer {
+                    state: Arc::downgrade(&state),
+                    audit: Arc::clone(&trace_audit),
+                }),
+            )
+        })
+    };
+    #[cfg(not(feature = "tracing-integration"))]
+    assert!(!trace_observer);
+
+    thread::scope(|scope| {
+        let (done, completed) = probe::channel();
+        let mut controls = Vec::new();
+        for mut worker in scheduler.take_workers() {
+            let (control, commands) = probe::channel::<bool>();
+            controls.push(control);
+            let done = done.clone();
+            #[cfg(feature = "tracing-integration")]
+            let dispatch = dispatch.clone();
+            scope.spawn(move || {
+                #[cfg(feature = "tracing-integration")]
+                let _dispatch = dispatch.as_ref().map(tracing::dispatcher::set_default);
+                while commands.recv().unwrap_or(false) {
+                    let task = worker.next_task().expect("a witnessed ready task");
+                    worker.execute(task);
+                    done.send(task).unwrap();
+                }
+            });
+        }
+        controls[0].send(true).unwrap();
+        assert_eq!(
+            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            task
+        );
+        assert!(
+            parked.load(Ordering::Acquire),
+            "actual oneshot wait returned Pending before completion"
+        );
+        assert_eq!(state.lock().unwrap().pending_obligation_count(), 1);
+        release.send_blocking(()).unwrap();
+        let completing_worker = worker_count - 1;
+        controls[completing_worker].send(true).unwrap();
+        assert_eq!(
+            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            task
+        );
+        controls[completing_worker].send(true).unwrap();
+        assert_eq!(
+            completed.recv_timeout(Duration::from_secs(2)).unwrap(),
+            healthy,
+            "completion published its waiter and the same native worker remains usable"
+        );
+        for control in controls {
+            control.send(false).unwrap();
+        }
+    });
+
+    let cx = crate::cx::Cx::for_testing();
+    assert_eq!(
+        futures_lite::future::block_on(handle.join(&cx)).unwrap(),
+        73
+    );
+    assert_eq!(
+        futures_lite::future::block_on(healthy_handle.join(&cx)).unwrap(),
+        91
+    );
+    metrics.assert_completed(
+        if response == crate::runtime::config::ObligationLeakResponse::Recover {
+            "discharged"
+        } else {
+            "leaked"
+        },
+    );
+    #[cfg(feature = "tracing-integration")]
+    if trace_observer {
+        let attempts = trace_audit.attempts.load(Ordering::SeqCst);
+        assert!(
+            attempts >= 2,
+            "lifecycle validation and abort diagnostics both ran"
+        );
+        assert_eq!(trace_audit.reentries.load(Ordering::SeqCst), attempts);
+        assert_eq!(
+            trace_audit.validator_reentries.load(Ordering::SeqCst),
+            attempts
+        );
+    }
+    let mut runtime = state.lock().unwrap();
+    assert!(runtime.region(child).is_none());
+    assert_eq!(runtime.pending_obligation_count(), 0);
+    assert!(runtime.region(root).unwrap().task_ids().is_empty());
+    assert_eq!(
+        runtime.task_completion_observer_panic_count(),
+        u64::from(panic_metrics || trace_observer)
+    );
+    assert!(
+        runtime
+            .region(root)
+            .unwrap()
+            .begin_close_without_subscriber(None)
+    );
+    runtime.advance_region_state(root);
+    assert!(
+        runtime.region(root).is_none(),
+        "the whole root drains after hostile observers"
+    );
+}
+
+#[test]
+fn native_completion_lifecycle_observers_reenter_after_retirement() {
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            for response in [
+                crate::runtime::config::ObligationLeakResponse::Log,
+                crate::runtime::config::ObligationLeakResponse::Recover,
+            ] {
+                run_native_completion_lifecycle_observers(workers, sharded, false, response, false);
+            }
+        }
+    }
+}
+
+#[test]
+fn native_completion_lifecycle_panics_preserve_waiters_and_worker_liveness() {
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            for response in [
+                crate::runtime::config::ObligationLeakResponse::Log,
+                crate::runtime::config::ObligationLeakResponse::Recover,
+            ] {
+                run_native_completion_lifecycle_observers(workers, sharded, true, response, false);
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+#[derive(Default)]
+struct CompletionLifecycleTraceAudit {
+    attempts: AtomicUsize,
+    reentries: AtomicUsize,
+    validator_reentries: AtomicUsize,
+}
+
+#[cfg(feature = "tracing-integration")]
+struct CompletionLifecycleLayer {
+    state: Weak<ContendedMutex<RuntimeState>>,
+    audit: Arc<CompletionLifecycleTraceAudit>,
+}
+
+#[cfg(feature = "tracing-integration")]
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CompletionLifecycleLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        struct Message(bool);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    let message = format!("{value:?}");
+                    self.0 = message.contains("obligation")
+                        || message.contains("cancel protocol violation");
+                }
+            }
+        }
+        let mut message = Message(false);
+        event.record(&mut message);
+        if !message.0 {
+            return;
+        }
+        self.audit.attempts.fetch_add(1, Ordering::SeqCst);
+        if let Some(state) = self.state.upgrade()
+            && let Ok(runtime) = state.try_lock()
+        {
+            self.audit.reentries.fetch_add(1, Ordering::SeqCst);
+            if runtime.cancel_protocol_validator().try_lock().is_some() {
+                self.audit
+                    .validator_reentries
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        panic!("lifecycle subscriber sentinel");
+    }
+}
+
+#[cfg(feature = "tracing-integration")]
+#[test]
+fn native_completion_lifecycle_validation_subscriber_reentry_is_outside_both_locks() {
+    for workers in [1, 2] {
+        for sharded in [false, true] {
+            run_native_completion_lifecycle_observers(
+                workers,
+                sharded,
+                false,
+                crate::runtime::config::ObligationLeakResponse::Recover,
+                true,
+            );
+        }
+    }
+}
+
 #[cfg(feature = "tracing-integration")]
 #[test]
 fn epoch_telemetry_subscriber_panics_do_not_kill_three_lane_worker() {

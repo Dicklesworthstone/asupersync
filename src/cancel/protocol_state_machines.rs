@@ -1728,6 +1728,24 @@ impl CancelProtocolValidator {
         event: RegionEvent,
         context: &RegionContext,
     ) -> TransitionResult {
+        let result = self.validate_region_transition_without_logging(region_id, event, context);
+        if matches!(
+            result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            self.log_violation("region", &region_id, &result);
+        }
+        result
+    }
+
+    /// Applies identical region validation/accounting without subscriber calls.
+    /// Completion carries a violation past its outer runtime lock for delivery.
+    pub(crate) fn validate_region_transition_without_logging(
+        &mut self,
+        region_id: RegionId,
+        event: RegionEvent,
+        context: &RegionContext,
+    ) -> TransitionResult {
         if !self.tracking {
             return TransitionResult::Valid;
         }
@@ -1737,8 +1755,6 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-
-                self.log_violation("region", &region_id, &result);
             }
             result
         } else {
@@ -1748,7 +1764,6 @@ impl CancelProtocolValidator {
                 attempted_transition: format!("{event:?}"),
             };
             self.violation_count += 1;
-            self.log_violation("region", &region_id, &result);
             result
         }
     }
@@ -1857,6 +1872,24 @@ impl CancelProtocolValidator {
         event: ObligationEvent,
         context: &ObligationContext,
     ) -> TransitionResult {
+        let result =
+            self.validate_obligation_transition_without_logging(obligation_id, event, context);
+        if matches!(
+            result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            self.log_violation("obligation", &obligation_id, &result);
+        }
+        result
+    }
+
+    /// Applies identical obligation validation/accounting without subscriber calls.
+    pub(crate) fn validate_obligation_transition_without_logging(
+        &mut self,
+        obligation_id: ObligationId,
+        event: ObligationEvent,
+        context: &ObligationContext,
+    ) -> TransitionResult {
         if !self.tracking {
             return TransitionResult::Valid;
         }
@@ -1866,7 +1899,6 @@ impl CancelProtocolValidator {
                 &result
             {
                 self.violation_count += 1;
-                self.log_violation("obligation", &obligation_id, &result);
             }
             result
         } else {
@@ -1876,7 +1908,6 @@ impl CancelProtocolValidator {
                 attempted_transition: format!("{event:?}"),
             };
             self.violation_count += 1;
-            self.log_violation("obligation", &obligation_id, &result);
             result
         }
     }
@@ -2033,6 +2064,71 @@ mod tests {
 
         assert!(matches!(result, TransitionResult::Invalid { .. }));
         assert_eq!(validator.violation_count(), 1);
+    }
+
+    #[test]
+    fn lifecycle_transitions_without_logging_preserve_validation_accounting() {
+        let mut direct = CancelProtocolValidator::new(ValidationLevel::Full);
+        let mut deferred = CancelProtocolValidator::new(ValidationLevel::Full);
+        let region = RegionId::new_for_test(81, 0);
+        direct.register_region(region);
+        deferred.register_region(region);
+        for event in [
+            RegionEvent::Activate,
+            RegionEvent::TaskSpawned,
+            RegionEvent::RequestClose,
+            RegionEvent::TaskCompleted,
+            RegionEvent::RequestClose,
+        ] {
+            assert_eq!(
+                direct.validate_region_transition(region, event.clone(), &region_context(region)),
+                deferred.validate_region_transition_without_logging(
+                    region,
+                    event,
+                    &region_context(region)
+                ),
+            );
+            assert_eq!(direct.region_state(region), deferred.region_state(region));
+            assert_eq!(direct.violation_count(), deferred.violation_count());
+        }
+        assert_eq!(deferred.region_state(region), Some(&RegionState::Finalized));
+        assert_eq!(
+            deferred.violation_count(),
+            1,
+            "closing with a live task is still refused"
+        );
+        let obligation = ObligationId::new_for_test(82, 0);
+        let context = ObligationContext {
+            obligation_id: obligation,
+            region_id: region,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        direct.register_obligation(obligation);
+        deferred.register_obligation(obligation);
+        for event in [
+            ObligationEvent::Reserve { token: 8 },
+            ObligationEvent::Commit,
+            ObligationEvent::Abort {
+                reason: "already committed".into(),
+            },
+        ] {
+            assert_eq!(
+                direct.validate_obligation_transition(obligation, event.clone(), &context),
+                deferred
+                    .validate_obligation_transition_without_logging(obligation, event, &context),
+            );
+            assert_eq!(direct.violation_count(), deferred.violation_count());
+            assert_eq!(
+                direct.obligation_machines[&obligation].current_state(),
+                deferred.obligation_machines[&obligation].current_state()
+            );
+        }
+        assert_eq!(
+            deferred.violation_count(),
+            2,
+            "a committed obligation cannot be aborted"
+        );
     }
 
     #[test]

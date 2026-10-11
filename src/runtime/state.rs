@@ -693,10 +693,11 @@ impl ReplyHistoryRecorder {
 /// dispatching the observer token. A legacy foreign-waker callback may run
 /// afterward as a separate, uncontained boundary. This abstraction defers only
 /// the `MetricsProvider::task_completed` callback and the completion
-/// debug/unknown trace emitted directly by [`RuntimeState::task_completed`]. It
-/// also carries detached cancellation-Waker targets across the outer lock;
-/// it does not make transitive obligation cleanup, region advancement,
-/// finalizers, foreign wakers, or unrelated destructors callback-free.
+/// debug/unknown trace emitted directly by [`RuntimeState::task_completed`],
+/// plus lifecycle observations produced by its obligation/region cleanup tail.
+/// It also carries detached cancellation-Waker targets across the outer lock.
+/// Direct state-threaded operations, configured leak panics, foreign wakers,
+/// and unrelated destructors retain their separate callback boundaries.
 #[must_use = "task completion effects must wake waiters and dispatch observers"]
 pub struct TaskCompletionEffects {
     waiters: SmallVec<[TaskId; 4]>,
@@ -840,6 +841,9 @@ pub struct TaskCompletionObserver {
     /// Monitor and link effects of this task's exit
     /// (br-asupersync-issue65-criticisms-kpmoy5.6.1).
     watch_effects: Option<crate::monitor::WatchEffects>,
+    /// Runtime-owned data only: no provider, Waker, closure or user destructor
+    /// is stored in this completion-local buffer.
+    lifecycle: Vec<LifecycleObserverEffect>,
 }
 
 enum TaskCompletionObserverPayload {
@@ -886,6 +890,7 @@ impl TaskCompletionObserver {
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
             watch_effects: None,
+            lifecycle: Vec::new(),
         }
     }
 
@@ -896,6 +901,7 @@ impl TaskCompletionObserver {
             retired_cancel_wakers: TaskCompletionRetirements::empty(),
             epoch_telemetry: None,
             watch_effects: None,
+            lifecycle: Vec::new(),
         }
     }
 
@@ -921,9 +927,26 @@ impl TaskCompletionObserver {
     /// caught panic increments this runtime's callback-free atomic failure
     /// counter once for this dispatch without invoking another observer.
     pub fn dispatch(mut self) {
-        // Monitors and links first: the caller released the runtime-state
-        // lock, and DOWN delivery, exit signals and linked cancellation
-        // requests contain their own waker panics.
+        // Completion has already retired the task, resolved its obligations,
+        // advanced its regions, and published waiter work. Each independent
+        // observation gets its own unwind boundary so an obligation hook
+        // cannot suppress a later region-close or task-completion hook.
+        let mut lifecycle_panicked = false;
+        if let Some(TaskCompletionObserverPayload::Completed { metrics, .. }) =
+            self.payload.as_ref()
+        {
+            for effect in self.lifecycle.drain(..) {
+                if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    effect.dispatch(&**metrics);
+                })) {
+                    std::mem::forget(payload);
+                    lifecycle_panicked = true;
+                }
+            }
+        }
+        // Monitors and links follow lifecycle observations: the caller released
+        // the runtime-state lock, and DOWN delivery, exit signals and linked
+        // cancellation requests contain their own waker panics.
         if let Some(effects) = self.watch_effects.take() {
             effects.dispatch();
         }
@@ -1007,7 +1030,7 @@ impl TaskCompletionObserver {
                 }
             }
         };
-        if observer_panicked {
+        if observer_panicked || lifecycle_panicked {
             panic_count.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -1460,6 +1483,205 @@ pub(crate) enum LifecycleEffect {
     /// wrappers call the validator directly at this slot; the buffered
     /// drain replays the removal at the same relative position.
     ValidatorRemoveObligation(ObligationId),
+    /// Observer-only data emitted inside a guarded lifecycle walk.
+    Observer(LifecycleObserverEffect),
+}
+
+/// Owned lifecycle observations. These values contain only runtime data;
+/// buffering or abandoning one cannot call a metrics provider or subscriber.
+pub(crate) enum LifecycleObserverEffect {
+    ObligationCreated(RegionId),
+    ObligationDischarged(RegionId),
+    ObligationLeaked(RegionId),
+    RegionCreated(RegionId, Option<RegionId>),
+    RegionClosed(RegionId, Duration),
+    DrainCompleted(RegionId, Duration),
+    Reserve {
+        obligation: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+    },
+    Commit(ObligationCommitInfo),
+    Abort(ObligationAbortInfo),
+    Leak(ObligationLeakInfo),
+    ProtocolViolation(&'static str, TransitionResult),
+    LeakAlarm(crate::obligation::eprocess::MonitorSnapshot),
+    LeakBatch {
+        task_id: Option<TaskId>,
+        region_id: RegionId,
+        completion: &'static str,
+        leak_count: usize,
+        cumulative_leaks: u64,
+        details: String,
+        response: ObligationLeakResponse,
+    },
+    LeakPanicDowngraded(Option<TaskId>),
+    ObligationDebt {
+        monitor: Arc<crate::observability::CancellationDebtMonitor>,
+        obligation: ObligationId,
+        holder: TaskId,
+    },
+}
+
+impl LifecycleObserverEffect {
+    fn dispatch(self, metrics: &dyn MetricsProvider) {
+        // Tracing's no-feature macros erase their fields.
+        #[cfg(not(feature = "tracing-integration"))]
+        let _ = &self;
+        match self {
+            Self::ObligationCreated(region) => metrics.obligation_created(region),
+            Self::ObligationDischarged(region) => metrics.obligation_discharged(region),
+            Self::ObligationLeaked(region) => metrics.obligation_leaked(region),
+            Self::RegionCreated(region, parent) => metrics.region_created(region, parent),
+            Self::RegionClosed(region, lifetime) => metrics.region_closed(region, lifetime),
+            Self::DrainCompleted(region, drain) => metrics.drain_completed(region, drain),
+            Self::Reserve {
+                obligation,
+                kind,
+                holder,
+                region,
+            } => {
+                let _guard = crate::tracing_compat::debug_span!(
+                    "obligation_reserve",
+                    obligation_id = ?obligation,
+                    kind = ?kind,
+                    holder_task = ?holder,
+                    region_id = ?region
+                )
+                .entered();
+                crate::tracing_compat::debug!(
+                    obligation_id = ?obligation, kind = ?kind,
+                    holder_task = ?holder, region_id = ?region,
+                    "obligation reserved"
+                );
+                let _ = (obligation, kind, holder, region);
+            }
+            Self::Commit(info) => {
+                let span = crate::tracing_compat::debug_span!(
+                    "obligation_commit", obligation_id = ?info.id,
+                    kind = ?info.kind, holder_task = ?info.holder,
+                    region_id = ?info.region, duration_ns = info.duration
+                );
+                let _guard = span.enter();
+                crate::tracing_compat::debug!(
+                    obligation_id = ?info.id, kind = ?info.kind,
+                    holder_task = ?info.holder, region_id = ?info.region,
+                    duration_ns = info.duration, "obligation committed"
+                );
+                let _ = info;
+            }
+            Self::Abort(info) => {
+                let span = crate::tracing_compat::debug_span!(
+                    "obligation_abort", obligation_id = ?info.id,
+                    kind = ?info.kind, holder_task = ?info.holder,
+                    region_id = ?info.region, duration_ns = info.duration,
+                    abort_reason = %info.reason
+                );
+                let _guard = span.enter();
+                crate::tracing_compat::debug!(
+                    obligation_id = ?info.id, kind = ?info.kind,
+                    holder_task = ?info.holder, region_id = ?info.region,
+                    duration_ns = info.duration, abort_reason = %info.reason,
+                    "obligation aborted"
+                );
+                let _ = info;
+            }
+            Self::Leak(info) => {
+                let span = crate::tracing_compat::error_span!(
+                    "obligation_leak", obligation_id = ?info.id,
+                    kind = ?info.kind, holder_task = ?info.holder,
+                    region_id = ?info.region, duration_ns = info.duration,
+                    acquired_at = %info.acquired_at
+                );
+                let _guard = span.enter();
+                #[allow(clippy::single_match, unused_variables)]
+                match info.acquire_backtrace.as_ref() {
+                    Some(backtrace) => crate::tracing_compat::error!(
+                        obligation_id = ?info.id, kind = ?info.kind,
+                        holder_task = ?info.holder, region_id = ?info.region,
+                        duration_ns = info.duration, acquired_at = %info.acquired_at,
+                        acquire_backtrace = ?backtrace, "obligation leaked"
+                    ),
+                    None => crate::tracing_compat::error!(
+                        obligation_id = ?info.id, kind = ?info.kind,
+                        holder_task = ?info.holder, region_id = ?info.region,
+                        duration_ns = info.duration, acquired_at = %info.acquired_at,
+                        "obligation leaked"
+                    ),
+                }
+            }
+            Self::ProtocolViolation(operation, result) => {
+                log_cancel_protocol_violation(operation, &result);
+            }
+            Self::LeakAlarm(snapshot) => {
+                crate::tracing_compat::warn!(
+                    e_value = snapshot.e_value,
+                    threshold = snapshot.threshold,
+                    observations = snapshot.observations,
+                    "obligation leak monitor alarm: {snapshot}"
+                );
+                let _ = snapshot;
+            }
+            Self::LeakBatch {
+                task_id,
+                region_id,
+                completion,
+                leak_count,
+                cumulative_leaks,
+                details,
+                response,
+            } => {
+                match response {
+                    ObligationLeakResponse::Recover => crate::tracing_compat::warn!(
+                        ?task_id, ?region_id, completion, leak_count,
+                        cumulative_leaks, %details,
+                        "obligation leaks recovered via auto-abort"
+                    ),
+                    ObligationLeakResponse::Panic => crate::tracing_compat::error!(
+                        ?task_id, ?region_id, completion, leak_count,
+                        cumulative_leaks, %details,
+                        "obligation leaks detected (fail-fast)"
+                    ),
+                    ObligationLeakResponse::Log => crate::tracing_compat::error!(
+                        ?task_id, ?region_id, completion, leak_count,
+                        cumulative_leaks, %details, "obligation leaks detected"
+                    ),
+                    ObligationLeakResponse::Silent => {}
+                }
+                let _ = (
+                    task_id,
+                    region_id,
+                    completion,
+                    leak_count,
+                    cumulative_leaks,
+                    details,
+                );
+            }
+            Self::LeakPanicDowngraded(task_id) => {
+                crate::tracing_compat::error!(
+                    ?task_id,
+                    "obligation leaks detected during panic; downgrading Panic policy to Log to prevent double-panic abort"
+                );
+                let _ = task_id;
+            }
+            Self::ObligationDebt {
+                monitor,
+                obligation,
+                holder,
+            } => {
+                monitor.queue_work(
+                    crate::observability::WorkType::ObligationSettlement,
+                    format!("obligation_{obligation}_{holder}"),
+                    1,
+                    1,
+                    &CancelReason::new(CancelKind::User),
+                    CancelKind::Shutdown,
+                    Vec::new(),
+                );
+            }
+        }
+    }
 }
 
 /// Sink for [`LifecycleEffect`] payloads (E2 S4c, br-asupersync-m9wsza;
@@ -1472,6 +1694,9 @@ pub(crate) enum LifecycleEffectsSink<'b> {
     /// (sharded shape; the wrapper-side resolution arms construct this —
     /// E2 S4c-2c-iv).
     Buffered(&'b mut Vec<LifecycleEffect>),
+    /// Apply kernel accounting immediately but retain observations for the
+    /// task-completion token's post-unlock dispatch.
+    Completion(&'b mut Vec<LifecycleObserverEffect>),
 }
 
 /// Obligation-table target for the completion C-phases
@@ -3097,20 +3322,31 @@ impl RuntimeState {
     /// Feeds an enabled leak monitor one committed or aborted obligation's
     /// age. The monitor's mutex is a leaf: nothing else is locked while it is
     /// held, and the alarm event is emitted after it is released.
-    fn observe_obligation_age(&self, age_ns: u64) {
-        self.feed_obligation_leak_monitor(|monitor| monitor.observe(age_ns));
+    fn observe_obligation_age_with_observers(
+        &self,
+        age_ns: u64,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
+        self.feed_obligation_leak_monitor(|monitor| monitor.observe(age_ns), observers);
     }
 
     /// Reports a leaked obligation to an enabled leak monitor. A leak is
     /// conclusive evidence, not an age: feeding a fast leak's age would count
     /// it as on time.
-    fn observe_obligation_leak(&self) {
-        self.feed_obligation_leak_monitor(crate::obligation::eprocess::LeakMonitor::observe_leak);
+    fn observe_obligation_leak_with_observers(
+        &self,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
+        self.feed_obligation_leak_monitor(
+            crate::obligation::eprocess::LeakMonitor::observe_leak,
+            observers,
+        );
     }
 
     fn feed_obligation_leak_monitor(
         &self,
         feed: impl FnOnce(&mut crate::obligation::eprocess::LeakMonitor),
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
         let Some(monitor) = &self.obligation_leak_monitor else {
             return;
@@ -3121,17 +3357,9 @@ impl RuntimeState {
             feed(&mut monitor);
             (monitor.alert_count() != before).then(|| monitor.snapshot())
         };
-        #[cfg(feature = "tracing-integration")]
         if let Some(snapshot) = alarm {
-            crate::tracing_compat::warn!(
-                e_value = snapshot.e_value,
-                threshold = snapshot.threshold,
-                observations = snapshot.observations,
-                "obligation leak monitor alarm: {snapshot}"
-            );
+            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::LeakAlarm(snapshot));
         }
-        #[cfg(not(feature = "tracing-integration"))]
-        let _ = alarm;
     }
 
     /// Returns a handle to the trace buffer.
@@ -3191,9 +3419,9 @@ impl RuntimeState {
         }
     }
 
-    /// Returns the number of direct task-completion observer dispatches whose
-    /// metrics callback, final provider destructor, or tracing subscriber
-    /// panicked.
+/// Returns the number of task-completion observer dispatches whose direct
+    /// or lifecycle metrics callback, final provider destructor, or tracing
+    /// subscriber panicked.
     ///
     /// The counter is updated atomically without invoking another callback, so
     /// it remains safe on the observer-panic path.
@@ -3355,6 +3583,7 @@ impl RuntimeState {
         task_event: TaskEvent,
         context: &TaskContext,
         cancellation_materialized: bool,
+        observers: &mut Vec<LifecycleObserverEffect>,
     ) {
         let (request_result, completion_result) = {
             let Some(mut validator) = self.tracked_cancel_protocol_validator() else {
@@ -3386,16 +3615,15 @@ impl RuntimeState {
                 TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
             )
         {
-            log_cancel_protocol_violation(
-                "external-shard synthesized cancellation request",
-                &result,
-            );
+            observers.push(LifecycleObserverEffect::ProtocolViolation(
+                "external-shard synthesized cancellation request", result));
         }
         if matches!(
             completion_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            log_cancel_protocol_violation("external-shard task completion", &completion_result);
+            observers.push(LifecycleObserverEffect::ProtocolViolation(
+                "external-shard task completion", completion_result));
         }
     }
 
@@ -4065,7 +4293,10 @@ impl RuntimeState {
     /// record is sealed before anything can advance it. Validator tracking,
     /// the trace event, metrics and the epoch advance are those of every
     /// child region.
-    fn create_race_branch_region(&mut self, parent: RegionId) -> Result<RegionId, RegionCreateError> {
+    fn create_race_branch_region(
+        &mut self,
+        parent: RegionId,
+    ) -> Result<RegionId, RegionCreateError> {
         let now = self.current_runtime_time();
         let id = self.regions.create_child_with_capability_budget(
             parent,
@@ -4093,7 +4324,7 @@ impl RuntimeState {
             budget: Budget::INFINITE,
             capability_budget: CapabilityBudget::UNSPECIFIED,
             register_envelope: false,
-        });
+        }, &mut None);
         Ok(id)
     }
 
@@ -5748,10 +5979,8 @@ impl RuntimeState {
 
         // PREVENT DOUBLE PANIC: If we are already panicking, we must not panic again.
         if matches!(response, ObligationLeakResponse::Panic) && std::thread::panicking() {
-            crate::tracing_compat::error!(
-                task_id = ?error.task_id,
-                "obligation leaks detected during panic; downgrading Panic policy to Log to prevent double-panic abort"
-            );
+            self.emit_walk_observation(effects,
+                LifecycleObserverEffect::LeakPanicDowngraded(error.task_id));
             response = ObligationLeakResponse::Log;
         }
 
@@ -5784,17 +6013,7 @@ impl RuntimeState {
                     let _ =
                         self.mark_obligation_leaked_in(regions, tasks, obligations, effects, id);
                 }
-                crate::tracing_compat::error!(
-                    task_id = ?error.task_id,
-                    region_id = ?error.region_id,
-                    completion = %error
-                        .completion
-                        .map_or("unknown", TaskCompletionKind::as_str),
-                    leak_count = leak_ids.len(),
-                    cumulative_leaks = self.leak_count,
-                    details = %error,
-                    "obligation leaks detected"
-                );
+                self.emit_leak_batch_observation(effects, &error, response, leak_ids.len());
             }
             ObligationLeakResponse::Silent => {
                 for &id in &leak_ids {
@@ -5822,27 +6041,44 @@ impl RuntimeState {
                     );
                     if monitored {
                         if aborted.is_ok() {
-                            self.observe_obligation_leak();
+                            let mut observations = Vec::new();
+                            self.observe_obligation_leak_with_observers(&mut Some(&mut observations));
+                            for observation in observations {
+                                self.emit_walk_observation(effects, observation);
+                            }
                         } else {
                             self.leak_recovered_obligations.remove(&id);
                         }
                     }
                 }
-                crate::tracing_compat::warn!(
-                    task_id = ?error.task_id,
-                    region_id = ?error.region_id,
-                    completion = %error
-                        .completion
-                        .map_or("unknown", TaskCompletionKind::as_str),
-                    leak_count = leak_ids.len(),
-                    cumulative_leaks = self.leak_count,
-                    details = %error,
-                    "obligation leaks recovered via auto-abort"
-                );
+                self.emit_leak_batch_observation(effects, &error, response, leak_ids.len());
             }
         }
 
         self.finish_obligation_leak_batch(regions, tasks, obligations, effects, &leak_ids);
+    }
+
+    fn emit_leak_batch_observation(
+        &self,
+        effects: &mut LifecycleEffectsSink<'_>,
+        error: &ObligationLeakError,
+        response: ObligationLeakResponse,
+        leak_count: usize,
+    ) {
+        self.emit_walk_observation(
+            effects,
+            LifecycleObserverEffect::LeakBatch {
+                task_id: error.task_id,
+                region_id: error.region_id,
+                completion: error
+                    .completion
+                    .map_or("unknown", TaskCompletionKind::as_str),
+                leak_count,
+                cumulative_leaks: self.leak_count,
+                details: error.to_string(),
+                response,
+            },
+        );
     }
 
     /// Creates and registers an obligation for the given task and region.
@@ -6290,14 +6526,25 @@ impl RuntimeState {
         event: ObligationEvent,
         context: &ObligationContext,
         op_label: &'static str,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
-        let validation_result =
-            self.validate_obligation_protocol_transition(obligation, event, context);
+        let validation_result = if observers.is_some() {
+            self.tracked_cancel_protocol_validator().map_or(
+                TransitionResult::Valid,
+                |mut validator| {
+                    validator
+                        .validate_obligation_transition_without_logging(obligation, event, context)
+                },
+            )
+        } else {
+            self.validate_obligation_protocol_transition(obligation, event, context)
+        };
         if matches!(
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            log_cancel_protocol_violation(op_label, &validation_result);
+            self.emit_lifecycle_observation(observers,
+                LifecycleObserverEffect::ProtocolViolation(op_label, validation_result));
             // Continue with the settle but log the violation
         }
     }
@@ -6306,7 +6553,11 @@ impl RuntimeState {
     /// br-asupersync-m9wsza). The unified wrappers route every inline
     /// dispatch through this method, so the S4c buffered drain replays
     /// payloads through exactly the code the embedded shape exercises.
-    fn dispatch_obligation_lifecycle_effect(&mut self, effect: ObligationLifecycleEffect) {
+    fn dispatch_obligation_lifecycle_effect(
+        &mut self,
+        effect: ObligationLifecycleEffect,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
         match effect {
             ObligationLifecycleEffect::Handoff { message, now } => {
                 self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
@@ -6328,6 +6579,7 @@ impl RuntimeState {
                     region,
                     now,
                     holder_logical_time,
+                    observers,
                 );
             }
             ObligationLifecycleEffect::SettleValidation {
@@ -6336,28 +6588,28 @@ impl RuntimeState {
                 context,
                 op_label,
             } => {
-                self.dispatch_obligation_settle_validation(obligation, event, &context, op_label);
+                self.dispatch_obligation_settle_validation(obligation, event, &context, op_label, observers);
             }
             ObligationLifecycleEffect::Commit {
                 info,
                 now,
                 holder_logical_time,
             } => {
-                self.dispatch_obligation_commit_effects(&info, now, holder_logical_time);
+                self.dispatch_obligation_commit_effects(&info, now, holder_logical_time, observers);
             }
             ObligationLifecycleEffect::Abort {
                 info,
                 now,
                 holder_logical_time,
             } => {
-                self.dispatch_obligation_abort_effects(&info, now, holder_logical_time);
+                self.dispatch_obligation_abort_effects(&info, now, holder_logical_time, observers);
             }
             ObligationLifecycleEffect::Leak {
                 info,
                 now,
                 holder_logical_time,
             } => {
-                self.dispatch_obligation_leak_effects(&info, now, holder_logical_time);
+                self.dispatch_obligation_leak_effects(&info, now, holder_logical_time, observers);
             }
         }
     }
@@ -6378,6 +6630,7 @@ impl RuntimeState {
         region: RegionId,
         now: Time,
         holder_logical_time: Option<LogicalTime>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
 
@@ -6394,41 +6647,28 @@ impl RuntimeState {
             created_at: now,
             validation_level: CancelValidationLevel::Basic,
         };
-        let validation_result = self.validate_obligation_protocol_transition(
+        self.dispatch_obligation_settle_validation(
             obligation,
-            ObligationEvent::Reserve {
-                token: obligation.as_u64().saturating_add(1),
-            },
-            &context,
+            ObligationEvent::Reserve { token: obligation.as_u64().saturating_add(1) },
+            &context, "obligation creation", observers,
         );
-        if matches!(
-            validation_result,
-            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
-        ) {
-            log_cancel_protocol_violation("obligation creation", &validation_result);
-            // Continue with creation but log violation
-        }
-
-        let _guard = crate::tracing_compat::debug_span!(
-            "obligation_reserve",
-            obligation_id = ?obligation,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region
-        )
-        .entered();
-        crate::tracing_compat::debug!(
-            obligation_id = ?obligation,
-            kind = ?kind,
-            holder_task = ?holder,
-            region_id = ?region,
-            "obligation reserved"
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::Reserve {
+                obligation,
+                kind,
+                holder,
+                region,
+            },
         );
 
         self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_reserve(seq, now, obligation, holder, region, kind)
         });
-        contain_metrics_hook(|| self.metrics.obligation_created(region));
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::ObligationCreated(region),
+        );
 
         // Notify epoch tracker of obligation creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
@@ -6443,9 +6683,12 @@ impl RuntimeState {
         effect: ObligationLifecycleEffect,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline => self.dispatch_obligation_lifecycle_effect(effect),
+            LifecycleEffectsSink::Inline => self.dispatch_obligation_lifecycle_effect(effect, &mut None),
             LifecycleEffectsSink::Buffered(buffer) => {
                 buffer.push(LifecycleEffect::Obligation(effect));
+            }
+            LifecycleEffectsSink::Completion(observers) => {
+                self.dispatch_obligation_lifecycle_effect(effect, &mut Some(observers));
             }
         }
     }
@@ -6462,7 +6705,7 @@ impl RuntimeState {
         obligation: ObligationId,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline => {
+            LifecycleEffectsSink::Inline | LifecycleEffectsSink::Completion(_) => {
                 if self.cancel_protocol_tracking {
                     self.cancel_protocol_validator
                         .lock()
@@ -6481,14 +6724,23 @@ impl RuntimeState {
     /// payload dispatches through the same code the Inline shape
     /// exercises on every operation.
     pub(crate) fn dispatch_lifecycle_effects(&mut self, effects: Vec<LifecycleEffect>) {
+        self.dispatch_lifecycle_effects_with_observers(effects, None);
+    }
+
+    fn dispatch_lifecycle_effects_with_observers(
+        &mut self,
+        effects: Vec<LifecycleEffect>,
+        mut observers: Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
         for effect in effects {
             match effect {
                 LifecycleEffect::Obligation(effect) => {
-                    self.dispatch_obligation_lifecycle_effect(effect);
+                    self.dispatch_obligation_lifecycle_effect(effect, &mut observers);
                 }
                 LifecycleEffect::Region(effect) => {
-                    self.dispatch_region_lifecycle_effect(effect);
+                    self.dispatch_region_lifecycle_effect(effect, &mut observers);
                 }
+                LifecycleEffect::Observer(effect) => self.emit_lifecycle_observation(&mut observers, effect),
                 LifecycleEffect::ValidatorRemoveObligation(obligation) => {
                     if self.cancel_protocol_tracking {
                         self.cancel_protocol_validator
@@ -6497,6 +6749,32 @@ impl RuntimeState {
                     }
                 }
             }
+        }
+    }
+
+    fn emit_lifecycle_observation(
+        &self,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+        effect: LifecycleObserverEffect,
+    ) {
+        if let Some(observers) = observers {
+            observers.push(effect);
+        } else {
+            contain_metrics_hook(|| effect.dispatch(&*self.metrics));
+        }
+    }
+
+    fn emit_walk_observation(
+        &self,
+        sink: &mut LifecycleEffectsSink<'_>,
+        effect: LifecycleObserverEffect,
+    ) {
+        match sink {
+            LifecycleEffectsSink::Inline => self.emit_lifecycle_observation(&mut None, effect),
+            LifecycleEffectsSink::Buffered(buffer) => {
+                buffer.push(LifecycleEffect::Observer(effect))
+            }
+            LifecycleEffectsSink::Completion(buffer) => buffer.push(effect),
         }
     }
 
@@ -6509,24 +6787,9 @@ impl RuntimeState {
         info: &ObligationCommitInfo,
         now: Time,
         holder_logical_time: Option<LogicalTime>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
-        let span = crate::tracing_compat::debug_span!(
-            "obligation_commit",
-            obligation_id = ?info.id,
-            kind = ?info.kind,
-            holder_task = ?info.holder,
-            region_id = ?info.region,
-            duration_ns = info.duration
-        );
-        let _span_guard = span.enter();
-        crate::tracing_compat::debug!(
-            obligation_id = ?info.id,
-            kind = ?info.kind,
-            holder_task = ?info.holder,
-            region_id = ?info.region,
-            duration_ns = info.duration,
-            "obligation committed"
-        );
+        self.emit_lifecycle_observation(observers, LifecycleObserverEffect::Commit(info.clone()));
 
         self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_commit(
@@ -6539,8 +6802,11 @@ impl RuntimeState {
                 info.duration,
             )
         });
-        contain_metrics_hook(|| self.metrics.obligation_discharged(info.region));
-        self.observe_obligation_age(info.duration);
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::ObligationDischarged(info.region),
+        );
+        self.observe_obligation_age_with_observers(info.duration, observers);
 
         // Notify epoch tracker of obligation commit
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::ObligationTable);
@@ -6705,26 +6971,9 @@ impl RuntimeState {
         info: &ObligationAbortInfo,
         now: Time,
         holder_logical_time: Option<LogicalTime>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
-        let span = crate::tracing_compat::debug_span!(
-            "obligation_abort",
-            obligation_id = ?info.id,
-            kind = ?info.kind,
-            holder_task = ?info.holder,
-            region_id = ?info.region,
-            duration_ns = info.duration,
-            abort_reason = %info.reason
-        );
-        let _span_guard = span.enter();
-        crate::tracing_compat::debug!(
-            obligation_id = ?info.id,
-            kind = ?info.kind,
-            holder_task = ?info.holder,
-            region_id = ?info.region,
-            duration_ns = info.duration,
-            abort_reason = %info.reason,
-            "obligation aborted"
-        );
+        self.emit_lifecycle_observation(observers, LifecycleObserverEffect::Abort(info.clone()));
 
         self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_abort(
@@ -6738,21 +6987,23 @@ impl RuntimeState {
                 info.reason,
             )
         });
-        contain_metrics_hook(|| self.metrics.obligation_discharged(info.region));
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::ObligationDischarged(info.region),
+        );
         if !self.leak_recovered_obligations.remove(&info.id) {
-            self.observe_obligation_age(info.duration);
+            self.observe_obligation_age_with_observers(info.duration, observers);
         }
 
-        // Track obligation settlement work in debt monitor
-        let cancel_reason = CancelReason::new(CancelKind::User);
-        self.debt_monitor.queue_work(
-            crate::observability::WorkType::ObligationSettlement,
-            format!("obligation_{}_{}", info.id, info.holder),
-            1, // Low priority for aborts
-            1, // Low cost estimate
-            &cancel_reason,
-            CancelKind::Shutdown,
-            Vec::new(),
+        // Debt monitoring may emit threshold/eviction subscriber callbacks.
+        // Completion therefore delivers this advisory work after unlock too.
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::ObligationDebt {
+                monitor: Arc::clone(&self.debt_monitor),
+                obligation: info.id,
+                holder: info.holder,
+            },
         );
 
         // Notify epoch tracker of obligation abort
@@ -7157,6 +7408,7 @@ impl RuntimeState {
         info: &ObligationLeakInfo,
         now: Time,
         holder_logical_time: Option<LogicalTime>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
         self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
             TraceEvent::obligation_leak(
@@ -7169,45 +7421,13 @@ impl RuntimeState {
                 info.duration,
             )
         });
-        contain_metrics_hook(|| self.metrics.obligation_leaked(info.region));
-        self.observe_obligation_leak();
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::ObligationLeaked(info.region),
+        );
+        self.observe_obligation_leak_with_observers(observers);
         if self.obligation_leak_response != ObligationLeakResponse::Silent {
-            let span = crate::tracing_compat::error_span!(
-                "obligation_leak",
-                obligation_id = ?info.id,
-                kind = ?info.kind,
-                holder_task = ?info.holder,
-                region_id = ?info.region,
-                duration_ns = info.duration,
-                acquired_at = %info.acquired_at
-            );
-            let _span_guard = span.enter();
-            #[allow(clippy::single_match, unused_variables)]
-            match info.acquire_backtrace.as_ref() {
-                Some(backtrace) => {
-                    crate::tracing_compat::error!(
-                        obligation_id = ?info.id,
-                        kind = ?info.kind,
-                        holder_task = ?info.holder,
-                        region_id = ?info.region,
-                        duration_ns = info.duration,
-                        acquired_at = %info.acquired_at,
-                        acquire_backtrace = ?backtrace,
-                        "obligation leaked"
-                    );
-                }
-                None => {
-                    crate::tracing_compat::error!(
-                        obligation_id = ?info.id,
-                        kind = ?info.kind,
-                        holder_task = ?info.holder,
-                        region_id = ?info.region,
-                        duration_ns = info.duration,
-                        acquired_at = %info.acquired_at,
-                        "obligation leaked"
-                    );
-                }
-            }
+            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::Leak(info.clone()));
         }
     }
 
@@ -8096,7 +8316,7 @@ impl RuntimeState {
                 }
                 _ => TaskEvent::Complete,
             };
-            self.validate_live_task_protocol_transition(task_id, task_event, "task completion");
+            let protocol_violation = self.live_task_protocol_violation(task_id, task_event);
             let retired_cancel_wakers = if let Some(inner) = task.cx_inner.as_ref() {
                 // br-asupersync-xgujaf — single write-lock; the previous
                 // read-then-write split had a TOCTOU window where a concurrent
@@ -8115,7 +8335,15 @@ impl RuntimeState {
                 TaskCompletionRetirements::empty()
             };
 
-            let observer = self.prepare_task_completion_observer(task, waiter_count);
+            let mut observer = self.prepare_task_completion_observer(task, waiter_count);
+            if let Some(violation) = protocol_violation {
+                observer
+                    .lifecycle
+                    .push(LifecycleObserverEffect::ProtocolViolation(
+                        "task completion",
+                        violation,
+                    ));
+            }
             let close_outcome = match &task.state {
                 crate::record::task::TaskState::Completed(outcome) => Some(outcome.clone()),
                 _ => None,
@@ -8187,6 +8415,7 @@ impl RuntimeState {
         // wins after cancellation was requested. Terminal state alone would
         // lose that ordering witness for Completed(Panicked).
         let cancellation_materialized = task.cancel_epoch > 0;
+        let mut lifecycle = Vec::new();
         if !*protocol_retired {
             // Validator mutation is callback-free and removes the generation
             // before diagnostic dispatch. Retain progress even if that later
@@ -8197,6 +8426,7 @@ impl RuntimeState {
                 task_event,
                 &context,
                 cancellation_materialized,
+                &mut lifecycle,
             );
         }
 
@@ -8209,7 +8439,8 @@ impl RuntimeState {
                         guard.take_cancel_wakers()
                     })
                 });
-        let observer = self.prepare_task_completion_observer(task, waiter_count);
+        let mut observer = self.prepare_task_completion_observer(task, waiter_count);
+        observer.lifecycle = lifecycle;
         let close_outcome = match &task.state {
             TaskState::Completed(outcome) => Some(outcome.clone()),
             _ => None,
@@ -8236,7 +8467,7 @@ impl RuntimeState {
         completion: TaskCompletionKind,
         close_outcome: Option<Outcome<(), Error>>,
         waiters: SmallVec<[TaskId; 4]>,
-        observer: TaskCompletionObserver,
+        mut observer: TaskCompletionObserver,
         retired_cancel_wakers: TaskCompletionRetirements,
         remove_embedded_record: bool,
     ) -> TaskCompletionEffects {
@@ -8282,6 +8513,7 @@ impl RuntimeState {
             }
             effects
         };
+        let mut lifecycle = std::mem::take(&mut observer.lifecycle);
         match self.shard_tables.clone() {
             Some(shards) => {
                 let mut deferred = Vec::new();
@@ -8322,13 +8554,13 @@ impl RuntimeState {
                         close_outcome,
                     );
                 }
-                self.dispatch_lifecycle_effects(deferred);
+                self.dispatch_lifecycle_effects_with_observers(deferred, Some(&mut lifecycle));
             }
             None => {
                 let mut regions = AdmissionRegionTarget::Embedded;
                 let tasks = AdmissionTaskTarget::Embedded;
                 let mut obligations = CompletionObligationTarget::Embedded;
-                let mut effects = LifecycleEffectsSink::Inline;
+                let mut effects = LifecycleEffectsSink::Completion(&mut lifecycle);
                 self.audit_completion_obligation_leaks(
                     &mut regions,
                     &tasks,
@@ -8359,7 +8591,7 @@ impl RuntimeState {
             }
         }
 
-        let mut observer = observer;
+        observer.lifecycle = lifecycle;
         observer.attach_epoch_telemetry(self.take_epoch_telemetry());
         observer.attach_watch_effects(watch_effects);
         TaskCompletionEffects {
@@ -9844,14 +10076,28 @@ impl RuntimeState {
         region_id: RegionId,
         finalization_event: RegionEvent,
         context: &RegionContext,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
-        let validation_result =
-            self.validate_region_protocol_transition(region_id, finalization_event, context);
+        let validation_result = if observers.is_some() {
+            self.tracked_cancel_protocol_validator().map_or(
+                TransitionResult::Valid,
+                |mut validator| {
+                    validator.validate_region_transition_without_logging(
+                        region_id,
+                        finalization_event,
+                        context,
+                    )
+                },
+            )
+        } else {
+            self.validate_region_protocol_transition(region_id, finalization_event, context)
+        };
         if matches!(
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            log_cancel_protocol_violation("region finalize transition", &validation_result);
+            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::ProtocolViolation(
+                "region finalize transition", validation_result));
             // Protocol violation detected - invalidate region snapshot cache
             // to ensure consistency is re-established via authoritative scan
             self.read_biased_draining_region_snapshot.invalidate();
@@ -9867,7 +10113,11 @@ impl RuntimeState {
     /// before that accounting reaches Finalized is a protocol invariant
     /// violation, not an implicit extra completion — the check records it
     /// into the machine when accounting is not terminal.
-    fn dispatch_region_close_validation(&self, region_id: RegionId) {
+    fn dispatch_region_close_validation(
+        &self,
+        region_id: RegionId,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
         let validation_result = {
             // An untracked validator holds no region accounting, so this check
             // would report every close as a violation.
@@ -9893,7 +10143,8 @@ impl RuntimeState {
             validation_result,
             TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
         ) {
-            log_cancel_protocol_violation("region close completion", &validation_result);
+            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::ProtocolViolation(
+                "region close completion", validation_result));
             self.read_biased_draining_region_snapshot.invalidate();
         }
     }
@@ -9909,6 +10160,7 @@ impl RuntimeState {
         parent: Option<RegionId>,
         created_at: Time,
         cancel_reported_at: Option<Arc<AtomicU64>>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
         let now = self.current_runtime_time();
         self.record_trace_event(|seq| {
@@ -9923,11 +10175,10 @@ impl RuntimeState {
             )
         });
         let lifetime = Duration::from_nanos(now.duration_since(created_at));
-        // Both hooks run inside the close walk under the runtime lock. A
-        // panicking provider must not unwind through the walk: the region
-        // would stay in the arena, listed under its parent, and the parent
-        // could never close.
-        contain_metrics_hook(|| self.metrics.region_closed(region_id, lifetime));
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::RegionClosed(region_id, lifetime),
+        );
         // A cancelled region's drain runs from its first cancellation report
         // to this close (br-asupersync-x9mmxl). The stamp is written before
         // the scheduler publishes the cancelled tasks, so an unset stamp
@@ -9941,7 +10192,7 @@ impl RuntimeState {
             .filter(|&stamp| stamp != u64::MAX)
         {
             let drain = Duration::from_nanos(now.as_nanos().saturating_sub(stamp));
-            contain_metrics_hook(|| self.metrics.drain_completed(region_id, drain));
+            self.emit_lifecycle_observation(observers, LifecycleObserverEffect::DrainCompleted(region_id, drain));
         }
     }
 
@@ -9950,10 +10201,18 @@ impl RuntimeState {
     /// post-mint sequence — validator tracking, region-created trace event,
     /// metrics, and the region-table epoch advance. Dispatched outside any
     /// shard guard.
-    fn dispatch_region_created_root_effects(&mut self, region_id: RegionId, now: Time) {
+    fn dispatch_region_created_root_effects(
+        &mut self,
+        region_id: RegionId,
+        now: Time,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
         self.track_new_region_in_cancel_protocol_validator(region_id, None, now);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, region_id, None));
-        contain_metrics_hook(|| self.metrics.region_created(region_id, None));
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::RegionCreated(region_id, None),
+        );
 
         // Notify epoch tracker of region creation
         self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
@@ -9972,6 +10231,7 @@ impl RuntimeState {
         now: Time,
         priority: RegionPriority,
         envelope_budgets: Option<(Budget, CapabilityBudget)>,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
     ) {
         self.resource_monitor
             .engine()
@@ -9981,7 +10241,10 @@ impl RuntimeState {
         self.record_trace_event(|seq| {
             TraceEvent::region_created(seq, now, region_id, Some(parent))
         });
-        contain_metrics_hook(|| self.metrics.region_created(region_id, Some(parent)));
+        self.emit_lifecycle_observation(
+            observers,
+            LifecycleObserverEffect::RegionCreated(region_id, Some(parent)),
+        );
 
         // Register resource envelope with swarm pressure governor
         if let Some((budget, capability_budget)) = envelope_budgets
@@ -10000,10 +10263,14 @@ impl RuntimeState {
     /// br-asupersync-m9wsza). The unified shape routes every inline
     /// dispatch through this method, so the S4c buffered drain replays
     /// payloads through exactly the code the embedded shape exercises.
-    fn dispatch_region_lifecycle_effect(&mut self, effect: RegionLifecycleEffect) {
+    fn dispatch_region_lifecycle_effect(
+        &mut self,
+        effect: RegionLifecycleEffect,
+        observers: &mut Option<&mut Vec<LifecycleObserverEffect>>,
+    ) {
         match effect {
             RegionLifecycleEffect::CreatedRoot { region_id, now } => {
-                self.dispatch_region_created_root_effects(region_id, now);
+                self.dispatch_region_created_root_effects(region_id, now, observers);
             }
             RegionLifecycleEffect::CreatedChild {
                 region_id,
@@ -10020,6 +10287,7 @@ impl RuntimeState {
                     now,
                     priority,
                     register_envelope.then_some((budget, capability_budget)),
+                    observers,
                 );
             }
             RegionLifecycleEffect::FinalizeValidation {
@@ -10027,10 +10295,10 @@ impl RuntimeState {
                 finalization_event,
                 context,
             } => {
-                self.dispatch_region_finalize_validation(region_id, finalization_event, &context);
+                self.dispatch_region_finalize_validation(region_id, finalization_event, &context, observers);
             }
             RegionLifecycleEffect::CloseValidation { region_id } => {
-                self.dispatch_region_close_validation(region_id);
+                self.dispatch_region_close_validation(region_id, observers);
             }
             RegionLifecycleEffect::SealedCloseBegin {
                 region_id,
@@ -10060,6 +10328,7 @@ impl RuntimeState {
                     parent,
                     created_at,
                     cancel_reported_at,
+                    observers,
                 );
             }
             RegionLifecycleEffect::RemoveValidator { region_id } => {
@@ -10081,9 +10350,12 @@ impl RuntimeState {
         effect: RegionLifecycleEffect,
     ) {
         match sink {
-            LifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect),
+            LifecycleEffectsSink::Inline => self.dispatch_region_lifecycle_effect(effect, &mut None),
             LifecycleEffectsSink::Buffered(buffer) => {
                 buffer.push(LifecycleEffect::Region(effect));
+            }
+            LifecycleEffectsSink::Completion(observers) => {
+                self.dispatch_region_lifecycle_effect(effect, &mut Some(observers));
             }
         }
     }
@@ -11879,6 +12151,110 @@ pub(crate) mod completion_observer_test_support {
     use super::*;
     use crate::sync::ContendedMutex;
     use std::sync::{Mutex, Weak};
+
+    /// Observes the actual completion lock and authoritative cleanup state.
+    /// A failed try-lock is recorded instead of blocking the old implementation
+    /// forever, so the same native test is a deterministic old-code failure.
+    pub(crate) struct LifecycleCompletionMetrics {
+        target: Mutex<Option<(Weak<ContendedMutex<RuntimeState>>, RegionId, TaskId)>>,
+        events: Mutex<Vec<&'static str>>,
+        reentries: AtomicUsize,
+        retired: AtomicUsize,
+        panic_on_lifecycle: bool,
+    }
+
+    impl LifecycleCompletionMetrics {
+        pub(crate) fn new(panic_on_lifecycle: bool) -> Arc<Self> {
+            Arc::new(Self {
+                target: Mutex::new(None),
+                events: Mutex::new(Vec::new()),
+                reentries: AtomicUsize::new(0),
+                retired: AtomicUsize::new(0),
+                panic_on_lifecycle,
+            })
+        }
+
+        pub(crate) fn arm(
+            &self,
+            state: &Arc<ContendedMutex<RuntimeState>>,
+            region: RegionId,
+            task: TaskId,
+        ) {
+            *self.target.lock().unwrap() = Some((Arc::downgrade(state), region, task));
+        }
+
+        fn observe(&self, event: &'static str, region: Option<RegionId>, task: Option<TaskId>) {
+            let Some((state, target_region, target_task)) = self.target.lock().unwrap().clone()
+            else {
+                return;
+            };
+            if region.is_some_and(|region| region != target_region)
+                || task.is_some_and(|task| task != target_task)
+            {
+                return;
+            }
+            self.events.lock().unwrap().push(event);
+            if let Some(state) = state.upgrade()
+                && let Ok(runtime) = state.try_lock()
+            {
+                self.reentries.fetch_add(1, Ordering::SeqCst);
+                if runtime.region(target_region).is_none()
+                    && runtime.pending_obligation_count() == 0
+                    && runtime.task(target_task).is_none()
+                {
+                    self.retired.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            if self.panic_on_lifecycle && event != "completed" {
+                panic!("lifecycle observer sentinel: {event}");
+            }
+        }
+
+        pub(crate) fn assert_completed(&self, discharged: &'static str) {
+            assert_eq!(
+                *self.events.lock().unwrap(),
+                [discharged, "closed", "completed"]
+            );
+            assert_eq!(
+                self.reentries.load(Ordering::SeqCst),
+                3,
+                "every callback reentered runtime state"
+            );
+            assert_eq!(
+                self.retired.load(Ordering::SeqCst),
+                3,
+                "callbacks observed complete task/obligation/region retirement"
+            );
+        }
+    }
+
+    impl MetricsProvider for LifecycleCompletionMetrics {
+        fn task_spawned(&self, _: RegionId, _: TaskId) {}
+        fn task_completed(&self, task: TaskId, _: OutcomeKind, _: Duration) {
+            self.observe("completed", None, Some(task));
+        }
+        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+        fn region_closed(&self, region: RegionId, _: Duration) {
+            self.observe("closed", Some(region), None);
+        }
+        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
+        fn drain_completed(&self, _: RegionId, _: Duration) {}
+        fn deadline_set(&self, _: RegionId, _: Duration) {}
+        fn deadline_exceeded(&self, _: RegionId) {}
+        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
+        fn deadline_violation(&self, _: &str, _: Duration) {}
+        fn deadline_remaining(&self, _: &str, _: Duration) {}
+        fn checkpoint_interval(&self, _: &str, _: Duration) {}
+        fn task_stuck_detected(&self, _: &str) {}
+        fn obligation_created(&self, _: RegionId) {}
+        fn obligation_discharged(&self, region: RegionId) {
+            self.observe("discharged", Some(region), None);
+        }
+        fn obligation_leaked(&self, region: RegionId) {
+            self.observe("leaked", Some(region), None);
+        }
+        fn scheduler_tick(&self, _: usize, _: Duration) {}
+    }
 
     struct PanickingDropPayload(Arc<AtomicUsize>);
 
