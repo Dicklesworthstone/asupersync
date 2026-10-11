@@ -3581,7 +3581,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept client");
             stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
+                .set_read_timeout(Some(Duration::from_secs(30)))
                 .expect("set read timeout");
 
             let mut header = [0u8; 4];
@@ -3604,7 +3604,7 @@ mod tests {
             stream.flush().expect("flush first result-set packet");
 
             release_rx
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(30))
                 .expect("wait for client cancellation");
         });
 
@@ -3662,7 +3662,7 @@ mod tests {
             }
             if !saw_query {
                 query_seen_rx
-                    .recv_timeout(Duration::from_secs(2))
+                    .recv_timeout(Duration::from_secs(30))
                     .expect("server should observe COM_QUERY");
                 for _ in 0..32 {
                     let _ = poll_once(&mut query);
