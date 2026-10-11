@@ -215,11 +215,13 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
     let started = Arc::new(AtomicUsize::new(0));
     let cancelled_clone = Arc::clone(&cancelled);
     let started_clone = Arc::clone(&started);
-    let cancelled_check = Arc::clone(&cancelled);
 
-    run_on_production(move |cx| async move {
+    let aborted_while_running = run_on_production(move |cx| async move {
         let scope = cx.scope();
-        let mut timeout_pinned = Box::pin(scope.timeout::<(), (), _, _>(
+        // Boxed, so `drop` below really drops the timeout future and the
+        // abort guard inside it; `pin!` would keep both alive until the end
+        // of this block and leave the abort to a race with shutdown.
+        let mut timeout_fut = Box::pin(scope.timeout::<(), (), _, _>(
             &cx,
             Duration::from_secs(30),
             move |task_cx| async move {
@@ -231,7 +233,7 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
         ));
         // Poll once so the operation is spawned and starts running.
         let _ = std::future::poll_fn(|poll_cx| {
-            let _ = timeout_pinned.as_mut().poll(poll_cx);
+            let _ = timeout_fut.as_mut().poll(poll_cx);
             Poll::Ready(())
         })
         .await;
@@ -240,21 +242,22 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
             yield_now().await;
         }
 
-        // Now drop the pinned Scope::timeout future!
-        drop(timeout_pinned);
+        drop(timeout_fut);
 
-        // Yield to allow the background task to receive abort and execute its park_until_cancelled
-        for _ in 0..100 {
-            if cancelled_check.load(Ordering::SeqCst) == 1 {
-                break;
+        // The operation must see the abort while the runtime still runs it,
+        // well inside its 30 s deadline.
+        let bound = std::time::Instant::now() + Duration::from_secs(10);
+        while cancelled.load(Ordering::SeqCst) == 0 {
+            if std::time::Instant::now() >= bound {
+                return false;
             }
             yield_now().await;
         }
+        true
     });
 
-    assert_eq!(
-        cancelled.load(Ordering::SeqCst),
-        1,
+    assert!(
+        aborted_while_running,
         "dropping a Scope::timeout future must abort the spawned task"
     );
 }

@@ -1710,12 +1710,14 @@ fn spawn_error_to_cancel_reason(err: SpawnError) -> CancelReason {
         SpawnError::RegionClosed(region) | SpawnError::RegionNotFound(region) => {
             CancelReason::parent_cancelled().with_region(region)
         }
-        SpawnError::RuntimeUnavailable => CancelReason::parent_cancelled(),
         SpawnError::RegionAtCapacity { region, .. }
         | SpawnError::AuthorizationDenied { region, .. } => {
             CancelReason::resource_unavailable().with_region(region)
         }
-        SpawnError::LocalSchedulerUnavailable
+        // No runtime, no spawn authority on this Cx, or a runtime shutting
+        // down: none of these is a cancelled parent.
+        SpawnError::RuntimeUnavailable
+        | SpawnError::LocalSchedulerUnavailable
         | SpawnError::NameRegistrationFailed { .. }
         | SpawnError::AdmissionSlotAlreadyReserved { .. } => CancelReason::resource_unavailable(),
     }
@@ -4459,7 +4461,7 @@ mod tests {
         assert_eq!(r2.origin_region(), region);
 
         let r3 = spawn_error_to_cancel_reason(SpawnError::RuntimeUnavailable);
-        assert_eq!(r3.kind(), CancelKind::ParentCancelled);
+        assert_eq!(r3.kind(), CancelKind::ResourceUnavailable);
 
         let r4 = spawn_error_to_cancel_reason(SpawnError::RegionAtCapacity {
             region,
