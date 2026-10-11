@@ -62,6 +62,36 @@ pub fn format_unix_nanos_rfc3339(unix_nanos: u64) -> String {
     rendered
 }
 
+/// Formats nonnegative Unix nanoseconds as canonical RFC 7231 / RFC 9110 HTTP-date (IMF-fixdate).
+///
+/// Output format: `Sun, 06 Nov 1994 08:49:37 GMT`.
+#[must_use]
+pub fn format_unix_nanos_http_date(unix_nanos: u64) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    let whole_seconds = unix_nanos / NANOS_PER_SECOND;
+    let unix_days = whole_seconds / SECONDS_PER_DAY;
+    let seconds_of_day = whole_seconds % SECONDS_PER_DAY;
+
+    let day_name = DAYS[(unix_days % 7) as usize];
+    let (year, month, day) = civil_date_from_unix_days(unix_days);
+    let month_name = MONTHS[(month - 1) as usize];
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+
+    let mut rendered = String::with_capacity(29);
+    write!(
+        rendered,
+        "{day_name}, {day:02} {month_name} {year:04} {hour:02}:{minute:02}:{second:02} GMT"
+    )
+    .expect("writing to a String cannot fail");
+    rendered
+}
+
 /// Converts days since 1970-01-01 to a proleptic Gregorian date.
 ///
 /// This is the civil-from-days decomposition for the nonnegative domain used
@@ -116,6 +146,22 @@ mod tests {
 
         for (unix_nanos, expected) in vectors {
             assert_eq!(format_unix_nanos_rfc3339(unix_nanos), expected);
+        }
+    }
+
+    #[test]
+    fn formats_http_date_vectors() {
+        use super::format_unix_nanos_http_date;
+
+        let vectors = [
+            (0, "Thu, 01 Jan 1970 00:00:00 GMT"),
+            (784_111_777_000_000_000, "Sun, 06 Nov 1994 08:49:37 GMT"),
+            (951_782_400_000_000_000, "Tue, 29 Feb 2000 00:00:00 GMT"),
+            (1_582_979_696_123_456_789, "Sat, 29 Feb 2020 12:34:56 GMT"),
+        ];
+
+        for (unix_nanos, expected) in vectors {
+            assert_eq!(format_unix_nanos_http_date(unix_nanos), expected);
         }
     }
 }
