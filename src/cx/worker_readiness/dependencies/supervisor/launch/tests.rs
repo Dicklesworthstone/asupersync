@@ -195,7 +195,21 @@ fn restart_budget_stop_cannot_leave_owned_startup_waiting_forever() {
                 async { Outcome::<(), _>::Err("never ready") }
             }, |_, _, ()| async { Outcome::<(), &'static str>::Ok(()) }, classify);
         let error = bind(vec![bad, idle("live-sibling")], 0).start(&cx, config(10)).await.unwrap_err();
-        assert!(matches!(error.cause, InitializedStartCause::Deadline { .. }));
+        // The exhausted restart budget retires the prerequisite, which closes its
+        // readiness (asupersync-h08ezk M1), so startup refuses at once with that
+        // cause instead of waiting out its deadline. The live sibling never
+        // closes, so a closed dependency is the stopped child.
+        assert!(
+            matches!(
+                &error.cause,
+                InitializedStartCause::Readiness(DependencyError::Worker {
+                    cause: crate::cx::worker_readiness::WorkerReadinessError::Closed,
+                    ..
+                })
+            ),
+            "{}",
+            error.cause
+        );
         assert_eq!(attempts.load(Ordering::SeqCst), 1, "no speculative restart outside the actual controller");
         let exit = error.cleanup.unwrap();
         assert!(exit.close.is_ok());

@@ -267,9 +267,14 @@ where
             }
             Poll::Pending => {
                 // Inner service is not ready; mark as overloaded but return Ready
-                // so the caller can call us immediately (and we'll shed)
+                // so the caller can call us immediately (and we'll shed).
+                // Release the inner wait now, not in `call`: a handle that is
+                // never called would otherwise keep it, e.g. a queued
+                // ConcurrencyLimit acquire at the head of its FIFO semaphore,
+                // blocking every later acquirer (br-asupersync-wfch0u).
                 self.overloaded = true;
                 self.ready_observed = true;
+                drop(self.inner.release_readiness());
                 Poll::Ready(Ok(()))
             }
         }
@@ -281,10 +286,8 @@ where
         }
 
         if self.overloaded {
-            // Stay overloaded until `poll_ready` observes the inner service as ready.
-            // Release inner readiness (e.g. semaphore acquire in ConcurrencyLimit)
-            // so an idle shed handle does not hold the queue head.
-            drop(self.inner.release_readiness());
+            // Stay overloaded until `poll_ready` observes the inner service as
+            // ready. `poll_ready` already released the inner wait.
             LoadShedFuture::overloaded()
         } else {
             LoadShedFuture::inner(self.inner.call(req))
@@ -809,12 +812,16 @@ mod tests {
             assert!(shed.is_overloaded(), "a full buffer is shed");
         }
 
-        // Releasing the slot wakes each distinct waker the buffer queued.
+        // Releasing the slot wakes each distinct waker the buffer queued. The
+        // shedder releases its wait whenever it sheds (an idle handle must not
+        // keep a queue position, br-asupersync-wfch0u), and it never parks, so
+        // at most one wake is owed: what this guards is one waker per shed
+        // request, a hundred here.
         drop(holder);
         crate::assert_with_log!(
-            wakes.load(Ordering::SeqCst) == 1,
-            "one task polling 100 times is queued, and woken, once",
-            1,
+            wakes.load(Ordering::SeqCst) <= 1,
+            "one task polling 100 times is queued, and woken, at most once",
+            "<= 1",
             wakes.load(Ordering::SeqCst)
         );
         crate::test_complete!("load_shed_reuses_its_probe_waker_while_shedding_over_a_full_buffer");

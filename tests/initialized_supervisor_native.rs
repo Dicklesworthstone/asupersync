@@ -366,8 +366,9 @@ async fn normal_transient_completion_closes_next_generation_wait(cx: Cx) {
         move |cx, _, state: Resource| {
             let mut command = command.lock().unwrap().take().unwrap();
             async move {
+                // Keep the !Sync state alive in the task until the command arrives.
+                let _state = state;
                 command.recv(&cx).await.unwrap();
-                drop(state);
                 Outcome::<(), &'static str>::Ok(())
             }
         },

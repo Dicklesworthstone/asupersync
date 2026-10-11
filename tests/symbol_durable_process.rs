@@ -161,7 +161,9 @@ impl Process {
                 if let Some((_, message)) = line.split_once(PREFIX) { let _ = tx.try_send(message.to_owned()); }
             }
         }));
-        let ready = process.messages.recv_timeout(Duration::from_secs(10)).expect("worker readiness");
+        // A reopening receiver replays its whole journal (several MiB for the
+        // chunked cases) before READY; on a loaded host that exceeded 10 s.
+        let ready = process.messages.recv_timeout(Duration::from_secs(60)).expect("worker readiness");
         process.address = ready.strip_prefix("READY ").expect("ready receipt").parse().unwrap();
         process
     }

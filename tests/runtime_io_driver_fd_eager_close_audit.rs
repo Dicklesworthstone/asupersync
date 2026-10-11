@@ -92,6 +92,21 @@ fn read_tcp_stream_source() -> String {
     std::fs::read_to_string(&path).expect("read net/tcp/stream.rs")
 }
 
+fn read_udp_source() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/net/udp.rs");
+    std::fs::read_to_string(&path).expect("read net/udp.rs")
+}
+
+/// The synchronous deregister call in `IoRegistration::drop`. Since
+/// br-asupersync-9kb866 it is `deregister_detached`, which removes the token
+/// from the reactor and the waker slab under the driver lock exactly as
+/// `deregister` does, and hands the removed waker back so it drops after the
+/// lock is released.
+const DROP_DEREGISTER_CALLS: [&str; 2] = [
+    "guard.deregister_detached(self.token)",
+    "guard.deregister(self.token)",
+];
+
 fn fn_body_global<'a>(source: &'a str, fn_marker: &str) -> &'a str {
     let start = source.find(fn_marker).expect("function marker");
     let body_end = source[start..]
@@ -117,9 +132,10 @@ fn io_registration_drop_eagerly_deregisters() {
     let body = &source[start..start + end_rel];
 
     assert!(
-        body.contains("guard.deregister(self.token)"),
+        DROP_DEREGISTER_CALLS.iter().any(|call| body.contains(call)),
         "REGRESSION: IoRegistration::drop no longer calls \
-         `guard.deregister(self.token)` directly. A regression \
+         `guard.deregister_detached(self.token)` (or \
+         `guard.deregister(self.token)`) directly. A regression \
          to a deferred cleanup queue would let FDs stay \
          registered past the user-visible drop, breaking the \
          eager-close discipline.\n\nimpl body:\n{body}",
@@ -173,8 +189,10 @@ fn io_registration_drop_wakes_reactor_for_immediate_visibility() {
     // Defense-in-depth: wake must come BEFORE deregister so
     // the reactor wakes BEFORE its registration view changes.
     let wake_pos = body.find("self.wake_polling_reactor()").expect("wake call");
-    let deregister_pos = body
-        .find("guard.deregister(self.token)")
+    let deregister_pos = DROP_DEREGISTER_CALLS
+        .iter()
+        .filter_map(|call| body.find(call))
+        .min()
         .expect("deregister call");
     assert!(
         wake_pos < deregister_pos,
@@ -290,15 +308,32 @@ fn tcp_stream_struct_holds_io_registration_for_eager_dereg_on_drop() {
     // deregister. A regression that removed the field would
     // mean the registration leaks (until the reactor's slab
     // entry was eventually invalidated some other way).
+    // Since 3a5dfa244 the field is a `ReactorRegistration` (src/net/udp.rs),
+    // the fallback-aware wrapper shared by the sockets, which itself holds
+    // the `Option<IoRegistration>`.
     let source = read_tcp_stream_source();
 
     assert!(
-        source.contains("registration: Option<IoRegistration>,"),
+        source.contains("registration: Option<IoRegistration>,")
+            || source.contains("registration: ReactorRegistration,"),
         "REGRESSION: TcpStream no longer has a \
-         `registration: Option<IoRegistration>` field. Without \
-         it, the reactor's view of the FD lingers past the \
-         user-visible drop, breaking the eager-deregister \
-         chain.",
+         `registration: ReactorRegistration` (or \
+         `Option<IoRegistration>`) field. Without it, the \
+         reactor's view of the FD lingers past the user-visible \
+         drop, breaking the eager-deregister chain.",
+    );
+
+    let udp = read_udp_source();
+    let struct_marker = "pub struct ReactorRegistration {";
+    let start = udp.find(struct_marker).expect("ReactorRegistration struct");
+    let end_rel = udp[start..].find("\n}\n").expect("struct close");
+    let body = &udp[start..start + end_rel];
+    assert!(
+        body.contains("registration: Option<IoRegistration>,"),
+        "REGRESSION: ReactorRegistration no longer holds a \
+         `registration: Option<IoRegistration>` field, so \
+         dropping a TcpStream no longer drops an IoRegistration \
+         and its eager deregister.\n\nstruct body:\n{body}",
     );
 }
 
@@ -342,10 +377,23 @@ fn io_driver_deregister_is_synchronous_under_lock() {
          shift worth re-auditing.",
     );
 
-    // The body must call self.reactor.deregister synchronously.
+    // The body must call self.reactor.deregister synchronously, directly or
+    // through the synchronous `deregister_detached` it delegates to since
+    // br-asupersync-9kb866.
     let body = fn_body_global(&source, fn_marker);
+    let reaches_reactor = if body.contains("self.reactor.deregister(") {
+        true
+    } else if body.contains("self.deregister_detached(token)") {
+        let detached = fn_body_global(
+            &source,
+            "fn deregister_detached(&mut self, token: Token) -> (io::Result<()>, Option<Waker>) {",
+        );
+        detached.contains("self.reactor.deregister(token)")
+    } else {
+        false
+    };
     assert!(
-        body.contains("self.reactor.deregister("),
+        reaches_reactor,
         "REGRESSION: IoDriver::deregister no longer calls \
          self.reactor.deregister synchronously. A regression \
          to a deferred / queued path would push FD cleanup \
