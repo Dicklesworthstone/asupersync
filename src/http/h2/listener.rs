@@ -3071,7 +3071,9 @@ where
         // Unlike h1 (one request per connection -> connection close), h2 is
         // multiplexed, so only the offending stream is answered with 421; the
         // rest of the connection keeps serving.
-        if let Err(rejection) = validate_host_header(&request.headers, &host_policy) {
+        if let Err(rejection) =
+            validate_host_header(&request.headers, request.version, &host_policy)
+        {
             let reject = Response::new(
                 rejection.status(),
                 rejection.reason(),

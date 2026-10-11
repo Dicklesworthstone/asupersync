@@ -458,7 +458,9 @@ impl StreamingRequests {
         }
         let suppress_response_body = head.method == Method::Head;
         let config = &self.dispatch.config;
-        if let Err(rejection) = validate_host_header(&head.headers, &config.listener.allowed_hosts) {
+        if let Err(rejection) =
+            validate_host_header(&head.headers, head.version, &config.listener.allowed_hosts)
+        {
             self.reject(
                 conn,
                 stream_id,
