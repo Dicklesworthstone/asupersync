@@ -6,22 +6,27 @@ use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+#[allow(dead_code)]
 fn deterministic_f32_be_bytes(value: f32) -> [u8; 4] {
     deterministic_f32_bits(value).to_be_bytes()
 }
 
+#[allow(dead_code)]
 fn deterministic_f32_le_bytes(value: f32) -> [u8; 4] {
     deterministic_f32_bits(value).to_le_bytes()
 }
 
+#[allow(dead_code)]
 fn deterministic_f64_be_bytes(value: f64) -> [u8; 8] {
     deterministic_f64_bits(value).to_be_bytes()
 }
 
+#[allow(dead_code)]
 fn deterministic_f64_le_bytes(value: f64) -> [u8; 8] {
     deterministic_f64_bits(value).to_le_bytes()
 }
 
+#[allow(dead_code)]
 fn deterministic_f32_bits(value: f32) -> u32 {
     const CANONICAL_NAN_BITS: u32 = 0x7fc0_0000;
     if value.is_nan() {
@@ -33,6 +38,7 @@ fn deterministic_f32_bits(value: f32) -> u32 {
     }
 }
 
+#[allow(dead_code)]
 fn deterministic_f64_bits(value: f64) -> u64 {
     const CANONICAL_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
     if value.is_nan() {
@@ -233,7 +239,7 @@ pub trait AsyncWriteExt: AsyncWrite {
         "little-endian",
         to_le_bytes
     );
-    /// Write a `f32` in big-endian byte order using deterministic float encoding.
+    /// Write a `f32` in big-endian byte order.
     ///
     /// Not cancel-safe: partial writes may have occurred.
     fn write_f32(&mut self, n: f32) -> WriteF32<'_, Self>
@@ -242,13 +248,13 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         WriteF32 {
             writer: self,
-            buf: deterministic_f32_be_bytes(n),
+            buf: n.to_be_bytes(),
             pos: 0,
             completed: false,
         }
     }
 
-    /// Write a `f32` in little-endian byte order using deterministic float encoding.
+    /// Write a `f32` in little-endian byte order.
     ///
     /// Not cancel-safe: partial writes may have occurred.
     fn write_f32_le(&mut self, n: f32) -> WriteF32Le<'_, Self>
@@ -257,13 +263,13 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         WriteF32Le {
             writer: self,
-            buf: deterministic_f32_le_bytes(n),
+            buf: n.to_le_bytes(),
             pos: 0,
             completed: false,
         }
     }
 
-    /// Write a `f64` in big-endian byte order using deterministic float encoding.
+    /// Write a `f64` in big-endian byte order.
     ///
     /// Not cancel-safe: partial writes may have occurred.
     fn write_f64(&mut self, n: f64) -> WriteF64<'_, Self>
@@ -272,13 +278,13 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         WriteF64 {
             writer: self,
-            buf: deterministic_f64_be_bytes(n),
+            buf: n.to_be_bytes(),
             pos: 0,
             completed: false,
         }
     }
 
-    /// Write a `f64` in little-endian byte order using deterministic float encoding.
+    /// Write a `f64` in little-endian byte order.
     ///
     /// Not cancel-safe: partial writes may have occurred.
     fn write_f64_le(&mut self, n: f64) -> WriteF64Le<'_, Self>
@@ -287,7 +293,7 @@ pub trait AsyncWriteExt: AsyncWrite {
     {
         WriteF64Le {
             writer: self,
-            buf: deterministic_f64_le_bytes(n),
+            buf: n.to_le_bytes(),
             pos: 0,
             completed: false,
         }
@@ -1186,6 +1192,88 @@ mod tests {
         let expected = val.to_le_bytes().to_vec();
         crate::assert_with_log!(output == expected, "output f64 LE", expected, output);
         crate::test_complete!("write_f64_le_little_endian");
+    }
+
+    #[test]
+    fn write_f32_and_f64_preserve_negative_zero_and_nan_payloads() {
+        init_test("write_f32_and_f64_preserve_negative_zero_and_nan_payloads");
+
+        // f32 negative zero and NaN with payload
+        let neg_zero_32: f32 = -0.0;
+        let nan_payload_32 = f32::from_bits(0x7fc0_0123);
+        let mut out32_be = Vec::new();
+        let mut fut = out32_be.write_f32(neg_zero_32);
+        let _ = poll_ready(&mut Pin::new(&mut fut));
+        crate::assert_with_log!(
+            out32_be == (-0.0f32).to_be_bytes(),
+            "f32 -0.0 BE bytes",
+            (-0.0f32).to_be_bytes().to_vec(),
+            out32_be
+        );
+
+        let mut out32_le = Vec::new();
+        let mut fut = out32_le.write_f32_le(nan_payload_32);
+        let _ = poll_ready(&mut Pin::new(&mut fut));
+        crate::assert_with_log!(
+            out32_le == nan_payload_32.to_le_bytes(),
+            "f32 NaN payload LE bytes",
+            nan_payload_32.to_le_bytes().to_vec(),
+            out32_le
+        );
+
+        // f64 negative zero and NaN with payload
+        let neg_zero_64: f64 = -0.0;
+        let nan_payload_64 = f64::from_bits(0x7ff8_0000_0000_0123);
+        let mut out64_be = Vec::new();
+        let mut fut = out64_be.write_f64(neg_zero_64);
+        let _ = poll_ready(&mut Pin::new(&mut fut));
+        crate::assert_with_log!(
+            out64_be == (-0.0f64).to_be_bytes(),
+            "f64 -0.0 BE bytes",
+            (-0.0f64).to_be_bytes().to_vec(),
+            out64_be
+        );
+
+        let mut out64_le = Vec::new();
+        let mut fut = out64_le.write_f64_le(nan_payload_64);
+        let _ = poll_ready(&mut Pin::new(&mut fut));
+        crate::assert_with_log!(
+            out64_le == nan_payload_64.to_le_bytes(),
+            "f64 NaN payload LE bytes",
+            nan_payload_64.to_le_bytes().to_vec(),
+            out64_le
+        );
+
+        crate::test_complete!("write_f32_and_f64_preserve_negative_zero_and_nan_payloads");
+    }
+
+    #[test]
+    fn float_write_and_read_roundtrip_preserves_sign_and_bits() {
+        use crate::io::AsyncReadExt;
+        init_test("float_write_and_read_roundtrip_preserves_sign_and_bits");
+
+        let neg_zero: f64 = -0.0;
+        let mut buf = Vec::new();
+        let mut fut = buf.write_f64(neg_zero);
+        let _ = poll_ready(&mut Pin::new(&mut fut));
+
+        let mut reader = &buf[..];
+        let mut read_fut = reader.read_f64();
+        let val = poll_ready(&mut Pin::new(&mut read_fut)).unwrap();
+        crate::assert_with_log!(
+            val.to_bits() == neg_zero.to_bits(),
+            "roundtrip f64 bits",
+            neg_zero.to_bits(),
+            val.to_bits()
+        );
+        crate::assert_with_log!(
+            val.is_sign_negative(),
+            "roundtrip f64 is_sign_negative",
+            true,
+            val.is_sign_negative()
+        );
+
+        crate::test_complete!("float_write_and_read_roundtrip_preserves_sign_and_bits");
     }
 
     #[test]
