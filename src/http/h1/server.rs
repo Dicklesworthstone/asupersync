@@ -24,7 +24,7 @@ use crate::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use crate::server::shutdown::{ShutdownPhase, ShutdownSignal};
 use crate::stream::Stream;
 use crate::time::{timeout, wall_now};
-use crate::tracing_compat::error;
+use crate::tracing_compat::{error, warn};
 use crate::types::{Budget, CancelKind};
 use crate::web::WebBodyDiagnostic;
 use crate::web::request_region::{
@@ -1415,29 +1415,37 @@ where
                     if admit_upgrade == UpgradeAdmission::TransportGeneric
                         && !upgrade.runs_on_any_transport()
                     {
-                        return Err(invalid_upgrade_error(
+                        warn!(
+                            peer = ?peer_addr,
+                            "TCP-typed HTTP/1 upgrade refused on transport; use Http1Upgrade::new_any (WebSocketUpgrade::on_upgrade_any)"
+                        );
+                        resp = hop_error_response(
+                            request_version,
+                            500,
                             "this transport runs only HTTP/1 upgrade actions made with \
                              Http1Upgrade::new_any (WebSocketUpgrade::on_upgrade_any)",
-                        ));
-                    }
-                    if draining {
+                        );
+                        forced_close = true;
+                        None
+                    } else if draining {
                         return Err(invalid_upgrade_error(
                             "HTTP/1 upgrade refused after listener drain began",
                         ));
-                    }
-                    let Some(upgrade_request) = upgrade_request.as_ref() else {
-                        // Same refusals, in the same order, as the check below.
-                        if request_version != Version::Http11 || request_method != Method::Get {
+                    } else {
+                        let Some(upgrade_request) = upgrade_request.as_ref() else {
+                            // Same refusals, in the same order, as the check below.
+                            if request_version != Version::Http11 || request_method != Method::Get {
+                                return Err(invalid_upgrade_error(
+                                    "WebSocket handoff requires an HTTP/1.1 GET request",
+                                ));
+                            }
                             return Err(invalid_upgrade_error(
-                                "WebSocket handoff requires an HTTP/1.1 GET request",
+                                "WebSocket handoff request must not carry a body or trailers",
                             ));
-                        }
-                        return Err(invalid_upgrade_error(
-                            "WebSocket handoff request must not carry a body or trailers",
-                        ));
-                    };
-                    validate_upgrade_handoff(upgrade_request, &resp, &upgrade)?;
-                    Some(upgrade)
+                        };
+                        validate_upgrade_handoff(upgrade_request, &resp, &upgrade)?;
+                        Some(upgrade)
+                    }
                 }
                 None => None,
             };

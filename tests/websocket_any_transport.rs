@@ -102,9 +102,11 @@ where
         }
     }
     if let Ok(response) = WsHttpResponse::parse(&head) {
-        handshake
-            .validate_response(&response)
-            .expect("valid 101 response");
+        if response.status == 101 {
+            handshake
+                .validate_response(&response)
+                .expect("valid 101 response");
+        }
     }
     (String::from_utf8_lossy(&head).into_owned(), stream)
 }
@@ -139,10 +141,15 @@ fn websocket_over_a_unix_socket_listener() {
             .expect("send");
         assert_eq!(text(ws.recv(&cx).await.expect("recv")), "over unix");
 
-        // The TCP-typed callback is refused on this transport before any 101.
+        // The TCP-typed callback is refused on this transport before any 101 with a 500 response.
         let stream = UnixStream::connect(&socket).await.expect("connect");
-        let (head, _stream) = client_handshake(stream, "/tcp-only").await;
+        let (head, mut stream) = client_handshake(stream, "/tcp-only").await;
+        assert!(head.starts_with("HTTP/1.1 500"), "{head}");
         assert!(!head.contains(" 101"), "{head}");
+        let mut body = Vec::new();
+        AsyncReadExt::read_to_end(&mut stream, &mut body).await.expect("read 500 body");
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("WebSocketUpgrade::on_upgrade_any"), "{body_str}");
 
         assert!(shutdown.begin_drain(Duration::from_secs(2)));
         let _ = run.await.expect("listener run");
@@ -196,6 +203,18 @@ fn websocket_through_the_auto_listener_next_to_http2() {
             (response.status, response.text().expect("UTF-8")),
             (200, "plain route")
         );
+
+        // The TCP-typed callback is refused over the auto listener with a 500 response.
+        let stream = asupersync::net::TcpStream::connect(addr)
+            .await
+            .expect("connect");
+        let (head, mut stream) = client_handshake(stream, "/tcp-only").await;
+        assert!(head.starts_with("HTTP/1.1 500"), "{head}");
+        assert!(!head.contains(" 101"), "{head}");
+        let mut body = Vec::new();
+        AsyncReadExt::read_to_end(&mut stream, &mut body).await.expect("read 500 body");
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("WebSocketUpgrade::on_upgrade_any"), "{body_str}");
 
         assert!(shutdown.begin_drain(Duration::from_secs(2)));
         let _ = run.await.expect("listener run");

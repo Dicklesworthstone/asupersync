@@ -940,3 +940,77 @@ fn tls_alpn_selects_http2_or_http1_on_one_port() {
         let _ = run.await.expect("auto listener run");
     }));
 }
+
+#[cfg(feature = "tls")]
+#[test]
+fn tls_auto_listener_refuses_an_acceptor_that_cannot_negotiate_h2() {
+    use asupersync::tls::{CertificateChain, PrivateKey, TlsAcceptorBuilder};
+
+    const SERVER_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
+    const SERVER_KEY_PEM: &[u8] = include_bytes!("fixtures/tls/server.key");
+
+    let chain = CertificateChain::from_pem(SERVER_CERT_PEM).expect("chain");
+    let key = PrivateKey::from_pem(SERVER_KEY_PEM).expect("key");
+    let http1_only = TlsAcceptorBuilder::new(chain, key)
+        .alpn_protocols(vec![b"http/1.1".to_vec()])
+        .build()
+        .expect("acceptor");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+    runtime.block_on(handle.clone().spawn(async move {
+        let listener = HttpAutoListener::bind("127.0.0.1:0", report, config())
+            .await
+            .expect("bind")
+            .with_tls(http1_only);
+        let run = asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            Duration::from_secs(5),
+            listener.run(&handle),
+        )
+        .await
+        .expect("run returns at once");
+        let error = run.expect_err("an acceptor without h2 cannot serve HttpAutoListener");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }));
+}
+
+#[cfg(feature = "tls")]
+#[test]
+fn tls_auto_listener_refuses_an_acceptor_without_alpn() {
+    use asupersync::tls::{CertificateChain, PrivateKey, TlsAcceptorBuilder};
+
+    const SERVER_CERT_PEM: &[u8] = include_bytes!("fixtures/tls/server.crt");
+    const SERVER_KEY_PEM: &[u8] = include_bytes!("fixtures/tls/server.key");
+
+    let chain = CertificateChain::from_pem(SERVER_CERT_PEM).expect("chain");
+    let key = PrivateKey::from_pem(SERVER_KEY_PEM).expect("key");
+    let no_alpn = TlsAcceptorBuilder::new(chain, key)
+        .build()
+        .expect("acceptor");
+
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(2)
+        .build()
+        .expect("build runtime");
+    let handle = runtime.handle();
+    runtime.block_on(handle.clone().spawn(async move {
+        let listener = HttpAutoListener::bind("127.0.0.1:0", report, config())
+            .await
+            .expect("bind")
+            .with_tls(no_alpn);
+        let run = asupersync::time::timeout(
+            Cx::current().unwrap().now(),
+            Duration::from_secs(5),
+            listener.run(&handle),
+        )
+        .await
+        .expect("run returns at once");
+        let error = run.expect_err("an acceptor without ALPN cannot serve HttpAutoListener");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }));
+}
+

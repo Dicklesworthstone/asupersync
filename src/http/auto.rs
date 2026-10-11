@@ -348,6 +348,20 @@ where
     }
 
     async fn run_with(self, spawner: TaskSpawner) -> io::Result<HttpAutoShutdownStats> {
+        #[cfg(feature = "tls")]
+        if let Some(acceptor) = &self.tls_acceptor
+            && !acceptor
+                .config()
+                .alpn_protocols
+                .iter()
+                .any(|protocol| protocol.as_slice() == b"h2")
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HttpAutoListener::with_tls needs an acceptor that advertises the h2 ALPN protocol",
+            ));
+        }
+
         let http1_queue = Arc::new(HandoffQueue::default());
         let http2_queue = Arc::new(HandoffQueue::default());
         let handler = Arc::clone(&self.handler);
@@ -851,8 +865,8 @@ fn is_transient_accept_error(error: &io::Error) -> bool {
             | io::ErrorKind::Interrupted
             | io::ErrorKind::WouldBlock
             | io::ErrorKind::TimedOut
-            | io::ErrorKind::OutOfMemory
-    ) || matches!(error.raw_os_error(), Some(23 | 24 | 105))
+            | io::ErrorKind::ConnectionRefused
+    ) || crate::net::tcp::listener::is_accept_resource_exhaustion(error)
 }
 
 /// One accepted connection on its way to a protocol's listener.
