@@ -1370,6 +1370,11 @@ path = "tests/regex_fixed_detector_terminal_receipt_contract.rs"
 required-features = ["metrics"]
 
 [[test]]
+name = "remote_durable_process"
+path = "tests/remote_durable_process.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
 name = "remote_native_admission"
 path = "tests/remote_native_admission.rs"
 required-features = ["test-internals", "tls"]

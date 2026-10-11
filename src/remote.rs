@@ -105,6 +105,8 @@ use std::time::Duration;
 
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod admission;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod durable;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod write_progress;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
