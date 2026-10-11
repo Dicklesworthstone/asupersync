@@ -6320,20 +6320,25 @@ mod tests {
         let headers = vec![("Host".to_string(), "auth.example.com".to_string())];
         assert!(validate_host_header(&headers, &policy).is_ok());
 
-        // Unlisted host — REJECTED. This is the host-injection defense.
+        // Unlisted host — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "attacker.com".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "attacker.com");
+        assert_eq!(err.status(), 421);
+        assert_eq!(err.reason(), "Misdirected Request");
 
-        // Subdomain not in allowlist — REJECTED (allowlist is exact match).
+        // Subdomain not in allowlist — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "evil.example.com".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "evil.example.com");
+        assert_eq!(err.status(), 421);
 
-        // Missing Host header (HTTP/1.1 protocol violation per RFC 7230 §5.4).
+        // Missing Host header (HTTP/1.1 protocol violation per RFC 9112 §3.2 -> 400 Bad Request).
         let headers = vec![("X-Other".to_string(), "value".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
-        assert!(err.is_empty(), "missing Host should yield empty err string");
+        assert_eq!(err, HostRejection::Missing);
+        assert_eq!(err.status(), 400);
+        assert_eq!(err.reason(), "Bad Request");
     }
 
     /// br-asupersync-scxixg: validation policies - AllowAll accepts any
@@ -6343,18 +6348,31 @@ mod tests {
     fn validate_host_header_policy_behaviors() {
         let headers = vec![("Host".to_string(), "anywhere.com".to_string())];
 
-        // AllowAll accepts any single Host header (insecure legacy mode).
+        // AllowAll rejects missing Host header per RFC 9112 §3.2 (HTTP/1.1 requires Host).
+        let missing_headers = vec![("X-Other".to_string(), "value".to_string())];
+        let err = validate_host_header(&missing_headers, &HostPolicy::AllowAll).unwrap_err();
+        assert_eq!(err, HostRejection::Missing);
+        assert_eq!(err.status(), 400);
+
+        // AllowAll rejects syntactically invalid Host per RFC 9112 §3.2.
+        let invalid_headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
+        let err = validate_host_header(&invalid_headers, &HostPolicy::AllowAll).unwrap_err();
+        assert_eq!(err.status(), 400);
+
+        // AllowAll accepts any single valid Host header.
         assert!(validate_host_header(&headers, &HostPolicy::AllowAll).is_ok());
 
-        // Empty allowlist now REJECTS all hosts (security fix for br-asupersync-scxixg).
+        // Empty allowlist now REJECTS all hosts with 421 (security fix for br-asupersync-scxixg).
         let empty_policy = HostPolicy::allow_list(vec![]);
         let err = validate_host_header(&headers, &empty_policy).unwrap_err();
         assert_eq!(err, "anywhere.com");
+        assert_eq!(err.status(), 421);
 
-        // RejectUnknown rejects all requests (secure default).
+        // RejectUnknown rejects all requests with 421 (secure default).
         let reject_policy = HostPolicy::RejectUnknown;
         let err = validate_host_header(&headers, &reject_policy).unwrap_err();
         assert_eq!(err, "anywhere.com");
+        assert_eq!(err.status(), 421);
     }
 
     #[test]
@@ -6366,13 +6384,16 @@ mod tests {
         let allow_list = HostPolicy::allow_list(vec!["example.com".to_string()]);
 
         let err = validate_host_header(&duplicate_hosts, &allow_list).unwrap_err();
-        assert_eq!(err, "multiple Host headers");
+        assert_eq!(err, HostRejection::Multiple);
+        assert_eq!(err.status(), 400);
 
         let err = validate_host_header(&duplicate_hosts, &HostPolicy::RejectUnknown).unwrap_err();
-        assert_eq!(err, "multiple Host headers");
+        assert_eq!(err, HostRejection::Multiple);
+        assert_eq!(err.status(), 400);
 
         let err = validate_host_header(&duplicate_hosts, &HostPolicy::AllowAll).unwrap_err();
-        assert_eq!(err, "multiple Host headers");
+        assert_eq!(err, HostRejection::Multiple);
+        assert_eq!(err.status(), 400);
     }
 
     /// br-asupersync-scxixg: IPv6 literal handling — strip brackets
@@ -6390,20 +6411,23 @@ mod tests {
         let headers = vec![("Host".to_string(), "[::1]".to_string())];
         assert!(validate_host_header(&headers, &policy).is_ok());
 
-        // Different IPv6 — REJECTED.
+        // Different IPv6 — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_err());
+        let err = validate_host_header(&headers, &policy).unwrap_err();
+        assert_eq!(err, "[fe80::1]:8080");
+        assert_eq!(err.status(), 421);
 
-        // Malformed IPv6 authority suffix must not bypass the allow-list.
+        // Malformed IPv6 authority suffix must not bypass the allow-list and returns 400 Bad Request.
         let headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "[::1]evil.test");
+        assert_eq!(err.status(), 400);
 
-        // Out-of-range ports are malformed authorities and must not be
-        // canonicalized to the allow-listed IPv6 literal.
+        // Out-of-range ports are malformed authorities and must return 400 Bad Request.
         let headers = vec![("Host".to_string(), "[::1]:65536".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "[::1]:65536");
+        assert_eq!(err.status(), 400);
     }
 
     /// br-asupersync-t9yqht: parse_host_header_host handles edge
@@ -6638,9 +6662,12 @@ mod tests {
 
         assert!(!close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert_eq!(resp.headers.len(), 1);
-        assert_eq!(resp.headers[0].0, "Connection");
-        assert_eq!(resp.headers[0].1, "keep-alive");
+        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "keep-alive")
+        );
     }
 
     #[test]
@@ -6651,9 +6678,12 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert_eq!(resp.headers.len(), 1);
-        assert_eq!(resp.headers[0].0, "Connection");
-        assert_eq!(resp.headers[0].1, "close");
+        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
+        );
     }
 
     #[test]
@@ -6664,9 +6694,37 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http11);
-        assert_eq!(resp.headers.len(), 1);
-        assert_eq!(resp.headers[0].0, "Connection");
-        assert_eq!(resp.headers[0].1, "close");
+        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
+        assert!(
+            resp.headers
+                .iter()
+                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
+        );
+    }
+
+    #[test]
+    fn finalize_response_persistence_generates_date_header() {
+        let mut resp = Response::new(200, "OK", Vec::new());
+        finalize_response_persistence(Version::Http11, &mut resp, false);
+        let date_header = resp
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case("date"));
+        assert!(date_header.is_some());
+        let date_val = &date_header.unwrap().1;
+        assert!(date_val.ends_with(" GMT"));
+
+        // If Date is already provided, it MUST be preserved rather than overwritten
+        let mut resp_with_date = Response::new(200, "OK", Vec::new())
+            .with_header("Date", "Sun, 06 Nov 1994 08:49:37 GMT");
+        finalize_response_persistence(Version::Http11, &mut resp_with_date, false);
+        let dates: Vec<_> = resp_with_date
+            .headers
+            .iter()
+            .filter(|(n, _)| n.eq_ignore_ascii_case("date"))
+            .collect();
+        assert_eq!(dates.len(), 1);
+        assert_eq!(dates[0].1, "Sun, 06 Nov 1994 08:49:37 GMT");
     }
 
     #[test]
