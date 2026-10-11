@@ -8,7 +8,7 @@ use crate::runtime::stored_task::StoredTask;
 use crate::types::TaskId;
 use crate::util::{Arena, ArenaIndex, RecyclingPool};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
 /// Number of task phases that are considered "live" (not Completed).
 const LIVE_PHASE_COUNT: usize = 5;
@@ -87,7 +87,7 @@ pub struct TaskTable {
     phase_tracker: Arc<crate::record::task::TaskPhaseTracker>,
     /// Reads of `live_task_count`, for the sampled debug cross-check.
     #[cfg(debug_assertions)]
-    live_count_reads: AtomicUsize,
+    live_count_reads: std::sync::atomic::AtomicUsize,
     /// Sum of all deadlines (in nanoseconds) for live tasks that have a
     /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
     /// estimation of deadline pressure.
@@ -127,7 +127,7 @@ impl TaskTable {
             live_task_count: 0,
             phase_tracker: Arc::new(crate::record::task::TaskPhaseTracker::default()),
             #[cfg(debug_assertions)]
-            live_count_reads: AtomicUsize::new(0),
+            live_count_reads: std::sync::atomic::AtomicUsize::new(0),
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
@@ -162,7 +162,7 @@ impl TaskTable {
             live_task_count: 0,
             phase_tracker: Arc::new(crate::record::task::TaskPhaseTracker::default()),
             #[cfg(debug_assertions)]
-            live_count_reads: AtomicUsize::new(0),
+            live_count_reads: std::sync::atomic::AtomicUsize::new(0),
             deadline_sum_ns: 0,
             tasks_with_deadline: 0,
         }
