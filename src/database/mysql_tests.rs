@@ -489,6 +489,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         (conn, listener)
     }
@@ -870,6 +871,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         }
     }
 
@@ -905,6 +907,7 @@ mod tests {
                     connect_autocommit: false,
                 },
                 options: None,
+                pool_reset: None,
             },
             peer_stream,
         )
@@ -972,6 +975,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
 
         (conn, server)
@@ -1025,6 +1029,7 @@ mod tests {
                     connect_autocommit: false,
                 },
                 options: None,
+                pool_reset: None,
             };
             conn.read_packet(None).await.expect("read packet")
         });
@@ -2508,6 +2513,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
 
         let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/testdb")
@@ -2599,6 +2605,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
 
         let options =
@@ -3330,6 +3337,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -3415,6 +3423,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -3628,6 +3637,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -3746,6 +3756,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -3826,6 +3837,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -3961,6 +3973,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -4076,6 +4089,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -4182,6 +4196,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -4283,6 +4298,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let stmt = MySqlStatement {
             statement_id: 7,
@@ -4405,6 +4421,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let cx = Cx::for_testing();
 
@@ -4422,6 +4439,626 @@ mod tests {
             conn.inner.closed,
             "rejecting LOCAL INFILE must keep the connection closed for fail-closed reuse"
         );
+    }
+
+    // asupersync-k3y26t H3: the opt-in isolation contract uses the real manager,
+    // authentication exchange, native reactor, and a private wire peer. The
+    // peer owns one accepted socket and is closed/joined even on assertion
+    // failure; socket timeouts are watchdogs, never scheduling evidence.
+    struct PoolResetPeer {
+        addr: std::net::SocketAddr,
+        stopped: Arc<std::sync::atomic::AtomicBool>,
+        socket: Arc<std::sync::Mutex<Option<std::net::TcpStream>>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl PoolResetPeer {
+        fn start(handler: impl FnOnce(&mut std::net::TcpStream) + Send + 'static) -> Self {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reset peer");
+            let addr = listener.local_addr().expect("reset peer address");
+            let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let socket = Arc::new(std::sync::Mutex::new(None));
+            let thread_stopped = Arc::clone(&stopped);
+            let thread_socket = Arc::clone(&socket);
+            let thread = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept reset connection");
+                *thread_socket.lock().expect("peer socket lock") =
+                    Some(stream.try_clone().expect("clone reset socket"));
+                if thread_stopped.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                stream.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+                stream.set_write_timeout(Some(Duration::from_secs(60))).unwrap();
+                handler(&mut stream);
+            });
+            Self { addr, stopped, socket, thread: Some(thread) }
+        }
+
+        fn options(&self, database: Option<&str>) -> MySqlConnectOptions {
+            let mut options = MySqlConnectOptions::parse(&format!(
+                "mysql://user@127.0.0.1:{}/initial_db", self.addr.port()
+            ))
+            .expect("reset test options");
+            options.database = database.map(str::to_string);
+            options
+        }
+
+        fn finish(mut self) {
+            self.thread.take().expect("owned peer thread").join().expect("reset peer assertions");
+        }
+    }
+
+    impl Drop for PoolResetPeer {
+        fn drop(&mut self) {
+            let Some(thread) = self.thread.take() else {
+                return;
+            };
+            self.stopped.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(socket) = self.socket.lock().expect("peer socket lock").as_ref() {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+            // Wake accept if connection setup failed before it reached the
+            // peer. This address belongs to this fixture's live listener.
+            let _ = std::net::TcpStream::connect_timeout(&self.addr, Duration::from_secs(1));
+            let _ = thread.join();
+        }
+    }
+
+    fn pool_reset_runtime(workers: usize) -> crate::runtime::Runtime {
+        pool_reset_runtime_with_timer(workers, None)
+    }
+
+    fn pool_reset_runtime_with_timer(
+        workers: usize,
+        timer: Option<crate::time::TimerDriverHandle>,
+    ) -> crate::runtime::Runtime {
+        let builder = if workers == 1 {
+            crate::runtime::RuntimeBuilder::current_thread()
+        } else {
+            crate::runtime::RuntimeBuilder::new().worker_threads(workers)
+        };
+        let builder = if let Some(timer) = timer {
+            builder.with_timer_driver(timer)
+        } else {
+            builder
+        };
+        builder.build().expect("native MySQL reset runtime")
+    }
+
+    struct PoolResetClockWatchdog {
+        stop: Option<mpsc::Sender<()>>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl PoolResetClockWatchdog {
+        fn start(
+            clock: Arc<crate::time::VirtualClock>,
+            timer: crate::time::TimerDriverHandle,
+        ) -> Self {
+            let (stop, stopped) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                if matches!(
+                    stopped.recv_timeout(Duration::from_secs(60)),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    // Failure-only wall watchdog: expire the outer test bound
+                    // even if the deterministic clock controller was not reached.
+                    clock.advance_to(crate::types::Time::from_secs(600));
+                    let _ = timer.process_timers();
+                }
+            });
+            Self {
+                stop: Some(stop),
+                thread: Some(thread),
+            }
+        }
+    }
+
+    impl Drop for PoolResetClockWatchdog {
+        fn drop(&mut self) {
+            if let Some(stop) = self.stop.take() {
+                let _ = stop.send(());
+            }
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    fn assert_pool_reset_drained(runtime: &crate::runtime::Runtime) {
+        let report = runtime.shutdown_drained(Duration::from_secs(30));
+        assert_eq!(report.outcome, crate::runtime::RootDrainOutcome::Quiescent);
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.live_regions, 0);
+        assert_eq!(report.pending_obligations, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.queued_finalizers, 0);
+        assert!(!report.has_pending_obligation_posts);
+    }
+
+    fn pool_reset_peer_command(peer: &mut std::net::TcpStream, command: u8, body: &[u8]) {
+        let (sequence, packet) = read_native_kat_peer_packet(peer);
+        assert_eq!(sequence, 0, "each reset/user command starts a fresh exchange");
+        assert_eq!(packet.first(), Some(&command));
+        assert_eq!(&packet[1..], body, "exact reset/user command body");
+    }
+
+    fn pool_reset_peer_eof(peer: &mut std::net::TcpStream) {
+        let mut byte = [0_u8; 1];
+        match peer.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if matches!(error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted) => {}
+            other => panic!("connection must close without an extra command: {other:?}"),
+        }
+    }
+
+    fn pool_reset_peer_row(peer: &mut std::net::TcpStream, values: &[Option<&str>]) {
+        write_response_packet(peer, 1, vec![values.len() as u8]);
+        for index in 0..values.len() {
+            write_response_packet(peer, index as u8 + 2, column_definition_payload(&format!("v{index}")));
+        }
+        let sequence = values.len() as u8 + 2;
+        write_response_packet(peer, sequence, eof_packet_payload(2));
+        let mut row = PacketBuffer::new();
+        for value in values {
+            if let Some(value) = value {
+                row.write_lenenc_int(value.len() as u64);
+                row.write_bytes(value.as_bytes());
+            } else {
+                row.write_byte(0xFB);
+            }
+        }
+        write_response_packet(peer, sequence + 1, row.buf);
+        write_response_packet(peer, sequence + 2, eof_packet_payload(2));
+    }
+
+    fn pool_reset_peer_auth(peer: &mut std::net::TcpStream, baseline: bool) {
+        let capabilities = capability::CLIENT_PROTOCOL_41
+            | capability::CLIENT_SECURE_CONNECTION
+            | capability::CLIENT_PLUGIN_AUTH
+            | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+            | capability::CLIENT_TRANSACTIONS
+            | capability::CLIENT_CONNECT_WITH_DB;
+        peer.write_all(&handshake_packet_bytes(capabilities)).expect("server greeting");
+        let (sequence, response) = read_native_kat_peer_packet(peer);
+        assert_eq!(sequence, 1, "real HandshakeResponse41");
+        assert!(response.ends_with(b"caching_sha2_password\0"));
+        write_response_packet(peer, 2, ok_packet_payload(0, 2));
+        if baseline {
+            pool_reset_peer_command(peer, command::COM_QUERY, POOL_SESSION_BASELINE_SQL.as_bytes());
+            pool_reset_peer_row(peer, &[
+                Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4"), Some("utf8mb4_bin"),
+            ]);
+        }
+    }
+
+    const POOL_RESET_RESTORE_SQL: &str = "SET SESSION character_set_client = 'utf8mb4', \
+        character_set_connection = 'utf8mb4', character_set_results = 'utf8mb4', \
+        collation_connection = 'utf8mb4_bin', autocommit = 1";
+
+    fn pool_reset_peer_restore(peer: &mut std::net::TcpStream) {
+        pool_reset_peer_command(peer, command::COM_RESET_CONNECTION, &[]);
+        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+        pool_reset_peer_command(peer, command::COM_QUERY, POOL_RESET_RESTORE_SQL.as_bytes());
+        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+        // Binary COM_INIT_DB preserves names that need SQL identifier quoting.
+        pool_reset_peer_command(peer, command::COM_INIT_DB, b"initial`db");
+        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_restores_session_before_prepared_cache_reuse_with_or_without_validation() {
+        for (workers, validate) in [(1, false), (2, false), (1, true), (2, true)] {
+            let peer = PoolResetPeer::start(|peer| {
+                pool_reset_peer_auth(peer, true);
+                pool_reset_peer_command(peer, command::COM_STMT_PREPARE, b"SELECT 42");
+                write_response_packet(peer, 1, prepare_ok_payload(11));
+                pool_reset_peer_command(peer, command::COM_QUERY, b"SET @tenant = 41");
+                write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                pool_reset_peer_restore(peer);
+                pool_reset_peer_command(peer, command::COM_STMT_PREPARE, b"SELECT 42");
+                write_response_packet(peer, 1, prepare_ok_payload(12));
+                pool_reset_peer_command(peer, command::COM_QUERY, b"SET SESSION max_execution_time = 77");
+                write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                pool_reset_peer_command(peer, command::COM_QUERY, b"SELECT 42");
+                pool_reset_peer_row(peer, &[Some("42")]);
+                pool_reset_peer_eof(peer);
+            });
+            let options = peer.options(Some("initial`db"));
+            let runtime = pool_reset_runtime(workers);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native reset Cx");
+                crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                    let pool = crate::database::pool::AsyncDbPool::new(
+                        MySqlConnectionManager::new(options).reset_session_on_return(true),
+                        crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(validate),
+                    );
+                    let mut first = pool.get(&cx).await.expect("first borrower");
+                    let old_statement = first.prepare(&cx, "SELECT 42").await.unwrap();
+                    first.set_statement_timeout_override(Some(Duration::from_millis(900)));
+                    first.set_max_result_rows(7);
+                    assert!(matches!(first.execute_trusted_sql(&cx, "SET @tenant = 41").await, Outcome::Ok(0)));
+                    drop(first);
+                    assert_eq!(pool.stats().idle, 1);
+
+                    let mut second = pool.get(&cx).await.expect("reused borrower");
+                    assert_eq!(second.pool_reset.as_ref().unwrap().pending, !validate);
+                    assert_eq!(second.statement_timeout_override(), None);
+                    assert_eq!(second.max_result_rows(), DEFAULT_MAX_RESULT_ROWS);
+                    second.set_statement_timeout_override(Some(Duration::from_millis(77)));
+                    second.set_max_result_rows(19);
+                    let fresh = second.prepare(&cx, "SELECT 42").await.unwrap();
+                    assert_eq!(fresh.statement_id, 12);
+                    assert_eq!(second.prepared_cache_stats().misses, 2);
+                    assert_eq!(second.prepared_cache_stats().hits, 0);
+                    assert_eq!(second.inner.prepared_cache.len(), 1);
+                    assert!(!second.pool_reset.as_ref().unwrap().pending);
+                    assert_eq!(second.statement_timeout_override(), Some(Duration::from_millis(77)));
+                    assert_eq!(second.max_result_rows(), 19);
+                    assert!(matches!(
+                        second.query_prepared(&cx, &old_statement, &[]).await,
+                        Outcome::Err(MySqlError::InvalidParameter(message)) if message.contains("pooled checkout epoch")
+                    ));
+                    let rows = second.query_trusted_sql(&cx, "SELECT 42").await.unwrap();
+                    assert_eq!(rows[0].get_idx(0).unwrap().as_str(), Some("42"));
+                    drop(second);
+                    assert_eq!(pool.stats().total_creates, 1, "same authenticated physical session");
+                    pool.close();
+                    assert_eq!(pool.stats().total, 0);
+                    assert_eq!(pool.stats().active, 0);
+                    assert_eq!(pool.stats().pending_waiters, 0);
+                }).await.expect("bounded native reset journey");
+            }));
+            peer.finish();
+            assert_pool_reset_drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_baseline_accepts_only_bounded_charset_names() {
+        let baseline = |values: Vec<MySqlValue>| vec![MySqlRow {
+            columns: Arc::new((0..values.len()).map(|index| test_var_string_column(&format!("v{index}"))).collect()),
+            column_indices: Arc::new(BTreeMap::new()),
+            values,
+        }];
+        let names = || vec![
+            MySqlValue::Text("utf8mb4".to_string()),
+            MySqlValue::Bytes(b"utf8mb4".to_vec()),
+            MySqlValue::Null,
+            MySqlValue::Text("utf8mb4_0900_ai_ci".to_string()),
+        ];
+        let reset = MySqlPoolReset::from_rows(&baseline(names()), true).unwrap();
+        assert!(reset.restore_sql.contains("character_set_results = NULL"));
+        assert!(reset.restore_sql.contains("collation_connection = 'utf8mb4_0900_ai_ci'"));
+        for bad in ["", "utf8mb4'; SET @leak=1; --", "utf8mb4\\", "utf8mb4\n", "café", &"x".repeat(65)] {
+            let mut values = names();
+            values[0] = MySqlValue::Text(bad.to_string());
+            assert!(MySqlPoolReset::from_rows(&baseline(values), true).is_err(), "{bad:?}");
+        }
+        let mut values = names();
+        values[0] = MySqlValue::Null;
+        assert!(MySqlPoolReset::from_rows(&baseline(values), true).is_err());
+        assert!(MySqlPoolReset::from_rows(&[], true).is_err());
+        assert!(MySqlPoolReset::from_rows(&baseline(vec![]), true).is_err());
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum PoolResetFinish {
+        Complete,
+        Cancel,
+        Drop,
+        Timeout,
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_return_owns_pending_reply_and_discards_on_cancel_drop_or_timeout() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        for workers in [1, 2] {
+            for finish in [
+                PoolResetFinish::Complete,
+                PoolResetFinish::Cancel,
+                PoolResetFinish::Drop,
+                PoolResetFinish::Timeout,
+            ] {
+                let final_command = Arc::new(AtomicBool::new(false));
+                let reset_waker = Arc::new(std::sync::Mutex::new(None::<Waker>));
+                let peer_final_command = Arc::clone(&final_command);
+                let peer_reset_waker = Arc::clone(&reset_waker);
+                let peer = PoolResetPeer::start(move |peer| {
+                    pool_reset_peer_auth(peer, true);
+                    pool_reset_peer_command(peer, command::COM_RESET_CONNECTION, &[]);
+                    write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                    pool_reset_peer_command(peer, command::COM_QUERY, POOL_RESET_RESTORE_SQL.as_bytes());
+                    write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                    pool_reset_peer_command(peer, command::COM_INIT_DB, b"initial`db");
+                    // Withhold the final database OK. Repoll the real socket
+                    // read so the parent observes Pending at this exact step.
+                    peer_final_command.store(true, Ordering::Release);
+                    let wake = peer_reset_waker.lock().unwrap().clone();
+                    wake.expect("reset future registered before its writes").wake();
+                    if matches!(finish, PoolResetFinish::Complete) {
+                        pool_reset_peer_command(peer, command::COM_PING, &[]);
+                        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                    }
+                    pool_reset_peer_eof(peer);
+                });
+                let reply_socket = Arc::clone(&peer.socket);
+                let options = peer.options(Some("initial`db"));
+                let clock = matches!(finish, PoolResetFinish::Timeout)
+                    .then(|| Arc::new(crate::time::VirtualClock::new()));
+                let timer = clock.as_ref().map(|clock| {
+                    crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(clock))
+                });
+                let runtime = pool_reset_runtime_with_timer(workers, timer.clone());
+                let _clock_watchdog = clock.as_ref().zip(timer.as_ref()).map(|(clock, timer)| {
+                    PoolResetClockWatchdog::start(Arc::clone(clock), timer.clone())
+                });
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("native reset Cx");
+                    crate::time::timeout(cx.now(), Duration::from_secs(60), async {
+                        let pool = Arc::new(crate::database::pool::AsyncDbPool::new(
+                            MySqlConnectionManager::new(options).reset_session_on_return(true),
+                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                        ));
+                        let (pending_tx, mut pending_rx) = crate::channel::oneshot::channel();
+                        let drop_requested = Arc::new(AtomicBool::new(false));
+                        let child_drop_requested = Arc::clone(&drop_requested);
+                        let child_waker = Arc::clone(&reset_waker);
+                        let child_pool = Arc::clone(&pool);
+                        let mut returning = cx.spawn(move |child_cx| async move {
+                            let guard = child_pool.get(&child_cx).await.expect("returning borrower");
+                            let mut reset = Box::pin(guard.reset_and_return(&child_cx));
+                            let mut pending_tx = Some(pending_tx);
+                            let completed = std::future::poll_fn(|task_cx| {
+                                *child_waker.lock().unwrap() = Some(task_cx.waker().clone());
+                                if child_drop_requested.load(Ordering::Acquire) {
+                                    return Poll::Ready(false);
+                                }
+                                match reset.as_mut().poll(task_cx) {
+                                    Poll::Ready(()) => Poll::Ready(true),
+                                    Poll::Pending => {
+                                        if final_command.load(Ordering::Acquire)
+                                            && let Some(sender) = pending_tx.take()
+                                        {
+                                            sender.send_blocking(()).expect("report final read Pending");
+                                        }
+                                        Poll::Pending
+                                    }
+                                }
+                            }).await;
+                            drop(reset);
+                            (completed, child_cx.is_cancel_requested())
+                        }).expect("spawn returning borrower");
+
+                        pending_rx.recv(&cx).await.expect("final reset response is actually Pending");
+                        assert!(returning.try_join().expect("live return task").is_none());
+                        let stats = pool.stats();
+                        assert_eq!((stats.total, stats.active, stats.idle), (1, 1, 0));
+                        let mut contender = Box::pin(pool.get(&cx));
+                        std::future::poll_fn(|task_cx| {
+                            assert!(contender.as_mut().poll(task_cx).is_pending(), "pool cannot lend the resetting socket");
+                            Poll::Ready(())
+                        }).await;
+                        assert_eq!(pool.stats().pending_waiters, 1);
+                        drop(contender);
+                        assert_eq!(pool.stats().pending_waiters, 0);
+
+                        match finish {
+                            PoolResetFinish::Complete => {
+                                let mut socket = reply_socket.lock().unwrap().as_ref().unwrap()
+                                    .try_clone().expect("owned final-response socket");
+                                write_response_packet(&mut socket, 1, ok_packet_payload(0, 2));
+                            }
+                            PoolResetFinish::Cancel => {
+                                returning.abort_with_reason(CancelReason::user("cancel final MySQL reset reply"));
+                            }
+                            PoolResetFinish::Drop => {
+                                drop_requested.store(true, Ordering::Release);
+                                let wake = reset_waker.lock().unwrap().clone();
+                                wake.expect("parked reset waker").wake();
+                            }
+                            PoolResetFinish::Timeout => {
+                                // Real worker, TCP read and timer registration;
+                                // only the clock is controlled. Advance after
+                                // final-OK Pending, without cancelling any Cx.
+                                assert!(!cx.is_cancel_requested());
+                                clock.as_ref().unwrap().advance_to(crate::types::Time::from_secs(31));
+                                let _ = timer.as_ref().unwrap().process_timers();
+                            }
+                        }
+                        let result = returning.join(&cx).await;
+                        match finish {
+                            PoolResetFinish::Complete => {
+                                assert!(matches!(result, Ok((true, false))), "{finish:?}: {result:?}");
+                                assert_eq!(pool.stats().idle, 1);
+                                let mut guard = pool.get(&cx).await.expect("completed reset is reusable");
+                                assert!(!guard.pool_reset.as_ref().unwrap().pending);
+                                assert!(matches!(guard.ping(&cx).await, Outcome::Ok(())));
+                                drop(guard);
+                            }
+                            PoolResetFinish::Cancel => {
+                                // Cancellation is acknowledged inside the reset
+                                // read; the real spawn wrapper retains completion.
+                                assert!(matches!(result, Ok((true, true))), "{finish:?}: {result:?}");
+                                assert_eq!(pool.stats().total_discards, 1);
+                                assert_eq!(pool.stats().total, 0);
+                            }
+                            PoolResetFinish::Drop => {
+                                assert!(matches!(result, Ok((false, false))), "{finish:?}: {result:?}");
+                                assert_eq!(pool.stats().total_discards, 1);
+                                assert_eq!(pool.stats().total, 0);
+                            }
+                            PoolResetFinish::Timeout => {
+                                assert!(matches!(result, Ok((true, false))), "{finish:?}: {result:?}");
+                                assert!(!cx.is_cancel_requested());
+                                assert_eq!(pool.stats().total_discards, 1);
+                                assert_eq!(pool.stats().total, 0);
+                            }
+                        }
+                        pool.close();
+                        assert_eq!(pool.stats().total, 0);
+                        assert_eq!(pool.stats().active, 0);
+                        assert_eq!(pool.stats().pending_waiters, 0);
+                    }).await.expect("bounded native reset ownership journey");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_rejects_unsupported_malformed_and_failed_restoration_replies() {
+        // Every reply shape is consumed by the real packet parser. No later
+        // borrower PING may reach the wire after one of these failures.
+        let failures = [
+            (0, error_packet_payload(1047, "08S01", "unknown command"), Some(1047)),
+            (0, vec![0x00], None),
+            (0, vec![0xFF], None),
+            (0, vec![0xFE, 0, 0, 2, 0], None),
+            (0, vec![1], None),
+            (0, Vec::new(), None),
+            (0, ok_packet_payload(1, 2), None),
+            (0, vec![0x00, 0, 1, 2, 0, 0, 0], None),
+            (0, ok_packet_payload(0, 0x000A), None),
+            (0, ok_packet_payload(0, 0x0003), None),
+            (1, error_packet_payload(1115, "42000", "unknown charset"), Some(1115)),
+            (1, vec![0x00, 0], None),
+            (2, error_packet_payload(1049, "42000", "unknown database"), Some(1049)),
+            (2, ok_packet_payload(0, 0), None),
+        ];
+        for workers in [1, 2] {
+            for (stage, reply, server_code) in failures.iter().cloned() {
+                let peer = PoolResetPeer::start(move |peer| {
+                    pool_reset_peer_auth(peer, true);
+                    for (index, command, body) in [
+                        (0, command::COM_RESET_CONNECTION, &b""[..]),
+                        (1, command::COM_QUERY, POOL_RESET_RESTORE_SQL.as_bytes()),
+                        (2, command::COM_INIT_DB, &b"initial`db"[..]),
+                    ] {
+                        pool_reset_peer_command(peer, command, body);
+                        if index == stage {
+                            write_response_packet(peer, 1, reply);
+                            break;
+                        }
+                        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                    }
+                    pool_reset_peer_eof(peer);
+                });
+                let options = peer.options(Some("initial`db"));
+                let runtime = pool_reset_runtime(workers);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("native reset Cx");
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                        let pool = crate::database::pool::AsyncDbPool::new(
+                            MySqlConnectionManager::new(options).reset_session_on_return(true),
+                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                        );
+                        drop(pool.get(&cx).await.expect("original borrower"));
+                        let mut guard = pool.get(&cx).await.expect("deferred reset borrower");
+                        let failure = guard.ping(&cx).await;
+                        match (failure, server_code) {
+                            (Outcome::Err(MySqlError::Server { code, .. }), Some(expected)) => assert_eq!(code, expected),
+                            (Outcome::Err(_), None) => {}
+                            (other, expected) => panic!("reset stage {stage}: expected error {expected:?}, got {other:?}"),
+                        }
+                        assert!(guard.inner.closed);
+                        assert!(guard.pool_reset.as_ref().unwrap().pending);
+                        assert!(!guard.inner.query_in_flight.load(std::sync::atomic::Ordering::Acquire));
+                        assert!(matches!(guard.ping(&cx).await, Outcome::Err(MySqlError::ConnectionClosed)));
+                        drop(guard);
+                        let stats = pool.stats();
+                        assert_eq!((stats.total, stats.active, stats.idle), (0, 0, 0));
+                        assert_eq!(stats.total_discards, 1);
+                        assert_eq!(stats.pending_waiters, 0);
+                        pool.close();
+                    }).await.expect("bounded failed-reset journey");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_preserves_legacy_default_and_discards_sessions_without_initial_database() {
+        for workers in [1, 2] {
+            for reset_enabled in [false, true] {
+                let peer = PoolResetPeer::start(move |peer| {
+                    pool_reset_peer_auth(peer, false);
+                    if !reset_enabled {
+                        pool_reset_peer_command(peer, command::COM_PING, &[]);
+                        write_response_packet(peer, 1, ok_packet_payload(0, 2));
+                    }
+                    pool_reset_peer_eof(peer);
+                });
+                let options = peer.options(None);
+                let runtime = pool_reset_runtime(workers);
+                runtime.block_on(runtime.handle().spawn(async move {
+                    let cx = Cx::current().expect("native reset Cx");
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), async {
+                        let manager = MySqlConnectionManager::new(options);
+                        assert!(!manager.reset_session_on_return, "legacy default stays opt-out");
+                        let pool = crate::database::pool::AsyncDbPool::new(
+                            manager.reset_session_on_return(reset_enabled),
+                            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+                        );
+                        let mut first = pool.get(&cx).await.expect("original borrower");
+                        first.set_statement_timeout_override(Some(Duration::from_millis(500)));
+                        drop(first);
+                        if reset_enabled {
+                            assert_eq!(pool.stats().total, 0);
+                            assert_eq!(pool.stats().total_discards, 1);
+                        } else {
+                            let mut second = pool.get(&cx).await.expect("legacy reuse");
+                            assert_eq!(second.statement_timeout_override(), Some(Duration::from_millis(500)));
+                            assert!(matches!(second.ping(&cx).await, Outcome::Ok(())));
+                            drop(second);
+                            assert_eq!(pool.stats().idle, 1);
+                        }
+                        pool.close();
+                        assert_eq!(pool.stats().total, 0);
+                        assert_eq!(pool.stats().active, 0);
+                    }).await.expect("bounded legacy/no-database journey");
+                }));
+                peer.finish();
+                assert_pool_reset_drained(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn k3y26t_pool_reset_rejects_untrusted_baseline_before_first_borrower() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        for workers in [1, 2] {
+            let peer = PoolResetPeer::start(|peer| {
+                pool_reset_peer_auth(peer, false);
+                pool_reset_peer_command(peer, command::COM_QUERY, POOL_SESSION_BASELINE_SQL.as_bytes());
+                pool_reset_peer_row(peer, &[
+                    Some("utf8mb4'; SET @leak=1; --"), Some("utf8mb4"),
+                    Some("utf8mb4"), Some("utf8mb4_bin"),
+                ]);
+                pool_reset_peer_eof(peer);
+            });
+            let options = peer.options(Some("initial`db"));
+            let runtime = pool_reset_runtime(workers);
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("native reset Cx");
+                let manager = MySqlConnectionManager::new(options).reset_session_on_return(true);
+                let result = crate::time::timeout(
+                    cx.now(), Duration::from_secs(30), manager.connect(&cx)
+                ).await.expect("bounded invalid baseline query");
+                assert!(matches!(result,
+                    Outcome::Err(MySqlError::Protocol(message))
+                    if message.contains("invalid charset or collation")
+                ));
+            }));
+            peer.finish();
+            assert_pool_reset_drained(&runtime);
+        }
     }
 
     #[test]
@@ -4600,6 +5237,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let stmt = MySqlStatement {
             statement_id: 7,
@@ -4690,6 +5328,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let stmt = MySqlStatement {
             statement_id: 7,
@@ -5223,6 +5862,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
         let options =
             MySqlConnectOptions::parse("mysql://user:switch-secret@localhost/db").unwrap();
@@ -5484,6 +6124,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
 
         let result = run(conn.read_handshake());
@@ -5570,6 +6211,7 @@ mod tests {
                 connect_autocommit: false,
             },
             options: None,
+            pool_reset: None,
         };
 
         let result = run(conn.read_handshake());

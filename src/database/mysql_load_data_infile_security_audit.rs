@@ -91,6 +91,7 @@ fn make_test_connection(stream: crate::net::TcpStream, sequence: u8) -> MySqlCon
             connect_autocommit: false,
         },
         options: None,
+        pool_reset: None,
     }
 }
 

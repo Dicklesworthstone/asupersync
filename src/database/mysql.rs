@@ -336,6 +336,7 @@ mod command {
     pub const COM_STMT_SEND_LONG_DATA: u8 = 0x18;
     pub const COM_STMT_CLOSE: u8 = 0x19;
     pub const COM_STMT_RESET: u8 = 0x1A;
+    pub const COM_RESET_CONNECTION: u8 = 0x1F;
 }
 
 /// Maximum payload size for a single MySQL packet (16 MiB - 1 byte).
@@ -344,6 +345,9 @@ const MAX_PACKET_SIZE: u32 = 16 * 1024 * 1024 - 1; // 16_777_215
 /// Default maximum number of rows returned from a single result set.
 /// Prevents unbounded memory growth from runaway SELECTs.
 const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
+const POOL_SESSION_BASELINE_SQL: &str = "SELECT @@session.character_set_client, \
+    @@session.character_set_connection, @@session.character_set_results, \
+    @@session.collation_connection";
 /// Default cap on the per-connection MySQL prepared-statement cache.
 ///
 /// br-asupersync-server-stack-hardening-eeexl1.5: protocol-level prepared
@@ -824,6 +828,9 @@ impl MySqlConnection {
     ) -> Outcome<MySqlRowStream<'a>, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
         }
         self.inner
             .query_in_flight
@@ -2086,6 +2093,70 @@ pub struct MySqlConnection {
     /// directly via test fixtures rather than `connect`/
     /// `connect_with_options`.
     options: Option<MySqlConnectOptions>,
+    /// Connect-time session baseline, present only for an opt-in pool that
+    /// can restore its initially selected database.
+    pool_reset: Option<MySqlPoolReset>,
+}
+
+struct MySqlPoolReset {
+    restore_sql: String,
+    pending: bool,
+}
+
+impl MySqlPoolReset {
+    fn from_rows(rows: &[MySqlRow], autocommit: bool) -> Result<Self, MySqlError> {
+        let [row] = rows else {
+            return Err(MySqlError::Protocol(
+                "expected one row for the MySQL pool session baseline".to_string(),
+            ));
+        };
+        if row.len() != 4 {
+            return Err(MySqlError::Protocol(
+                "expected four columns for the MySQL pool session baseline".to_string(),
+            ));
+        }
+
+        // These names come from the server, not a trusted SQL template. Keep
+        // the accepted alphabet smaller than SQL's quoted-string alphabet;
+        // even a malicious or malformed reply cannot introduce SQL syntax.
+        let name = |index: usize, nullable: bool| -> Result<String, MySqlError> {
+            let value = row.get_idx(index)?;
+            if nullable && matches!(value, MySqlValue::Null) {
+                return Ok("NULL".to_string());
+            }
+            let bytes = match value {
+                MySqlValue::Text(value) => value.as_bytes(),
+                MySqlValue::Bytes(value) => value.as_slice(),
+                _ => {
+                    return Err(MySqlError::Protocol(
+                        "invalid charset or collation in MySQL pool session baseline".to_string(),
+                    ));
+                }
+            };
+            if bytes.is_empty()
+                || bytes.len() > 64
+                || !bytes.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                return Err(MySqlError::Protocol(
+                    "invalid charset or collation in MySQL pool session baseline".to_string(),
+                ));
+            }
+            // The validation above permits ASCII only.
+            Ok(format!("'{}'", String::from_utf8_lossy(bytes)))
+        };
+        Ok(Self {
+            restore_sql: format!(
+                "SET SESSION character_set_client = {}, character_set_connection = {}, \
+                 character_set_results = {}, collation_connection = {}, autocommit = {}",
+                name(0, false)?,
+                name(1, false)?,
+                name(2, true)?,
+                name(3, false)?,
+                u8::from(autocommit),
+            ),
+            pending: false,
+        })
+    }
 }
 
 /// Parsed MySQL Protocol 41 handshake data exposed for fuzz oracles.
@@ -2458,6 +2529,7 @@ impl MySqlConnection {
         Self::connect_bounded(
             cx,
             options,
+            false,
             #[cfg(feature = "tls")]
             None,
         )
@@ -2482,7 +2554,7 @@ impl MySqlConnection {
                 "an explicit TLS connector requires ssl-mode=preferred or required".to_string(),
             ));
         }
-        Self::connect_bounded(cx, options, Some(connector)).await
+        Self::connect_bounded(cx, options, false, Some(connector)).await
     }
 
     /// Whether this connection authenticated over TLS.
@@ -2494,6 +2566,7 @@ impl MySqlConnection {
     async fn connect_bounded(
         cx: &Cx,
         options: MySqlConnectOptions,
+        capture_pool_session: bool,
         #[cfg(feature = "tls")] connector: Option<TlsConnector>,
     ) -> Outcome<Self, MySqlError> {
         use std::future::Future;
@@ -2502,11 +2575,27 @@ impl MySqlConnection {
             cx.now(),
             options.connect_timeout.unwrap_or(MYSQL_CONNECT_TIMEOUT),
         );
-        let mut connecting = std::pin::pin!(Self::connect_inner(
-            options,
-            #[cfg(feature = "tls")]
-            connector
-        ));
+        let capture_pool_session = capture_pool_session
+            && options.database.as_ref().is_some_and(|database| !database.is_empty());
+        let mut connecting = std::pin::pin!(async {
+            let mut conn = match Self::connect_inner(
+                options,
+                #[cfg(feature = "tls")]
+                connector,
+            ).await {
+                Outcome::Ok(conn) => conn,
+                other => return other,
+            };
+            if capture_pool_session {
+                match conn.capture_pool_session_baseline(cx).await {
+                    Outcome::Ok(()) => {}
+                    Outcome::Err(error) => return Outcome::Err(error),
+                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+                }
+            }
+            Outcome::Ok(conn)
+        });
         let mut cancel_wake = CancelWakerGuard {
             cx: Some(cx.clone()),
             token: None,
@@ -2525,7 +2614,7 @@ impl MySqlConnection {
             if Pin::new(&mut deadline).poll_deadline(task_cx).is_ready() {
                     return Poll::Ready(Outcome::Err(MySqlError::Io(io::Error::new(
                         io::ErrorKind::TimedOut,
-                        "MySQL connection, TLS negotiation, or authentication timed out",
+                        "MySQL connection, TLS negotiation, authentication, or pool baseline timed out",
                     ))));
             }
             connecting.as_mut().poll(task_cx)
@@ -2605,6 +2694,7 @@ impl MySqlConnection {
             // connection to issue KILL QUERY <connection_id>
             // (br-asupersync-og4pm6).
             options: Some(options.clone()),
+            pool_reset: None,
         };
 
         // Read initial handshake — the server's HandshakeV10 packet carries
@@ -2790,6 +2880,7 @@ impl MySqlConnection {
             let mut killer = match Self::connect_bounded(
                 cx,
                 options,
+                false,
                 #[cfg(feature = "tls")]
                 connector,
             )
@@ -3802,6 +3893,9 @@ impl MySqlConnection {
             // Preserve an abandoned exchange's in-flight flag for Drop.
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
             return outcome_from_error(error);
         }
@@ -4743,6 +4837,9 @@ impl MySqlConnection {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         if let Err(error) = self.forget_prepared_statements_before(cx, sql).await {
             return outcome_from_error(error);
         }
@@ -5170,6 +5267,9 @@ impl MySqlConnection {
 
     /// Ping the server.
     pub async fn ping(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         let result = self.ping_inner(cx).await;
         if matches!(result, Outcome::Cancelled(_)) && self.inner.closed {
             // PING has no server query to kill, but a partial exchange must
@@ -5268,6 +5368,181 @@ impl MySqlConnection {
         self.inner.prepared_statement_epoch = self.inner.prepared_statement_epoch.wrapping_add(1);
     }
 
+    async fn capture_pool_session_baseline(&mut self, cx: &Cx) -> Outcome<(), MySqlError> {
+        // Capture before the first borrower can change any session variable.
+        // In particular, do not infer a charset name from a collation ID:
+        // supported collations differ across MySQL and MariaDB versions.
+        let original_row_limit = self.inner.max_result_rows;
+        self.inner.max_result_rows = 1;
+        let baseline = self.query_unchecked_inner_impl(cx, POOL_SESSION_BASELINE_SQL).await;
+        self.inner.max_result_rows = original_row_limit;
+        let rows = match baseline {
+            Outcome::Ok(rows) => rows,
+            other => {
+                self.mark_unusable_after_cleanup_failure();
+                return other.map(|_| ());
+            }
+        };
+        if self.inner.status_flags & 0x0009 != 0 {
+            self.mark_unusable_after_cleanup_failure();
+            return Outcome::Err(MySqlError::Protocol(
+                "unexpected transaction or extra results in MySQL pool session baseline".to_string(),
+            ));
+        }
+        match MySqlPoolReset::from_rows(&rows, self.inner.connect_autocommit) {
+            Ok(reset) => {
+                self.pool_reset = Some(reset);
+                Outcome::Ok(())
+            }
+            Err(error) => {
+                self.mark_unusable_after_cleanup_failure();
+                Outcome::Err(error)
+            }
+        }
+    }
+
+    /// Finish a reset before any borrower command or cache lookup. This gate
+    /// remains active when the pool disables checkout validation.
+    async fn reset_pooled_session(&mut self, cx: &Cx) -> Result<(), MySqlError> {
+        let Some(reset) = self.pool_reset.as_ref().filter(|reset| reset.pending) else {
+            return Ok(());
+        };
+        let restore_sql = reset.restore_sql.clone();
+        if self.inner.closed {
+            self.mark_unusable_after_cleanup_failure();
+            return Err(MySqlError::ConnectionClosed);
+        }
+        let Some(database) = self
+            .options
+            .as_ref()
+            .and_then(|options| options.database.as_ref())
+            .filter(|database| !database.is_empty())
+            .cloned()
+        else {
+            self.mark_unusable_after_cleanup_failure();
+            return Err(MySqlError::Protocol(
+                "MySQL pool session reset requires an initial database".to_string(),
+            ));
+        };
+
+        // Poison before the first checkpoint or write. Dropping this future,
+        // including reset_and_return, can never recycle a partial exchange.
+        // Session reset is not a user query and must not dispatch KILL QUERY.
+        self.inner.closed = true;
+        let bound = self
+            .options
+            .as_ref()
+            .and_then(|options| options.connect_timeout)
+            .unwrap_or(MYSQL_CONNECT_TIMEOUT);
+        let result = match crate::time::timeout(
+            cx.now(),
+            bound,
+            self.reset_pooled_session_inner(cx, &restore_sql, &database),
+        )
+        .await
+        {
+            Ok(result) => result,
+            // Timeout can win before the socket future is repolled. Keep
+            // cancellation acknowledgement and precedence at that boundary.
+            Err(_) => Err(match io_cancel_reason(Some(cx)) {
+                Some(reason) => MySqlError::Cancelled(reason),
+                None => MySqlError::Io(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "MySQL pool session reset timed out",
+                )),
+            }),
+        };
+        if let Err(error) = result {
+            self.mark_unusable_after_cleanup_failure();
+            return Err(error);
+        }
+
+        // COM_RESET_CONNECTION destroyed these server handles. Closing their
+        // old numeric IDs now could close a newly allocated statement instead.
+        drop(self.inner.prepared_cache.clear_returning_ids());
+        self.inner.applied_max_execution_time_ms = None;
+        self.inner.max_execution_time_uncertain = false;
+        self.inner.session_isolation_restore = None;
+        self.inner.needs_rollback = false;
+        self.pool_reset.as_mut().expect("reset baseline remains present").pending = false;
+        self.inner.closed = false;
+        Ok(())
+    }
+
+    async fn reset_pooled_session_inner(
+        &mut self,
+        cx: &Cx,
+        restore_sql: &str,
+        database: &str,
+    ) -> Result<(), MySqlError> {
+        if cx.checkpoint().is_err() {
+            return Err(MySqlError::Cancelled(
+                cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")),
+            ));
+        }
+        self.pool_reset_command_expect_ok(cx, command::COM_RESET_CONNECTION, &[], "session reset")
+            .await?;
+        self.pool_reset_command_expect_ok(
+            cx,
+            command::COM_QUERY,
+            restore_sql.as_bytes(),
+            "session charset restore",
+        )
+        .await?;
+        // RESET does not restore the initially selected database. Use the
+        // protocol command, so arbitrary configured database names stay data.
+        self.pool_reset_command_expect_ok(
+            cx,
+            command::COM_INIT_DB,
+            database.as_bytes(),
+            "session database restore",
+        )
+        .await?;
+        if self.autocommit_changed() {
+            return Err(MySqlError::Protocol(
+                "MySQL pool session reset did not restore autocommit".to_string(),
+            ));
+        }
+        // A cancel arriving with the final response is still acknowledged.
+        // Refuse reuse if cancellation interrupted this ownership boundary.
+        if cx.checkpoint().is_err() {
+            return Err(MySqlError::Cancelled(
+                cx.cancel_reason().unwrap_or_else(|| CancelReason::user("cancelled")),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn pool_reset_command_expect_ok(
+        &mut self,
+        cx: &Cx,
+        command: u8,
+        body: &[u8],
+        what: &str,
+    ) -> Result<(), MySqlError> {
+        let mut packet = PacketBuffer::new();
+        packet.set_sequence(0);
+        packet.write_byte(command);
+        packet.write_bytes(body);
+        let packet = packet.build_packet();
+        self.write_all(Some(cx), &packet.bytes).await?;
+        self.inner.sequence = packet.next_sequence;
+        let (data, sequence) = self.read_packet(Some(cx)).await?;
+        self.inner.sequence = sequence.wrapping_add(1);
+        match data.first() {
+            Some(0x00) => {
+                let ok = Self::parse_ok_packet(&data)?;
+                if ok.affected_rows != 0 || ok.last_insert_id != 0 || ok.status_flags & 0x0009 != 0 {
+                    return Err(MySqlError::Protocol(format!("invalid OK response to {what}")));
+                }
+                self.inner.status_flags = ok.status_flags;
+                Ok(())
+            }
+            Some(0xFF) => Err(Self::parse_error(&data)),
+            _ => Err(MySqlError::Protocol(format!("unexpected response to {what}"))),
+        }
+    }
+
     /// `USE` and a `SET` of sql_mode change what a prepared statement means:
     /// MySQL binds a statement to the default database and the parse-time
     /// sql_mode in effect when it was prepared, and re-binds neither later.
@@ -5358,6 +5633,9 @@ impl MySqlConnection {
     /// let rows2 = conn.query_prepared(cx, &stmt, &[&false]).await?;
     /// ```
     pub async fn prepare(&mut self, cx: &Cx, sql: &str) -> Outcome<MySqlStatement, MySqlError> {
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -5584,6 +5862,9 @@ impl MySqlConnection {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
         }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
+        }
         let was_closed_at_entry = self.inner.closed;
         self.inner
             .query_in_flight
@@ -5745,6 +6026,9 @@ impl MySqlConnection {
     ) -> Outcome<MySqlExecResult, MySqlError> {
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+        if let Err(error) = self.reset_pooled_session(cx).await {
+            return outcome_from_error(error);
         }
         let was_closed_at_entry = self.inner.closed;
         self.inner
@@ -6932,12 +7216,14 @@ pub fn bench_prepared_cache_repeated_workload(
 /// reuses the same server `connection_id`.
 pub struct MySqlConnectionManager {
     options: MySqlConnectOptions,
+    reset_session_on_return: bool,
 }
 
 impl fmt::Debug for MySqlConnectionManager {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MySqlConnectionManager")
             .field("options", &self.options)
+            .field("reset_session_on_return", &self.reset_session_on_return)
             .finish()
     }
 }
@@ -6946,7 +7232,43 @@ impl MySqlConnectionManager {
     /// Create a new manager that mints connections using `options`.
     #[must_use]
     pub fn new(options: MySqlConnectOptions) -> Self {
-        Self { options }
+        Self {
+            options,
+            reset_session_on_return: false,
+        }
+    }
+
+    /// Isolate the server session between borrowers of a pooled connection.
+    ///
+    /// Disabled by default. When enabled, returned connections run
+    /// `COM_RESET_CONNECTION` before their next use, clearing user variables,
+    /// temporary tables, advisory locks and server prepared statements. The
+    /// manager captures the initial charset/collation and restores them, the
+    /// initial autocommit mode, and the configured database after each reset.
+    /// It also clears the returning borrower's statement-timeout override and
+    /// restores the default client result-row limit. Cache counters continue
+    /// to describe the physical connection, but its cached statements do not
+    /// survive a reset.
+    ///
+    /// A nonempty initial database in the connection options is required for
+    /// reuse: the protocol cannot undo a later `USE` back to no database, so
+    /// connections without one are discarded on return. Unsupported reset
+    /// commands, reset/restoration errors and cancellation likewise discard
+    /// the connection; they never fall back to reusing a dirty session.
+    /// The complete reset and restoration exchange uses `connect_timeout`
+    /// from the connection options as its upper bound (30 seconds when unset),
+    /// so even an unbounded caller cannot hold a pool slot forever. Timeout
+    /// closes and discards the session without issuing `KILL QUERY`.
+    ///
+    /// Ordinary guard drop defers the wire reset until checkout validation or
+    /// the next request, including when validation is disabled. Server state
+    /// such as advisory locks survives while that connection is idle. Use
+    /// [`AsyncPooledConnection::reset_and_return`](crate::database::pool::AsyncPooledConnection::reset_and_return)
+    /// to await the reset before returning the connection to the idle pool.
+    #[must_use]
+    pub fn reset_session_on_return(mut self, enabled: bool) -> Self {
+        self.reset_session_on_return = enabled;
+        self
     }
 
     /// Returns the options this manager uses to mint connections.
@@ -6961,14 +7283,28 @@ impl crate::database::pool::AsyncConnectionManager for MySqlConnectionManager {
     type Error = MySqlError;
 
     async fn connect(&self, cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
-        MySqlConnection::connect_with_options(cx, self.options.clone()).await
+        MySqlConnection::connect_bounded(
+            cx,
+            self.options.clone(),
+            self.reset_session_on_return,
+            #[cfg(feature = "tls")]
+            None,
+        ).await
     }
 
-    async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
-        !conn.inner.closed
-            && !conn.in_transaction()
-            && !conn.inner.needs_rollback
-            && !conn.autocommit_changed()
+    async fn is_valid(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
+        if conn.inner.closed
+            || conn.in_transaction()
+            || conn.inner.needs_rollback
+            || conn.autocommit_changed()
+        {
+            return false;
+        }
+        conn.reset_pooled_session(cx).await.is_ok()
+    }
+
+    async fn reset_on_return(&self, cx: &Cx, conn: &mut Self::Connection) -> bool {
+        conn.reset_pooled_session(cx).await.is_ok()
     }
 
     fn release_check(&self, conn: &mut Self::Connection) -> bool {
@@ -6980,6 +7316,17 @@ impl crate::database::pool::AsyncConnectionManager for MySqlConnectionManager {
             return false;
         }
 
+        if self.reset_session_on_return {
+            let Some(reset) = conn.pool_reset.as_mut() else {
+                return false;
+            };
+            reset.pending = true;
+            // Clear the previous borrower's settings now. Clearing them only
+            // during the deferred reset would erase the next borrower's
+            // explicit override set before their first query.
+            conn.inner.statement_timeout_override = None;
+            conn.inner.max_result_rows = DEFAULT_MAX_RESULT_ROWS;
+        }
         conn.invalidate_prepared_statements_for_pool_return();
         true
     }

@@ -14,8 +14,10 @@
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
 use asupersync::database::mysql::{
-    IsolationLevel, MySqlConnectOptions, MySqlConnection, MySqlError,
+    IsolationLevel, MySqlConnectOptions, MySqlConnection, MySqlConnectionManager, MySqlError,
+    MySqlValue,
 };
+use asupersync::database::pool::{AsyncDbPool, DbPoolConfig};
 use asupersync::test_utils::run_test_with_cx;
 use asupersync::types::Outcome;
 
@@ -313,6 +315,154 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
 
         log.phase("close");
         conn.close().await.expect("close");
+        log.end("pass");
+    });
+}
+
+/// asupersync-k3y26t H3: three borrowers share one authenticated connection.
+/// Both deferred checkout reset and awaited return release real server state.
+/// MYSQL_URL must select a writable database, as for the other temp-table tests.
+#[test]
+fn mysql_real_pool_reset_isolates_borrowers_and_releases_locks_before_awaited_return() {
+    use std::time::Duration;
+
+    let cfg = RealMySqlConfig::from_env();
+    if skip_if_disabled(&cfg, "mysql_real_pool_reset_isolates_borrowers") {
+        return;
+    }
+    let log = MySqlTestLogger::new("mysql_real", "mysql_real_pool_reset_isolates_borrowers");
+    run_test_with_cx(|cx| async move {
+        let mut options = MySqlConnectOptions::parse(&cfg.url).expect("test MySQL URL");
+        assert!(options.database.as_ref().is_some_and(|database| !database.is_empty()),
+            "reset reuse requires MYSQL_URL to select a writable initial database");
+        if std::env::var("MYSQL_ALLOW_NATIVE_PASSWORD").is_ok_and(|value| value == "true") {
+            options.insecure_legacy_mysql_native_password = true;
+        }
+        let pool = AsyncDbPool::new(
+            MySqlConnectionManager::new(options).reset_session_on_return(true),
+            DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+        );
+        log.phase("initial_session_and_observer");
+        let mut observer = unwrap_mysql(connect_test_server(&cx, &cfg.url).await, "observer connect", &log);
+        let global_defaults = unwrap_mysql(observer.query_trusted_sql(
+            &cx, "SELECT @@global.sql_mode AS sql_mode, @@global.time_zone AS time_zone"
+        ).await, "global session defaults", &log);
+        let observe_lock = unwrap_mysql(observer.prepare(
+            &cx, "SELECT IS_USED_LOCK(?) AS owner"
+        ).await, "prepare lock observation", &log);
+        let mut first = pool.get(&cx).await.expect("first pooled borrower");
+        let connection_id = first.connection_id();
+        let default_row_limit = first.max_result_rows();
+        let lock_name = format!("asupersync_k3y26t_{}_{}", std::process::id(), connection_id);
+        const SNAPSHOT: &str = "SELECT DATABASE() AS db, \
+            @@session.character_set_client AS charset_client, \
+            @@session.character_set_connection AS charset_connection, \
+            @@session.character_set_results AS charset_results, \
+            @@session.collation_connection AS collation, @@session.autocommit AS autocommit, \
+            @asupersync_reset_tenant AS tenant, @@session.sql_mode AS sql_mode, \
+            @@session.time_zone AS time_zone";
+        let initial = unwrap_mysql(first.query_trusted_sql(&cx, SNAPSHOT).await, "initial baseline", &log);
+
+        log.phase("first_borrower_session_state");
+        for sql in [
+            "CREATE TEMPORARY TABLE asupersync_k3y26t_reset_temp (id INT PRIMARY KEY) ENGINE=InnoDB",
+            "INSERT INTO asupersync_k3y26t_reset_temp VALUES (41)",
+            "SET @asupersync_reset_tenant = 41",
+            "SET SESSION sql_mode = 'ANSI_QUOTES'",
+            "SET SESSION time_zone = '+07:00'",
+            "SET NAMES latin1 COLLATE latin1_swedish_ci",
+            "USE information_schema",
+        ] {
+            unwrap_mysql(first.execute_trusted_sql(&cx, sql).await, "dirty session", &log);
+        }
+        let acquire_lock = unwrap_mysql(first.prepare(
+            &cx, "SELECT GET_LOCK(?, 0) AS acquired"
+        ).await, "prepare advisory lock", &log);
+        let acquired = unwrap_mysql(first.query_prepared(
+            &cx, &acquire_lock, &[&lock_name]
+        ).await, "acquire advisory lock", &log);
+        assert_eq!(acquired[0].get_i64("acquired").unwrap(), 1);
+        let retained_statement = unwrap_mysql(first.prepare(
+            &cx, "SELECT ? AS payload"
+        ).await, "prepare in old session", &log);
+        let old_cache_stats = first.prepared_cache_stats();
+        first.set_statement_timeout_override(Some(Duration::from_millis(900)));
+        first.set_max_result_rows(7);
+        drop(first);
+        assert_eq!(pool.stats().idle, 1);
+        let held = unwrap_mysql(observer.query_prepared(
+            &cx, &observe_lock, &[&lock_name]
+        ).await, "observe lock on idle connection", &log);
+        assert_eq!(held[0].get_i64("owner").unwrap(), i64::from(connection_id));
+
+        log.phase("second_borrower_resets_before_first_request");
+        let mut second = pool.get(&cx).await.expect("second pooled borrower");
+        assert_eq!(second.connection_id(), connection_id, "reuse the authenticated socket");
+        assert_eq!(second.statement_timeout_override(), None);
+        assert_eq!(second.max_result_rows(), default_row_limit);
+        let restored = unwrap_mysql(second.query_trusted_sql(&cx, SNAPSHOT).await, "reset and session snapshot", &log);
+        for column in ["db", "charset_client", "charset_connection", "charset_results", "collation", "autocommit"] {
+            assert_eq!(restored[0].get(column).unwrap(), initial[0].get(column).unwrap(), "restore {column}");
+        }
+        assert!(matches!(restored[0].get("tenant").unwrap(), MySqlValue::Null));
+        for column in ["sql_mode", "time_zone"] {
+            assert_eq!(restored[0].get(column).unwrap(), global_defaults[0].get(column).unwrap(), "reset {column} to server default");
+        }
+        let released = unwrap_mysql(observer.query_prepared(
+            &cx, &observe_lock, &[&lock_name]
+        ).await, "observe lock released by deferred reset", &log);
+        assert!(matches!(released[0].get("owner").unwrap(), MySqlValue::Null));
+        assert!(matches!(
+            second.query_trusted_sql(&cx, "SELECT id FROM asupersync_k3y26t_reset_temp").await,
+            Outcome::Err(MySqlError::Server { code: 1146, .. })
+        ), "the previous borrower's temporary table must be gone");
+        assert!(matches!(
+            second.query_prepared(&cx, &retained_statement, &[&"stale"]).await,
+            Outcome::Err(MySqlError::InvalidParameter(message)) if message.contains("pooled checkout epoch")
+        ));
+        let fresh_statement = unwrap_mysql(second.prepare(
+            &cx, "SELECT ? AS payload"
+        ).await, "reprepare after reset", &log);
+        assert_eq!(second.prepared_cache_stats().misses, old_cache_stats.misses + 1);
+        let echoed = unwrap_mysql(second.query_prepared(
+            &cx, &fresh_statement, &[&"café"]
+        ).await, "prepared string after charset restoration", &log);
+        assert_eq!(echoed[0].get_str("payload").unwrap(), "café");
+
+        log.phase("awaited_return_releases_lock_before_idle");
+        let acquire_lock = unwrap_mysql(second.prepare(
+            &cx, "SELECT GET_LOCK(?, 0) AS acquired"
+        ).await, "prepare lock after reset", &log);
+        let acquired = unwrap_mysql(second.query_prepared(
+            &cx, &acquire_lock, &[&lock_name]
+        ).await, "reacquire lock", &log);
+        assert_eq!(acquired[0].get_i64("acquired").unwrap(), 1);
+        unwrap_mysql(second.execute_trusted_sql(
+            &cx, "SET @asupersync_reset_tenant = 99"
+        ).await, "second tenant state", &log);
+        second.reset_and_return(&cx).await;
+        assert_eq!(pool.stats().idle, 1, "successful awaited reset keeps the connection");
+        let released = unwrap_mysql(observer.query_prepared(
+            &cx, &observe_lock, &[&lock_name]
+        ).await, "lock is released before return completes", &log);
+        assert!(matches!(released[0].get("owner").unwrap(), MySqlValue::Null));
+
+        log.phase("third_borrower_and_cleanup");
+        let mut third = pool.get(&cx).await.expect("third pooled borrower");
+        assert_eq!(third.connection_id(), connection_id);
+        let restored_again = unwrap_mysql(third.query_trusted_sql(
+            &cx, SNAPSHOT
+        ).await, "third borrower snapshot", &log);
+        assert!(matches!(restored_again[0].get("tenant").unwrap(), MySqlValue::Null));
+        assert_eq!(restored_again[0].get("db").unwrap(), initial[0].get("db").unwrap());
+        assert_eq!(restored_again[0].get("collation").unwrap(), initial[0].get("collation").unwrap());
+        drop(third);
+        assert_eq!(pool.stats().total_creates, 1);
+        pool.close();
+        assert_eq!(pool.stats().total, 0);
+        assert_eq!(pool.stats().active, 0);
+        assert_eq!(pool.stats().pending_waiters, 0);
+        observer.close().await.expect("close observer");
         log.end("pass");
     });
 }
