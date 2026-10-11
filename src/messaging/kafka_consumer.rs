@@ -2732,13 +2732,9 @@ impl KafkaConsumer {
                     partition: record.partition,
                     offset,
                     key: record.key,
-                    payload: Some(record.payload),
+                    payload: record.payload,
                     timestamp: record.timestamp,
-                    headers: record
-                        .headers
-                        .into_iter()
-                        .map(|(key, value)| (key, Some(value)))
-                        .collect(),
+                    headers: record.headers,
                 }));
             }
         }

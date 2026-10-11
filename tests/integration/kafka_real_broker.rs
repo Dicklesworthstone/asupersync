@@ -1553,6 +1553,221 @@ fn test_real_broker_transaction_offsets_survive_restart_and_abort() {
     });
 }
 
+/// br-asupersync-messaging-client-audit-k6pxks: nullable values must survive
+/// real transaction commit/abort filtering and committed-offset restart.
+/// This observes tombstone records; it does not wait for background compaction.
+#[cfg(feature = "kafka")]
+#[test]
+fn test_real_broker_nullable_transaction_tombstones_and_offset_resume() {
+    use asupersync::messaging::kafka::{TransactionalConfig, TransactionalProducer};
+    use asupersync::messaging::kafka_consumer::{IsolationLevel, NullableConsumerRecord};
+
+    async fn next_nullable(
+        cx: &asupersync::Cx,
+        consumer: &KafkaConsumer,
+    ) -> NullableConsumerRecord {
+        let started = std::time::Instant::now();
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "missing real broker nullable record"
+            );
+            if let Some(record) = consumer
+                .poll_nullable(cx, Duration::from_millis(250))
+                .await
+                .unwrap()
+            {
+                return record;
+            }
+        }
+    }
+
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+    let log = KafkaTestLogger::new("real_broker_nullable_transaction_tombstones");
+    run_test_with_cx(|cx| async move {
+        let topic = unique_topic("nullable-tombstone-transactions");
+        let group = format!("nullable-tombstone-group-{}", fastrand::u64(..));
+        let producer_config = ProducerConfig::new(config.bootstrap_servers.clone());
+        let producer = KafkaProducer::new(producer_config.clone()).unwrap();
+        let transactions = TransactionalProducer::new(
+            TransactionalConfig::new(
+                producer_config,
+                format!("nullable-tombstone-tx-{}", fastrand::u64(..)),
+            )
+            .transaction_timeout(Duration::from_secs(30)),
+        )
+        .unwrap();
+        let key = b"materialized-key";
+
+        log.phase("produce_nullable_transaction_boundaries");
+        let initial = producer
+            .send_nullable(&cx, &topic, Some(key), Some(b"initial"), None)
+            .await
+            .unwrap();
+        let aborted = transactions.begin_transaction(&cx).await.unwrap();
+        aborted
+            .send_nullable_with_headers(
+                &cx,
+                &topic,
+                Some(key),
+                None,
+                &[
+                    ("marker", Some(&b"aborted"[..])),
+                    ("same", None),
+                    ("same", Some(&b""[..])),
+                ],
+            )
+            .await
+            .unwrap();
+        aborted.abort(&cx).await.unwrap();
+
+        let empty = transactions.begin_transaction(&cx).await.unwrap();
+        empty
+            .send_nullable(&cx, &topic, Some(key), Some(b""))
+            .await
+            .unwrap();
+        empty.commit(&cx).await.unwrap();
+        let deletion = transactions.begin_transaction(&cx).await.unwrap();
+        deletion
+            .send_nullable_with_headers(
+                &cx,
+                &topic,
+                Some(key),
+                None,
+                &[
+                    ("marker", Some(&b"committed-delete"[..])),
+                    ("same", None),
+                    ("same", Some(&b""[..])),
+                ],
+            )
+            .await
+            .unwrap();
+        deletion.commit(&cx).await.unwrap();
+        let later = transactions.begin_transaction(&cx).await.unwrap();
+        later
+            .send_nullable(&cx, &topic, Some(key), Some(b"later-marker"))
+            .await
+            .unwrap();
+        later.commit(&cx).await.unwrap();
+
+        log.phase("observe_physical_aborted_and_committed_records");
+        let raw = KafkaConsumer::new(
+            ConsumerConfig::new(config.bootstrap_servers.clone(), format!("{group}-raw"))
+                .force_real_kafka(true)
+                .enable_auto_commit(false)
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .isolation_level(IsolationLevel::ReadUncommitted),
+        )
+        .unwrap();
+        raw.subscribe(&cx, &[&topic]).await.unwrap();
+        let mut physical = Vec::new();
+        for payload in [
+            Some(&b"initial"[..]),
+            None,
+            Some(&b""[..]),
+            None,
+            Some(&b"later-marker"[..]),
+        ] {
+            let record = next_nullable(&cx, &raw).await;
+            assert_eq!(
+                record.partition, initial.partition,
+                "the fixed key keeps every transaction ordered"
+            );
+            assert_eq!(record.key.as_deref(), Some(key.as_slice()));
+            assert_eq!(record.payload.as_deref(), payload);
+            physical.push(record);
+        }
+        assert!(
+            physical
+                .windows(2)
+                .all(|pair| pair[0].offset < pair[1].offset)
+        );
+        assert_eq!(
+            physical[1].headers,
+            vec![
+                ("marker".into(), Some(b"aborted".to_vec())),
+                ("same".into(), None),
+                ("same".into(), Some(Vec::new())),
+            ]
+        );
+        assert_eq!(
+            physical[3].headers,
+            vec![
+                ("marker".into(), Some(b"committed-delete".to_vec())),
+                ("same".into(), None),
+                ("same".into(), Some(Vec::new())),
+            ]
+        );
+        raw.close(&cx).await.unwrap();
+        drop(raw);
+
+        log.phase("read_committed_preserves_empty_and_applies_only_committed_delete");
+        let consumer_config = ConsumerConfig::new(config.bootstrap_servers.clone(), &group)
+            .force_real_kafka(true)
+            .enable_auto_commit(false)
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .isolation_level(IsolationLevel::ReadCommitted);
+        let consumer = KafkaConsumer::new(consumer_config.clone()).unwrap();
+        consumer.subscribe(&cx, &[&topic]).await.unwrap();
+        let mut materialized = HashMap::new();
+        for index in [0, 2, 3] {
+            let record = next_nullable(&cx, &consumer).await;
+            assert_eq!(
+                record, physical[index],
+                "the aborted deletion must be skipped before later records"
+            );
+            let record_key = record.key.unwrap();
+            if let Some(value) = record.payload {
+                materialized.insert(record_key, value);
+            } else {
+                materialized.remove(&record_key);
+            }
+            match index {
+                0 => assert_eq!(
+                    materialized.get(key.as_slice()).map(Vec::as_slice),
+                    Some(&b"initial"[..])
+                ),
+                2 => assert_eq!(
+                    materialized.get(key.as_slice()).map(Vec::as_slice),
+                    Some(&b""[..])
+                ),
+                3 => assert!(
+                    materialized.is_empty(),
+                    "committed null deletes rather than storing empty bytes"
+                ),
+                _ => unreachable!(),
+            }
+        }
+        consumer
+            .commit_offsets(
+                &cx,
+                &[TopicPartitionOffset::new(
+                    &topic,
+                    initial.partition,
+                    physical[3].offset + 1,
+                )],
+            )
+            .await
+            .unwrap();
+        consumer.close(&cx).await.unwrap();
+        drop(consumer);
+
+        log.phase("new_consumer_resumes_after_committed_tombstone");
+        let restarted = KafkaConsumer::new(consumer_config).unwrap();
+        restarted.subscribe(&cx, &[&topic]).await.unwrap();
+        let marker = next_nullable(&cx, &restarted).await;
+        assert_eq!(
+            marker, physical[4],
+            "restart must use the broker's committed next offset"
+        );
+        restarted.close(&cx).await.unwrap();
+        producer.close(&cx, Duration::from_secs(10)).await.unwrap();
+        log.test_end("pass");
+    });
+}
+
 #[test]
 fn test_real_broker_consumer_group_rebalancing() {
     let Some(config) = require_real_broker() else {

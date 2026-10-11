@@ -579,13 +579,45 @@ fn acks_to_str(acks: Acks) -> &'static str {
     }
 }
 
-#[cfg(feature = "kafka")]
+#[cfg_attr(
+    not(any(feature = "kafka", test, feature = "test-internals")),
+    allow(dead_code)
+)]
 struct SendRequest<'a> {
     topic: &'a str,
     key: Option<&'a [u8]>,
-    payload: &'a [u8],
+    payload: Option<&'a [u8]>,
     partition: Option<i32>,
-    headers: Option<&'a [(&'a str, &'a [u8])]>,
+    headers: SendHeaders<'a>,
+}
+
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(any(feature = "kafka", test, feature = "test-internals")),
+    allow(dead_code)
+)]
+enum SendHeaders<'a> {
+    None,
+    Bytes(&'a [(&'a str, &'a [u8])]),
+    Nullable(&'a [(&'a str, Option<&'a [u8]>)]),
+}
+
+#[cfg(any(feature = "kafka", test, feature = "test-internals"))]
+impl<'a> SendHeaders<'a> {
+    fn iter(self) -> impl Iterator<Item = (&'a str, Option<&'a [u8]>)> {
+        let bytes = match self {
+            Self::Bytes(headers) => headers,
+            _ => &[],
+        };
+        let nullable = match self {
+            Self::Nullable(headers) => headers,
+            _ => &[],
+        };
+        bytes
+            .iter()
+            .map(|(key, value)| (*key, Some(*value)))
+            .chain(nullable.iter().copied())
+    }
 }
 
 #[cfg(feature = "kafka")]
@@ -661,9 +693,10 @@ async fn send_with_producer(
 ) -> Result<RecordMetadata, KafkaError> {
     cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
-    if request.payload.len() > config.max_message_size {
+    let payload_size = request.payload.map_or(0, <[u8]>::len);
+    if payload_size > config.max_message_size {
         return Err(KafkaError::MessageTooLarge {
-            size: request.payload.len(),
+            size: payload_size,
             max_size: config.max_message_size,
         });
     }
@@ -671,21 +704,20 @@ async fn send_with_producer(
     let receiver = retry_immediate_send(cx, config, || {
         let (sender, receiver) = delivery_channel(cx);
 
-        let mut record =
-            BaseRecord::with_opaque_to(request.topic, Box::new(sender)).payload(request.payload);
+        let mut record = BaseRecord::with_opaque_to(request.topic, Box::new(sender));
+        if let Some(payload) = request.payload {
+            record = record.payload(payload);
+        }
         if let Some(key) = request.key {
             record = record.key(key);
         }
         if let Some(partition) = request.partition {
             record = record.partition(partition);
         }
-        if let Some(headers) = request.headers {
+        if !matches!(request.headers, SendHeaders::None) {
             let mut owned_headers = OwnedHeaders::new();
-            for (key, value) in headers {
-                owned_headers = owned_headers.insert(Header {
-                    key,
-                    value: Some(*value),
-                });
+            for (key, value) in request.headers.iter() {
+                owned_headers = owned_headers.insert(Header { key, value });
             }
             record = record.headers(owned_headers);
         }
@@ -769,9 +801,9 @@ pub(crate) struct DeterministicBrokerRecord {
     pub topic: String,
     pub partition: i32,
     pub key: Option<Vec<u8>>,
-    pub payload: Vec<u8>,
+    pub payload: Option<Vec<u8>>,
     pub timestamp: Option<i64>,
-    pub headers: Vec<(String, Vec<u8>)>,
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
 }
 
 #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
@@ -1831,7 +1863,6 @@ impl KafkaProducer {
     ///
     /// # Errors
     /// Returns an error if the message cannot be sent.
-    #[allow(unused_variables, clippy::unused_async)]
     pub async fn send(
         &self,
         cx: &Cx,
@@ -1840,58 +1871,8 @@ impl KafkaProducer {
         payload: &[u8],
         partition: Option<i32>,
     ) -> Result<RecordMetadata, KafkaError> {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        validate_topic(topic)?;
-
-        // Check message size
-        if payload.len() > self.config.max_message_size {
-            return Err(KafkaError::MessageTooLarge {
-                size: payload.len(),
-                max_size: self.config.max_message_size,
-            });
-        }
-
-        let _op_guard = self.begin_operation()?;
-
-        #[cfg(feature = "kafka")]
-        {
-            send_with_producer(
-                &self.producer,
-                cx,
-                &self.config,
-                SendRequest {
-                    topic,
-                    key,
-                    payload,
-                    partition,
-                    headers: None,
-                },
-            )
+        self.send_nullable(cx, topic, key, Some(payload), partition)
             .await
-        }
-
-        // Without the `kafka` cargo feature, only this crate's own tests are
-        // permitted to drive the in-process deterministic broker. Downstream production
-        // builds get a loud `FeatureDisabled` error instead of silent message
-        // loss against the harness. See br-asupersync-w2p2a0.
-        #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
-        {
-            if !self.config.deterministic_broker_allowed_for_testing() {
-                return Err(KafkaError::FeatureDisabled);
-            }
-            Ok(deterministic_broker_publish(DeterministicBrokerRecord {
-                topic: topic.to_string(),
-                partition: partition.unwrap_or(0),
-                key: key.map(std::borrow::ToOwned::to_owned),
-                payload: payload.to_vec(),
-                timestamp: None,
-                headers: Vec::new(),
-            }))
-        }
-        #[cfg(all(not(feature = "kafka"), not(any(test, feature = "test-internals"))))]
-        {
-            Err(KafkaError::FeatureDisabled)
-        }
     }
 
     /// Send a message with headers.
@@ -1902,7 +1883,6 @@ impl KafkaProducer {
     /// * `key` - Optional message key for partitioning
     /// * `payload` - Message payload
     /// * `headers` - Key-value header pairs
-    #[allow(unused_variables, clippy::unused_async)]
     pub async fn send_with_headers(
         &self,
         cx: &Cx,
@@ -1911,12 +1891,90 @@ impl KafkaProducer {
         payload: &[u8],
         headers: &[(&str, &[u8])],
     ) -> Result<RecordMetadata, KafkaError> {
-        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
-        validate_topic(topic)?;
+        self.send_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload: Some(payload),
+                partition: None,
+                headers: SendHeaders::Bytes(headers),
+            },
+        )
+        .await
+    }
 
-        if payload.len() > self.config.max_message_size {
+    /// Send a Kafka value or a tombstone.
+    ///
+    /// `None` sends a null payload; on a compacted topic, use the key of the
+    /// value to delete. `Some(&[])` sends an ordinary empty payload. Routing,
+    /// delivery acknowledgements, cancellation, retries and size limits use
+    /// the same path as [`Self::send`]. A null value is not a client-side delete:
+    /// the broker's compaction policy and consuming applications determine its
+    /// effect.
+    pub async fn send_nullable(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+        partition: Option<i32>,
+    ) -> Result<RecordMetadata, KafkaError> {
+        self.send_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition,
+                headers: SendHeaders::None,
+            },
+        )
+        .await
+    }
+
+    /// Send a nullable payload with ordered, nullable headers.
+    ///
+    /// Duplicate header names, null values and empty values are preserved on
+    /// the wire. `partition` overrides routing exactly as in [`Self::send`].
+    /// Consume these records with
+    /// [`KafkaConsumer::poll_nullable`](super::kafka_consumer::KafkaConsumer::poll_nullable)
+    /// to retain every null versus empty distinction.
+    pub async fn send_nullable_with_headers(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+        headers: &[(&str, Option<&[u8]>)],
+        partition: Option<i32>,
+    ) -> Result<RecordMetadata, KafkaError> {
+        self.send_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition,
+                headers: SendHeaders::Nullable(headers),
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn send_request(
+        &self,
+        cx: &Cx,
+        request: SendRequest<'_>,
+    ) -> Result<RecordMetadata, KafkaError> {
+        cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
+        validate_topic(request.topic)?;
+
+        let payload_size = request.payload.map_or(0, <[u8]>::len);
+        if payload_size > self.config.max_message_size {
             return Err(KafkaError::MessageTooLarge {
-                size: payload.len(),
+                size: payload_size,
                 max_size: self.config.max_message_size,
             });
         }
@@ -1929,32 +1987,27 @@ impl KafkaProducer {
                 &self.producer,
                 cx,
                 &self.config,
-                SendRequest {
-                    topic,
-                    key,
-                    payload,
-                    partition: None,
-                    headers: Some(headers),
-                },
+                request,
             )
             .await
         }
 
-        // See `send` above for the cfg-gating rationale (br-w2p2a0).
+        // Only the opt-in test harness may use the deterministic broker;
+        // non-Kafka production builds fail closed (br-asupersync-w2p2a0).
         #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
         {
             if !self.config.deterministic_broker_allowed_for_testing() {
                 return Err(KafkaError::FeatureDisabled);
             }
             Ok(deterministic_broker_publish(DeterministicBrokerRecord {
-                topic: topic.to_string(),
-                partition: 0,
-                key: key.map(std::borrow::ToOwned::to_owned),
-                payload: payload.to_vec(),
+                topic: request.topic.to_string(),
+                partition: request.partition.unwrap_or(0),
+                key: request.key.map(std::borrow::ToOwned::to_owned),
+                payload: request.payload.map(std::borrow::ToOwned::to_owned),
                 timestamp: None,
-                headers: headers
+                headers: request.headers
                     .iter()
-                    .map(|(key, value)| ((*key).to_string(), (*value).to_vec()))
+                    .map(|(key, value)| (key.to_owned(), value.map(std::borrow::ToOwned::to_owned)))
                     .collect(),
             }))
         }
@@ -2677,7 +2730,6 @@ pub struct Transaction<'a> {
 
 impl Transaction<'_> {
     /// Send a message within the transaction.
-    #[allow(unused_variables, clippy::unused_async)]
     pub async fn send(
         &self,
         cx: &Cx,
@@ -2685,13 +2737,68 @@ impl Transaction<'_> {
         key: Option<&[u8]>,
         payload: &[u8],
     ) -> Result<(), KafkaError> {
+        self.send_nullable(cx, topic, key, Some(payload)).await
+    }
+
+    /// Send a nullable value within the transaction.
+    ///
+    /// A keyed `None` payload is a compaction tombstone; `Some(&[])` is an
+    /// empty value. The tombstone participates in this transaction's normal
+    /// commit/abort boundary, including any enrolled consumer offsets. Observe
+    /// transaction isolation with a `read_committed` consumer.
+    pub async fn send_nullable(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+    ) -> Result<(), KafkaError> {
+        self.send_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition: None,
+                headers: SendHeaders::None,
+            },
+        )
+        .await
+    }
+
+    /// Send a nullable value and ordered nullable headers in this transaction.
+    /// Duplicate names and null versus empty header values are retained.
+    pub async fn send_nullable_with_headers(
+        &self,
+        cx: &Cx,
+        topic: &str,
+        key: Option<&[u8]>,
+        payload: Option<&[u8]>,
+        headers: &[(&str, Option<&[u8]>)],
+    ) -> Result<(), KafkaError> {
+        self.send_request(
+            cx,
+            SendRequest {
+                topic,
+                key,
+                payload,
+                partition: None,
+                headers: SendHeaders::Nullable(headers),
+            },
+        )
+        .await
+    }
+
+    #[allow(clippy::unused_async)]
+    async fn send_request(&self, cx: &Cx, request: SendRequest<'_>) -> Result<(), KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.producer.ensure_active_transaction(self.generation)?;
-        validate_topic(topic)?;
+        validate_topic(request.topic)?;
 
-        if payload.len() > self.producer.config.producer.max_message_size {
+        let payload_size = request.payload.map_or(0, <[u8]>::len);
+        if payload_size > self.producer.config.producer.max_message_size {
             return Err(KafkaError::MessageTooLarge {
-                size: payload.len(),
+                size: payload_size,
                 max_size: self.producer.config.producer.max_message_size,
             });
         }
@@ -2702,13 +2809,7 @@ impl Transaction<'_> {
                 &self.producer.producer,
                 cx,
                 &self.producer.config.producer,
-                SendRequest {
-                    topic,
-                    key,
-                    payload,
-                    partition: None,
-                    headers: None,
-                },
+                request,
             )
             .await
             .map(|_metadata| ())
@@ -2723,12 +2824,14 @@ impl Transaction<'_> {
                 ));
             }
             state.staged_records.push(DeterministicBrokerRecord {
-                topic: topic.to_string(),
+                topic: request.topic.to_string(),
                 partition: 0,
-                key: key.map(std::borrow::ToOwned::to_owned),
-                payload: payload.to_vec(),
+                key: request.key.map(std::borrow::ToOwned::to_owned),
+                payload: request.payload.map(std::borrow::ToOwned::to_owned),
                 timestamp: None,
-                headers: Vec::new(),
+                headers: request.headers.iter()
+                    .map(|(key, value)| (key.to_owned(), value.map(std::borrow::ToOwned::to_owned)))
+                    .collect(),
             });
             drop(state);
             Ok(())
@@ -3511,6 +3614,340 @@ mod tests {
     #[cfg(feature = "kafka")]
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn nullable_model_sends_preserve_nulls_through_commit_and_discard_aborts() {
+        use crate::messaging::kafka_consumer::{AutoOffsetReset, ConsumerConfig, KafkaConsumer};
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let topic = "nullable-commit-model";
+            let headers = [
+                ("same", None),
+                ("same", Some(&b""[..])),
+                ("same", Some(&b"h"[..])),
+            ];
+            let plain = KafkaProducer::new(ProducerConfig::default()).unwrap();
+            let tx_producer = TransactionalProducer::new(TransactionalConfig::new(
+                ProducerConfig::default(),
+                "nullable-commit-model".into(),
+            ))
+            .unwrap();
+            let consumer = KafkaConsumer::new(
+                ConsumerConfig::default().auto_offset_reset(AutoOffsetReset::Earliest),
+            )
+            .unwrap();
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+
+            plain
+                .send_nullable_with_headers(&cx, topic, Some(b"key"), Some(b""), &headers, Some(0))
+                .await
+                .unwrap();
+            let aborted = tx_producer.begin_transaction(&cx).await.unwrap();
+            aborted
+                .send_nullable(&cx, topic, Some(b"aborted"), None)
+                .await
+                .unwrap();
+            aborted.abort(&cx).await.unwrap();
+            assert_eq!(deterministic_broker_end_offset(topic, 0), 1);
+
+            let committed = tx_producer.begin_transaction(&cx).await.unwrap();
+            committed
+                .send_nullable_with_headers(&cx, topic, Some(b"key"), None, &headers)
+                .await
+                .unwrap();
+            committed
+                .send_nullable(&cx, topic, Some(b"empty"), Some(b""))
+                .await
+                .unwrap();
+            assert_eq!(
+                deterministic_broker_end_offset(topic, 0),
+                1,
+                "nullable records stay staged until commit"
+            );
+            committed.commit(&cx).await.unwrap();
+            plain
+                .send(&cx, topic, Some(b"tail"), b"tail", Some(0))
+                .await
+                .unwrap();
+
+            for (offset, payload) in [
+                (0, Some(&b""[..])),
+                (1, None),
+                (2, Some(&b""[..])),
+                (3, Some(&b"tail"[..])),
+            ] {
+                let record = consumer
+                    .poll_nullable(&cx, Duration::ZERO)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(record.offset, offset);
+                assert_eq!(record.payload.as_deref(), payload);
+                if offset < 2 {
+                    assert_eq!(record.key.as_deref(), Some(&b"key"[..]));
+                    assert_eq!(
+                        record.headers,
+                        vec![
+                            ("same".into(), None),
+                            ("same".into(), Some(Vec::new())),
+                            ("same".into(), Some(b"h".to_vec())),
+                        ]
+                    );
+                } else {
+                    assert!(record.headers.is_empty());
+                }
+            }
+            assert!(
+                consumer
+                    .poll_nullable(&cx, Duration::ZERO)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            consumer.close(&cx).await.unwrap();
+            plain.close(&cx, Duration::from_secs(1)).await.unwrap();
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn nullable_sends_keep_admission_cancellation_size_and_close_guards() {
+        let _broker = deterministic_broker_guard();
+        crate::test_utils::run_test_with_cx(|cx| async move {
+            let topic = "nullable-send-refusal";
+            let config = ProducerConfig {
+                max_message_size: 2,
+                ..ProducerConfig::default()
+            };
+            let producer = KafkaProducer::new(config.clone()).unwrap();
+            let tx_producer = TransactionalProducer::new(TransactionalConfig::new(
+                config,
+                "nullable-refusal".into(),
+            ))
+            .unwrap();
+            let transaction = tx_producer.begin_transaction(&cx).await.unwrap();
+            let cancelled = Cx::for_testing();
+            cancelled.cancel_with(crate::types::CancelKind::User, Some("before nullable send"));
+            assert!(matches!(
+                producer
+                    .send_nullable(&cancelled, topic, Some(b"key"), None, Some(0))
+                    .await,
+                Err(KafkaError::Cancelled)
+            ));
+            assert!(matches!(
+                transaction
+                    .send_nullable(&cancelled, topic, Some(b"key"), None)
+                    .await,
+                Err(KafkaError::Cancelled)
+            ));
+            assert!(matches!(
+                producer
+                    .send_nullable(&cx, topic, None, Some(b"big"), Some(0))
+                    .await,
+                Err(KafkaError::MessageTooLarge {
+                    size: 3,
+                    max_size: 2
+                })
+            ));
+            assert!(matches!(
+                transaction
+                    .send_nullable(&cx, topic, None, Some(b"big"))
+                    .await,
+                Err(KafkaError::MessageTooLarge {
+                    size: 3,
+                    max_size: 2
+                })
+            ));
+            assert_eq!(deterministic_broker_end_offset(topic, 0), 0);
+            assert!(tx_producer.state.lock().staged_records.is_empty());
+            transaction.abort(&cx).await.unwrap();
+            producer.close(&cx, Duration::from_secs(1)).await.unwrap();
+            assert!(matches!(
+                producer
+                    .send_nullable(&cx, topic, Some(b"key"), None, Some(0))
+                    .await,
+                Err(KafkaError::Config(_))
+            ));
+            assert_eq!(deterministic_broker_end_offset(topic, 0), 0);
+        });
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn native_nullable_send_journey(multithread: bool) {
+        use crate::runtime::RuntimeBuilder;
+        use crate::types::Budget;
+        use rdkafka::message::Headers;
+        use rdkafka::topic_partition_list::{Offset, TopicPartitionList};
+
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "nullable-producer-wire";
+        cluster.create_topic(topic, 2, 1).unwrap();
+        let bootstrap = cluster.bootstrap_servers();
+        let mut config = ProducerConfig::new(vec![bootstrap.clone()]);
+        config.max_message_size = 1024;
+        let builder = if multithread {
+            RuntimeBuilder::new().worker_threads(2)
+        } else {
+            RuntimeBuilder::current_thread()
+        };
+        let runtime = builder.build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let mut expected = runtime.block_on_with_cx(cx.clone(), async move {
+            let producer = KafkaProducer::new(config).unwrap();
+            let mut expected = std::collections::BTreeMap::new();
+            for (key, payload) in [
+                (&b"value"[..], Some(&b"value"[..])),
+                (&b"empty"[..], Some(&b""[..])),
+                (&b"delete"[..], None),
+            ] {
+                let metadata = producer
+                    .send_nullable(&cx, topic, Some(key), payload, Some(0))
+                    .await
+                    .unwrap();
+                assert_eq!(metadata.partition, 0);
+                expected.insert(
+                    (metadata.partition, metadata.offset),
+                    (key.to_vec(), payload.map(<[u8]>::to_vec), Vec::new()),
+                );
+            }
+            let headers = [
+                ("same", None),
+                ("same", Some(&b""[..])),
+                ("same", Some(&b"h"[..])),
+            ];
+            for (key, payload) in [
+                (&b"header-delete"[..], None),
+                (&b"header-empty"[..], Some(&b""[..])),
+            ] {
+                let metadata = producer
+                    .send_nullable_with_headers(&cx, topic, Some(key), payload, &headers, Some(1))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    metadata.partition, 1,
+                    "explicit routing must survive header sends"
+                );
+                expected.insert(
+                    (metadata.partition, metadata.offset),
+                    (
+                        key.to_vec(),
+                        payload.map(<[u8]>::to_vec),
+                        vec![
+                            ("same".to_owned(), None),
+                            ("same".to_owned(), Some(Vec::new())),
+                            ("same".to_owned(), Some(b"h".to_vec())),
+                        ],
+                    ),
+                );
+            }
+            let legacy = producer
+                .send_with_headers(&cx, topic, Some(b"legacy"), b"", &[("same", b"")])
+                .await
+                .unwrap();
+            expected.insert(
+                (legacy.partition, legacy.offset),
+                (
+                    b"legacy".to_vec(),
+                    Some(Vec::new()),
+                    vec![("same".into(), Some(Vec::new()))],
+                ),
+            );
+            let cancelled = Cx::for_testing();
+            cancelled.cancel_with(
+                crate::types::CancelKind::User,
+                Some("before wire admission"),
+            );
+            assert!(matches!(
+                producer
+                    .send_nullable(&cancelled, topic, Some(b"refused"), None, Some(0))
+                    .await,
+                Err(KafkaError::Cancelled)
+            ));
+            assert!(matches!(
+                producer
+                    .send_nullable(&cx, topic, None, Some(&[0; 1025]), Some(0))
+                    .await,
+                Err(KafkaError::MessageTooLarge {
+                    size: 1025,
+                    max_size: 1024
+                })
+            ));
+            producer.close(&cx, Duration::from_secs(10)).await.unwrap();
+            assert!(producer.is_closed());
+            expected
+        });
+        assert_eq!(expected.len(), 6);
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        drop(runtime);
+
+        // Decode with raw rdkafka, independently of poll_nullable, so matching
+        // producer/consumer mistakes cannot hide the wire's null distinction.
+        let observer: rdkafka::consumer::BaseConsumer = ClientConfig::new()
+            .set("bootstrap.servers", bootstrap)
+            .set("group.id", "nullable-wire-observer")
+            .set("enable.auto.commit", "false")
+            .create()
+            .unwrap();
+        let mut partitions = TopicPartitionList::new();
+        for partition in [0, 1] {
+            partitions
+                .add_partition_offset(topic, partition, Offset::Offset(0))
+                .unwrap();
+        }
+        observer.assign(&partitions).unwrap();
+        let started = std::time::Instant::now();
+        while !expected.is_empty() {
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "missing nullable wire records: {expected:?}"
+            );
+            let Some(message) = observer.poll(Duration::from_millis(100)) else {
+                continue;
+            };
+            let message = message.unwrap();
+            let (key, payload, headers) = expected
+                .remove(&(message.partition(), message.offset()))
+                .expect("every produced record appears exactly once");
+            assert_eq!(message.key(), Some(key.as_slice()));
+            assert_eq!(message.payload(), payload.as_deref());
+            assert_eq!(
+                message
+                    .headers()
+                    .map_or(0, rdkafka::message::Headers::count),
+                headers.len()
+            );
+            for (index, (key, value)) in headers.iter().enumerate() {
+                let actual = message.headers().unwrap().get(index);
+                assert_eq!(actual.key, key);
+                assert_eq!(actual.value, value.as_deref());
+            }
+        }
+        observer.unassign().unwrap();
+        drop(observer);
+        drop(cluster);
+    }
+
+    /// br-asupersync-messaging-client-audit-k6pxks: native client and mock
+    /// broker protocol coverage; transaction isolation needs a real broker.
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_nullable_send_preserves_tombstones_and_duplicate_headers_on_wire() {
+        for multithread in [false, true] {
+            let (send, receive) = std::sync::mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(|| native_nullable_send_journey(multithread));
+                let _ = send.send(result);
+            });
+            let result = receive
+                .recv_timeout(Duration::from_secs(45))
+                .expect("native nullable producer and observer must finish");
+            thread.join().unwrap();
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
+        }
     }
 
     #[test]
