@@ -202,14 +202,22 @@ impl TaskPhase {
     }
 }
 
+/// Shared atomic counters for live task tracking and phase tracking across direct
+/// mutations.
+#[derive(Debug, Default)]
+pub(crate) struct TaskPhaseTracker {
+    pub(crate) live_count: AtomicUsize,
+    pub(crate) phase_counts: [AtomicUsize; 5],
+}
+
 /// Atomic task phase cell for cross-thread state checks.
 #[derive(Debug)]
 pub struct TaskPhaseCell {
     inner: AtomicU8,
-    /// The live-task count of the task table that holds this record. Every
-    /// phase change goes through [`Self::store`], which keeps the count exact
+    /// Shared tracker of the task table that holds this record. Every
+    /// phase change goes through [`Self::store`], which keeps the counts exact
     /// even when a record is mutated directly (br-asupersync-bzict6).
-    live_count: Option<Arc<AtomicUsize>>,
+    tracker: Option<Arc<TaskPhaseTracker>>,
 }
 
 impl TaskPhaseCell {
@@ -219,26 +227,50 @@ impl TaskPhaseCell {
     pub fn new(phase: TaskPhase) -> Self {
         Self {
             inner: AtomicU8::new(phase.as_u8()),
-            live_count: None,
+            tracker: None,
         }
     }
 
-    /// Counts this cell in `live_count` while its phase is not terminal.
-    pub(crate) fn attach_live_count(&mut self, live_count: Arc<AtomicUsize>) {
-        self.detach_live_count();
-        if !self.load().is_terminal() {
-            live_count.fetch_add(1, Ordering::AcqRel);
+    /// Counts this cell in `tracker` while its phase is not terminal.
+    pub(crate) fn attach_phase_tracker(&mut self, tracker: Arc<TaskPhaseTracker>) {
+        self.detach_phase_tracker();
+        let phase = self.load();
+        if !phase.is_terminal() {
+            tracker.live_count.fetch_add(1, Ordering::AcqRel);
+            let idx = phase as usize;
+            if idx < 5 {
+                tracker.phase_counts[idx].fetch_add(1, Ordering::AcqRel);
+            }
         }
-        self.live_count = Some(live_count);
+        self.tracker = Some(tracker);
     }
 
     /// Stops counting this cell.
-    pub(crate) fn detach_live_count(&mut self) {
-        if let Some(live_count) = self.live_count.take() {
-            if !self.load().is_terminal() {
-                live_count.fetch_sub(1, Ordering::AcqRel);
+    pub(crate) fn detach_phase_tracker(&mut self) {
+        if let Some(tracker) = self.tracker.take() {
+            let phase = self.load();
+            if !phase.is_terminal() {
+                tracker.live_count.fetch_sub(1, Ordering::AcqRel);
+                let idx = phase as usize;
+                if idx < 5 {
+                    tracker.phase_counts[idx].fetch_sub(1, Ordering::AcqRel);
+                }
             }
         }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn attach_live_count(&mut self, live_count: Arc<AtomicUsize>) {
+        let tracker = Arc::new(TaskPhaseTracker {
+            live_count: AtomicUsize::new(live_count.load(Ordering::Acquire)),
+            phase_counts: [const { AtomicUsize::new(0) }; 5],
+        });
+        self.attach_phase_tracker(tracker);
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn detach_live_count(&mut self) {
+        self.detach_phase_tracker();
     }
 
     /// Loads the current phase.
@@ -265,27 +297,38 @@ impl TaskPhaseCell {
                 "invalid TaskPhase transition: {current:?} -> {phase:?}"
             );
         }
-        let Some(live_count) = &self.live_count else {
+        let Some(tracker) = &self.tracker else {
             self.inner.store(phase as u8, Ordering::Release);
             return;
         };
-        let was_live = TaskPhase::from_u8(self.inner.swap(phase as u8, Ordering::AcqRel))
-            .is_some_and(|previous| !previous.is_terminal());
-        match (was_live, !phase.is_terminal()) {
-            (true, false) => {
-                live_count.fetch_sub(1, Ordering::AcqRel);
+        let prev_raw = self.inner.swap(phase as u8, Ordering::AcqRel);
+        if let Some(prev) = TaskPhase::from_u8(prev_raw) {
+            let was_live = !prev.is_terminal();
+            let is_live = !phase.is_terminal();
+            match (was_live, is_live) {
+                (true, false) => {
+                    tracker.live_count.fetch_sub(1, Ordering::AcqRel);
+                }
+                (false, true) => {
+                    tracker.live_count.fetch_add(1, Ordering::AcqRel);
+                }
+                _ => {}
             }
-            (false, true) => {
-                live_count.fetch_add(1, Ordering::AcqRel);
+            let prev_idx = prev as usize;
+            if prev_idx < 5 {
+                tracker.phase_counts[prev_idx].fetch_sub(1, Ordering::AcqRel);
             }
-            _ => {}
+            let new_idx = phase as usize;
+            if new_idx < 5 {
+                tracker.phase_counts[new_idx].fetch_add(1, Ordering::AcqRel);
+            }
         }
     }
 }
 
 impl Drop for TaskPhaseCell {
     fn drop(&mut self) {
-        self.detach_live_count();
+        self.detach_phase_tracker();
     }
 }
 

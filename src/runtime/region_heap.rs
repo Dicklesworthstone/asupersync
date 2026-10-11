@@ -52,9 +52,10 @@
 //! 4. *No aliased access after reclamation.* After `complete_close()`:
 //!    - `RRef::get()` checks `state.is_terminal()` and returns
 //!      `Err(AllocationInvalid)`.
-//!    - `HeapIndex` carries a generation counter; even if a stale index is
-//!      presented to a new heap, the generation mismatch prevents access (ABA
-//!      safety).
+//!    - Within the same heap, `HeapIndex` carries a generation counter so
+//!      that slot reuse by a later allocation prevents access (intra-heap ABA
+//!      safety). Across different heaps or regions, `RRef` checks the region ID
+//!      to prevent cross-region access.
 //!
 //! 5. *Global counter conservation.* Every `alloc()` increments
 //!    `GLOBAL_ALLOC_COUNT` and every `dealloc()` / `reclaim_all()` / `Drop`

@@ -76,14 +76,15 @@ pub struct TaskTable {
     /// Incremental total of all non-terminal task phases.
     ///
     /// Kept as a mutation-side cache for future fully-encapsulated task phase
-    /// updates. Read-side access uses `live_records` instead, which direct
+    /// updates. Read-side access uses `phase_tracker` instead, which direct
     /// legacy `TaskRecord` phase mutations cannot drift.
+    #[allow(dead_code)]
     live_task_count: usize,
     /// Records in the arena whose phase is not terminal. Each record's
-    /// `TaskPhaseCell` holds this counter while the record is in the table and
-    /// adjusts it on every phase store, so `live_task_count` is O(1) and exact
-    /// on every mutation path (br-asupersync-bzict6).
-    live_records: Arc<AtomicUsize>,
+    /// `TaskPhaseCell` holds this tracker while the record is in the table and
+    /// adjusts it on every phase store, so `live_task_count` and `count_in_phase`
+    /// are O(1) and exact on every mutation path (br-asupersync-bzict6).
+    phase_tracker: Arc<crate::record::task::TaskPhaseTracker>,
     /// Reads of `live_task_count`, for the sampled debug cross-check.
     #[cfg(debug_assertions)]
     live_count_reads: AtomicUsize,
@@ -124,7 +125,7 @@ impl TaskTable {
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             live_task_count: 0,
-            live_records: Arc::new(AtomicUsize::new(0)),
+            phase_tracker: Arc::new(crate::record::task::TaskPhaseTracker::default()),
             #[cfg(debug_assertions)]
             live_count_reads: AtomicUsize::new(0),
             deadline_sum_ns: 0,
@@ -159,7 +160,7 @@ impl TaskTable {
             task_record_pool_stats: TaskRecordPoolStats::default(),
             phase_counts: [0; LIVE_PHASE_COUNT],
             live_task_count: 0,
-            live_records: Arc::new(AtomicUsize::new(0)),
+            phase_tracker: Arc::new(crate::record::task::TaskPhaseTracker::default()),
             #[cfg(debug_assertions)]
             live_count_reads: AtomicUsize::new(0),
             deadline_sum_ns: 0,
@@ -327,10 +328,10 @@ impl TaskTable {
     pub fn count_in_phase(&self, phase: TaskPhase) -> usize {
         let idx = phase as usize;
         if idx < LIVE_PHASE_COUNT {
-            self.tasks
-                .iter()
-                .filter(|(_, record)| record.phase.load() == phase)
-                .count()
+            let count = self.phase_tracker.phase_counts[idx].load(Ordering::Acquire);
+            #[cfg(debug_assertions)]
+            self.debug_check_phase_count(phase, count);
+            count
         } else {
             0
         }
@@ -369,9 +370,9 @@ impl TaskTable {
     /// stays in the table.
     #[inline]
     fn count_live(&mut self, idx: ArenaIndex) {
-        let live_records = Arc::clone(&self.live_records);
+        let tracker = Arc::clone(&self.phase_tracker);
         if let Some(record) = self.tasks.get_mut(idx) {
-            record.phase.attach_live_count(live_records);
+            record.phase.attach_phase_tracker(tracker);
         }
     }
 
@@ -379,7 +380,7 @@ impl TaskTable {
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<TaskRecord> {
         let mut record = self.tasks.remove(index)?;
-        record.phase.detach_live_count();
+        record.phase.detach_phase_tracker();
         if let Some(cx) = &record.cx {
             cx.revoke_obligation_admission();
         }
@@ -659,7 +660,7 @@ impl TaskTable {
     #[must_use]
     #[inline]
     pub fn live_task_count(&self) -> usize {
-        let count = self.live_records.load(Ordering::Acquire);
+        let count = self.phase_tracker.live_count.load(Ordering::Acquire);
         #[cfg(debug_assertions)]
         self.debug_check_live_count(count);
         count
@@ -680,6 +681,25 @@ impl TaskTable {
             debug_assert_eq!(
                 count, scanned,
                 "live task count drifted from the task records"
+            );
+        }
+    }
+
+    /// Debug builds: sampled check that the cached phase count matches an arena scan.
+    #[cfg(debug_assertions)]
+    fn debug_check_phase_count(&self, phase: TaskPhase, count: usize) {
+        let reads = self.live_count_reads.fetch_add(1, Ordering::Relaxed);
+        if self.tasks.len() <= LIVE_COUNT_CHECK_ALWAYS_UP_TO
+            || reads.is_multiple_of(LIVE_COUNT_CHECK_INTERVAL)
+        {
+            let scanned = self
+                .tasks
+                .iter()
+                .filter(|(_, record)| record.phase.load() == phase)
+                .count();
+            debug_assert_eq!(
+                count, scanned,
+                "phase {phase:?} count drifted from the task records"
             );
         }
     }
@@ -789,7 +809,9 @@ mod tests {
     }
 
     fn live_phase_sum(table: &TaskTable) -> usize {
-        table.phase_counts.iter().sum()
+        (0..LIVE_PHASE_COUNT)
+            .map(|i| table.count_in_phase(TaskPhase::from_u8(i as u8).unwrap()))
+            .sum()
     }
 
     #[test]
