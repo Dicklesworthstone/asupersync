@@ -70,6 +70,18 @@ enum Slot<T> {
     },
 }
 
+/// Maximum generation allowed before an arena slot is retired permanently.
+///
+/// Retiring slots at `ARENA_MAX_GENERATION` (2^31 - 1) serves two critical
+/// purposes:
+/// 1. Prevents generation wrapping back to 0 (the ABA hazard addressed in
+///    `br-asupersync-rvz1tq`).
+/// 2. Ensures that canonical arena indices never have their MSB (bit 31) set,
+///    preventing collisions with provisional ID namespaces that reserve bit 31
+///    (e.g., `SPAWN_ID_GENERATION_TAG = 0x8000_0000` in `spawn_mailbox.rs`;
+///    `br-asupersync-01oghn` L2).
+pub const ARENA_MAX_GENERATION: u32 = 0x7fff_ffff;
+
 /// A simple arena allocator with generation-based indices.
 ///
 /// This arena provides stable indices for inserted elements, with generation
@@ -233,14 +245,13 @@ impl<T> Arena<T> {
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
     ///
-    /// br-asupersync-rvz1tq — generation-overflow safety: if the slot has
-    /// already cycled through `u32::MAX` reuses, the next `wrapping_add`
-    /// would silently roll back to 0 and a stale `ArenaIndex` from the very
-    /// first generation could be matched against the new slot (ABA bypass
-    /// against the generation guard). This branch panics in debug to catch
-    /// the bug fast, and in release retires the slot permanently — it is
-    /// removed from the free list so it is never reused, capping the leak
-    /// at one slot per 2^32 reuses (per slot).
+    /// br-asupersync-rvz1tq / br-asupersync-01oghn (L2) — generation-overflow safety:
+    /// if the slot has already cycled through `ARENA_MAX_GENERATION` reuses (2^31 - 1),
+    /// the next generation would set bit 31 (colliding with provisional IDs such as
+    /// `SPAWN_ID_GENERATION_TAG`) and eventually roll back to 0 (ABA bypass).
+    /// This branch panics in debug to catch the bug fast, and in release retires
+    /// the slot permanently — it is removed from the free list so it is never
+    /// reused, capping the leak at one slot per 2^31 reuses (per slot).
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<T> {
         let slot = self.slots.get_mut(index.index as usize)?;
@@ -248,11 +259,11 @@ impl<T> Arena<T> {
         match slot {
             Slot::Occupied { generation, .. } if *generation == index.generation => {
                 let cur_gen = *generation;
-                let retire_slot = if cur_gen == u32::MAX {
+                let retire_slot = if cur_gen >= ARENA_MAX_GENERATION {
                     debug_assert!(
                         false,
                         "ArenaIndex generation wrap detected at slot {} \
-                         (br-asupersync-rvz1tq)",
+                         (br-asupersync-rvz1tq / br-asupersync-01oghn L2)",
                         index.index
                     );
                     true
@@ -395,12 +406,12 @@ impl<T> Arena<T> {
             let mut skip_link = false;
             if let Slot::Occupied { generation, .. } = &guard.arena.slots[i] {
                 let cur_gen = *generation;
-                let retire_slot = cur_gen == u32::MAX;
+                let retire_slot = cur_gen >= ARENA_MAX_GENERATION;
                 if retire_slot {
                     debug_assert!(
                         false,
                         "ArenaIndex generation wrap detected at slot {} \
-                         (br-asupersync-rvz1tq)",
+                         (br-asupersync-rvz1tq / br-asupersync-01oghn L2)",
                         i
                     );
                 }
@@ -541,12 +552,12 @@ impl<T> Iterator for DrainValues<'_, T> {
 
             if let Slot::Occupied { generation, .. } = &self.arena.slots[i] {
                 let cur_gen = *generation;
-                let retire_slot = cur_gen == u32::MAX;
+                let retire_slot = cur_gen >= ARENA_MAX_GENERATION;
                 if retire_slot {
                     debug_assert!(
                         false,
                         "ArenaIndex generation wrap detected at slot {} \
-                         (br-asupersync-rvz1tq)",
+                         (br-asupersync-rvz1tq / br-asupersync-01oghn L2)",
                         i
                     );
                 }
@@ -1012,4 +1023,52 @@ mod tests {
         // ArenaIndex. We can't construct a 2^32-slot arena in a unit test,
         // but the panic message is part of the contract.
     }
+
+    /// br-asupersync-01oghn L2: removing a slot whose generation reaches
+    /// `ARENA_MAX_GENERATION` (2^31 - 1) retires the slot permanently so that
+    /// no future arena index is minted with bit 31 set.
+    #[test]
+    fn remove_at_generation_max_2_to_31_minus_1_retires_slot() {
+        let mut arena: Arena<u32> = Arena::new();
+        let idx = arena.insert(42);
+
+        if let Some(Slot::Occupied { generation, .. }) = arena.slots.get_mut(idx.index() as usize) {
+            *generation = ARENA_MAX_GENERATION;
+        }
+        let recovered = ArenaIndex {
+            index: idx.index(),
+            generation: ARENA_MAX_GENERATION,
+        };
+
+        let prev_free_head = arena.free_head;
+        let val = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.remove(recovered)));
+        match val {
+            Ok(Some(42)) => {
+                assert_eq!(
+                    arena.free_head, prev_free_head,
+                    "slot retired at ARENA_MAX_GENERATION must not be added to free list"
+                );
+            }
+            Ok(Some(v)) => panic!("expected 42, got {v}"),
+            Ok(None) => panic!("expected to remove the value"),
+            Err(_) => {
+                // Debug-style behavior: debug_assert fired.
+            }
+        }
+    }
+
+    /// br-asupersync-01oghn L2: verify that valid arena indices never collide
+    /// with provisional spawn mailbox IDs (which reserve bit 31).
+    #[test]
+    fn arena_issued_indices_never_satisfy_is_spawn_mailbox_id() {
+        use crate::runtime::spawn_mailbox::is_spawn_mailbox_id;
+        use crate::types::TaskId;
+
+        let mut arena: Arena<u32> = Arena::new();
+        let idx = arena.insert(100);
+        let task_id = TaskId::from_arena(idx);
+        assert!(!is_spawn_mailbox_id(task_id));
+        assert!(idx.generation() < ARENA_MAX_GENERATION);
+    }
 }
+

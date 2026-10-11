@@ -15,10 +15,12 @@
 //! # Provisional task-id namespace
 //!
 //! Arena-allocated `TaskId`s carry small generations: fresh slots start at
-//! generation 0 and the generation increments once per slot reuse. The
-//! mailbox mints ids in a disjoint namespace by setting the generation MSB
-//! (`SPAWN_ID_GENERATION_TAG`): an arena id would need 2^31 reuses of a
-//! single slot to collide, which is unreachable in practice. Layout:
+//! generation 0 and the generation increments once per slot reuse. Arena
+//! slots retire permanently upon reaching `ARENA_MAX_GENERATION` (2^31 - 1
+//! reuses, `br-asupersync-01oghn` L2), guaranteeing that an arena id never
+//! sets bit 31. The mailbox mints ids in a strictly disjoint namespace by
+//! setting the generation MSB (`SPAWN_ID_GENERATION_TAG = 0x8000_0000`).
+//! Layout:
 //!
 //! ```text
 //! generation = TAG(bit 31) | shard(bits 30..24) | epoch(bits 23..0)
@@ -77,8 +79,10 @@ pub use crate::record::region::{PendingSpawnCounter, PendingSpawnReservation};
 
 /// Generation tag (MSB) marking a provisional spawn-mailbox `TaskId`.
 ///
-/// Arena generations start at 0 and increment once per slot reuse, so an
-/// arena id reaches this bit only after 2^31 reuses of one slot.
+/// Arena generations start at 0 and increment once per slot reuse. Arena slots
+/// retire permanently upon reaching `ARENA_MAX_GENERATION` (2^31 - 1 reuses,
+/// `br-asupersync-01oghn` L2), guaranteeing that canonical arena IDs never set
+/// this bit and preventing collision with provisional IDs.
 pub const SPAWN_ID_GENERATION_TAG: u32 = 0x8000_0000;
 
 /// Number of bits in the generation reserved for the epoch counter.
@@ -1440,15 +1444,7 @@ impl fmt::Debug for SpawnRequest {
     }
 }
 
-/// Lock-free multi-producer intake queue for spawn requests.
-///
-/// Producers enqueue from any thread without holding `RuntimeState`; the
-/// scheduler's admission path consumes. The underlying queue is MPMC-safe,
-/// but the FIFO guarantees documented on [`Self::dequeue`] and
-/// [`Self::dequeue_batch_into`] are stated for a single logical consumer;
-/// with concurrent consumers each pop still returns the oldest *remaining*
-/// request, but the global drain order interleaves across consumers. See
-/// module docs for capacity, backpressure, and trace-ordering contracts.
+/// Cancellation request issued through a `TaskHandle` before or after task admission.
 pub(crate) struct HandleCancelRequest {
     pub(crate) task_id: TaskId,
     pub(crate) reason: CancelReason,
@@ -1887,6 +1883,31 @@ pub(crate) trait TeardownWake: Send + Sync {
     fn wake_for_teardown(&self);
 }
 
+/// Lock-free multi-producer intake mailbox for spawn requests, handle cancellations,
+/// and region lifecycle commands.
+///
+/// Producers enqueue from any thread without holding `RuntimeState`; scheduler
+/// worker threads consume requests under admission turns.
+///
+/// # Concurrency & Multi-Worker Ordering (br-asupersync-01oghn L4)
+///
+/// The mailbox maintains three independent lock-free lanes:
+/// - `queue`: incoming spawn requests
+/// - `handle_cancels`: handle cancellation requests
+/// - `region_commands`: region lifecycle commands (create, cancel, close)
+///
+/// Each lane is backed by a lock-free `GlobalFifoQueue`. The FIFO guarantees
+/// documented on dequeue operations hold for a single logical consumer. On
+/// multi-worker runtimes, multiple workers dequeue and execute requests
+/// concurrently:
+/// 1. **Cross-lane ordering:** The lanes are drained concurrently; there is no
+///    global total order across different request types without state-lock
+///    synchronization. For instance, a cancel queued on `handle_cancels` and a
+///    close command queued on `region_commands` may be dequeued in parallel.
+/// 2. **Per-region ordering:** While requests in the same queue are popped in
+///    FIFO order, concurrent worker threads processing distinct requests for
+///    the same region interleave their execution. State transitions synchronize
+///    under the `RuntimeState` lock upon admission.
 pub struct SpawnMailbox {
     queue: GlobalFifoQueue<SpawnRequest>,
     handle_cancels: GlobalFifoQueue<HandleCancelRequest>,
