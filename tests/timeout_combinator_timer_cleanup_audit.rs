@@ -309,11 +309,12 @@ fn sleep_drop_uses_safe_let_underscore_for_cancel_result() {
 
 #[test]
 fn sleep_drop_detaches_fallback_threads_to_avoid_blocking() {
-    // Pin (audit): the shared cleanup used by Sleep::Drop drops
-    // fallback_handles without joining. This
-    // detaches background threads. Joining would block the
-    // executor; detaching lets them complete in their own
-    // time.
+    // Pin (audit): the shared cleanup used by Sleep::Drop hands
+    // fallback_handles to spawn_blocking::reap_threads. It joins a
+    // finished thread and parks a running one for a later reap; it
+    // never waits on a running thread. Joining would block the
+    // executor, and detaching (the old drop) leaked threads past the
+    // task (GitHub #80, f87732a14).
     let source = read("src/time/sleep.rs");
 
     let impl_marker = "impl Drop for Sleep {";
@@ -329,10 +330,13 @@ fn sleep_drop_detaches_fallback_threads_to_avoid_blocking() {
 
     assert!(
         body.contains("self.cancel_active_registration();")
-            && cancel_body.contains("drop(fallback_handles);"),
-        "REGRESSION: Sleep::Drop no longer detaches \
+            && cancel_body
+                .contains("crate::runtime::spawn_blocking::reap_threads(fallback_handles);")
+            && !cancel_body.contains("drop(fallback_handles);")
+            && !cancel_body.contains(".join()"),
+        "REGRESSION: Sleep::Drop no longer reaps \
          fallback_handles. Either it joins (would block \
-         the executor) or it leaks (background threads \
+         the executor) or it detaches (background threads \
          persist past task lifetime).",
     );
 }
