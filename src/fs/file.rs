@@ -902,20 +902,27 @@ impl AsyncWrite for File {
                     });
                     *pending = Some(PendingIo::Write { future, chunk });
                 }
-                Some(PendingIo::ReadAhead { bytes, consumed }) => {
+                Some(read_ahead) if matches!(read_ahead, PendingIo::ReadAhead { .. }) => {
                     // The OS cursor sits past bytes the caller never consumed;
                     // rewind before writing so the write lands where the
-                    // caller believes the cursor is.
-                    let rewind = i64::try_from(bytes.len() - consumed)
+                    // caller believes the cursor is. Use PendingIo::Rewind
+                    // so if the rewind fails (e.g. on a pipe/socket), unconsumed
+                    // read-ahead bytes are retained rather than lost.
+                    let rewind = i64::try_from(Self::unconsumed_read_ahead(Some(&read_ahead)))
                         .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
-                    let chunk = Arc::new(buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec());
-                    let submitted = Arc::clone(&chunk);
+                    let PendingIo::ReadAhead { bytes, consumed } = read_ahead else {
+                        unreachable!()
+                    };
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
-                        Write::write(&mut file_ref, &submitted)
+                        Ok(())
                     });
-                    *pending = Some(PendingIo::Write { future, chunk });
+                    *pending = Some(PendingIo::Rewind {
+                        future,
+                        bytes,
+                        consumed,
+                    });
                 }
                 other => {
                     *pending = other;
@@ -1005,19 +1012,26 @@ impl AsyncSeek for File {
                     });
                     *pending = Some(PendingIo::Seek { future, pos });
                 }
-                Some(read_ahead @ PendingIo::ReadAhead { .. }) => {
+                Some(read_ahead) if matches!(read_ahead, PendingIo::ReadAhead { .. }) => {
                     // Reconcile the physical cursor before the requested
-                    // seek, as the owned seek path does. Combining the
-                    // offsets can overflow, and a failed seek would otherwise
-                    // leave the cursor past bytes the caller never received.
+                    // seek, as the owned seek path does. Use PendingIo::Rewind
+                    // so that if rewind fails (e.g. on a pipe/socket), unconsumed
+                    // read-ahead bytes are retained rather than lost.
                     let unconsumed = i64::try_from(Self::unconsumed_read_ahead(Some(&read_ahead)))
                         .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
+                    let PendingIo::ReadAhead { bytes, consumed } = read_ahead else {
+                        unreachable!()
+                    };
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, SeekFrom::Current(-unconsumed))?;
-                        Seek::seek(&mut file_ref, pos)
+                        Ok(())
                     });
-                    *pending = Some(PendingIo::Seek { future, pos });
+                    *pending = Some(PendingIo::Rewind {
+                        future,
+                        bytes,
+                        consumed,
+                    });
                 }
                 other => {
                     *pending = other;
@@ -1617,6 +1631,56 @@ mod tests {
             assert_eq!(remaining, b"23456789");
         });
         crate::test_complete!("test_owned_cursor_failed_rewind_retains_read_ahead");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_poll_write_failed_rewind_retains_read_ahead() {
+        init_test("test_poll_write_failed_rewind_retains_read_ahead");
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        Write::write_all(&mut writer, b"0123456789").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let fd: std::os::fd::OwnedFd = reader.into();
+        let mut file = File::from_std(std::fs::File::from(fd));
+        let mut bytes = vec![0; 6];
+        Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+        *file.pending.lock() = Some(PendingIo::ReadAhead { bytes, consumed: 2 });
+        let _guard = crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing()));
+        futures_lite::future::block_on(async {
+            let write_result = std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_write(cx, b"write")
+            }).await;
+            assert!(write_result.is_err());
+            let mut remaining = Vec::new();
+            file.read_to_end(&mut remaining).await.unwrap();
+            assert_eq!(remaining, b"23456789");
+        });
+        crate::test_complete!("test_poll_write_failed_rewind_retains_read_ahead");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_poll_seek_failed_rewind_retains_read_ahead() {
+        init_test("test_poll_seek_failed_rewind_retains_read_ahead");
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        Write::write_all(&mut writer, b"0123456789").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let fd: std::os::fd::OwnedFd = reader.into();
+        let mut file = File::from_std(std::fs::File::from(fd));
+        let mut bytes = vec![0; 6];
+        Read::read_exact(&mut &*file.inner, &mut bytes).unwrap();
+        *file.pending.lock() = Some(PendingIo::ReadAhead { bytes, consumed: 2 });
+        let _guard = crate::cx::Cx::set_current(Some(crate::cx::Cx::for_testing()));
+        futures_lite::future::block_on(async {
+            let seek_result = std::future::poll_fn(|cx| {
+                Pin::new(&mut file).poll_seek(cx, SeekFrom::Start(0))
+            }).await;
+            assert!(seek_result.is_err());
+            let mut remaining = Vec::new();
+            file.read_to_end(&mut remaining).await.unwrap();
+            assert_eq!(remaining, b"23456789");
+        });
+        crate::test_complete!("test_poll_seek_failed_rewind_retains_read_ahead");
     }
 
     #[cfg(feature = "test-internals")]
