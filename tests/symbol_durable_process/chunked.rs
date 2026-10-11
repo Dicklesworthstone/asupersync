@@ -81,6 +81,7 @@ fn transport(cx: &Cx, endpoint: SocketAddr) -> RemoteSymbolTransport {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn chunked_four_mib_snapshot_recovers_after_receiver_crash_with_source_symbol_loss() {
+    let _serial = super::serial();
     for workers in [1, 2] {
         let path = journal_path();
         let inode = std::fs::metadata(&path).unwrap();
@@ -220,6 +221,7 @@ async fn partial_request(
 
 #[test]
 fn receiver_restart_discards_only_uncommitted_chunks_and_exact_attempt_reuploads() {
+    let _serial = super::serial();
     let path = journal_path();
     let first = Process::start(&path, "chunked-create");
     let initial = std::fs::metadata(&path).unwrap().len();
@@ -258,6 +260,7 @@ fn receiver_restart_discards_only_uncommitted_chunks_and_exact_attempt_reuploads
 
 #[test]
 fn durable_chunked_registration_without_a_blocking_pool_refuses_before_staging() {
+    let _serial = super::serial();
     let path = journal_path();
     let process = Process::start(&path, "chunked-no-pool");
     let initial = std::fs::metadata(&path).unwrap().len();
