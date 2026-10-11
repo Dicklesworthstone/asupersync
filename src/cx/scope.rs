@@ -774,10 +774,13 @@ impl<'scope, P: Policy> Scope<'scope, P> {
         F: FnOnce(Scope<'_, P2>, &mut RuntimeState) -> Fut,
         Fut: Future<Output = Outcome<T, P2::Error>>,
     {
+        // A scope may be narrower than its owning region. Carry those
+        // context-only constraints into admission before the runtime meets
+        // the request with the parent region's authoritative envelopes.
         let child_region = state.create_child_region_with_capability_budget_and_priority(
             self.region,
-            admission.budget,
-            admission.capability_budget,
+            self.budget.meet(admission.budget),
+            self.capability_budget.meet(admission.capability_budget),
             admission.requirements,
             admission.priority,
         )?;
@@ -2667,6 +2670,107 @@ mod tests {
             state.region(child_id).is_none(),
             "closed child region should be reclaimed from arena"
         );
+    }
+
+    #[test]
+    fn region_admission_meets_region_scope_and_requested_envelopes() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region_with_capability_budget(
+            Budget::with_deadline_at_secs(80)
+                .with_poll_quota(80)
+                .with_cost_quota(80)
+                .with_priority(220),
+            CapabilityBudget::new()
+                .with_memory_bytes(2_048)
+                .with_cpu_units(30)
+                .with_io_bytes(2_000)
+                .with_artifact_bytes(128)
+                .with_cleanup_budget(Budget::new().with_poll_quota(80)),
+        );
+        let scope = test_scope_with_capability_budget(
+            parent,
+            Budget::with_deadline_at_secs(60)
+                .with_poll_quota(90)
+                .with_cost_quota(60)
+                .with_priority(210),
+            CapabilityBudget::new()
+                .with_memory_bytes(1_024)
+                .with_cpu_units(60)
+                .with_io_bytes(3_000)
+                .with_artifact_bytes(64)
+                .with_cleanup_budget(Budget::new().with_poll_quota(40).with_cost_quota(30)),
+        );
+        let outcome = block_on(scope.region_with_budget_and_capability_budget(
+            &mut state,
+            &cx,
+            Budget::with_deadline_at_secs(70)
+                .with_poll_quota(40)
+                .with_cost_quota(90)
+                .with_priority(230),
+            CapabilityBudget::new()
+                .with_memory_bytes(4_096)
+                .with_cpu_units(20)
+                .with_io_bytes(1_000)
+                .with_artifact_bytes(256)
+                .with_cleanup_budget(Budget::new().with_poll_quota(60).with_cost_quota(20)),
+            CapabilityBudgetRequirements::new()
+                .require_memory_bytes()
+                .require_cpu_units()
+                .require_io_bytes()
+                .require_artifact_bytes()
+                .require_cleanup(),
+            crate::types::policy::FailFast,
+            |child, state| {
+                let record = state.region(child.region_id()).expect("admitted child");
+                assert_eq!(record.budget(), child.budget());
+                assert_eq!(record.capability_budget(), child.capability_budget());
+                std::future::ready(Outcome::Ok((child.budget(), child.capability_budget())))
+            },
+        ))
+        .expect("combined envelopes admit the child");
+        let Outcome::Ok((budget, capability_budget)) = outcome else {
+            panic!("empty child must close successfully");
+        };
+        assert_eq!(
+            budget,
+            Budget::with_deadline_at_secs(60)
+                .with_poll_quota(40)
+                .with_cost_quota(60)
+                .with_priority(230)
+        );
+        assert_eq!(
+            capability_budget,
+            CapabilityBudget::new()
+                .with_memory_bytes(1_024)
+                .with_cpu_units(20)
+                .with_io_bytes(1_000)
+                .with_artifact_bytes(64)
+                .with_cleanup_budget(Budget::new().with_poll_quota(40).with_cost_quota(20))
+        );
+        assert!(state.region(parent).expect("parent").child_ids().is_empty());
+    }
+
+    #[test]
+    fn region_cannot_replenish_exhausted_scope_scheduler_budget() {
+        let mut state = RuntimeState::new();
+        let cx = test_cx();
+        let parent = state.create_root_region(Budget::INFINITE);
+        let exhausted = Budget::with_deadline_at_ns(0)
+            .with_poll_quota(0)
+            .with_cost_quota(0)
+            .with_priority(u8::MAX);
+        let scope = test_scope(parent, exhausted);
+        let outcome = block_on(scope.region_with_budget(
+            &mut state,
+            &cx,
+            Budget::INFINITE,
+            crate::types::policy::FailFast,
+            |child, _state| std::future::ready(Outcome::Ok(child.budget())),
+        ))
+        .expect("legacy admission retains the exhausted scheduler envelope");
+        assert!(matches!(outcome, Outcome::Ok(budget) if budget == exhausted));
+        assert!(state.region(parent).expect("parent").child_ids().is_empty());
     }
 
     #[test]
