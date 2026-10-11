@@ -107,7 +107,9 @@ impl Default for NativeH3ListenerConfig {
                 max_connections: 64,
                 ..ManagedEndpointConfig::default()
             },
-            router: NativeH3RouterConfig::default(),
+            router: NativeH3RouterConfig::default()
+                .max_pending_requests(16)
+                .max_in_flight_dispatches(16),
             max_concurrent_requests: 128,
             max_pending_handshakes: 16,
             max_requests_per_connection: 128,
@@ -1386,8 +1388,13 @@ impl ListenerState {
                         connection.assembly.clear();
                         connection.retirement_deadline = None;
                         connection.application_idle_deadline = None;
-                        self.report.failed_connections =
-                            self.report.failed_connections.saturating_add(1);
+                        let clean_close = connection.idle_retirement
+                            || close_code == Some(0x100)
+                            || close_code == Some(0);
+                        if !clean_close {
+                            self.report.failed_connections =
+                                self.report.failed_connections.saturating_add(1);
+                        }
                         let protected_close = close_code.is_some_and(|code| {
                             endpoint
                                 .request_authenticated_close(cx, connection.id, code, true)
@@ -1399,6 +1406,13 @@ impl ListenerState {
                             // its idle timeout. The endpoint retains the
                             // authenticated route and sends its protected
                             // close while owned request regions drain here.
+                            retired_connection = true;
+                        } else if endpoint.request_authenticated_close(
+                            cx,
+                            connection.id,
+                            close_code.unwrap_or(0x100),
+                            false,
+                        ) == Ok(true) {
                             retired_connection = true;
                         } else {
                             let _ = endpoint.remove_connection(cx, connection.id);
@@ -1783,7 +1797,7 @@ impl ListenerConnection {
         {
             self.retirement_deadline = None;
             self.retirement_forced = true;
-            if !self.idle_retirement {
+            if draining && !self.idle_retirement {
                 report.drain_timed_out = true;
             }
             for request in self.requests.values_mut() {
