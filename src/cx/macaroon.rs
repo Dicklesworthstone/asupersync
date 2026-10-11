@@ -2,8 +2,10 @@
 //!
 //! Macaroons are bearer tokens with chained HMAC caveats that enable
 //! **decentralized capability attenuation**. Any holder can add caveats
-//! (restrictions) without contacting the issuer, but nobody can remove
-//! caveats without the root key.
+//! (restrictions) without contacting the issuer. First-party caveats and the
+//! native protected third-party envelope preserve that attenuation boundary.
+//! The legacy third-party envelope exposes a prefix signature to its discharge
+//! authority; see `MacaroonToken::add_third_party_caveat` before using it.
 //!
 //! # Token Format
 //!
@@ -78,6 +80,21 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// Current Macaroon binary schema version (v2: HMAC-SHA256 + third-party caveats).
 pub const MACAROON_SCHEMA_VERSION: u8 = 2;
+
+// Native protected verification-key identifier, version 1. The marker is not
+// a valid first-party predicate tag, so its chained bytes cannot be confused
+// with a first-party predicate. Legacy VIDs remain exactly 32 bytes.
+const PROTECTED_VID_MARKER: u8 = 0xA1;
+const PROTECTED_VID_NONCE_SIZE: usize = 24;
+const PROTECTED_VID_TAG_SIZE: usize = 16;
+const PROTECTED_VID_SIZE: usize =
+    1 + PROTECTED_VID_NONCE_SIZE + AUTH_KEY_SIZE + PROTECTED_VID_TAG_SIZE;
+const MAX_TOKEN_CAVEATS: usize = 64;
+
+#[cfg(not(target_arch = "wasm32"))]
+const PROTECTED_VID_KEY_DOMAIN: &[u8] = b"asupersync-macaroon-protected-vid-key-v1\0";
+#[cfg(not(target_arch = "wasm32"))]
+const PROTECTED_VID_AAD_DOMAIN: &[u8] = b"asupersync-macaroon-protected-vid-aad-v1\0";
 
 // ---------------------------------------------------------------------------
 // CaveatPredicate
@@ -703,6 +720,9 @@ std::thread_local! {
 /// State of one discharge verification walk.
 #[derive(Default)]
 struct DischargeWalk {
+    /// Explicit protected-only policy, shared by every recursive discharge.
+    /// The default preserves verification of deployed legacy tokens.
+    require_protected: bool,
     /// Discharges being verified on the current path (cycle detection and
     /// the depth bound).
     active: Vec<u64>,
@@ -798,7 +818,7 @@ impl MacaroonToken {
         MacaroonSignature::from_bytes(*expected_sig.as_bytes()).constant_time_eq(&self.signature)
     }
 
-    /// Add a third-party caveat to the token.
+    /// Add a legacy third-party caveat to the token.
     ///
     /// The `caveat_key` is a shared secret between the issuer and
     /// the third party. It is encrypted under the current chain
@@ -806,6 +826,15 @@ impl MacaroonToken {
     /// recover it during verification.
     ///
     /// The HMAC chain is extended over the `vid` bytes.
+    ///
+    /// # Security
+    ///
+    /// This compatibility envelope reveals the preceding chain signature to
+    /// anyone who knows `caveat_key`: XORing that key with `vid` recovers it.
+    /// Such a party can remove this caveat and every later caveat. New native
+    /// integrations should use `add_protected_third_party_caveat` and
+    /// `verify_with_protected_discharges_for_identifier` instead. Existing
+    /// legacy issuance and verification are unchanged (asupersync-s45073 H2).
     #[must_use]
     pub fn add_third_party_caveat(
         mut self,
@@ -827,6 +856,94 @@ impl MacaroonToken {
             vid,
         });
         self
+    }
+
+    /// Add an authenticated, encrypted third-party caveat on native targets.
+    ///
+    /// The caveat key is sealed with XChaCha20-Poly1305 under a
+    /// domain-separated HMAC key derived from the current chain signature.
+    /// The version and length-delimited discharge identifier are authenticated;
+    /// the location remains an unsigned routing hint. A discharge authority
+    /// cannot recover the preceding signature from its caveat key and this VID.
+    /// Discharges are still minted with [`Self::mint`] and bound to the final
+    /// authorizing token with [`Self::bind_for_request`].
+    ///
+    /// `nonce` must be unique for this prefix signature, including across
+    /// clones, processes, and restarts. Use 24 fresh CSPRNG bytes, supplied by
+    /// the caller's explicit entropy capability. Deterministic test entropy,
+    /// clocks, task IDs, and reusing a nonce after cloning are not production
+    /// nonce sources. This method performs no ambient entropy or I/O.
+    ///
+    /// Use `verify_with_protected_discharges_for_identifier` at the native
+    /// authorization boundary to reject legacy envelopes at every depth.
+    /// Migrating an already-issued legacy capability also requires a fresh
+    /// issuer key or a newly issued identifier: a previously leaked prefix
+    /// signature cannot be revoked merely by rejecting visible legacy VIDs.
+    /// Rotate discharge keys too if legacy tokens were issued under them.
+    ///
+    /// The schema-v2 outer frame is retained, with a separately tagged,
+    /// fixed-size VID. Older verifiers and wasm32 verifiers refuse this new
+    /// envelope; all parties that verify it must support the native profile.
+    ///
+    /// # Errors
+    ///
+    /// Refuses bound tokens and inputs that cannot round-trip through the
+    /// existing bounded binary format. Encryption failure leaves no token.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn add_protected_third_party_caveat(
+        mut self,
+        location: &str,
+        tp_identifier: &str,
+        caveat_key: &AuthKey,
+        nonce: [u8; 24],
+    ) -> Result<Self, ProtectedCaveatError> {
+        if self.bound {
+            return Err(ProtectedCaveatError::AlreadyBound);
+        }
+        if self.caveats.len() >= MAX_TOKEN_CAVEATS
+            || !self.has_encodable_wire_fields()
+            || location.len() > usize::from(u16::MAX)
+            || tp_identifier.len() > usize::from(u16::MAX)
+        {
+            return Err(ProtectedCaveatError::WireLimit);
+        }
+
+        let current_key = AuthKey::from_hmac_derived(*self.signature.as_bytes())
+            .expect("Macaroon signature has the fixed HMAC output size");
+        let vid = seal_protected_caveat_key(&current_key, tp_identifier, caveat_key, &nonce)?;
+        let caveat = Caveat::ThirdParty {
+            location: location.to_string(),
+            identifier: tp_identifier.to_string(),
+            vid,
+        };
+        let new_sig = hmac_compute(&current_key, &caveat.chain_bytes());
+        self.signature = MacaroonSignature::from_bytes(*new_sig.as_bytes());
+        self.caveats.push(caveat);
+        Ok(self)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn has_encodable_wire_fields(&self) -> bool {
+        let maximum = usize::from(u16::MAX);
+        self.identifier.len() <= maximum
+            && self.location.len() <= maximum
+            && self.caveats.len() <= MAX_TOKEN_CAVEATS
+            && self.caveats.iter().all(|caveat| match caveat {
+                Caveat::FirstParty { predicate } => match predicate {
+                    CaveatPredicate::ResourceScope(pattern) => pattern.len() <= maximum - 3,
+                    CaveatPredicate::Custom(key, value) => {
+                        key.len() <= maximum - 5 && value.len() <= maximum - 5 - key.len()
+                    }
+                    _ => true,
+                },
+                Caveat::ThirdParty {
+                    location,
+                    identifier,
+                    vid,
+                } => {
+                    location.len() <= maximum && identifier.len() <= maximum && vid.len() <= maximum
+                }
+            })
     }
 
     /// Bind a discharge macaroon to this authorizing macaroon.
@@ -949,6 +1066,50 @@ impl MacaroonToken {
             .map(|_| ())
     }
 
+    /// Authorize an exact capability using only native protected third-party
+    /// envelopes, including every recursively referenced discharge.
+    ///
+    /// First-party-only tokens and discharges are accepted. A visible legacy
+    /// VID is refused even when its signature and discharge are valid. Binding,
+    /// first-party predicates, depth limits, and discharge memoization use the
+    /// same verifier as [`Self::verify_with_discharges_for_identifier`].
+    ///
+    /// This is an explicit policy; the existing verification methods retain
+    /// legacy acceptance. It cannot detect a legacy token whose unsafe caveat
+    /// has already been stripped using a leaked prefix signature. Migrate
+    /// with a fresh issuer key or a newly issued identifier, and reissue all
+    /// affected grants. Do not fall back to legacy verification on failure,
+    /// including while trying overlapping issuer keys during rotation.
+    /// [`MacaroonKeyRing::verify`] compares signatures only and is not a
+    /// substitute for this complete capability check.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VerificationError::InvalidSignature`] for a top-level legacy
+    /// or malformed VID, and [`VerificationError::DischargeInvalid`] when a
+    /// nested discharge carries one. Other refusal shapes are unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn verify_with_protected_discharges_for_identifier(
+        &self,
+        root_key: &AuthKey,
+        expected_identifier: &str,
+        context: &VerificationContext,
+        discharges: &[Self],
+    ) -> Result<(), VerificationError> {
+        if self.identifier != expected_identifier {
+            return Err(VerificationError::UnexpectedIdentifier {
+                expected: expected_identifier.to_string(),
+                actual: self.identifier.clone(),
+            });
+        }
+        let mut walk = DischargeWalk {
+            require_protected: true,
+            ..DischargeWalk::default()
+        };
+        self.verify_with_discharges_inner(root_key, context, discharges, None, None, &mut walk)
+            .map(|_| ())
+    }
+
     /// Maximum nesting depth for recursive third-party discharge verification.
     /// Prevents stack overflow from deeply nested (but acyclic) discharge chains.
     /// Maximum discharge depth to prevent stack overflow (br-asupersync-kya99g).
@@ -980,6 +1141,10 @@ impl MacaroonToken {
         auth_unbound_signature: Option<&MacaroonSignature>,
         walk: &mut DischargeWalk,
     ) -> Result<MacaroonSignature, VerificationError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        if walk.require_protected && !self.has_encodable_wire_fields() {
+            return Err(VerificationError::InvalidSignature);
+        }
         // Enhanced depth checking to prevent stack overflow (br-asupersync-kya99g)
         if walk.active.len() >= Self::MAX_DISCHARGE_DEPTH {
             return Err(VerificationError::DischargeChainTooDeep {
@@ -1099,21 +1264,28 @@ impl MacaroonToken {
         sig: &AuthKey,
         verification: &mut ThirdPartyVerification<'_>,
     ) -> Result<AuthKey, VerificationError> {
-        if vid.len() != AUTH_KEY_SIZE {
+        let caveat_key = if vid.len() == AUTH_KEY_SIZE && !verification.walk.require_protected {
+            let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
+            AuthKey::from_hmac_derived(
+                caveat_key_bytes
+                    .try_into()
+                    .map_err(|_| VerificationError::InvalidSignature)?,
+            )
+            .map_err(|_| VerificationError::WeakCaveatKey)?
+        } else if vid.len() == PROTECTED_VID_SIZE && vid[0] == PROTECTED_VID_MARKER {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                open_protected_caveat_key(sig, tp_id, vid)?
+            }
+            // The AEAD dependency is deliberately native-only. A browser must
+            // never interpret this envelope as a legacy XOR key on fallback.
+            #[cfg(target_arch = "wasm32")]
+            {
+                return Err(VerificationError::InvalidSignature);
+            }
+        } else {
             return Err(VerificationError::InvalidSignature);
-        }
-
-        let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
-        // br-asupersync-q3terg: bytes are XOR of two HMAC-derived values
-        // (sig: HMAC chain output; vid: encrypted caveat key, also
-        // HMAC-derived). XOR of uniformly-random bytes is uniformly
-        // random, but we validate to catch implementation issues.
-        let caveat_key = AuthKey::from_hmac_derived(
-            caveat_key_bytes
-                .try_into()
-                .map_err(|_| VerificationError::InvalidSignature)?,
-        )
-        .map_err(|_| VerificationError::WeakCaveatKey)?;
+        };
         let discharge = Self::find_discharge(index, tp_id, verification.discharges)?;
         let discharge_ptr = Self::discharge_stack_id(discharge);
         if verification.walk.active.contains(&discharge_ptr) {
@@ -1356,10 +1528,8 @@ impl MacaroonToken {
         // SECURITY: Prevent unbounded memory DoS by enforcing hard limit on caveat count.
         // Previous vulnerability: safe_capacity was bounded but loop ran for full caveat_count,
         // allowing attackers to cause memory exhaustion via excessive iterations.
-        const MAX_CAVEATS: usize = 64;
-
         // Reject macaroons with excessive caveat counts immediately
-        if caveat_count_raw > MAX_CAVEATS {
+        if caveat_count_raw > MAX_TOKEN_CAVEATS {
             return None;
         }
 
@@ -1663,6 +1833,108 @@ impl fmt::Display for BindError {
 }
 
 impl std::error::Error for BindError {}
+
+/// Refusal from native protected third-party caveat issuance.
+///
+/// No variant carries a signature, caveat key, nonce, or capability contents.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProtectedCaveatError {
+    /// A discharge must be attenuated before binding it to its authorizing token.
+    AlreadyBound,
+    /// A string, caveat frame, or caveat count exceeds the existing wire limit.
+    WireLimit,
+    /// The authenticated envelope could not be produced.
+    Encryption,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl fmt::Display for ProtectedCaveatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::AlreadyBound => "cannot add a protected caveat to a bound discharge",
+            Self::WireLimit => "protected macaroon exceeds its binary encoding limit",
+            Self::Encryption => "protected caveat encryption failed",
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for ProtectedCaveatError {}
+
+/// The AAD carries an explicit version and exact identifier length. Location
+/// is intentionally excluded: macaroon locations are unsigned routing hints.
+#[cfg(not(target_arch = "wasm32"))]
+fn protected_vid_aad(identifier: &str) -> Option<Vec<u8>> {
+    let length = u16::try_from(identifier.len()).ok()?;
+    let mut aad = Vec::with_capacity(PROTECTED_VID_AAD_DOMAIN.len() + 3 + identifier.len());
+    aad.extend_from_slice(PROTECTED_VID_AAD_DOMAIN);
+    aad.push(PROTECTED_VID_MARKER);
+    aad.extend_from_slice(&length.to_le_bytes());
+    aad.extend_from_slice(identifier.as_bytes());
+    Some(aad)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn seal_protected_caveat_key(
+    signature_key: &AuthKey,
+    identifier: &str,
+    caveat_key: &AuthKey,
+    nonce: &[u8; PROTECTED_VID_NONCE_SIZE],
+) -> Result<Vec<u8>, ProtectedCaveatError> {
+    use chacha20poly1305::aead::{AeadInOut, KeyInit};
+    use chacha20poly1305::{XChaCha20Poly1305, XNonce};
+    use zeroize::Zeroizing;
+
+    let key = hmac_compute(signature_key, PROTECTED_VID_KEY_DOMAIN);
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .expect("derived wrapping key has the fixed 32-byte size");
+    let associated = protected_vid_aad(identifier).ok_or(ProtectedCaveatError::WireLimit)?;
+    let cipher_nonce = XNonce::try_from(nonce.as_slice()).expect("fixed 24-byte nonce");
+    let mut ciphertext = Zeroizing::new(*caveat_key.as_bytes());
+    let tag = cipher
+        .encrypt_inout_detached(&cipher_nonce, &associated, ciphertext.as_mut_slice().into())
+        .map_err(|_| ProtectedCaveatError::Encryption)?;
+
+    let mut vid = Vec::with_capacity(PROTECTED_VID_SIZE);
+    vid.push(PROTECTED_VID_MARKER);
+    vid.extend_from_slice(nonce);
+    vid.extend_from_slice(ciphertext.as_slice());
+    vid.extend_from_slice(&tag);
+    Ok(vid)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn open_protected_caveat_key(
+    signature_key: &AuthKey,
+    identifier: &str,
+    vid: &[u8],
+) -> Result<AuthKey, VerificationError> {
+    use chacha20poly1305::aead::{AeadInOut, KeyInit};
+    use chacha20poly1305::{Tag, XChaCha20Poly1305, XNonce};
+    use zeroize::Zeroizing;
+
+    // Validate the exact envelope before any field slicing or decryption.
+    // In particular, a damaged protected VID never falls back to legacy XOR.
+    if vid.len() != PROTECTED_VID_SIZE || vid[0] != PROTECTED_VID_MARKER {
+        return Err(VerificationError::InvalidSignature);
+    }
+    let associated = protected_vid_aad(identifier).ok_or(VerificationError::InvalidSignature)?;
+    let key = hmac_compute(signature_key, PROTECTED_VID_KEY_DOMAIN);
+    let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
+        .expect("derived wrapping key has the fixed 32-byte size");
+    let ciphertext_start = 1 + PROTECTED_VID_NONCE_SIZE;
+    let tag_start = ciphertext_start + AUTH_KEY_SIZE;
+    let nonce = XNonce::try_from(&vid[1..ciphertext_start]).expect("fixed 24-byte nonce field");
+    let tag = Tag::try_from(&vid[tag_start..]).expect("fixed 16-byte authentication tag");
+    let mut plaintext = Zeroizing::new([0; AUTH_KEY_SIZE]);
+    plaintext.copy_from_slice(&vid[ciphertext_start..tag_start]);
+    cipher
+        .decrypt_inout_detached(&nonce, &associated, plaintext.as_mut_slice().into(), &tag)
+        .map_err(|_| VerificationError::InvalidSignature)?;
+    AuthKey::from_hmac_derived(*plaintext).map_err(|_| VerificationError::WeakCaveatKey)
+}
 
 // ---------------------------------------------------------------------------
 // HMAC-SHA256 computation
@@ -2527,6 +2799,494 @@ mod tests {
     }
 
     // --- Third-party caveats ---
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_matches_independent_libsodium_fixture_and_round_trips() {
+        // asupersync-s45073 H2: fixture computed independently with Python's
+        // hmac/hashlib and libsodium crypto_aead_xchacha20poly1305_ietf_encrypt.
+        // Fixed keys/nonces are test data, never a production entropy recipe.
+        let root_key = AuthKey::from_bytes(std::array::from_fn(|i| u8::try_from(i).unwrap()))
+            .expect("fixture root key");
+        let caveat_key =
+            AuthKey::from_bytes(std::array::from_fn(|i| u8::try_from(i + 32).unwrap()))
+                .expect("fixture discharge key");
+        let token = MacaroonToken::mint(&root_key, "repair:tenant-a", "service")
+            .add_protected_third_party_caveat(
+                "authority",
+                "approved",
+                &caveat_key,
+                std::array::from_fn(|i| u8::try_from(i).unwrap()),
+            )
+            .expect("protected issuance");
+        let Caveat::ThirdParty { vid, .. } = &token.caveats[0] else {
+            panic!("expected protected caveat");
+        };
+        assert_eq!(
+            vid.as_slice(),
+            &[
+                0xa1, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
+                0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x3a, 0x58, 0x7b,
+                0x8b, 0x2c, 0x1b, 0x34, 0x1f, 0xc2, 0x16, 0x2c, 0x8d, 0xf0, 0xe5, 0x97, 0xf0, 0xad,
+                0xff, 0xf9, 0x34, 0x47, 0xc1, 0xfe, 0x32, 0xd9, 0x9b, 0x25, 0x16, 0x69, 0xa7, 0x7e,
+                0x2f, 0x7d, 0xe4, 0xb3, 0x31, 0x44, 0x21, 0x3e, 0x5a, 0xb0, 0x20, 0xb6, 0x39, 0x0e,
+                0xc4, 0xde, 0x67,
+            ]
+        );
+        assert_eq!(
+            token.signature().as_bytes(),
+            &[
+                0xed, 0x28, 0x1d, 0x06, 0x78, 0x3a, 0x48, 0x8f, 0x18, 0xc7, 0x5e, 0x60, 0x12, 0x4b,
+                0x0c, 0xf0, 0x58, 0x88, 0xd1, 0x04, 0xc6, 0x6d, 0x86, 0x00, 0x71, 0x19, 0xf4, 0x1e,
+                0xa3, 0xbe, 0x7a, 0x24,
+            ]
+        );
+
+        let discharge = MacaroonToken::mint(&caveat_key, "approved", "authority")
+            .add_caveat(CaveatPredicate::TimeBefore(100))
+            .add_caveat(CaveatPredicate::MaxUses(3));
+        let bound = token.bind_for_request(&discharge).expect("bind to root");
+        let encoded = token.to_binary();
+        assert_eq!(encoded[0], MACAROON_SCHEMA_VERSION);
+        let recovered = MacaroonToken::from_binary(&encoded).expect("protected binary round trip");
+        let bound =
+            MacaroonToken::from_binary(&bound.to_binary()).expect("bound binary round trip");
+        let context = VerificationContext::new().with_time(99).with_use_count(3);
+        assert_eq!(recovered.to_binary(), encoded);
+        assert!(recovered.verify_signature(&root_key));
+        assert_eq!(
+            recovered.verify_with_discharges_for_identifier(
+                &root_key,
+                "repair:tenant-a",
+                &context,
+                std::slice::from_ref(&bound),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            recovered.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "repair:tenant-a",
+                &context,
+                std::slice::from_ref(&bound),
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            recovered.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "repair:tenant-b",
+                &context,
+                std::slice::from_ref(&bound),
+            ),
+            Err(VerificationError::UnexpectedIdentifier { .. })
+        ));
+        assert_eq!(
+            recovered.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "repair:tenant-a",
+                &context,
+                &[],
+            ),
+            Err(VerificationError::MissingDischarge {
+                index: 0,
+                identifier: "approved".to_string(),
+            })
+        );
+        for denied in [context.clone().with_time(100), context.with_use_count(4)] {
+            assert!(matches!(
+                recovered.verify_with_protected_discharges_for_identifier(
+                    &root_key,
+                    "repair:tenant-a",
+                    &denied,
+                    std::slice::from_ref(&bound),
+                ),
+                Err(VerificationError::CaveatFailed { .. })
+            ));
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_refuses_prefix_stripping_and_pins_legacy_migration_limit() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(910);
+        let prefix = MacaroonToken::mint(&root_key, "cap", "service")
+            .add_caveat(CaveatPredicate::RegionScope(42));
+        let legacy = prefix
+            .clone()
+            .add_third_party_caveat("authority", "approved", &caveat_key)
+            .add_caveat(CaveatPredicate::TimeBefore(100));
+        let Caveat::ThirdParty { vid, .. } = &legacy.caveats[1] else {
+            panic!("expected legacy caveat");
+        };
+        let stolen: [u8; 32] = xor_pad(vid, caveat_key.as_bytes()).try_into().unwrap();
+        assert_eq!(&stolen, prefix.signature().as_bytes());
+        let mut stripped = legacy.clone();
+        stripped.caveats.truncate(1);
+        stripped.signature = MacaroonSignature::from_bytes(stolen);
+        let stripped = MacaroonToken::from_binary(&stripped.to_binary()).unwrap();
+        let expired = VerificationContext::new().with_region(42).with_time(101);
+        // Compatibility witness and migration boundary: no verifier can tell
+        // this leaked, valid prefix from the originally issued prefix token.
+        assert_eq!(
+            stripped.verify_for_identifier(&root_key, "cap", &expired),
+            Ok(())
+        );
+        assert_eq!(
+            stripped.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &expired,
+                &[],
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            stripped.verify_with_protected_discharges_for_identifier(
+                &AuthKey::from_seed(911),
+                "cap",
+                &expired,
+                &[],
+            ),
+            Err(VerificationError::InvalidSignature)
+        );
+
+        let protected = prefix
+            .add_protected_third_party_caveat("authority", "approved", &caveat_key, [7; 24])
+            .expect("protected issuance")
+            .add_caveat(CaveatPredicate::TimeBefore(100));
+        let Caveat::ThirdParty { vid, .. } = &protected.caveats[1] else {
+            panic!("expected protected caveat");
+        };
+        // The same attacker learns stream-cipher output, not the preceding
+        // signature. No root key is used to manufacture the forgery.
+        let recovered: [u8; 32] = xor_pad(&vid[25..57], caveat_key.as_bytes())
+            .try_into()
+            .unwrap();
+        assert_ne!(&recovered, stripped.signature().as_bytes());
+        let mut forged = protected.clone();
+        forged.caveats.truncate(1);
+        forged.signature = MacaroonSignature::from_bytes(recovered);
+        let forged = MacaroonToken::from_binary(&forged.to_binary()).unwrap();
+        assert_eq!(
+            forged.verify_with_protected_discharges_for_identifier(&root_key, "cap", &expired, &[]),
+            Err(VerificationError::InvalidSignature)
+        );
+        let bound = protected
+            .bind_for_request(&MacaroonToken::mint(&caveat_key, "approved", "authority"))
+            .unwrap();
+        assert!(matches!(
+            protected.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &expired,
+                &[bound],
+            ),
+            Err(VerificationError::CaveatFailed { index: 2, .. })
+        ));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_authenticates_every_envelope_field_without_downgrade() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(920);
+        let token = MacaroonToken::mint(&root_key, "cap", "service")
+            .add_protected_third_party_caveat("authority", "approved", &caveat_key, [9; 24])
+            .unwrap();
+        // Resigning and rebinding are deliberate white-box controls: the
+        // outer HMAC and discharge binding are valid, so AEAD/shape checks
+        // themselves must reject the modified envelope.
+        for mutation in 0..7 {
+            let mut altered = token.clone();
+            let Caveat::ThirdParty {
+                identifier, vid, ..
+            } = &mut altered.caveats[0]
+            else {
+                panic!("expected protected caveat");
+            };
+            match mutation {
+                0 => vid[0] ^= 1,
+                1 => vid[1] ^= 1,
+                2 => vid[25] ^= 1,
+                3 => vid[72] ^= 1,
+                4 => {
+                    vid.pop();
+                }
+                5 => vid.push(0),
+                6 => *identifier = "different-approval".to_string(),
+                _ => unreachable!(),
+            }
+            let discharge = MacaroonToken::mint(&caveat_key, identifier, "authority");
+            altered.signature = altered.recompute_signature(&root_key);
+            let bound = altered.bind_for_request(&discharge).unwrap();
+            assert!(altered.verify_signature(&root_key));
+            let altered = MacaroonToken::from_binary(&altered.to_binary()).unwrap();
+            assert_eq!(
+                altered.verify_with_protected_discharges_for_identifier(
+                    &root_key,
+                    "cap",
+                    &VerificationContext::new(),
+                    std::slice::from_ref(&bound),
+                ),
+                Err(VerificationError::InvalidSignature),
+                "protected envelope mutation {mutation}"
+            );
+            assert_eq!(
+                altered.verify_with_discharges_for_identifier(
+                    &root_key,
+                    "cap",
+                    &VerificationContext::new(),
+                    &[bound],
+                ),
+                Err(VerificationError::InvalidSignature),
+                "ordinary verifier must not downgrade protected mutation {mutation}"
+            );
+        }
+        let legacy = MacaroonToken::mint(&root_key, "cap", "service").add_third_party_caveat(
+            "authority",
+            "approved",
+            &caveat_key,
+        );
+        let bound = legacy
+            .bind_for_request(&MacaroonToken::mint(&caveat_key, "approved", "authority"))
+            .unwrap();
+        assert_eq!(
+            legacy.verify_with_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &VerificationContext::new(),
+                std::slice::from_ref(&bound),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            legacy.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &VerificationContext::new(),
+                &[bound],
+            ),
+            Err(VerificationError::InvalidSignature)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_recursive_policy_keeps_binding_and_bounded_memoization() {
+        let root_key = test_root_key();
+        let outer_key = AuthKey::from_seed(930);
+        let inner_key = AuthKey::from_seed(931);
+        let mut token = MacaroonToken::mint(&root_key, "cap", "service");
+        let mut outer = MacaroonToken::mint(&outer_key, "outer", "authority");
+        for nonce in 1..=4 {
+            token = token
+                .add_protected_third_party_caveat("authority", "outer", &outer_key, [nonce; 24])
+                .unwrap();
+            outer = outer
+                .add_protected_third_party_caveat("authority", "inner", &inner_key, [nonce + 4; 24])
+                .unwrap();
+        }
+        let inner = MacaroonToken::mint(&inner_key, "inner", "authority")
+            .add_caveat(CaveatPredicate::TimeBefore(1_000));
+        let discharges = [
+            token.bind_for_request(&outer).unwrap(),
+            token.bind_for_request(&inner).unwrap(),
+        ];
+        DISCHARGE_VERIFICATIONS.with(|count| count.set(0));
+        let context = VerificationContext::new().with_time(999);
+        assert_eq!(
+            token.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &context,
+                &discharges,
+            ),
+            Ok(())
+        );
+        assert_eq!(DISCHARGE_VERIFICATIONS.with(std::cell::Cell::get), 2);
+        let attenuated = token.clone().add_caveat(CaveatPredicate::TimeBefore(1_000));
+        assert!(matches!(
+            attenuated.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &context,
+                &discharges,
+            ),
+            Err(VerificationError::DischargeInvalid { .. })
+        ));
+        let wrong_binding = [
+            token.bind_for_request(&outer).unwrap(),
+            outer.bind_for_request(&inner).unwrap(),
+        ];
+        assert!(matches!(
+            token.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &context,
+                &wrong_binding,
+            ),
+            Err(VerificationError::DischargeInvalid { .. })
+        ));
+
+        let legacy_outer = MacaroonToken::mint(&outer_key, "outer", "authority")
+            .add_third_party_caveat("authority", "inner", &inner_key);
+        let legacy_nested = [
+            token.bind_for_request(&legacy_outer).unwrap(),
+            token.bind_for_request(&inner).unwrap(),
+        ];
+        assert_eq!(
+            token.verify_with_discharges_for_identifier(&root_key, "cap", &context, &legacy_nested),
+            Ok(())
+        );
+        assert_eq!(
+            token.verify_with_protected_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &context,
+                &legacy_nested,
+            ),
+            Err(VerificationError::DischargeInvalid {
+                index: 0,
+                identifier: "outer".to_string(),
+            })
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_rotation_never_falls_back_to_legacy_verification() {
+        let active = AuthKey::from_seed(940);
+        let retired = AuthKey::from_seed(941);
+        let caveat_key = AuthKey::from_seed(942);
+        let mint = |key: &AuthKey, nonce| {
+            let token = MacaroonToken::mint(key, "cap", "service")
+                .add_protected_third_party_caveat("authority", "approved", &caveat_key, [nonce; 24])
+                .unwrap();
+            let bound = token
+                .bind_for_request(&MacaroonToken::mint(&caveat_key, "approved", "authority"))
+                .unwrap();
+            (token, bound)
+        };
+        let (old, old_discharge) = mint(&retired, 1);
+        let (new, new_discharge) = mint(&active, 2);
+        let verify = |token: &MacaroonToken, discharge: &MacaroonToken, keys: &[&AuthKey]| {
+            keys.iter().any(|key| {
+                token
+                    .verify_with_protected_discharges_for_identifier(
+                        key,
+                        "cap",
+                        &VerificationContext::new(),
+                        std::slice::from_ref(discharge),
+                    )
+                    .is_ok()
+            })
+        };
+        assert!(verify(&old, &old_discharge, &[&active, &retired]));
+        assert!(verify(&new, &new_discharge, &[&active, &retired]));
+        assert!(!verify(&old, &old_discharge, &[&active]));
+        assert!(verify(&new, &new_discharge, &[&active]));
+        let legacy = MacaroonToken::mint(&retired, "cap", "service").add_third_party_caveat(
+            "authority",
+            "approved",
+            &caveat_key,
+        );
+        let bound = legacy
+            .bind_for_request(&MacaroonToken::mint(&caveat_key, "approved", "authority"))
+            .unwrap();
+        assert!(!verify(&legacy, &bound, &[&active, &retired]));
+        assert!(!verify(&new, &old_discharge, &[&active, &retired]));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_issuance_refuses_bound_or_unencodable_inputs() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(950);
+        let plain = MacaroonToken::mint(&root_key, "cap", "service");
+        let bound = plain
+            .bind_for_request(&MacaroonToken::mint(&caveat_key, "approved", "authority"))
+            .unwrap();
+        assert_eq!(
+            bound.add_protected_third_party_caveat("authority", "nested", &root_key, [1; 24]),
+            Err(ProtectedCaveatError::AlreadyBound)
+        );
+        let oversized = "a".repeat(usize::from(u16::MAX) + 1);
+        for token in [
+            MacaroonToken::mint(&root_key, &oversized, "service"),
+            MacaroonToken::mint(&root_key, "cap", &oversized),
+            plain.clone().add_caveat(CaveatPredicate::Custom(
+                "k".repeat(32_768),
+                "v".repeat(32_768),
+            )),
+        ] {
+            assert_eq!(
+                token.add_protected_third_party_caveat(
+                    "authority",
+                    "approved",
+                    &caveat_key,
+                    [2; 24],
+                ),
+                Err(ProtectedCaveatError::WireLimit)
+            );
+        }
+        for (location, identifier) in [(&oversized[..], "approved"), ("authority", &oversized[..])]
+        {
+            assert_eq!(
+                plain.clone().add_protected_third_party_caveat(
+                    location,
+                    identifier,
+                    &caveat_key,
+                    [3; 24],
+                ),
+                Err(ProtectedCaveatError::WireLimit)
+            );
+        }
+        let mut full = plain;
+        for _ in 0..MAX_TOKEN_CAVEATS - 1 {
+            full = full.add_caveat(CaveatPredicate::MaxUses(1));
+        }
+        let last = full
+            .clone()
+            .add_protected_third_party_caveat("authority", "approved", &caveat_key, [4; 24])
+            .unwrap();
+        assert_eq!(last.caveat_count(), MAX_TOKEN_CAVEATS);
+        assert!(MacaroonToken::from_binary(&last.to_binary()).is_some());
+        full = full.add_caveat(CaveatPredicate::MaxUses(1));
+        assert_eq!(
+            full.add_protected_third_party_caveat("authority", "approved", &caveat_key, [5; 24]),
+            Err(ProtectedCaveatError::WireLimit)
+        );
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn protected_third_party_native_profile_is_refused_on_wasm() {
+        let root_key = test_root_key();
+        let mut token = MacaroonToken::mint(&root_key, "cap", "service");
+        let mut vid = vec![0; PROTECTED_VID_SIZE];
+        vid[0] = PROTECTED_VID_MARKER;
+        token.caveats.push(Caveat::ThirdParty {
+            location: "authority".to_string(),
+            identifier: "approved".to_string(),
+            vid,
+        });
+        token.signature = token.recompute_signature(&root_key);
+        let token = MacaroonToken::from_binary(&token.to_binary()).unwrap();
+        assert!(token.verify_signature(&root_key));
+        // A valid outer signature reaches unsupported-profile refusal before
+        // discharge lookup, with no native AEAD dependency on this target.
+        assert_eq!(
+            token.verify_with_discharges_for_identifier(
+                &root_key,
+                "cap",
+                &VerificationContext::new(),
+                &[],
+            ),
+            Err(VerificationError::InvalidSignature)
+        );
+    }
 
     #[test]
     fn third_party_caveat_changes_signature() {
