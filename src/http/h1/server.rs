@@ -474,17 +474,28 @@ fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>
 /// the host policy. Returns `Ok(())` if validation passes; `Err(HostRejection)`
 /// on failure with RFC 9112 §3.2 (400 Bad Request for missing/multiple/invalid)
 /// or §7.1 (421 Misdirected Request for unallowed hosts).
+///
+/// `AllowAll` refuses only what RFC 9112 §3.2 calls malformed: duplicate Host
+/// fields, an invalid Host value, and an HTTP/1.1 request without Host. As in
+/// v0.4.3 it serves HTTP/1.0 and HTTP/2 requests that carry no Host, an empty
+/// Host (a target without an authority) and an empty port, all valid syntax.
 pub(crate) fn validate_host_header(
     headers: &[(String, String)],
+    version: Version,
     host_policy: &HostPolicy,
 ) -> Result<(), HostRejection> {
     match host_policy {
         HostPolicy::AllowAll => {
             let host_value = single_host_header_value(headers)?;
             let Some(host_value) = host_value else {
-                return Err(HostRejection::Missing);
+                if version == Version::Http11 {
+                    return Err(HostRejection::Missing);
+                }
+                return Ok(());
             };
-            if parse_host_header_host(host_value).is_some() {
+            let authority = trim_ows(host_value);
+            let authority = authority.strip_suffix(':').unwrap_or(authority);
+            if authority.is_empty() || parse_host_header_host(authority).is_some() {
                 Ok(())
             } else {
                 Err(HostRejection::Invalid(host_value.to_string()))
@@ -1279,16 +1290,14 @@ where
             // injection attack surface for absolute-URL emission /
             // OAuth redirect_uri / cache-key computation.
             if let Err(rejection) =
-                validate_host_header(&req.headers, &self.config.allowed_hosts)
+                validate_host_header(&req.headers, req.version, &self.config.allowed_hosts)
             {
                 state.phase = ConnectionPhase::Writing;
-                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let reject_resp = Response {
                     status: rejection.status(),
                     reason: rejection.reason().to_string(),
                     version: req.version,
                     headers: vec![
-                        ("date".to_string(), date_str),
                         (
                             "content-type".to_string(),
                             "text/plain; charset=utf-8".to_string(),
@@ -1725,15 +1734,13 @@ where
             let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
 
             if let Err(rejection) =
-                validate_host_header(&head.headers, &self.config.allowed_hosts)
+                validate_host_header(&head.headers, head.version, &self.config.allowed_hosts)
             {
-                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let response = Response {
                     status: rejection.status(),
                     reason: rejection.reason().to_string(),
                     version: head.version,
                     headers: vec![
-                        ("date".to_owned(), date_str),
                         (
                             "content-type".to_owned(),
                             "text/plain; charset=utf-8".to_owned(),
@@ -2109,14 +2116,13 @@ where
     let early_request_method = head.method.clone();
     let _in_flight = InFlightRequestGuard::acquire(in_flight_requests.as_ref());
 
-    if let Err(rejection) = validate_host_header(&head.headers, &config.allowed_hosts) {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
+    if let Err(rejection) = validate_host_header(&head.headers, head.version, &config.allowed_hosts)
+    {
         let mut response = Response {
             status: rejection.status(),
             reason: rejection.reason().to_string(),
             version: head.version,
             headers: vec![
-                ("date".to_owned(), date_str),
                 (
                     "content-type".to_owned(),
                     "text/plain; charset=utf-8".to_owned(),
@@ -2415,8 +2421,6 @@ fn live_sse_head_only_response(version: Version) -> Response {
         .filter(|(name, _)| !name.eq_ignore_ascii_case("connection"))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-    response.headers.push(("date".to_owned(), date_str));
     add_connection_close(&mut response);
     response
 }
@@ -2436,10 +2440,6 @@ fn validate_produced_response_head(
         .retain(|(name, _)| !name.eq_ignore_ascii_case("connection"));
     head.headers
         .push(("Connection".to_owned(), "close".to_owned()));
-    if head.status >= 200 && !head.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("date")) {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-        head.headers.push(("date".to_owned(), date_str));
-    }
 
     let mut content_length = None;
     let mut transfer_encoding = None;
@@ -3203,13 +3203,11 @@ fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
         | HttpError::PrefetchedDataRemaining(_)
         | HttpError::TooManyInformationalResponses { .. } => return None,
     };
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Some(Response {
         status,
         reason: String::new(),
         version: Version::Http11,
         headers: vec![
-            ("date".to_string(), date_str),
             (
                 "content-type".to_string(),
                 "text/plain; charset=utf-8".to_string(),
@@ -3508,18 +3506,14 @@ async fn race_force_close<F: Future>(signal: Option<&ShutdownSignal>, fut: F) ->
 /// Minimal `text/plain` response for server-hop terminal outcomes
 /// (handler panic → 500, request budget deadline → 503).
 fn hop_error_response(version: Version, status: u16, body: &str) -> Response {
-    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Response {
         status,
         reason: String::new(),
         version,
-        headers: vec![
-            ("date".to_string(), date_str),
-            (
-                "content-type".to_string(),
-                "text/plain; charset=utf-8".to_string(),
-            ),
-        ],
+        headers: vec![(
+            "content-type".to_string(),
+            "text/plain; charset=utf-8".to_string(),
+        )],
         body: body.as_bytes().to_vec(),
         trailers: Vec::new(),
     }
@@ -4050,17 +4044,11 @@ fn finalize_response_persistence(
         resp.version = Version::Http10;
     }
 
-    // RFC 9110 §6.6.1: An origin server MUST generate a Date header field in all
-    // non-1xx responses when its clock is available.
-    if resp.status >= 200
-        && !resp
-            .headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("date"))
-    {
-        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
-        resp.headers.push(("date".to_string(), date_str));
-    }
+    // No Date header is generated. RFC 9110 §6.6.1 forbids one from a server
+    // without a clock that approximates UTC, and this server's clock is the
+    // runtime's (wall_now: timer or process-relative time, virtual in the
+    // lab), not UTC: formatting it gave dates in January 1970. A handler that
+    // has a UTC clock can set Date itself with format_unix_nanos_http_date.
 
     let close_after = close_after || response_requests_close(resp);
     if close_after {
@@ -6306,36 +6294,36 @@ mod tests {
 
         // Listed host — accepted.
         let headers = vec![("Host".to_string(), "example.com".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // Listed host with port — accepted (port stripped).
         let headers = vec![("Host".to_string(), "example.com:8080".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // Case-insensitive match.
         let headers = vec![("Host".to_string(), "EXAMPLE.COM".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // Different listed host.
         let headers = vec![("Host".to_string(), "auth.example.com".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // Unlisted host — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "attacker.com".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, "attacker.com");
         assert_eq!(err.status(), 421);
         assert_eq!(err.reason(), "Misdirected Request");
 
         // Subdomain not in allowlist — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "evil.example.com".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, "evil.example.com");
         assert_eq!(err.status(), 421);
 
         // Missing Host header (HTTP/1.1 protocol violation per RFC 9112 §3.2 -> 400 Bad Request).
         let headers = vec![("X-Other".to_string(), "value".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, HostRejection::Missing);
         assert_eq!(err.status(), 400);
         assert_eq!(err.reason(), "Bad Request");
@@ -6350,27 +6338,29 @@ mod tests {
 
         // AllowAll rejects missing Host header per RFC 9112 §3.2 (HTTP/1.1 requires Host).
         let missing_headers = vec![("X-Other".to_string(), "value".to_string())];
-        let err = validate_host_header(&missing_headers, &HostPolicy::AllowAll).unwrap_err();
+        let err = validate_host_header(&missing_headers, Version::Http11, &HostPolicy::AllowAll)
+            .unwrap_err();
         assert_eq!(err, HostRejection::Missing);
         assert_eq!(err.status(), 400);
 
         // AllowAll rejects syntactically invalid Host per RFC 9112 §3.2.
         let invalid_headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
-        let err = validate_host_header(&invalid_headers, &HostPolicy::AllowAll).unwrap_err();
+        let err = validate_host_header(&invalid_headers, Version::Http11, &HostPolicy::AllowAll)
+            .unwrap_err();
         assert_eq!(err.status(), 400);
 
         // AllowAll accepts any single valid Host header.
-        assert!(validate_host_header(&headers, &HostPolicy::AllowAll).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &HostPolicy::AllowAll).is_ok());
 
         // Empty allowlist now REJECTS all hosts with 421 (security fix for br-asupersync-scxixg).
         let empty_policy = HostPolicy::allow_list(vec![]);
-        let err = validate_host_header(&headers, &empty_policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &empty_policy).unwrap_err();
         assert_eq!(err, "anywhere.com");
         assert_eq!(err.status(), 421);
 
         // RejectUnknown rejects all requests with 421 (secure default).
         let reject_policy = HostPolicy::RejectUnknown;
-        let err = validate_host_header(&headers, &reject_policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &reject_policy).unwrap_err();
         assert_eq!(err, "anywhere.com");
         assert_eq!(err.status(), 421);
     }
@@ -6383,17 +6373,75 @@ mod tests {
         ];
         let allow_list = HostPolicy::allow_list(vec!["example.com".to_string()]);
 
-        let err = validate_host_header(&duplicate_hosts, &allow_list).unwrap_err();
+        let err = validate_host_header(&duplicate_hosts, Version::Http11, &allow_list).unwrap_err();
         assert_eq!(err, HostRejection::Multiple);
         assert_eq!(err.status(), 400);
 
-        let err = validate_host_header(&duplicate_hosts, &HostPolicy::RejectUnknown).unwrap_err();
+        let err = validate_host_header(
+            &duplicate_hosts,
+            Version::Http11,
+            &HostPolicy::RejectUnknown,
+        )
+        .unwrap_err();
         assert_eq!(err, HostRejection::Multiple);
         assert_eq!(err.status(), 400);
 
-        let err = validate_host_header(&duplicate_hosts, &HostPolicy::AllowAll).unwrap_err();
+        let err = validate_host_header(&duplicate_hosts, Version::Http11, &HostPolicy::AllowAll)
+            .unwrap_err();
         assert_eq!(err, HostRejection::Multiple);
         assert_eq!(err.status(), 400);
+    }
+
+    /// AllowAll (also what `allowed_hosts(None)` builds) keeps serving the
+    /// valid requests v0.4.3 served: RFC 9112 §3.2 requires Host only on
+    /// HTTP/1.1.
+    #[test]
+    fn validate_host_header_allow_all_requires_host_only_on_http11() {
+        let allow_all = HostPolicy::AllowAll;
+        let no_host = vec![("Accept".to_string(), "*/*".to_string())];
+        assert!(validate_host_header(&no_host, Version::Http10, &allow_all).is_ok());
+        assert!(validate_host_header(&no_host, Version::Http2, &allow_all).is_ok());
+        assert_eq!(
+            validate_host_header(&no_host, Version::Http11, &allow_all),
+            Err(HostRejection::Missing)
+        );
+
+        let duplicate = vec![
+            ("Host".to_string(), "example.com".to_string()),
+            ("Host".to_string(), "example.com".to_string()),
+        ];
+        assert_eq!(
+            validate_host_header(&duplicate, Version::Http10, &allow_all),
+            Err(HostRejection::Multiple)
+        );
+        // The restrictive policies still refuse a request they cannot match.
+        let policy = HostPolicy::allow_list(vec!["example.com".to_string()]);
+        assert_eq!(
+            validate_host_header(&no_host, Version::Http10, &policy),
+            Err(HostRejection::Missing)
+        );
+    }
+
+    /// An empty Host (a target without an authority) and an empty port are
+    /// valid syntax (RFC 9112 §3.2, RFC 3986 §3.2.3), so AllowAll serves them
+    /// as v0.4.3 did; an invalid value is still a 400.
+    #[test]
+    fn validate_host_header_allow_all_accepts_empty_host_and_empty_port() {
+        let allow_all = HostPolicy::AllowAll;
+        for value in ["", "  ", "example.com:", "[::1]:", ":"] {
+            let headers = vec![("Host".to_string(), value.to_string())];
+            assert!(
+                validate_host_header(&headers, Version::Http11, &allow_all).is_ok(),
+                "{value:?}"
+            );
+        }
+        for value in ["example.com::", "a b", "[::1", "a:b:"] {
+            let headers = vec![("Host".to_string(), value.to_string())];
+            assert_eq!(
+                validate_host_header(&headers, Version::Http11, &allow_all),
+                Err(HostRejection::Invalid(value.to_string()))
+            );
+        }
     }
 
     /// br-asupersync-scxixg: IPv6 literal handling — strip brackets
@@ -6405,27 +6453,27 @@ mod tests {
 
         // IPv6 literal with port.
         let headers = vec![("Host".to_string(), "[::1]:8080".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // IPv6 literal without port.
         let headers = vec![("Host".to_string(), "[::1]".to_string())];
-        assert!(validate_host_header(&headers, &policy).is_ok());
+        assert!(validate_host_header(&headers, Version::Http11, &policy).is_ok());
 
         // Different IPv6 — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, "fe80::1");
         assert_eq!(err.status(), 421);
 
         // Malformed IPv6 authority suffix must not bypass the allow-list and returns 400 Bad Request.
         let headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, "[::1]evil.test");
         assert_eq!(err.status(), 400);
 
         // Out-of-range ports are malformed authorities and must return 400 Bad Request.
         let headers = vec![("Host".to_string(), "[::1]:65536".to_string())];
-        let err = validate_host_header(&headers, &policy).unwrap_err();
+        let err = validate_host_header(&headers, Version::Http11, &policy).unwrap_err();
         assert_eq!(err, "[::1]:65536");
         assert_eq!(err.status(), 400);
     }
@@ -6662,12 +6710,9 @@ mod tests {
 
         assert!(!close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "keep-alive")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "keep-alive");
     }
 
     #[test]
@@ -6678,12 +6723,9 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http10);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
     }
 
     #[test]
@@ -6694,27 +6736,28 @@ mod tests {
 
         assert!(close_after);
         assert_eq!(resp.version, Version::Http11);
-        assert!(resp.headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("date")));
-        assert!(
-            resp.headers
-                .iter()
-                .any(|(n, v)| n.eq_ignore_ascii_case("connection") && v == "close")
-        );
+        assert_eq!(resp.headers.len(), 1);
+        assert_eq!(resp.headers[0].0, "Connection");
+        assert_eq!(resp.headers[0].1, "close");
     }
 
     #[test]
-    fn finalize_response_persistence_generates_date_header() {
+    fn finalize_response_persistence_never_invents_a_date_header() {
+        // The server's clock is not UTC (wall_now is timer or process time),
+        // so it must not invent a Date (RFC 9110 §6.6.1); formatting it gave
+        // dates in January 1970.
         let mut resp = Response::new(200, "OK", Vec::new());
         finalize_response_persistence(Version::Http11, &mut resp, false);
-        let date_header = resp
-            .headers
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case("date"));
-        assert!(date_header.is_some());
-        let date_val = &date_header.unwrap().1;
-        assert!(date_val.ends_with(" GMT"));
+        assert!(
+            !resp
+                .headers
+                .iter()
+                .any(|(n, _)| n.eq_ignore_ascii_case("date")),
+            "the server injected a Date: {:?}",
+            resp.headers
+        );
 
-        // If Date is already provided, it MUST be preserved rather than overwritten
+        // A Date the handler set is kept, exactly once.
         let mut resp_with_date = Response::new(200, "OK", Vec::new())
             .with_header("Date", "Sun, 06 Nov 1994 08:49:37 GMT");
         finalize_response_persistence(Version::Http11, &mut resp_with_date, false);
@@ -7492,6 +7535,56 @@ mod tests {
         assert!(written.contains("Connection: close\r\n"));
         assert!(written.ends_with("\r\n\r\n"));
         assert!(!written.ends_with("\r\n\r\nhello"));
+    }
+
+    /// Under AllowAll the server answers an HTTP/1.0 request without Host and
+    /// an HTTP/1.1 request with an empty Host, as v0.4.3 did. An HTTP/1.1
+    /// request without Host still gets 400 before the handler (RFC 9112 §3.2).
+    #[test]
+    fn serve_allow_all_answers_requests_that_need_no_host() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("build current-thread runtime");
+        let cases: [(&[u8], &str, usize); 3] = [
+            (b"GET / HTTP/1.0\r\n\r\n", "HTTP/1.0 200 OK\r\n", 1),
+            (
+                b"GET / HTTP/1.1\r\nHost:\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\n",
+                1,
+            ),
+            (
+                b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 400 Bad Request\r\n",
+                0,
+            ),
+        ];
+        let mut mismatches = Vec::new();
+        for (request, status_line, handled) in cases {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let calls_for_handler = Arc::clone(&calls);
+            let server = Http1Server::with_config(
+                move |_req| {
+                    calls_for_handler.fetch_add(1, Ordering::SeqCst);
+                    async move { Response::new(200, "OK", b"hello") }
+                },
+                Http1Config::default().host_policy(HostPolicy::AllowAll),
+            );
+            let io = TestIo::new(request.to_vec(), Arc::clone(&written));
+            runtime
+                .block_on(async { server.serve(io).await })
+                .expect("serve");
+            let written = String::from_utf8(written.lock().unwrap().clone())
+                .expect("response should be valid utf8");
+            let ran = calls.load(Ordering::SeqCst);
+            if !written.starts_with(status_line) || ran != handled {
+                mismatches.push(format!(
+                    "{:?}: handler ran {ran}x, wrote {written:?}",
+                    String::from_utf8_lossy(request)
+                ));
+            }
+        }
+        assert!(mismatches.is_empty(), "{mismatches:#?}");
     }
 
     /// A handler that declares a Content-Length its body does not carry used

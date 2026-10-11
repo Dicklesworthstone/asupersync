@@ -3071,14 +3071,14 @@ where
         // Unlike h1 (one request per connection -> connection close), h2 is
         // multiplexed, so only the offending stream is answered with 421; the
         // rest of the connection keeps serving.
-        if let Err(rejection) = validate_host_header(&request.headers, &host_policy) {
-            let date_str = crate::time::format_unix_nanos_http_date(crate::time::wall_now().as_nanos());
+        if let Err(rejection) =
+            validate_host_header(&request.headers, request.version, &host_policy)
+        {
             let reject = Response::new(
                 rejection.status(),
                 rejection.reason(),
                 rejection.body().into_bytes(),
             )
-            .with_header("date", date_str)
             .with_header("content-type", "text/plain; charset=utf-8")
             .into_h2_response();
             if let Ok(permit) = resp_tx.reserve(&cx).await {
