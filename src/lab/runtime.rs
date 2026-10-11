@@ -4191,8 +4191,8 @@ impl LabRuntime {
                     );
                 }
                 crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
-                    let completion =
-                        crate::types::CancelReason::user("owned child region body finished");
+                    // Never earlier than the reasons it races with (pz66t0).
+                    let completion = owned_region_close_reason(self.now());
                     self.state.close_region_command(region_id, &completion);
                 }
             }
@@ -6686,6 +6686,19 @@ where
     );
 
     result
+}
+
+/// The reason a closing owned child region's remaining tasks are cancelled
+/// with: the lab's virtual close time, never earlier than
+/// `CancelReason::user`'s own stamp (see the native scheduler's
+/// `owned_region_close_reason`; br-asupersync-pz66t0).
+fn owned_region_close_reason(now: Time) -> crate::types::CancelReason {
+    let reason = crate::types::CancelReason::user("owned child region body finished");
+    if now > reason.timestamp {
+        reason.with_timestamp(now)
+    } else {
+        reason
+    }
 }
 
 #[cfg(test)]

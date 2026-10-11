@@ -541,6 +541,12 @@ fn owned_remote_close_keeps_its_report_with_an_already_cancelled_observer() {
             RemoteInput::empty(), config(),
         ).unwrap();
         transport.changed.wait_until(|| transport.sent.load(Ordering::Acquire) == 1).await;
+        // Run past 1 s of the runtime clock first: the region-close reason used
+        // to carry a constant 1 s timestamp, so it outranked this cancel in any
+        // process older than that and passed only in young ones (pz66t0).
+        while cx.now() < Time::from_secs(2) {
+            crate::time::sleep(cx.now(), Duration::from_millis(50)).await;
+        }
         let observer = Cx::for_testing();
         observer.cancel_with(CancelKind::User, Some("cancelled remote result observer"));
         let expected = observer.cancel_reason().unwrap();

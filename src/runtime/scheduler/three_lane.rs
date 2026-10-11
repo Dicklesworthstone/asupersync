@@ -6879,8 +6879,8 @@ impl ThreeLaneWorker {
                         );
                     }
                     crate::runtime::spawn_mailbox::RegionCommand::Close { region_id } => {
-                        let completion =
-                            crate::types::CancelReason::user("owned child region body finished");
+                        // Never earlier than the reasons it races with (pz66t0).
+                        let completion = owned_region_close_reason(drain_now);
                         state.close_region_command_in_task_table(
                             region_id,
                             &completion,
@@ -9839,6 +9839,22 @@ mod lifo_slot_tests {
             ran.is_ok(),
             "a task outside the waking chain never ran: the LIFO slot starved it"
         );
+    }
+}
+
+/// The reason [`RegionCommand::Close`](crate::runtime::spawn_mailbox::RegionCommand)
+/// cancels a closing region's remaining tasks with: the close time, never
+/// earlier than `CancelReason::user`'s own constant 1 s stamp.
+/// `CancelReason::strengthen` keeps the earlier of two same-kind reasons. With
+/// the constant alone, this internal reason outranked any real cancellation it
+/// raced with once the runtime clock passed 1 s; with the close time alone, it
+/// would outrank every constant-stamped reason while the clock (a virtual one,
+/// say) is still under 1 s (br-asupersync-pz66t0).
+fn owned_region_close_reason(now: Option<Time>) -> crate::types::CancelReason {
+    let reason = crate::types::CancelReason::user("owned child region body finished");
+    match now {
+        Some(now) if now > reason.timestamp => reason.with_timestamp(now),
+        _ => reason,
     }
 }
 
