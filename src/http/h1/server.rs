@@ -6414,7 +6414,7 @@ mod tests {
         // Different IPv6 — REJECTED with 421 Misdirected Request.
         let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
         let err = validate_host_header(&headers, &policy).unwrap_err();
-        assert_eq!(err, "[fe80::1]:8080");
+        assert_eq!(err, "fe80::1");
         assert_eq!(err.status(), 421);
 
         // Malformed IPv6 authority suffix must not bypass the allow-list and returns 400 Bad Request.
