@@ -165,7 +165,10 @@ enum Case { RepairAndRefusals, CancelAndResume }
 fn exercise(workers: usize, case: Case) {
     let builder = if workers == 1 { RuntimeBuilder::current_thread() }
         else { RuntimeBuilder::multi_thread().worker_threads(workers) };
-    let runtime = builder.build().unwrap();
+    let runtime = builder
+        .thread_stack_size(FIXTURE_STACK_BYTES)
+        .build()
+        .unwrap();
     let handle = runtime.handle();
     runtime.block_on(async {
         let base = Cx::current().unwrap();
@@ -429,15 +432,38 @@ fn exercise(workers: usize, case: Case) {
     assert_eq!(report.queued_finalizers, 0);
     assert!(!report.has_pending_obligation_posts);
     assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    // A strong RuntimeHandle keeps the runtime alive, and shutdown_timeout
+    // waits for every such owner, so release this fixture's own first.
+    drop(handle);
     assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+}
+
+// The fixture is one large future; a debug build's poll frames for it
+// overflow a 2 MiB stack. That is libtest's test thread, which polls it under
+// block_on, and the runtime's default worker stack, so both get a larger one.
+const FIXTURE_STACK_BYTES: usize = 32 * 1024 * 1024;
+
+fn exercise_on_large_stack(workers: usize, case: Case) {
+    let run = std::thread::Builder::new()
+        .name(format!("anti-entropy-{workers}"))
+        .stack_size(FIXTURE_STACK_BYTES)
+        .spawn(move || exercise(workers, case))
+        .unwrap();
+    if let Err(panic) = run.join() {
+        std::panic::resume_unwind(panic);
+    }
 }
 
 #[test]
 fn native_symbol_anti_entropy_repairs_exact_batches_and_refuses_cross_origin_stale_and_over_limit_work() {
-    for workers in [1, 2] { exercise(workers, Case::RepairAndRefusals); }
+    for workers in [1, 2] {
+        exercise_on_large_stack(workers, Case::RepairAndRefusals);
+    }
 }
 
 #[test]
 fn native_symbol_anti_entropy_cancels_after_real_handler_admission_and_resumes_the_same_cursor() {
-    for workers in [1, 2] { exercise(workers, Case::CancelAndResume); }
+    for workers in [1, 2] {
+        exercise_on_large_stack(workers, Case::CancelAndResume);
+    }
 }
