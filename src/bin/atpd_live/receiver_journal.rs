@@ -113,7 +113,15 @@ pub(super) fn receive(
     options: CreateOptions,
 ) -> io::Result<()> {
     options.validate(intent.is_some())?;
-    execute(config, journal, data, intent, Some(options), options.wait)
+    execute(
+        config,
+        journal,
+        data,
+        intent,
+        Some(options),
+        options.wait,
+        false,
+    )
 }
 
 pub(super) fn resume(
@@ -122,9 +130,18 @@ pub(super) fn resume(
     data: PathBuf,
     intent: Option<PathBuf>,
     wait: WaitOptions,
+    resolve_finalizing: bool,
 ) -> io::Result<()> {
     wait.validate()?;
-    execute(config, journal, data, intent, None, wait)
+    execute(
+        config,
+        journal,
+        data,
+        intent,
+        None,
+        wait,
+        resolve_finalizing,
+    )
 }
 
 fn checked_paths(
@@ -188,6 +205,7 @@ fn execute(
     intent: Option<PathBuf>,
     create: Option<CreateOptions>,
     wait: WaitOptions,
+    resolve_finalizing: bool,
 ) -> io::Result<()> {
     wait.validate()?;
     let (journal_path, data_path, intent_path) =
@@ -197,6 +215,21 @@ fn execute(
     {
         return Err(invalid(
             "restore requires the original nonzero port and a bounded shutdown grace",
+        ));
+    }
+    // The SDK creates the journal, the data file and then the intent, each
+    // create-only, and removes nothing after a partial failure. A leftover
+    // target is refused here, before the inbox is loaded, charged or written,
+    // so a refusal never strands an empty, unusable pair.
+    let targets = [Some(&journal_path), Some(&data_path), intent_path.as_ref()];
+    if create.is_some()
+        && targets
+            .into_iter()
+            .flatten()
+            .any(|target| std::fs::symlink_metadata(target).is_ok())
+    {
+        return Err(invalid(
+            "journaled receiver journal, data or intent path already exists",
         ));
     }
     let profile = settings::profile(
@@ -247,12 +280,25 @@ fn execute(
             (journal, options.attempts)
         }
         None => {
-            let journal = if let Some(intent) = &intent_path {
+            let mut journal = if let Some(intent) = &intent_path {
                 ReceiverJournalFile::open_existing_compact(&journal_path, &data_path, intent)?
             } else {
                 ReceiverJournalFile::open_existing(&journal_path, &data_path)?
             };
-            let saved = journal.checkpoint()?;
+            let mut saved = journal.checkpoint()?;
+            if resolve_finalizing
+                && saved.client() == client
+                && saved.phase() == ReceiverCheckpointPhase::Finalizing
+            {
+                // A crash during this built-in file sink's final verification
+                // and sync. The SDK re-hashes the retained data against the
+                // final intent and records Committed; it must run before the
+                // runtime starts. Only the final Proof can then be resent.
+                let receipt = journal.resolve_finalizing()?;
+                emit(json!({"schema_version": 1, "event": "finalizing_resolved",
+                    "receipt": receipt_json(&receipt)}))?;
+                saved = journal.checkpoint()?;
+            }
             if saved.client() != client
                 || saved.phase() == ReceiverCheckpointPhase::Finalizing
                 || saved.attempts() >= saved.maximum_attempts()

@@ -104,6 +104,11 @@ enum Command {
         /// Original compact-profile intent file; required if creation used --intent.
         #[arg(long)]
         intent: Option<PathBuf>,
+        /// Complete a receiver a crash left in `Finalizing`: re-hash the retained
+        /// data against the final intent and record `Committed` before restoring,
+        /// so only the final Proof can be resent. Without it, `Finalizing` is refused.
+        #[arg(long)]
+        resolve_finalizing: bool,
         #[command(flatten)]
         options: receiver_journal::WaitOptions,
     },
@@ -258,8 +263,16 @@ pub fn run() -> io::Result<()> {
             journal,
             data,
             intent,
+            resolve_finalizing,
             options,
-        } => receiver_journal::resume(settings::load(&config)?, journal, data, intent, options),
+        } => receiver_journal::resume(
+            settings::load(&config)?,
+            journal,
+            data,
+            intent,
+            options,
+            resolve_finalizing,
+        ),
         Command::SendJournaled {
             config,
             input,

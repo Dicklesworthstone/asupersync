@@ -707,7 +707,7 @@ fn compact_receiver_executable_resumes_a_large_file_with_a_small_wal() {
 
 #[test]
 fn compact_receiver_intent_preflight_refuses_aliases_and_inbox_paths_before_creation() {
-    for location in ["journal", "data", "inbox", "relative"] {
+    for location in ["journal", "data", "inbox", "relative", "existing"] {
         let fixture = Fixture::new();
         let wal = fixture.unique("receiver-wal");
         let data = fixture.inbox.join("transfer.data");
@@ -716,6 +716,13 @@ fn compact_receiver_intent_preflight_refuses_aliases_and_inbox_paths_before_crea
             "data" => data.clone(),
             "inbox" => fixture.inbox.join("receiver.intent"),
             "relative" => PathBuf::from("receiver.intent"),
+            // A leftover intent: the SDK would create the journal and data
+            // file before failing on it, and clean up neither.
+            "existing" => {
+                let path = fixture.unique("receiver-intent");
+                std::fs::write(&path, b"left over").unwrap();
+                path
+            }
             _ => unreachable!(),
         };
         let mut refused = fixture.compact_receiver(
@@ -736,6 +743,9 @@ fn compact_receiver_intent_preflight_refuses_aliases_and_inbox_paths_before_crea
         assert!(!wal.exists());
         assert!(!data.exists());
         assert_eq!(std::fs::read_dir(&fixture.inbox).unwrap().count(), 0);
+        if location == "existing" {
+            assert_eq!(std::fs::read(&intent).unwrap(), b"left over");
+        }
     }
 }
 
@@ -819,6 +829,104 @@ fn ordinary_and_empty_receivers_use_actual_peer_proof_not_data_file_existence() 
         assert_eq!(receiver_records(&wal).last().unwrap()[280], 2);
         assert_eq!(ended["durable_receipt"], sent["transfer"]["receipt"]);
     }
+}
+
+/// A crash between the `Finalizing` and `Committed` appends leaves a complete,
+/// synced data file. That state is reproduced exactly by cutting a finished WAL
+/// back to its `Finalizing` record (same inode, record boundary).
+#[test]
+fn a_receiver_left_in_finalizing_completes_only_with_resolve_finalizing() {
+    let fixture = Fixture::new();
+    let bytes = b"complete before the crash".as_slice();
+    let wal = fixture.unique("receiver-wal");
+    let data = fixture.inbox.join("transfer.data");
+    let mut config = fixture.receiver_config(1, bytes.len());
+    let mut receiver = fixture.receiver(&config, &wal, &data, Some(32), 25);
+    let address: SocketAddr = receiver.until("ready")["address"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    config["bind"] = json!(address);
+    let mut sender = fixture.sender(
+        &fixture.sender_config(address, 1, bytes.len()),
+        &fixture.unique("sender-wal"),
+        &fixture.source(bytes),
+        true,
+        25,
+    );
+    let sent = sender.until("send_result");
+    assert!(sender.exit().success());
+    let receipt = sent["transfer"]["receipt"].clone();
+    let received = receiver.until("receiver_journal_attempt");
+    assert_eq!(received["checkpoint"]["phase"], "committed");
+    assert_eq!(receiver.stop(true)["durable_receipt"], receipt);
+
+    let records = receiver_records(&wal);
+    let finalizing = records
+        .iter()
+        .rposition(|state| state[280] == 1)
+        .expect("a finished WAL holds its Finalizing record");
+    let (kept, after) = records.split_at(finalizing + 1);
+    assert!(!after.is_empty(), "Committed follows Finalizing");
+    assert!(
+        after.iter().all(|state| state[280] == 2),
+        "only Committed records follow Finalizing"
+    );
+    let cut = 96 + kept.iter().map(|state| 48 + state.len()).sum::<usize>();
+    let file = OpenOptions::new().write(true).open(&wal).unwrap();
+    file.set_len(u64::try_from(cut).unwrap()).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(receiver_records(&wal).last().unwrap()[280], 1);
+    let stranded = std::fs::read(&wal).unwrap();
+    let inode = std::fs::metadata(&data).unwrap().ino();
+
+    // The default restore still refuses Finalizing and changes nothing.
+    let mut refused = fixture.receiver(&config, &wal, &data, None, 25);
+    assert!(!refused.exit().success());
+    let log = std::fs::read_to_string(&refused.log).unwrap();
+    assert!(log.contains("unresolved"), "refusal reason: {log}");
+    assert_eq!(std::fs::read(&wal).unwrap(), stranded);
+
+    let resolving = || {
+        let mut command = fixture.receiver_command(&config, &wal, &data, None, 25);
+        command.arg("--resolve-finalizing");
+        fixture.launch(command)
+    };
+
+    // Data that no longer matches the final intent is refused, untouched.
+    let mut writer = OpenOptions::new().write(true).open(&data).unwrap();
+    writer.write_all(b"X").unwrap();
+    writer.sync_all().unwrap();
+    let mut changed = resolving();
+    assert!(!changed.exit().success());
+    assert_eq!(std::fs::read(&wal).unwrap(), stranded);
+    let mut writer = OpenOptions::new().write(true).open(&data).unwrap();
+    writer.write_all(&bytes[..1]).unwrap();
+    writer.sync_all().unwrap();
+    drop(writer);
+
+    // With the flag, the retained data is verified and recorded Committed, and
+    // only the final-Proof exchange is restored.
+    let mut resolved = resolving();
+    assert_eq!(resolved.until("finalizing_resolved")["receipt"], receipt);
+    let ready = resolved.until("ready");
+    assert_eq!(ready["restored"], true);
+    assert_eq!(ready["checkpoint"]["phase"], "committed");
+    let records = receiver_records(&wal);
+    assert_eq!(records.len(), kept.len() + 1);
+    assert_eq!(records.last().unwrap()[280], 2);
+    assert!(std::fs::read(&wal).unwrap().starts_with(&stranded));
+    assert_eq!(std::fs::read(&data).unwrap(), bytes);
+    assert_eq!(std::fs::metadata(&data).unwrap().ino(), inode);
+    kill(
+        Pid::from_raw(i32::try_from(resolved.child.id()).unwrap()),
+        Signal::SIGTERM,
+    )
+    .unwrap();
+    assert_eq!(resolved.until("receive_result")["durable_receipt"], receipt);
+    let _ = resolved.exit();
 }
 
 #[test]

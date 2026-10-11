@@ -121,6 +121,15 @@ looks complete. `Committed` can restore the final-Proof exchange. Torn journals
 are refused as a whole. This is not universal crash recovery or exactly-once
 execution of arbitrary application effects.
 
+An operator can complete such a receiver explicitly with
+`resume-receiver --resolve-finalizing`. Before the runtime starts, atpd re-hashes
+the retained data inode, requires its length and SHA-256 to equal the final
+intent, syncs it, and appends `Committed`. It emits a `finalizing_resolved` event
+with the receipt, then restores only the final-Proof exchange. Changed,
+truncated, extended or replaced data is refused and the journal is left as it
+was. Nothing is written to the data file. Without the flag, `Finalizing` is
+refused as before.
+
 ## Disk admission remains valid after restart
 
 The inbox is scanned under its existing process-lifetime exclusive lock. Creation
