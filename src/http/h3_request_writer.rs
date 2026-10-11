@@ -335,6 +335,9 @@ mod tests {
         connection.begin_handshake(&cx).unwrap();
         connection.mark_handshake_keys_available(&cx).unwrap();
         connection.mark_app_keys_available(&cx).unwrap();
+        // A client refuses to confirm until a verifying handshake recorded the
+        // server identity (br-asupersync-7pwwwe); these tests stand in for one.
+        connection.record_verified_server_identity();
         connection.confirm_handshake(&cx).unwrap();
         let mut session = NativeH3Session::with_config(H3ConnectionConfig {
             max_frame_payload_size,
@@ -444,7 +447,7 @@ mod tests {
                         assert!(pending_polls < 512, "bounded frame must make credit-driven progress");
                         replenish(&cx, &mut connection, stream, 17);
                     }
-                    other => panic!("unexpected upload flush: {other:?}"),
+                    other @ Poll::Ready(_) => panic!("unexpected upload flush: {other:?}"),
                 }
             }
         }
