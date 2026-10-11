@@ -953,6 +953,8 @@ pub struct ServerBuilder {
     services: BTreeMap<String, Arc<dyn ServiceHandler>>,
     /// Optional reflection registry.
     reflection: Option<ReflectionService>,
+    /// Whether an explicit v1alpha reflection service was registered via add_service.
+    explicit_v1alpha_service: bool,
     /// br-asupersync-mfk14i: interceptor chain. Each registered
     /// interceptor's `intercept_request` runs in registration order
     /// before the user handler executes; `intercept_response` runs
@@ -971,6 +973,7 @@ impl std::fmt::Debug for ServerBuilder {
             .field("config", &self.config)
             .field("services", &format!("[{} services]", self.services.len()))
             .field("reflection_enabled", &self.reflection.is_some())
+            .field("explicit_v1alpha_service", &self.explicit_v1alpha_service)
             .finish()
     }
 }
@@ -983,6 +986,7 @@ impl ServerBuilder {
             config: ServerConfig::default(),
             services: BTreeMap::new(),
             reflection: None,
+            explicit_v1alpha_service: false,
             interceptors: Vec::new(),
         }
     }
@@ -1175,6 +1179,9 @@ impl ServerBuilder {
         {
             reflection.register_handler(service.as_ref());
         }
+        if service_name == ReflectionService::NAME {
+            self.explicit_v1alpha_service = true;
+        }
         self.services.insert(service_name, service);
         self
     }
@@ -1207,9 +1214,7 @@ impl ServerBuilder {
                 reflection.register_handler(service.as_ref());
             }
         }
-        let has_explicit_v1alpha =
-            self.services.contains_key(ReflectionService::NAME) && self.reflection.is_none();
-        if !has_explicit_v1alpha {
+        if !self.explicit_v1alpha_service {
             self.services.insert(
                 ReflectionService::NAME.to_string(),
                 Arc::new(reflection.clone()),
@@ -1237,9 +1242,7 @@ impl ServerBuilder {
                 reflection.register_handler(service.as_ref());
             }
         }
-        let has_explicit_v1alpha =
-            self.services.contains_key(ReflectionService::NAME) && self.reflection.is_none();
-        if !has_explicit_v1alpha {
+        if !self.explicit_v1alpha_service {
             self.services.insert(
                 ReflectionService::NAME.to_string(),
                 Arc::new(reflection.clone()),

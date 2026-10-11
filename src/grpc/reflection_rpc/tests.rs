@@ -281,15 +281,26 @@ fn enable_reflection_preserves_explicitly_registered_v1alpha_service() {
     // Case 2: enable_reflection_with_auth BEFORE add_service(alpha)
     let server2 = Server::builder()
         .enable_reflection_with_auth(|_, _| Ok(()))
-        .add_service(alpha)
+        .add_service(alpha.clone())
         .build();
     let registered2 = server2.get_service(ReflectionRpcV1AlphaService::NAME).unwrap();
     assert_eq!(registered2.descriptor().methods[0].path, ALPHA_PATH);
     assert!(registered2.descriptor().methods[0].client_streaming);
+
+    // Case 3: enable(a) -> add_service(alpha) -> enable(b) still preserves the explicit service
+    let server3 = Server::builder()
+        .enable_reflection_with_auth(|_, _| Ok(()))
+        .add_service(alpha)
+        .enable_reflection_with_auth(|_, _| Ok(()))
+        .build();
+    let registered3 = server3.get_service(ReflectionRpcV1AlphaService::NAME).unwrap();
+    assert_eq!(registered3.descriptor().methods[0].path, ALPHA_PATH);
+    assert!(registered3.descriptor().methods[0].client_streaming);
 }
 
 #[test]
 fn oversize_response_returns_in_band_error_reply_without_failing_stream() {
+    // Case 1: Raw descriptors exceed max_response_bytes during files_reply (328 B > 200 B).
     let config = ReflectionRpcConfig {
         max_response_bytes: 200,
         ..Default::default()
@@ -305,10 +316,35 @@ fn oversize_response_returns_in_band_error_reply_without_failing_stream() {
     match reply.reply {
         Some(Reply::Error(err)) => {
             assert_eq!(err.code, Code::ResourceExhausted as i32);
-            assert!(err.message.contains("limit"));
+            assert_eq!(err.message, "reflection descriptors exceed response limit");
         }
         other => panic!("expected in-band Error reply, got {other:?}"),
     }
+
+    // Case 2: Raw descriptors fit (328 B <= 350 B), but framing and echoed request
+    // push encoded response over the limit (~377 B > 350 B).
+    let config2 = ReflectionRpcConfig {
+        max_response_bytes: 350,
+        ..Default::default()
+    };
+    let service2 = rpc(registry().allow_anonymous(), config2);
+    let response2 = service2.answer(&cx, &Bytes::from(request.encode_to_vec())).unwrap();
+    let reply2 = decode(response2);
+    match reply2.reply {
+        Some(Reply::Error(err)) => {
+            assert_eq!(err.code, Code::ResourceExhausted as i32);
+            assert_eq!(err.message, "reflection response byte limit exceeded");
+        }
+        other => panic!("expected in-band Error reply, got {other:?}"),
+    }
+
+    // Case 3: for_server derives max_response_bytes from ServerConfig.
+    let server_config = crate::grpc::ServerConfig {
+        max_message_size: 1024 * 1024,
+        ..Default::default()
+    };
+    let derived = ReflectionRpcConfig::for_server(&server_config);
+    assert_eq!(derived.max_response_bytes, 1024 * 1024);
 }
 
 async fn deadline_scenario(cx: Cx) {
