@@ -445,7 +445,8 @@ impl UnixStream {
     ///
     /// # Errors
     ///
-    /// Returns an error if the send fails.
+    /// Returns an error if the send fails, or if `buf` is empty while file
+    /// descriptors are queued in `ancillary`.
     ///
     /// # Example
     ///
@@ -769,6 +770,13 @@ fn send_with_ancillary_impl(
     buf: &[u8],
     ancillary: &mut crate::net::unix::SocketAncillary,
 ) -> io::Result<usize> {
+    if buf.is_empty() && !ancillary.send_fds().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "cannot send file descriptors with an empty buffer on a stream socket",
+        ));
+    }
+
     let iov = [IoSlice::new(buf)];
 
     let cmsgs_storage;
@@ -2081,5 +2089,40 @@ mod tests {
                 pid: None
             }
         );
+    }
+
+    #[test]
+    fn send_with_ancillary_empty_buffer_handling() {
+        use crate::net::unix::SocketAncillary;
+        use std::os::unix::io::AsRawFd;
+
+        init_test("send_with_ancillary_empty_buffer_handling");
+        futures_lite::future::block_on(async {
+            let (tx, _rx) = UnixStream::pair().expect("pair failed");
+
+            // Empty buffer with no fds succeeds with Ok(0)
+            let mut empty_ancillary = SocketAncillary::new(64);
+            let n = tx
+                .send_with_ancillary(b"", &mut empty_ancillary)
+                .await
+                .expect("empty send without fds must succeed");
+            assert_eq!(n, 0);
+
+            // Empty buffer with queued fds returns InvalidInput error
+            let file = tempfile::tempfile().expect("tempfile");
+            let mut fd_ancillary = SocketAncillary::new(64);
+            assert!(fd_ancillary.add_fds(&[file.as_raw_fd()]));
+
+            let err = tx
+                .send_with_ancillary(b"", &mut fd_ancillary)
+                .await
+                .expect_err("sending fds with empty buffer on stream socket must fail");
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                err.to_string()
+                    .contains("cannot send file descriptors with an empty buffer"),
+                "unexpected error message: {err}"
+            );
+        });
     }
 }

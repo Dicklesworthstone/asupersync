@@ -28,6 +28,7 @@ pub mod catalog;
 pub mod symbols;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub mod native;
+#[allow(clippy::redundant_pub_crate)]
 mod wire;
 
 /// FNV-1a 64-bit hash (fixed constants → stable across builds and replicas).

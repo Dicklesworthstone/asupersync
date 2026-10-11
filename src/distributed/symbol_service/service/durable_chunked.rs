@@ -86,6 +86,7 @@ struct Credits {
 struct Credit(Arc<Credits>);
 
 impl Credit {
+    #[allow(deprecated)]
     fn acquire(gate: &Arc<Credits>) -> Option<Self> {
         gate.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
             (active < gate.maximum).then(|| active + 1)
