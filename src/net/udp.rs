@@ -1586,11 +1586,32 @@ impl FallbackIoStart {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static FALLBACK_IO_START: parking_lot::Mutex<FallbackIoStart> =
-    parking_lot::Mutex::new(FallbackIoStart {
-        failures: 0,
-        calls_since_failure: 0,
-    });
+static FALLBACK_IO_START: FallbackIoStarter = FallbackIoStarter::new();
+
+/// The start state of a fallback driver cell, plus a lock-free verdict for a
+/// target with no reactor backend at all.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct FallbackIoStarter {
+    /// Set when a start failed with `Unsupported` (no backend, or the
+    /// syscall is missing): no later start can succeed, so callers return
+    /// `None` without taking the lock or counting.
+    unsupported: std::sync::atomic::AtomicBool,
+    state: parking_lot::Mutex<FallbackIoStart>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FallbackIoStarter {
+    const fn new() -> Self {
+        Self {
+            unsupported: std::sync::atomic::AtomicBool::new(false),
+            state: parking_lot::Mutex::new(FallbackIoStart {
+                failures: 0,
+                calls_since_failure: 0,
+            }),
+        }
+    }
+}
 
 /// Park applied by the fallback pump after a reactor error other than `EINTR`
 /// so a persistently failing backend cannot turn the pump into a hot loop.
@@ -1616,13 +1637,19 @@ fn global_fallback_io_driver() -> Option<&'static IoDriverHandle> {
 #[cfg(not(target_arch = "wasm32"))]
 fn fallback_io_driver_from(
     cell: &'static OnceLock<GlobalFallbackIoDriver>,
-    start: &parking_lot::Mutex<FallbackIoStart>,
+    starter_state: &FallbackIoStarter,
     starter: impl FnOnce() -> io::Result<GlobalFallbackIoDriver>,
 ) -> Option<&'static IoDriverHandle> {
     if let Some(global) = cell.get() {
         return Some(&global.driver);
     }
-    let mut start = start.lock();
+    if starter_state
+        .unsupported
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        return None;
+    }
+    let mut start = starter_state.state.lock();
     // Another caller may have started it while this one waited for the lock.
     if let Some(global) = cell.get() {
         return Some(&global.driver);
@@ -1632,15 +1659,20 @@ fn fallback_io_driver_from(
     }
     match starter() {
         Ok(global) => Some(&cell.get_or_init(|| global).driver),
-        Err(_err) => {
+        Err(err) => {
             if start.failures == 0 {
                 crate::tracing_compat::warn!(
                     target: "asupersync::net::udp",
-                    error = %_err,
+                    error = %err,
                     "GH#67: the process-global fallback I/O driver did not start (no reactor \
                      backend, or no pump thread); driverless UDP polls keep the immediate \
-                     self-wake path, and the start is retried"
+                     self-wake path, and the start is retried unless it is unsupported here"
                 );
+            }
+            if err.kind() == io::ErrorKind::Unsupported {
+                starter_state
+                    .unsupported
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
             start.record_failure();
             None
@@ -1845,18 +1877,18 @@ impl SharedWaiters {
     /// nothing is evicted. A 32-entry cap that woke the evicted waiter made
     /// 33 or more waiting tasks wake each other forever
     /// (br-asupersync-reactor-audit-dofi11).
-    fn register(&self, owner: u64, waker: &std::task::Waker) {
-        let displaced = {
-            let mut waiters = self.waiters.lock();
-            if let Some((_, existing)) = waiters.iter_mut().find(|(id, _)| *id == owner) {
-                (!existing.will_wake(waker)).then(|| std::mem::replace(existing, waker.clone()))
-            } else {
-                waiters.push((owner, waker.clone()));
-                None
-            }
-        };
-        // A waker drops outside the list's lock.
-        drop(displaced);
+    ///
+    /// Returns the waker it replaced, for the caller to drop after releasing
+    /// its own locks: a waker can own the last reference to a task, and
+    /// dropping that task can run code that takes them (br-asupersync-9kb866).
+    fn register(&self, owner: u64, waker: &std::task::Waker) -> Option<std::task::Waker> {
+        let mut waiters = self.waiters.lock();
+        if let Some((_, existing)) = waiters.iter_mut().find(|(id, _)| *id == owner) {
+            (!existing.will_wake(waker)).then(|| std::mem::replace(existing, waker.clone()))
+        } else {
+            waiters.push((owner, waker.clone()));
+            None
+        }
     }
 
     /// Removes `owner`'s entry, returning its waker for the caller to drop
@@ -2047,7 +2079,9 @@ impl ReactorRegistration {
     ///
     /// `owner` ([`next_shared_waiter_owner`]) names the calling future's one
     /// entry in the list; the future removes it with
-    /// [`forget_shared`](Self::forget_shared) when dropped.
+    /// [`forget_shared`](Self::forget_shared) when dropped. The third value
+    /// is the waker that entry held before, if this call replaced it; the
+    /// caller drops it after releasing the lock that guards `self`.
     #[cfg(unix)]
     pub(crate) fn arm_shared(
         &mut self,
@@ -2055,9 +2089,13 @@ impl ReactorRegistration {
         interest: Interest,
         owner: u64,
         waker: &std::task::Waker,
-    ) -> (io::Result<Armed>, Vec<std::task::Waker>) {
+    ) -> (
+        io::Result<Armed>,
+        Vec<std::task::Waker>,
+        Option<std::task::Waker>,
+    ) {
         let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
-        waiters.register(owner, waker);
+        let displaced = waiters.register(owner, waker);
         let dispatch = std::task::Waker::from(Arc::clone(&waiters));
         let armed = self.arm(source, interest, &dispatch);
         let stranded = if matches!(armed, Ok(Armed::Parked)) {
@@ -2065,7 +2103,7 @@ impl ReactorRegistration {
         } else {
             waiters.take_others(owner)
         };
-        (armed, stranded)
+        (armed, stranded, displaced)
     }
 
     /// Removes `owner`'s entry from the shared waiter list, returning its
@@ -5972,7 +6010,7 @@ mod tests {
         fn a_failed_fallback_driver_start_is_retried_with_backoff() {
             let cell: &'static OnceLock<GlobalFallbackIoDriver> =
                 Box::leak(Box::new(OnceLock::new()));
-            let start = parking_lot::Mutex::new(FallbackIoStart::default());
+            let start = FallbackIoStarter::new();
             let attempts = std::cell::Cell::new(0_u32);
             let failing = || {
                 attempts.set(attempts.get() + 1);
@@ -6022,6 +6060,32 @@ mod tests {
             assert!(
                 capped.attempt_due(),
                 "attempts stay at most 4096 calls apart"
+            );
+
+            // A target without a reactor backend (`Unsupported`) is tried once:
+            // later calls return `None` without the lock or another attempt.
+            let unsupported_cell: &'static OnceLock<GlobalFallbackIoDriver> =
+                Box::leak(Box::new(OnceLock::new()));
+            let unsupported_start = FallbackIoStarter::new();
+            let unsupported_attempts = std::cell::Cell::new(0_u32);
+            let unsupported = || {
+                unsupported_attempts.set(unsupported_attempts.get() + 1);
+                Err(io::Error::from(io::ErrorKind::Unsupported))
+            };
+            for _ in 0..10_000 {
+                assert!(
+                    fallback_io_driver_from(unsupported_cell, &unsupported_start, unsupported)
+                        .is_none()
+                );
+            }
+            assert_eq!(
+                unsupported_attempts.get(),
+                1,
+                "an unsupported start is final"
+            );
+            assert!(
+                !unsupported_start.state.is_locked(),
+                "the start lock is free"
             );
         }
 
