@@ -672,6 +672,7 @@ where
                         cx,
                         shared.config.ping_interval,
                         shared.close_handshake.is_open(),
+                        !shared.read_buf.is_empty(),
                     )
                     .map(|ping| (ping, shared.heartbeat.write_deadline()))
             };
@@ -863,7 +864,8 @@ where
                 // (br-asupersync-4en1sw W1). Only once the peer's Close is in:
                 // in CloseSent the peer's Close is read first, as before.
                 let resume_close_flush = {
-                    let shared = self.shared.lock();
+                    let mut shared = self.shared.lock();
+                    shared.heartbeat.note_drained();
                     shared.close_flush_pending
                         && shared.close_handshake.state() != CloseState::CloseSent
                 };
@@ -1054,6 +1056,7 @@ where
                             shared.read_buf.reserve(8192.max(n));
                         }
                         shared.read_buf.extend_from_slice(&temp[..n]);
+                        shared.heartbeat.note_read();
                     }
                     Poll::Ready(Ok(n))
                 }

@@ -37,6 +37,8 @@ enum Behavior {
     Resume,
     Cancel,
     Disabled,
+    /// The first Pong arrives in one TCP write behind a Text message.
+    PongBehindData,
 }
 
 #[derive(Default)]
@@ -164,7 +166,7 @@ fn receive_frame(peer: &mut std::net::TcpStream, masked: bool) -> Option<(u8, Ve
     Some((first[0] & 0x0f, payload))
 }
 
-fn send_frame(peer: &mut std::net::TcpStream, masked: bool, opcode: u8, payload: &[u8]) {
+fn encode_frame(masked: bool, opcode: u8, payload: &[u8]) -> Vec<u8> {
     assert!(payload.len() <= 125);
     let mut frame = vec![
         0x80 | opcode,
@@ -181,7 +183,12 @@ fn send_frame(peer: &mut std::net::TcpStream, masked: bool, opcode: u8, payload:
             *byte
         }
     }));
-    peer.write_all(&frame).unwrap();
+    frame
+}
+
+fn send_frame(peer: &mut std::net::TcpStream, masked: bool, opcode: u8, payload: &[u8]) {
+    peer.write_all(&encode_frame(masked, opcode, payload))
+        .unwrap();
 }
 
 fn run_peer(
@@ -223,6 +230,15 @@ fn run_peer(
                         if count == 3 {
                             send_frame(&mut peer, server, 1, b"alive");
                         }
+                    }
+                    Behavior::PongBehindData if count == 1 => {
+                        let mut both = encode_frame(server, 1, b"busy");
+                        both.extend_from_slice(&encode_frame(server, 10, &payload));
+                        peer.write_all(&both).unwrap();
+                    }
+                    Behavior::PongBehindData => {
+                        send_frame(&mut peer, server, 10, &payload);
+                        send_frame(&mut peer, server, 1, b"alive");
                     }
                     Behavior::WrongPong => send_frame(&mut peer, server, 10, b"unrelated pong"),
                     Behavior::Resume => send_frame(&mut peer, server, 1, b"pause"),
@@ -281,6 +297,11 @@ fn scenario(workers: usize, role: Role, behavior: Behavior) {
                         assert!(matches!(ws.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "pause"));
                         drop_pending_recv(ws.recv(&cx), &task_witness).await;
                     }
+                    if matches!(behavior, Behavior::PongBehindData) {
+                        assert!(matches!(ws.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "busy"));
+                        // The application holds the message past the Ping's deadline.
+                        std::thread::sleep(INTERVAL * 3);
+                    }
                     let result = ws.recv(&cx).await;
                     (result, ws.is_closed())
                 }
@@ -291,12 +312,20 @@ fn scenario(workers: usize, role: Role, behavior: Behavior) {
                         assert!(matches!(ws.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "pause"));
                         drop_pending_recv(ws.recv(&cx), &task_witness).await;
                     }
+                    if matches!(behavior, Behavior::PongBehindData) {
+                        assert!(matches!(ws.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "busy"));
+                        std::thread::sleep(INTERVAL * 3);
+                    }
                     let result = ws.recv(&cx).await;
                     (result, ws.is_closed())
                 }
                 Role::Split => {
                     let ws = WebSocket::from_upgraded(socket, WebSocketConfig::new().ping_interval(interval));
                     let (mut read, write) = ws.split();
+                    if matches!(behavior, Behavior::PongBehindData) {
+                        assert!(matches!(read.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "busy"));
+                        std::thread::sleep(INTERVAL * 3);
+                    }
                     if matches!(behavior, Behavior::Resume) {
                         assert!(matches!(read.recv(&cx).await, Ok(Some(Message::Text(text))) if text == "pause"));
                         drop_pending_recv(read.recv(&cx), &task_witness).await;
@@ -312,7 +341,7 @@ fn scenario(workers: usize, role: Role, behavior: Behavior) {
                 }
             };
             match behavior {
-                Behavior::Respond | Behavior::Disabled => {
+                Behavior::Respond | Behavior::Disabled | Behavior::PongBehindData => {
                     assert!(matches!(result, Ok(Some(Message::Text(ref text))) if text == "alive"), "unexpected result: {result:?}");
                     assert!(!closed);
                     assert!(!cx.is_cancel_requested());
@@ -341,6 +370,8 @@ fn scenario(workers: usize, role: Role, behavior: Behavior) {
     let pings = peer.join().expect("independent peer saw transport EOF");
     if matches!(behavior, Behavior::Respond) {
         assert_eq!(pings, 3);
+    } else if matches!(behavior, Behavior::PongBehindData) {
+        assert_eq!(pings, 2, "the buffered Pong rearmed the heartbeat once");
     } else if matches!(
         behavior,
         Behavior::Silent | Behavior::WrongPong | Behavior::Resume
@@ -367,6 +398,17 @@ fn native_idle_websockets_ping_match_pongs_and_expire_silent_peers() {
             ] {
                 scenario(workers, role, behavior);
             }
+        }
+    }
+}
+
+/// A Pong read together with a message counts although the application calls
+/// recv again only after the Ping's deadline (asupersync-5aioka item 4).
+#[test]
+fn native_pong_read_behind_a_message_counts_after_a_slow_application() {
+    for workers in [0, 1, 2] {
+        for role in [Role::Client, Role::Server, Role::Split] {
+            scenario(workers, role, Behavior::PongBehindData);
         }
     }
 }

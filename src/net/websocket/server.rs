@@ -461,6 +461,7 @@ where
                 cx,
                 self.config.ping_interval,
                 self.close_handshake.is_open(),
+                !self.read_buf.is_empty(),
             ) {
                 Ok(Some(payload)) => {
                     let mut encoded = BytesMut::new();
@@ -590,6 +591,7 @@ where
                 }
             } else {
                 // Need more data - read from socket
+                self.heartbeat.note_drained();
                 if self.close_handshake.is_closed() {
                     return Ok(None);
                 }
@@ -1009,6 +1011,7 @@ where
 
         if n > 0 {
             self.read_buf.extend_from_slice(&temp[..n]);
+            self.heartbeat.note_read();
         }
 
         Ok(n)

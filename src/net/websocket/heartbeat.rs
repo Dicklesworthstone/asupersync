@@ -20,6 +20,11 @@ pub(super) struct Heartbeat {
     pending_ping: Option<Bytes>,
     sequence: u64,
     failed: bool,
+    /// When peer bytes last reached the read buffer. A Pong is judged by this
+    /// arrival time, not by when the application next calls recv to decode it.
+    last_read: Option<Time>,
+    /// The read buffer held no complete frame when last decoded.
+    drained: bool,
 }
 
 #[derive(Clone)]
@@ -47,11 +52,13 @@ impl Heartbeat {
         self.failed = true;
     }
 
+    /// `buffered` is whether the connection's read buffer holds undecoded bytes.
     pub(super) fn update(
         &mut self,
         cx: &Cx,
         interval: Option<Duration>,
         open: bool,
+        buffered: bool,
     ) -> Result<Option<Bytes>, WsError> {
         if self.failed {
             return Err(timeout_error());
@@ -74,6 +81,12 @@ impl Heartbeat {
         let now = self.now();
         if let Some((_, deadline)) = &self.outstanding {
             if now >= *deadline {
+                // The Pong may have been read in time, behind a message the
+                // application took first: decode what arrived before the
+                // deadline before declaring the peer dead.
+                if buffered && !self.drained && self.last_read.is_some_and(|at| at < *deadline) {
+                    return Ok(None);
+                }
                 self.fail();
                 return Err(timeout_error());
             }
@@ -98,17 +111,34 @@ impl Heartbeat {
     }
 
     pub(super) fn received_pong(&mut self, payload: &[u8]) {
+        // The frame was read no later than the last read into the buffer.
+        let arrived = self.last_read.unwrap_or_else(|| self.now());
         if self.pending_ping.is_none()
             && self
                 .outstanding
                 .as_ref()
                 .is_some_and(|(expected, deadline)| {
-                    expected.as_ref() == payload && self.now() < *deadline
+                    expected.as_ref() == payload && arrived < *deadline
                 })
         {
             self.outstanding = None;
+            self.drained = false;
             self.next_ping = self.interval.map(|interval| self.now() + interval);
         }
+    }
+
+    /// Records that peer bytes reached the read buffer now.
+    pub(super) fn note_read(&mut self) {
+        if self.started {
+            self.last_read = Some(self.now());
+        }
+        self.drained = false;
+    }
+
+    /// Records that the read buffer holds no complete frame: nothing read in
+    /// time is left to decode.
+    pub(super) fn note_drained(&mut self) {
+        self.drained = true;
     }
 
     pub(super) fn ping_queued(&mut self) {
@@ -228,7 +258,7 @@ mod tests {
         let _ambient = Cx::set_current(Some(foreign.clone()));
         assert!(
             heartbeat
-                .update(&explicit, Some(interval), true)
+                .update(&explicit, Some(interval), true, false)
                 .unwrap()
                 .is_none()
         );
@@ -237,7 +267,7 @@ mod tests {
         assert!(deadline.at >= before + interval && deadline.at <= after + interval);
         assert!(
             heartbeat
-                .update(&foreign, Some(interval), true)
+                .update(&foreign, Some(interval), true, false)
                 .unwrap()
                 .is_none()
         );
@@ -266,7 +296,7 @@ mod tests {
         let mut heartbeat = Heartbeat::default();
         assert!(
             heartbeat
-                .update(&cx, Some(Duration::ZERO), true)
+                .update(&cx, Some(Duration::ZERO), true, false)
                 .unwrap()
                 .is_none()
         );
@@ -292,7 +322,7 @@ mod tests {
             ));
         }
         let payload = heartbeat
-            .update(&foreign, Some(Duration::ZERO), true)
+            .update(&foreign, Some(Duration::ZERO), true, false)
             .unwrap()
             .unwrap();
         heartbeat.ping_queued();
@@ -300,8 +330,99 @@ mod tests {
         clock.advance(1_000_000);
         heartbeat.received_pong(&payload);
         assert!(
-            matches!(heartbeat.update(&cx, Some(Duration::ZERO), true), Err(WsError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            matches!(heartbeat.update(&cx, Some(Duration::ZERO), true, false), Err(WsError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
             "a matching Pong at the deadline is late, even after thread preemption"
         );
+    }
+
+    /// A Pong is judged by when it reached the read buffer, not by when the
+    /// application next calls recv to decode it (asupersync-5aioka item 4).
+    #[test]
+    fn a_pong_read_in_time_counts_although_it_is_decoded_after_the_deadline() {
+        let clock = Arc::new(VirtualClock::new());
+        let cx = timed_cx(&clock);
+        let interval = Duration::from_millis(10);
+        let ms = |n: u64| n * 1_000_000;
+        let mut heartbeat = Heartbeat::default();
+        assert!(
+            heartbeat
+                .update(&cx, Some(interval), true, false)
+                .unwrap()
+                .is_none()
+        );
+        clock.advance(ms(10));
+        let payload = heartbeat
+            .update(&cx, Some(interval), true, false)
+            .unwrap()
+            .unwrap();
+        heartbeat.ping_queued();
+        // The Pong is read 1 ms after the Ping, behind a message the
+        // application takes first; its next recv comes 50 ms later.
+        clock.advance(ms(1));
+        heartbeat.note_read();
+        clock.advance(ms(50));
+        assert!(
+            heartbeat
+                .update(&cx, Some(interval), true, true)
+                .unwrap()
+                .is_none(),
+            "bytes read before the deadline are decoded before it can expire"
+        );
+        heartbeat.received_pong(&payload);
+        assert!(
+            heartbeat
+                .update(&cx, Some(interval), true, false)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            !heartbeat.failed(),
+            "the Pong read in time rearmed the heartbeat"
+        );
+
+        // Bytes read in time that hold no Pong: once the decoder finds no
+        // complete frame left, the deadline fails.
+        clock.advance(ms(10));
+        let _second_ping = heartbeat
+            .update(&cx, Some(interval), true, false)
+            .unwrap()
+            .unwrap();
+        heartbeat.ping_queued();
+        clock.advance(ms(1));
+        heartbeat.note_read();
+        clock.advance(ms(50));
+        assert!(
+            heartbeat
+                .update(&cx, Some(interval), true, true)
+                .unwrap()
+                .is_none()
+        );
+        heartbeat.note_drained();
+        assert!(
+            matches!(heartbeat.update(&cx, Some(interval), true, true), Err(WsError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "no Pong among the bytes read in time"
+        );
+
+        // Bytes read after the deadline get no grace.
+        let mut late = Heartbeat::default();
+        assert!(
+            late.update(&cx, Some(interval), true, false)
+                .unwrap()
+                .is_none()
+        );
+        clock.advance(ms(10));
+        let payload = late
+            .update(&cx, Some(interval), true, false)
+            .unwrap()
+            .unwrap();
+        late.ping_queued();
+        clock.advance(ms(20));
+        late.note_read();
+        assert!(
+            matches!(late.update(&cx, Some(interval), true, true), Err(WsError::Io(error)) if error.kind() == io::ErrorKind::TimedOut),
+            "a Pong read after the deadline is late"
+        );
+        late.received_pong(&payload);
+        assert!(late.failed());
     }
 }
