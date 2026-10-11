@@ -219,7 +219,7 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
 
     run_on_production(move |cx| async move {
         let scope = cx.scope();
-        let timeout_fut = scope.timeout::<(), (), _, _>(
+        let mut timeout_pinned = Box::pin(scope.timeout::<(), (), _, _>(
             &cx,
             Duration::from_secs(30),
             move |task_cx| async move {
@@ -228,8 +228,7 @@ fn dropping_scope_timeout_future_aborts_spawned_task() {
                 cancelled_clone.store(1, Ordering::SeqCst);
                 Ok(())
             },
-        );
-        let mut timeout_pinned = std::pin::pin!(timeout_fut);
+        ));
         // Poll once so the operation is spawned and starts running.
         let _ = std::future::poll_fn(|poll_cx| {
             let _ = timeout_pinned.as_mut().poll(poll_cx);

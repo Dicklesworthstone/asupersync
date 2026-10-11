@@ -268,6 +268,18 @@ fn scope_close_waits_for_targeted_work_and_join_wait_can_resume() {
                     assert!(Instant::now() < deadline, "close must cancel the target task");
                     yield_now().await;
                 }
+                assert!(
+                    !task.is_finished(),
+                    "blocking task must remain unfinished while its closure is blocked"
+                );
+                poll_fn(|poll_cx| {
+                    assert!(
+                        closing.as_mut().poll(poll_cx).is_pending(),
+                        "region.close() must remain pending while blocking task runs"
+                    );
+                    Poll::Ready(())
+                })
+                .await;
                 release.send(()).unwrap();
                 closing.await.unwrap();
                 assert_eq!(task.join().await.unwrap(), 73);

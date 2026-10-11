@@ -915,15 +915,30 @@ mod tests {
 
     #[test]
     fn drained_cancelled_pool_envelope_retires_capture_before_publication() {
-        struct Capture(Arc<AtomicUsize>);
+        struct Capture {
+            drops: Arc<AtomicUsize>,
+            was_finished_on_drop: Arc<std::sync::atomic::AtomicBool>,
+            state: Arc<DrainedBlockingState<u8>>,
+        }
         impl Drop for Capture {
-            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                self.was_finished_on_drop.store(
+                    self.state.inner.lock().finished,
+                    Ordering::SeqCst,
+                );
+            }
         }
         let drops = Arc::new(AtomicUsize::new(0));
         let calls = Arc::new(AtomicUsize::new(0));
-        let capture = Capture(Arc::clone(&drops));
-        let called = Arc::clone(&calls);
+        let was_finished_on_drop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let state = DrainedBlockingState::new();
+        let capture = Capture {
+            drops: Arc::clone(&drops),
+            was_finished_on_drop: Arc::clone(&was_finished_on_drop),
+            state: Arc::clone(&state),
+        };
+        let called = Arc::clone(&calls);
         state.cancel(crate::types::CancelReason::user("cancelled before pool claim"));
         let envelope = DrainedPoolWork {
             work: Some(move || {
@@ -938,6 +953,10 @@ mod tests {
         envelope.run();
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert!(
+            !was_finished_on_drop.load(Ordering::SeqCst),
+            "captures must be dropped before completion is published to state"
+        );
         let mut state = state.inner.lock();
         assert!(state.finished);
         assert!(matches!(state.result.take(),
