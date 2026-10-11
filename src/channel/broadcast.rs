@@ -530,6 +530,15 @@ impl<T: Clone> Sender<T> {
     }
 
     /// Returns the number of messages currently buffered in the channel.
+    ///
+    /// # Tokio Divergence
+    ///
+    /// Unlike Tokio's broadcast channel (which eagerly clears individual slots once
+    /// all active receivers have read them), `asupersync` retains messages in the
+    /// ring buffer until overwritten upon reaching capacity (eviction) or when the
+    /// channel is dropped. Therefore, `len()` reports the count of ring buffer slots
+    /// currently occupied rather than unread messages for a specific receiver, and
+    /// a `while !tx.is_empty()` loop will not drain the channel (br-asupersync-lh4z78 L2).
     #[must_use]
     #[inline]
     pub fn len(&self) -> usize {
@@ -537,6 +546,8 @@ impl<T: Clone> Sender<T> {
     }
 
     /// Returns `true` if no messages are buffered.
+    ///
+    /// See [`len`](Self::len) for ring buffer retention semantics.
     #[must_use]
     #[inline]
     pub fn is_empty(&self) -> bool {
