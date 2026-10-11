@@ -1772,17 +1772,27 @@ pub fn reconstruct_manifest_bytes(
     manifest: &PersistentChunkManifest,
     store: &ContentAddressedChunkStore,
 ) -> Result<Vec<u8>, DeltaError> {
+    // Verify every chunk once, before allocating, and size the output from the
+    // verified payloads rather than the manifest's own total: one hash per
+    // chunk, and the allocation never exceeds the bytes actually stored.
+    let mut payloads = Vec::new();
+    payloads
+        .try_reserve_exact(manifest.chunks.len())
+        .map_err(|_| DeltaError::ChunkSizeOverflow)?;
+    let mut capacity = 0_usize;
     for chunk in &manifest.chunks {
-        let _ = verified_chunk_payload(store, chunk)?;
+        let payload = verified_chunk_payload(store, chunk)?;
+        capacity = capacity
+            .checked_add(payload.len())
+            .ok_or(DeltaError::ChunkSizeOverflow)?;
+        payloads.push(payload);
     }
-    let capacity =
-        usize::try_from(manifest.total_size_bytes).map_err(|_| DeltaError::ChunkSizeOverflow)?;
     let mut bytes = Vec::new();
     bytes
         .try_reserve_exact(capacity)
         .map_err(|_| DeltaError::ChunkSizeOverflow)?;
-    for chunk in &manifest.chunks {
-        bytes.extend_from_slice(verified_chunk_payload(store, chunk)?);
+    for payload in payloads {
+        bytes.extend_from_slice(payload);
     }
     Ok(bytes)
 }
