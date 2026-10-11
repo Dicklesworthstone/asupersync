@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use crate::grpc::{Code, Metadata, Server};
 use crate::remote::RemoteCap;
