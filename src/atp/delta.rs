@@ -30,6 +30,11 @@ const DELTA_SEND_ITEM_WHOLE_CHUNK: u8 = 0;
 const DELTA_SEND_ITEM_SUBCHUNK_OPS: u8 = 1;
 const DELTA_SEND_ITEM_REPEATED_CHUNK: u8 = 2;
 const DELTA_SEND_ITEM_WHOLE_CHUNK_RUN: u8 = 3;
+/// Wire framing overhead of a [`DeltaResyncSendItem::SubchunkOps`] item (145 bytes)
+/// compared to a [`DeltaResyncSendItem::WholeChunk`] item (61 bytes).
+///
+/// A sub-delta only saves bandwidth when `encoded_ops + 84 < target_payload.len()`.
+pub const SUBDELTA_FRAMING_OVERHEAD_BYTES: usize = 145 - 61;
 const RECEIVER_HAVE_SET_BASE_WIRE_BYTES: u64 = 32 + 8 + 8;
 const RECEIVER_HAVE_SET_CHUNK_WIRE_BYTES: u64 = 32 + 8;
 
@@ -242,14 +247,29 @@ impl ContentAddressedChunkStore {
         })
     }
 
-    /// Whether a content id is available locally.
+    /// Whether a content id's payload is stored locally.
     #[must_use]
     pub fn contains(&self, content_id: &ContentId) -> bool {
         self.chunks.contains_key(content_id)
+    }
+
+    /// Whether verified coverage has been recorded for this content id.
+    #[must_use]
+    pub fn contains_coverage(&self, content_id: &ContentId) -> bool {
+        self.chunks.contains_key(content_id)
             || self
                 .verified_coverage
-                .iter()
-                .any(|chunk| &chunk.content_id == content_id)
+                .range(
+                    ReceiverChunkKey {
+                        content_id: content_id.clone(),
+                        size_bytes: 0,
+                    }..=ReceiverChunkKey {
+                        content_id: content_id.clone(),
+                        size_bytes: u64::MAX,
+                    },
+                )
+                .next()
+                .is_some()
     }
 
     /// Fetch a stored chunk by content id.
@@ -1612,7 +1632,24 @@ pub fn apply_delta_resync_send_plan(
     let mut store = receiver_store.clone();
     for item in &send_plan.items {
         match item {
-            DeltaResyncSendItem::WholeChunk { payload, .. } => {
+            DeltaResyncSendItem::WholeChunk { chunk, payload } => {
+                let actual_len =
+                    u64::try_from(payload.len()).map_err(|_| DeltaError::ChunkSizeOverflow)?;
+                if actual_len != chunk.size_bytes {
+                    return Err(DeltaError::ChunkPayloadSizeMismatch {
+                        index: chunk.index,
+                        expected: chunk.size_bytes,
+                        actual: actual_len,
+                    });
+                }
+                let actual_id = ContentId::from_bytes(payload);
+                if actual_id != chunk.content_id {
+                    return Err(DeltaError::ChunkPayloadHashMismatch {
+                        index: chunk.index,
+                        expected: chunk.content_id.clone(),
+                        actual: actual_id,
+                    });
+                }
                 store.insert(payload)?;
             }
             DeltaResyncSendItem::SubchunkOps {
@@ -1735,9 +1772,15 @@ pub fn reconstruct_manifest_bytes(
     manifest: &PersistentChunkManifest,
     store: &ContentAddressedChunkStore,
 ) -> Result<Vec<u8>, DeltaError> {
+    for chunk in &manifest.chunks {
+        let _ = verified_chunk_payload(store, chunk)?;
+    }
     let capacity =
         usize::try_from(manifest.total_size_bytes).map_err(|_| DeltaError::ChunkSizeOverflow)?;
-    let mut bytes = Vec::with_capacity(capacity);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| DeltaError::ChunkSizeOverflow)?;
     for chunk in &manifest.chunks {
         bytes.extend_from_slice(verified_chunk_payload(store, chunk)?);
     }
@@ -2238,7 +2281,11 @@ fn build_delta_resync_send_item(
 
         let ops = delta_subchunk::diff(target_payload, &signature.signature);
         let encoded_ops = encode_subdelta_ops(&ops)?;
-        if encoded_ops.len() >= target_payload.len() {
+        if encoded_ops
+            .len()
+            .saturating_add(SUBDELTA_FRAMING_OVERHEAD_BYTES)
+            >= target_payload.len()
+        {
             continue;
         }
         if best
