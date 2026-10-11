@@ -216,15 +216,56 @@ fn cancelled(cx: &Cx) -> RemoteOutcome {
     cx.cancel_reason().map_or_else(|| RemoteOutcome::Failed("persistent membership worker refused".to_owned()), RemoteOutcome::Cancelled)
 }
 
+async fn dispatch(
+    cx: &Cx, controller: Arc<PersistentMembershipController>, peer: &NodeId, bytes: &[u8],
+) -> RemoteOutcome {
+    if cx.checkpoint().is_err() { return cancelled(cx); }
+    if cx.blocking_pool_handle().is_none() {
+        return RemoteOutcome::Failed("persistent membership requires a context blocking pool".to_owned());
+    }
+    let job = match controller.prepare(peer, bytes) {
+        Ok(job) => job,
+        Err(error) => return RemoteOutcome::Failed(error.to_string()),
+    };
+    let receipt = job.bytes.to_vec();
+    let mut worker = match cx.spawn_blocking_drained(move |worker| {
+        if worker.checkpoint().is_err() { return cancelled(&worker); }
+        match job.execute() {
+            Ok(_) => RemoteOutcome::Success(receipt),
+            Err(error) => RemoteOutcome::Failed(error.to_string()),
+        }
+    }) {
+        Ok(worker) => worker,
+        Err(_) => return RemoteOutcome::Failed("persistent membership worker admission refused".to_owned()),
+    };
+    // Handler cancellation cannot retire the region owner while a queued or
+    // running update still owns its journal. Joining independently of the
+    // invocation also preserves a decision already persisted and projected.
+    let outcome = match worker.join().await {
+        Ok(outcome) => outcome,
+        Err(_) => cancelled(cx),
+    };
+    // Preserve this terminal value through the invocation task's ordinary
+    // cooperative completion policy as well as through the worker's join.
+    // Acknowledge an observed cancellation only after the worker has retired;
+    // an already-persisted decision cannot be replaced with a cancellation.
+    if cx.is_cancel_requested() { let _ = cx.checkpoint(); }
+    outcome
+}
+
 /// Alternative backend for the existing V1 capability and submission client.
 ///
 /// Grant only the certificate-bound authority via the normal peer policy. The
 /// private controller additionally checks that identity and the statement MAC.
 /// Require an explicit context blocking pool; no inline disk-I/O fallback exists.
 /// One controller-wide admission is taken BEFORE copies/spawn and is retained if
-/// its network waiter drops. The worker checks cancellation before starting,
-/// then completes a synchronous append/projection without pretending to roll it
-/// back. An exact success echo follows sync and checked local revocation posts;
+/// its network waiter drops. A runtime-owned task remains live until the pool
+/// retires the queued or running update and returns its journal. The worker
+/// checks cancellation before starting, then completes a synchronous append and
+/// projection without rolling either back. Joining waits for worker retirement
+/// independently of invocation cancellation, preserving a completed decision's
+/// exact success echo. A synchronous filesystem call or projection callback can
+/// delay region drain. The echo follows sync and checked local revocation posts;
 /// it does not certify child drain, peer liveness or persistent runtime tokens.
 /// V1 avoids replaying framework-cached lifecycle receipts after backend restart.
 pub fn register_persistent_membership_service(registry: &mut RemoteComputationRegistry,
@@ -233,28 +274,7 @@ pub fn register_persistent_membership_service(registry: &mut RemoteComputationRe
     registry.register::<Request, Response, _, _>(MEMBERSHIP_SERVICE_COMPUTATION, move |cx, invocation| {
         let controller = Arc::clone(&controller);
         async move {
-            if cx.checkpoint().is_err() { return Ok(cancelled(&cx)); }
-            if cx.blocking_pool_handle().is_none() {
-                return Ok(RemoteOutcome::Failed("persistent membership requires a context blocking pool".to_owned()));
-            }
-            let job = match controller.prepare(invocation.peer_node(), invocation.request().input.data()) {
-                Ok(job) => job, Err(error) => return Ok(RemoteOutcome::Failed(error.to_string())),
-            };
-            let receipt = job.bytes.to_vec();
-            let mut worker = match cx.spawn_blocking(move |worker| {
-                if worker.checkpoint().is_err() { return cancelled(&worker); }
-                match job.execute() {
-                    Ok(_) => RemoteOutcome::Success(receipt),
-                    Err(error) => RemoteOutcome::Failed(error.to_string()),
-                }
-            }) {
-                Ok(worker) => worker,
-                Err(_) => return Ok(RemoteOutcome::Failed("persistent membership worker admission refused".to_owned())),
-            };
-            match worker.join(&cx).await {
-                Ok(outcome) if !cx.is_cancel_requested() => Ok(outcome),
-                _ => Ok(cancelled(&cx)),
-            }
+            Ok(dispatch(&cx, controller, invocation.peer_node(), invocation.request().input.data()).await)
         }
     })
 }
