@@ -387,26 +387,38 @@ fn mr_scaling_linearity() {
 
         let pool1 = config.create_pool();
         let pool2 = config.create_pool();
+        // Tasks hold their worker until released, so none can finish before the
+        // measurement however slowly this thread runs (a 200 ms sleep raced it under
+        // fleet load: base_in_flight 3 of 5, ratio 2.67).
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let held = |release: Arc<std::sync::atomic::AtomicBool>| {
+            move || {
+                let started = std::time::Instant::now();
+                while !release.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(30) {
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+        };
 
         // Submit base_task_count tasks to pool1
         for _i in 0..base_task_count {
-            pool1.spawn(move || {
-                thread::sleep(Duration::from_millis(200)); // Long enough to create backlog
-            });
+            pool1.spawn(held(Arc::clone(&release)));
         }
 
         // Submit 2×base_task_count tasks to pool2
         for _i in 0..(base_task_count * 2) {
-            pool2.spawn(move || {
-                thread::sleep(Duration::from_millis(200));
-            });
+            pool2.spawn(held(Arc::clone(&release)));
         }
 
-        // Allow some time for queue buildup
-        thread::sleep(Duration::from_millis(50));
+        // Wait (bounded) until both pools are saturated: every worker holds a task.
+        let saturated = std::time::Instant::now();
+        while (pool1.busy_threads() < 2 || pool2.busy_threads() < 2) && saturated.elapsed() < Duration::from_secs(10) {
+            thread::sleep(Duration::from_millis(1));
+        }
 
         let queued_or_running1 = pool1.pending_count() + pool1.busy_threads();
         let queued_or_running2 = pool2.pending_count() + pool2.busy_threads();
+        release.store(true, Ordering::Release);
 
         // Under saturation, queued-or-running work should scale approximately linearly.
         if queued_or_running1 > 0 && queued_or_running2 > 0 {

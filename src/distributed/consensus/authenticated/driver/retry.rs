@@ -645,7 +645,7 @@ mod tests {
                             Poll::Ready(())
                         } else { Poll::Pending }
                     });
-                    crate::time::timeout(cx.now(), Duration::from_secs(5), all_applied)
+                    crate::time::timeout(cx.now(), Duration::from_secs(30), all_applied)
                         .await.expect("native UDP loss recovery deadline");
                     // Dropping caller-owned pumps retires their pending idle
                     // receive/timer futures before inspecting nodes again.

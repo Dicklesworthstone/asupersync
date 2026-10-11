@@ -5,6 +5,9 @@
 //! `on_upgrade_any` runs on all of them. Each test echoes one message
 //! through a real client.
 #![cfg(unix)]
+// HttpAutoListener's connection future nests deep enough under the tls
+// features to exceed the default trait-solver depth (as in http_auto_listener).
+#![recursion_limit = "256"]
 
 use asupersync::cx::Cx;
 use asupersync::http::h1::listener::{Http1Listener, Http1ListenerConfig};
