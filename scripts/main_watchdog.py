@@ -872,6 +872,40 @@ def lane_at_commit(lane: dict[str, Any], sha: str, target_exists: TargetExists |
     return {**lane, "argv": argv, "expected_targets": expected, "display_command": " ".join(argv)}
 
 
+def lane_for_red(lane: dict[str, Any], new_targets: set[str]) -> dict[str, Any]:
+    """The lane a bisect probe runs: only the `--test X` targets that own `new_targets`.
+
+    Each `--test X` is its own binary, so the red tests run exactly as in the full lane,
+    while a probe builds one or two test binaries instead of every target the batch
+    touched. On 10-11, each full-lane probe of a ~30-target lane took about 45 min, and
+    one red stalled coverage for hours. A red key no target owns, a lib red, or a lane
+    with no matching `--test` keeps the whole lane.
+    """
+    if lane["kind"] != "test":
+        return lane
+    owners = {target_of(t) for t in new_targets}
+    if None in owners:
+        return lane
+    argv: list[str] = []
+    kept: list[str] = []
+    source = lane["argv"]
+    index = 0
+    while index < len(source):
+        if source[index] == "--test" and index + 1 < len(source):
+            name = source[index + 1]
+            if name in owners:
+                argv += ["--test", name]
+                kept.append(name)
+            index += 2
+            continue
+        argv.append(source[index])
+        index += 1
+    if not kept:
+        return lane
+    expected = [t for t in lane.get("expected_targets", []) if t in kept]
+    return {**lane, "argv": argv, "expected_targets": expected, "display_command": " ".join(argv)}
+
+
 def red_can_exist_at(lane: dict[str, Any], sha: str, new_targets: set[str], target_exists: TargetExists | None) -> bool:
     """False when every newly red target's test target is absent at `sha`, so it cannot be red there."""
     if lane["kind"] != "test" or target_exists is None:
@@ -888,9 +922,10 @@ def probe(
     """Run one bisect probe. Returns (kind, outcome): kind is `red`, `clear` or `undecided`."""
     if not red_can_exist_at(lane, sha, new_targets, target_exists):
         return "clear", None  # the failing target does not exist yet at this commit
-    probe_lane = lane_at_commit(lane, sha, target_exists)
+    probe_lane = lane_at_commit(lane_for_red(lane, new_targets), sha, target_exists)
     text, exit_code = runner(probe_lane, sha)
     outcome = classify_lane_output(text, exit_code, probe_lane)
+    outcome["command"] = probe_lane["display_command"]
     if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
         return "red", outcome
     if outcome["verdict"] == VERDICT_RED and uncompiled_owners(outcome) & owners_of(new_targets):
@@ -935,7 +970,13 @@ def bisect_first_red(
     while lo < hi:
         mid = (lo + hi) // 2
         kind, outcome = probe(lane, batch[mid], runner, new_targets, target_exists)
-        probes.append({"sha": batch[mid], "verdict": outcome["verdict"] if outcome else "target-absent"})
+        probes.append(
+            {
+                "sha": batch[mid],
+                "verdict": outcome["verdict"] if outcome else "target-absent",
+                "command": outcome["command"] if outcome else None,
+            }
+        )
         if kind == "red":
             hi = mid
         elif kind == "clear":
@@ -1085,12 +1126,35 @@ def run_engine(
             if new_targets:
                 index, exact, probes = bisect_first_red(lane, batch, runner, new_targets, target_exists)
                 pre_existing = False
+                not_reproduced = False
                 base = plan.get("since")
-                if index == 0 and base:
+                if exact and index == len(batch) - 1 and lane["kind"] == "test":
+                    # Every probe below the head was clear, so only the head run saw this red.
+                    # A test that fails once on a loaded worker lands here too (147.139 blamed
+                    # a beads-only commit), so the head is probed once more before it is named.
+                    kind, again = probe(lane, head, runner, new_targets, target_exists)
+                    probes.append(
+                        {
+                            "sha": head,
+                            "verdict": again["verdict"] if again else "target-absent",
+                            "command": again["command"] if again else None,
+                            "confirm": True,
+                        }
+                    )
+                    if kind == "clear":
+                        not_reproduced = True
+                    elif kind == "undecided":
+                        exact = False
+                if index == 0 and base and not not_reproduced:
                     # Red at the first commit of the batch: it may predate the batch.
                     kind, base_outcome = probe(lane, base, runner, new_targets, target_exists)
                     probes.append(
-                        {"sha": base, "verdict": base_outcome["verdict"] if base_outcome else "target-absent", "batch_base": True}
+                        {
+                            "sha": base,
+                            "verdict": base_outcome["verdict"] if base_outcome else "target-absent",
+                            "command": base_outcome["command"] if base_outcome else None,
+                            "batch_base": True,
+                        }
                     )
                     if kind == "red":
                         pre_existing = True
@@ -1098,7 +1162,17 @@ def run_engine(
                         exact = False
                 culprit = commits[batch[index]]
                 payload = bead_payload(lane, culprit, outcome, batch, new_targets)
-                if pre_existing:
+                if not_reproduced:
+                    payload["title"] = payload["title"].replace("[main-watchdog] RED ", "[main-watchdog] FLAKY ", 1)
+                    payload["description"] = (
+                        f"**Not reproduced:** red in the head run at `{head}`, but it passed when the head was probed "
+                        "again, and every earlier probe was clear. No commit is blamed: the test depends on timing or "
+                        "load. The commit named below is only where the red was seen.\n\n" + payload["description"]
+                    )
+                    payload["priority"] = 1
+                    payload["labels"] = [*payload["labels"], "flaky"]
+                    payload["culprit"] = None
+                elif pre_existing:
                     payload["title"] = payload["title"].replace(
                         f"at {culprit['sha'][:9]}", f"already red at batch base {base[:9]}"
                     )
@@ -1110,16 +1184,18 @@ def run_engine(
                 elif not exact:
                     payload["title"] = payload["title"].replace(f"at {culprit['sha'][:9]}", f"in {batch[0][:9]}..{culprit['sha'][:9]}")
                 payloads.append(payload)
+                blamed = not (pre_existing or not_reproduced)
                 receipt.update(
                     new_red=sorted(new_targets),
-                    culprit=None if pre_existing else culprit["sha"],
-                    culprit_exact=exact and not pre_existing,
+                    culprit=culprit["sha"] if blamed else None,
+                    culprit_exact=exact and blamed,
                     pre_existing=pre_existing,
+                    not_reproduced=not_reproduced,
                     bisect_probes=probes,
                 )
                 for target in new_targets:
                     lane_known[target] = {
-                        "culprit": None if pre_existing else culprit["sha"],
+                        "culprit": culprit["sha"] if blamed else None,
                         "first_seen": now,
                         "bead": None,
                         "signature": payload["signature"],
@@ -2774,6 +2850,7 @@ def main(argv: list[str]) -> int:
         logs = scenario["lane_logs"]
 
         absent = {sha: set(names) for sha, names in scenario.get("absent_targets", {}).items()}
+        runs: dict[tuple[str, str], int] = {}
 
         def fake_runner(lane: dict[str, Any], sha: str) -> tuple[str, int]:
             # Like cargo: asking for a target that does not exist at `sha` fails the invocation.
@@ -2783,6 +2860,11 @@ def main(argv: list[str]) -> int:
                     name = argv[index + 1]
                     return f"error: no test target named `{name}` in `asupersync` package\n  Remote command finished: exit=101 in 1ms\n", 101
             entry = logs.get(lane["id"], {}).get(sha)
+            if isinstance(entry, list):
+                # Successive runs at one commit (a flaky target): one entry per run, the last repeats.
+                count = runs.get((lane["id"], sha), 0)
+                runs[(lane["id"], sha)] = count + 1
+                entry = entry[min(count, len(entry) - 1)]
             if entry is None:
                 return "", 103
             return entry["log"], entry.get("client_exit", 0)

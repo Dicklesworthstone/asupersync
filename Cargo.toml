@@ -1120,6 +1120,21 @@ path = "tests/http_client_https_e2e.rs"
 required-features = ["tls"]
 
 [[test]]
+name = "http_client_pool_wait"
+path = "tests/http_client_pool_wait.rs"
+required-features = ["test-internals"]
+
+[[test]]
+name = "http_deflate_interoperability"
+path = "tests/http_deflate_interoperability.rs"
+required-features = ["compression"]
+
+[[test]]
+name = "http_listener_cancellation"
+path = "tests/http_listener_cancellation.rs"
+required-features = ["test-internals"]
+
+[[test]]
 name = "initialized_startup_native"
 path = "tests/initialized_startup_native.rs"
 required-features = ["test-internals"]
@@ -1285,6 +1300,11 @@ path = "tests/pool_timeout_test.rs"
 required-features = ["test-internals"]
 
 [[test]]
+name = "postgres_array_codec"
+path = "tests/postgres_array_codec.rs"
+required-features = ["postgres"]
+
+[[test]]
 name = "postgres_make_test_connection_migration"
 path = "tests/postgres_make_test_connection_migration.rs"
 required-features = ["postgres"]
@@ -1307,6 +1327,11 @@ required-features = ["postgres"]
 [[test]]
 name = "postgres_real_server"
 path = "tests/postgres_real_server.rs"
+required-features = ["postgres"]
+
+[[test]]
+name = "postgres_time_json_codec"
+path = "tests/postgres_time_json_codec.rs"
 required-features = ["postgres"]
 
 [[test]]
@@ -1503,6 +1528,11 @@ required-features = ["test-internals"]
 name = "time_utc_rfc3339_foundation_contract"
 path = "tests/time_utc_rfc3339_foundation_contract.rs"
 required-features = ["cli"]
+
+[[test]]
+name = "tls_certificates"
+path = "tests/tls_certificates.rs"
+required-features = ["tls"]
 
 [[test]]
 name = "tls_pin_mismatch_e2e"
