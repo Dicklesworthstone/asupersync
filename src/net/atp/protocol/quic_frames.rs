@@ -22,7 +22,7 @@
 //! - HANDSHAKE_DONE: TLS handshake completion
 
 use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::net::atp::protocol::varint::{VarInt, VarIntError};
+use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt, VarIntError};
 use crate::net::quic_core::ConnectionId;
 use crate::types::outcome::Outcome;
 
@@ -761,9 +761,12 @@ impl QuicFrame {
             }
 
             0x06 => {
-                // CRYPTO
+                // CRYPTO (RFC 9000 §19.6: offset + length must not exceed 2^62-1)
                 let offset = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
                 let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                if offset.value().checked_add(length.value()).is_none_or(|end| end > VARINT_MAX) {
+                    return Err(QuicFrameError::InvalidFormat("crypto offset and length exceed 2^62-1".into()));
+                }
                 let data = copy_length_prefixed(buf, length)?;
                 Ok(Some(QuicFrame::Crypto { offset, data }))
             }
@@ -1229,6 +1232,19 @@ mod tests {
         let mut decode_buf = buf.freeze().reader();
         let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_crypto_frame_overflow_rejected() {
+        let mut buf = BytesMut::new();
+        QuicFrameType::Crypto.to_varint().encode_to_buf(&mut buf).unwrap();
+        VarInt::new(VARINT_MAX).unwrap().encode_to_buf(&mut buf).unwrap();
+        VarInt::new(1).unwrap().encode_to_buf(&mut buf).unwrap();
+        buf.put_u8(0x42);
+
+        let mut decode_buf = buf.freeze().reader();
+        let result = QuicFrame::decode(&mut decode_buf);
+        assert!(matches!(result, Err(QuicFrameError::InvalidFormat(_))));
     }
 
     #[test]

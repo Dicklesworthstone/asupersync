@@ -99,9 +99,11 @@ pub struct SymbolRepairProgress {
     pub already_present: usize,
 }
 
-/// Opaque, non-cloneable in-process continuation. Contains only bounded metadata
-/// and one bounded pending leaf; no socket, future, Cx or encoded value is retained.
-/// It is bound to its originating client, namespace, source snapshot and limits.
+/// Opaque, non-cloneable in-process continuation.
+///
+/// Contains only bounded metadata and one bounded pending leaf; no socket,
+/// future, Cx or encoded value is retained. It is bound to its originating
+/// client, namespace, source snapshot and limits.
 pub struct SymbolRepairCursor {
     owner: Arc<()>,
     source: Root,

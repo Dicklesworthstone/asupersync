@@ -50,7 +50,7 @@ use super::tls::{
 use crate::bytes::{Bytes, BytesMut};
 use crate::cx::Cx;
 use crate::net::atp::protocol::quic_frames::QuicFrame;
-use crate::net::atp::protocol::varint::VarInt;
+use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt};
 use crate::net::quic_core::{
     ConnectionId, LongHeader, LongPacketType, PacketHeader, ProtectedHeaderPrefix,
     ProtectedLongHeaderPrefix, RetryHeader, TransportParameters, apply_header_protection,
@@ -547,6 +547,9 @@ impl HandshakeCryptoReassembler {
         let end = offset
             .checked_add(data_len)
             .ok_or_else(|| handshake_failure("crypto_offset_overflow"))?;
+        if !data.is_empty() && end > VARINT_MAX {
+            return Err(handshake_failure("crypto_offset_overflow"));
+        }
         if end <= self.next_offset {
             return Ok(Vec::new());
         }
@@ -3428,6 +3431,32 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                 provider: "rustls-quic-handshake",
                 code: "crypto_overlap_conflict",
             })
+        ));
+    }
+
+    #[test]
+    fn crypto_reassembler_rejects_offset_or_end_exceeding_varint_max() {
+        let mut reassembler = HandshakeCryptoReassembler::default();
+        let err = reassembler
+            .push(VARINT_MAX, b"x")
+            .expect_err("offset + len > VARINT_MAX must fail");
+        assert!(matches!(
+            err,
+            QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "crypto_offset_overflow",
+            }
+        ));
+
+        let err2 = reassembler
+            .push(VARINT_MAX + 1, b"x")
+            .expect_err("offset > VARINT_MAX must fail");
+        assert!(matches!(
+            err2,
+            QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "crypto_offset_overflow",
+            }
         ));
     }
 
