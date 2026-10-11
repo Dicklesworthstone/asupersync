@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Waker};
 
 use crate::bytes::Bytes;
@@ -28,6 +29,13 @@ use crate::net::quic_native::streams::{
 #[path = "h3_receive_frame.rs"]
 mod receive_frame;
 use receive_frame::{DataFrameCursor, FrameHeader, FrameHeaderError};
+
+#[path = "h3_request_writer.rs"]
+mod request_writer;
+pub use request_writer::{NativeH3RequestWriteEvent, NativeH3RequestWriter};
+use request_writer::{
+    MAX_REQUEST_WRITERS, RequestWriteOwner, RequestWriterState, RequestWriterWake,
+};
 
 use super::h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole, H3Frame, H3NativeError,
@@ -644,6 +652,8 @@ pub struct NativeH3Session {
     /// and STOP_SENDING (with the error code) are still to be queued on the
     /// connection.
     rejected_requests: Vec<(StreamId, u64)>,
+    request_writers: BTreeMap<StreamId, Arc<RequestWriteOwner>>,
+    request_writer_wake: Arc<RequestWriterWake>,
 }
 
 impl NativeH3Session {
@@ -687,6 +697,8 @@ impl NativeH3Session {
             next_local_request_stream_id: 0,
             streaming_receive: None,
             rejected_requests: Vec::new(),
+            request_writers: BTreeMap::new(),
+            request_writer_wake: Arc::new(RequestWriterWake::default()),
         }
     }
 
@@ -824,6 +836,7 @@ impl NativeH3Session {
         body: Bytes,
     ) -> Result<StreamId, NativeH3SessionError> {
         self.ensure_ready_for_messages(connection)?;
+        self.reap_request_writers(cx, connection)?;
         if self.role != H3EndpointRole::Client {
             return Err(NativeH3SessionError::InvalidState(
                 "only a client session can send requests",
@@ -877,6 +890,134 @@ impl NativeH3Session {
         self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
         connection.write_stream(cx, stream_id, Bytes::from(wire), true)?;
         Ok(stream_id)
+    }
+
+    /// Open a request whose body can exceed the peer's initial send credit.
+    ///
+    /// The head is validated and bounded before opening a QUIC stream. The
+    /// returned writer retains HEADERS until it is polled, then accepts one
+    /// bounded DATA frame at a time. `end_stream` queues FIN with HEADERS for
+    /// requests with no body. Otherwise the caller must eventually flush
+    /// `finish` or trailers. Both kinds of frame can be fragmented across
+    /// multiple stream/connection credit updates.
+    ///
+    /// This session retains cancellation ownership for unfinished writers.
+    /// At most 4096 writers may be live at once, further bounded by an
+    /// explicitly configured `max_concurrent_request_streams` and QUIC's own
+    /// stream admission. Finished/cancelled writers are reaped on the next
+    /// session event poll or request start. Dropping a writer before FIN
+    /// schedules RESET_STREAM and STOP_SENDING; continue driving the session
+    /// and transport to transmit them.
+    pub fn start_request_writer(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        head: &H3RequestHead,
+        end_stream: bool,
+    ) -> Result<NativeH3RequestWriter, NativeH3SessionError> {
+        self.ensure_ready_for_messages(connection)?;
+        self.reap_request_writers(cx, connection)?;
+        if self.role != H3EndpointRole::Client {
+            return Err(NativeH3SessionError::InvalidState(
+                "only a client session can send requests",
+            ));
+        }
+        if self.closing {
+            return Err(NativeH3SessionError::InvalidState(
+                "session is closing and rejects new requests",
+            ));
+        }
+        if self
+            .state
+            .goaway_id()
+            .is_some_and(|goaway_id| self.next_local_request_stream_id >= goaway_id)
+        {
+            return Err(NativeH3SessionError::InvalidState(
+                "peer GOAWAY rejects the next request stream",
+            ));
+        }
+        let limit = self
+            .config
+            .max_concurrent_request_streams
+            .map_or(MAX_REQUEST_WRITERS, |limit| {
+                usize::try_from(limit)
+                    .unwrap_or(usize::MAX)
+                    .min(MAX_REQUEST_WRITERS)
+            });
+        if self.request_writers.len() >= limit {
+            return Err(NativeH3SessionError::InvalidState(
+                "incremental request writer limit reached",
+            ));
+        }
+        let field_section = qpack_encode_request_field_section(head)?;
+        if field_section.len() > self.config.max_frame_payload_size {
+            return Err(NativeH3SessionError::Protocol(
+                H3NativeError::FrameTooLarge {
+                    payload_size: field_section.len(),
+                    max_size: self.config.max_frame_payload_size,
+                },
+            ));
+        }
+        let wire = encode_frame(H3Frame::Headers(field_section))?;
+        let stream_id = connection.open_bidi_stream(cx)?;
+        if stream_id.0 != self.next_local_request_stream_id {
+            // A caller shared this session's stream allocator. Refuse that
+            // composition without orphaning the stream we just opened.
+            cx.masked(|| {
+                connection.reset_stream(cx, stream_id, H3_REQUEST_CANCELLED)?;
+                connection.stop_stream_receiving(cx, stream_id, H3_REQUEST_CANCELLED)?;
+                Ok::<(), NativeH3SessionError>(())
+            })?;
+            return Err(NativeH3SessionError::InvalidState(
+                "QUIC request stream allocation was shared outside the HTTP/3 session",
+            ));
+        }
+        self.next_local_request_stream_id = self.next_local_request_stream_id.saturating_add(4);
+        let owner = Arc::new(RequestWriteOwner::new(Arc::clone(&self.request_writer_wake)));
+        self.request_writers.insert(stream_id, Arc::clone(&owner));
+        Ok(NativeH3RequestWriter {
+            inner: NativeH3ResponseWriter {
+                stream_id,
+                phase: NativeH3ResponsePhase::HeadPending,
+                pending: Some(NativeH3PendingWrite {
+                    wire,
+                    fin: end_stream,
+                    event: NativeH3WriteEvent::Head { end_stream },
+                    next_phase: if end_stream {
+                        NativeH3ResponsePhase::Finished
+                    } else {
+                        NativeH3ResponsePhase::Open
+                    },
+                }),
+                max_frame_payload_size: self.config.max_frame_payload_size,
+            },
+            owner,
+            write_offset: 0,
+        })
+    }
+
+    fn reap_request_writers(
+        &mut self,
+        cx: &Cx,
+        connection: &mut QuicConnection,
+    ) -> Result<(), NativeH3SessionError> {
+        let retired: Vec<_> = self
+            .request_writers
+            .iter()
+            .filter_map(|(&stream, owner)| {
+                (owner.state() != RequestWriterState::Active).then_some(stream)
+            })
+            .collect();
+        for stream in retired {
+            if self.request_writers[&stream].state() == RequestWriterState::Abandoned {
+                // Only the two bounded cleanup controls are masked. A caller
+                // using the cancelled upload's Cx must still release its
+                // protocol ownership before the next checkpoint can fail.
+                cx.masked(|| self.reset_request(cx, connection, stream, H3_REQUEST_CANCELLED))?;
+            }
+            self.request_writers.remove(&stream);
+        }
+        Ok(())
     }
 
     /// Queue one informational response without closing the response stream.
@@ -1031,8 +1172,14 @@ impl NativeH3Session {
                 "request cancellation requires a client bidirectional stream",
             ));
         }
+        if let Some(owner) = self.request_writers.get(&stream_id) {
+            owner.abandon();
+        }
         connection.reset_stream(cx, stream_id, error_code)?;
         connection.stop_stream_receiving(cx, stream_id, error_code)?;
+        if let Some(owner) = self.request_writers.get(&stream_id) {
+            owner.cancel();
+        }
         Ok(())
     }
 
@@ -1079,6 +1226,7 @@ impl NativeH3Session {
         connection: &mut QuicConnection,
     ) -> Result<Option<NativeH3Event>, NativeH3SessionError> {
         self.ensure_ready_for_messages(connection)?;
+        self.reap_request_writers(cx, connection)?;
         if self.streaming_receive.is_some() {
             loop {
                 if let Some(event) = self.events.pop_front() {
@@ -1109,6 +1257,14 @@ impl NativeH3Session {
     ) -> Poll<Result<NativeH3Event, NativeH3SessionError>> {
         if let Err(error) = self.ensure_ready_for_messages(connection) {
             return Poll::Ready(Err(error));
+        }
+        // Register before reaping so a concurrent writer drop cannot leave
+        // this event consumer parked without a receive-side transport edge.
+        if !self.request_writers.is_empty() {
+            self.request_writer_wake.register(task_cx);
+            if let Err(error) = self.reap_request_writers(cx, connection) {
+                return Poll::Ready(Err(error));
+            }
         }
         if self.streaming_receive.is_some() {
             return self.poll_streaming_event(cx, connection, task_cx);
@@ -1330,6 +1486,9 @@ impl NativeH3Session {
         // QUIC exposes that reset exactly once, including when duplicate
         // transport frames arrive after its terminal receive notification.
         if let Some((error_code, final_size)) = readiness.reset {
+            if let Some(owner) = self.request_writers.get(&stream_id) {
+                owner.abandon();
+            }
             let kind = self.classify_reset_stream(connection, stream_id)?;
             match kind {
                 Some(IncomingStreamKind::Control) => {
@@ -1420,6 +1579,9 @@ impl NativeH3Session {
         stream_id: StreamId,
         error_code: u64,
     ) -> Result<(), NativeH3SessionError> {
+        if let Some(owner) = self.request_writers.get(&stream_id) {
+            owner.abandon();
+        }
         self.state.abort_request_stream(stream_id.0)?;
         self.incoming.remove(&stream_id);
         self.forget_streaming_readiness(stream_id);

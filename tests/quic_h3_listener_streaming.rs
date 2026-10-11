@@ -488,6 +488,315 @@ mod native_h3_listener_live {
             .await;
         }
 
+        fn incremental_head(path: &str, size: Option<usize>, large_head: bool) -> H3RequestHead {
+            let mut headers = size
+                .map(|size| vec![("content-length".to_owned(), size.to_string())])
+                .unwrap_or_default();
+            if large_head {
+                headers.push(("x-upload-metadata".to_owned(), "h".repeat(1024)));
+            }
+            H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("POST".to_owned()),
+                    scheme: Some("https".to_owned()),
+                    authority: Some("localhost".to_owned()),
+                    path: Some(path.to_owned()),
+                    ..H3PseudoHeaders::default()
+                },
+                headers,
+            )
+            .unwrap()
+        }
+
+        async fn flush_incremental_request(
+            cx: &Cx,
+            owner: &mut NativeQuicUdpConnection,
+            session: &mut NativeH3Session,
+            writer: &mut asupersync::http::h3::NativeH3RequestWriter,
+            received: &mut Vec<NativeH3Event>,
+        ) -> (asupersync::http::h3::NativeH3RequestWriteEvent, usize) {
+            let mut pending = 0;
+            loop {
+                let result = writer.poll_flush(
+                    cx,
+                    owner.connection_mut(),
+                    &mut Context::from_waker(Waker::noop()),
+                );
+                owner.flush(cx).await.unwrap();
+                received.extend(drain_h3_events(cx, session, owner.connection_mut()));
+                match result {
+                    Poll::Ready(Ok(Some(event))) => return (event, pending),
+                    Poll::Pending => {
+                        pending += 1;
+                        owner.drive_io_once(cx, Duration::from_millis(20)).await.unwrap();
+                        received.extend(drain_h3_events(cx, session, owner.connection_mut()));
+                    }
+                    other => panic!("incremental request must progress: {other:?}"),
+                }
+            }
+        }
+
+        async fn finish_incremental_response(
+            cx: &Cx,
+            owner: &mut NativeQuicUdpConnection,
+            session: &mut NativeH3Session,
+            stream: StreamId,
+            mut events: Vec<NativeH3Event>,
+            expected: &[u8],
+        ) {
+            let mut head_seen = false;
+            let mut body = Vec::new();
+            loop {
+                for event in events.drain(..) {
+                    match event {
+                        NativeH3Event::ResponseHeaders { stream_id, head } => {
+                            assert_eq!(stream_id, stream);
+                            assert_eq!(head.status, 200);
+                            assert!(!head_seen);
+                            head_seen = true;
+                        }
+                        NativeH3Event::Data { stream_id, bytes } => {
+                            assert_eq!(stream_id, stream);
+                            assert!(head_seen);
+                            body.extend_from_slice(&bytes);
+                            assert!(body.len() <= expected.len());
+                        }
+                        NativeH3Event::Finished { stream_id } => {
+                            assert_eq!(stream_id, stream);
+                            assert!(head_seen);
+                            assert_eq!(body, expected);
+                            return;
+                        }
+                        other => panic!("unexpected incremental response: {other:?}"),
+                    }
+                }
+                owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+                events.extend(drain_h3_events(cx, session, owner.connection_mut()));
+            }
+        }
+
+        #[test]
+        fn authenticated_incremental_request_crosses_both_windows_with_exact_body_and_fin() {
+            use asupersync::http::h3::NativeH3RequestWriteEvent;
+
+            for workers in [1, 2] {
+                for trailers in [false, true] {
+                    run(workers, async move {
+                        const WINDOW: u64 = 256;
+                        const QUEUE_BYTES: usize = 64;
+                        let cx = Cx::current().unwrap();
+                        let expected: Vec<u8> = (0_u8..=255).cycle().take(16_384).collect();
+                        let handler_expected = expected.clone();
+                        let router = Router::new().route(
+                            "/incremental",
+                            post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                                move |_request_cx: Cx, mut body: StreamingRawBody| {
+                                    let expected = handler_expected.clone();
+                                    async move {
+                                        let mut received = Vec::new();
+                                        let mut trailers_seen = false;
+                                        while let Some(frame) = std::future::poll_fn(|task_cx| {
+                                            Pin::new(&mut body).poll_frame(task_cx)
+                                        }).await {
+                                            match frame.unwrap() {
+                                                Frame::Data(bytes) => {
+                                                    assert!(!trailers_seen);
+                                                    received.extend_from_slice(bytes.chunk());
+                                                }
+                                                Frame::Trailers(fields) => {
+                                                    assert!(trailers && !trailers_seen);
+                                                    assert_trailer_fields(&fields, &[
+                                                        ("x-upload-complete".to_owned(), "yes".to_owned()),
+                                                    ]);
+                                                    trailers_seen = true;
+                                                }
+                                            }
+                                        }
+                                        assert_eq!(trailers_seen, trailers);
+                                        assert_eq!(received, expected);
+                                        assert!(body.queued_bytes_peak() <= QUEUE_BYTES);
+                                        Response::new(StatusCode::OK, "upload complete")
+                                    }
+                                },
+                            )),
+                        );
+                        let mut listener_config = config(QUEUE_BYTES);
+                        listener_config.endpoint.connection_config.recv_window = WINDOW;
+                        listener_config.endpoint.connection_config.connection_recv_limit = 512;
+                        listener_config.receive_window_bytes = WINDOW;
+                        let listener = bind(&cx, router, listener_config).await;
+                        let address = listener.local_addr();
+                        let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                        let serving = listener.serve_with_shutdown(&cx, async {
+                            shutdown_rx.recv(&cx).await.unwrap();
+                        });
+                        let client = async {
+                            let (mut owner, mut session) = connect(&cx, address, 102).await;
+                            assert_eq!(owner.connection().inner().streams().initial_send_windows().local_bidi, WINDOW);
+                            assert!(owner.connection().inner().streams().connection_send_remaining() <= 512);
+                            let mut writer = session.start_request_writer(
+                                &cx,
+                                owner.connection_mut(),
+                                &incremental_head("/incremental", Some(expected.len()), true),
+                                false,
+                            ).unwrap();
+                            let stream = writer.stream_id();
+                            let mut events = Vec::new();
+                            let (event, header_pending) = flush_incremental_request(
+                                &cx, &mut owner, &mut session, &mut writer, &mut events,
+                            ).await;
+                            assert_eq!(event, NativeH3RequestWriteEvent::Headers { end_stream: false });
+                            assert!(header_pending > 0, "HEADERS exceed the negotiated stream window");
+                            writer.queue_data(Bytes::copy_from_slice(&expected)).unwrap();
+                            let (event, body_pending) = flush_incremental_request(
+                                &cx, &mut owner, &mut session, &mut writer, &mut events,
+                            ).await;
+                            assert_eq!(event, NativeH3RequestWriteEvent::Data { payload_bytes: expected.len() });
+                            assert!(body_pending > 1, "one DATA frame exceeds both negotiated windows");
+                            assert!(!writer.is_finished());
+                            let terminal = if trailers {
+                                writer.queue_trailers(&[("x-upload-complete".to_owned(), "yes".to_owned())]).unwrap();
+                                NativeH3RequestWriteEvent::Trailers
+                            } else {
+                                writer.finish().unwrap();
+                                NativeH3RequestWriteEvent::Finished
+                            };
+                            assert_eq!(flush_incremental_request(
+                                &cx, &mut owner, &mut session, &mut writer, &mut events,
+                            ).await.0, terminal);
+                            assert!(writer.is_finished());
+                            drop(writer);
+                            finish_incremental_response(
+                                &cx, &mut owner, &mut session, stream, events, b"upload complete",
+                            ).await;
+                            shutdown_tx.send(&cx, ()).unwrap();
+                            acknowledge_shutdown_goaway(&cx, &mut owner, &mut session, stream.0 + 4, None).await;
+                        };
+                        let (report, ()) = zip(serving, client).await;
+                        let report = report.unwrap();
+                        assert_eq!(report.completed_requests, 1);
+                        assert_eq!(report.cancelled_requests, 0);
+                        assert_eq!(report.failed_connections, 0);
+                        assert_eq!(report.failed_request_cleanups, 0);
+                        assert!(!report.drain_timed_out);
+                    });
+                }
+            }
+        }
+
+        #[test]
+        fn authenticated_incremental_request_drop_at_flow_pending_cancels_and_reuses_connection() {
+            for workers in [1, 2] {
+                run(workers, async move {
+                    let cx = Cx::current().unwrap();
+                    let (parked_tx, mut parked_rx) = asupersync::channel::oneshot::channel();
+                    let parked = Arc::new(Mutex::new(Some(parked_tx)));
+                    let retired = Arc::new(AtomicUsize::new(0));
+                    let handler_retired = Arc::clone(&retired);
+                    let router = Router::new().route(
+                        "/abandon-incremental",
+                        post(AsyncCxFnHandler1::<_, StreamingRawBody>::new(
+                            move |request_cx: Cx, body: StreamingRawBody| {
+                                let mut parked = parked.lock().unwrap().take();
+                                let retired = Arc::clone(&handler_retired);
+                                async move {
+                                    let mut cancelled = std::pin::pin!(request_cx.cancelled());
+                                    std::future::poll_fn(|task_cx| {
+                                        let poll = cancelled.as_mut().poll(task_cx);
+                                        if poll.is_pending() && let Some(signal) = parked.take() {
+                                            signal.send(&request_cx, request_cx.clone()).unwrap();
+                                        }
+                                        poll
+                                    }).await;
+                                    assert!(request_cx.checkpoint().is_err());
+                                    drop(body);
+                                    retired.fetch_add(1, Ordering::SeqCst);
+                                    Response::new(StatusCode::OK, "cancelled upload cannot succeed")
+                                }
+                            },
+                        )),
+                    ).route("/healthy-incremental", post(FnHandler::new(|| {
+                        Response::new(StatusCode::OK, "connection survived")
+                    })));
+                    let mut listener_config = config(32);
+                    listener_config.endpoint.connection_config.recv_window = 256;
+                    listener_config.receive_window_bytes = 256;
+                    let listener = bind(&cx, router, listener_config).await;
+                    let address = listener.local_addr();
+                    let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+                    let serving = listener.serve_with_shutdown(&cx, async {
+                        shutdown_rx.recv(&cx).await.unwrap();
+                    });
+                    let client = async {
+                        let (mut owner, mut session) = connect(&cx, address, 103).await;
+                        let mut writer = session.start_request_writer(
+                            &cx, owner.connection_mut(),
+                            &incremental_head("/abandon-incremental", None, false), false,
+                        ).unwrap();
+                        let stream = writer.stream_id();
+                        let mut events = Vec::new();
+                        flush_incremental_request(&cx, &mut owner, &mut session, &mut writer, &mut events).await;
+                        assert!(events.is_empty());
+                        let request_cx: Cx = parked_rx.recv(&cx).await.unwrap();
+                        writer.queue_data(Bytes::from(vec![0x5a; 8192])).unwrap();
+                        let mut polls = 0;
+                        loop {
+                            assert!(writer.poll_flush(
+                                &cx, owner.connection_mut(), &mut Context::from_waker(Waker::noop()),
+                            ).is_pending());
+                            owner.flush(&cx).await.unwrap();
+                            owner.drive_io_once(&cx, Duration::from_millis(20)).await.unwrap();
+                            assert!(drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty());
+                            polls += 1;
+                            assert!(polls < 64, "the unread bounded body must apply backpressure");
+                            if !owner.connection().has_pending_stream_frames(stream)
+                                && owner.connection().inner().stream_send_credit_remaining(stream) == 0
+                            {
+                                break;
+                            }
+                        }
+                        assert!(writer.has_pending_write() && !writer.is_finished());
+                        assert!(writer.poll_flush(
+                            &cx,
+                            owner.connection_mut(),
+                            &mut Context::from_waker(Waker::noop()),
+                        ).is_pending(), "the empty packet queue must still wait for peer credit");
+                        assert_eq!(retired.load(Ordering::SeqCst), 0);
+                        drop(writer);
+                        assert!(drain_h3_events(&cx, &mut session, owner.connection_mut()).is_empty());
+                        owner.flush(&cx).await.unwrap();
+                        // Continue the authenticated driver until the peer's
+                        // cancellation edge is observed, then prove its owner drained.
+                        receive_cancelled(&cx, &mut owner, &mut session, stream,
+                            asupersync::http::h3::H3_REQUEST_CANCELLED).await;
+                        wait_region_closed(&request_cx).await;
+                        assert_eq!(retired.load(Ordering::SeqCst), 1);
+                        let mut healthy = session.start_request_writer(
+                            &cx, owner.connection_mut(),
+                            &incremental_head("/healthy-incremental", Some(0), false), true,
+                        ).unwrap();
+                        let healthy_stream = healthy.stream_id();
+                        assert_eq!(healthy_stream.0, stream.0 + 4);
+                        flush_incremental_request(&cx, &mut owner, &mut session, &mut healthy, &mut events).await;
+                        assert!(healthy.is_finished());
+                        drop(healthy);
+                        finish_incremental_response(&cx, &mut owner, &mut session,
+                            healthy_stream, events, b"connection survived").await;
+                        shutdown_tx.send(&cx, ()).unwrap();
+                        acknowledge_shutdown_goaway(&cx, &mut owner, &mut session,
+                            healthy_stream.0 + 4, None).await;
+                    };
+                    let (report, ()) = zip(serving, client).await;
+                    let report = report.unwrap();
+                    assert_eq!(report.completed_requests, 1);
+                    assert_eq!(report.cancelled_requests, 1);
+                    assert_eq!(report.failed_connections, 0);
+                    assert_eq!(report.failed_request_cleanups, 0);
+                    assert!(!report.drain_timed_out);
+                });
+            }
+        }
+
         async fn send_control_keepalive(cx: &Cx, owner: &mut NativeQuicUdpConnection) {
             // The existing client initializer opens its control stream first
             // (client unidirectional stream 2). An ignored GREASE frame keeps

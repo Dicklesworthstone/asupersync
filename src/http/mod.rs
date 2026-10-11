@@ -52,7 +52,8 @@ pub mod h3 {
         validate_request_pseudo_headers, validate_response_pseudo_headers,
     };
     pub use super::h3_quic::{
-        H3_REQUEST_CANCELLED, NativeH3Event, NativeH3Session, NativeH3SessionError,
+        H3_REQUEST_CANCELLED, NativeH3Event, NativeH3RequestWriteEvent, NativeH3RequestWriter,
+        NativeH3Session, NativeH3SessionError,
     };
     pub(crate) use super::h3_quic::{
         NativeH3ResponseWriter, NativeH3WriteEvent, h3_data_frame_wire_len,
