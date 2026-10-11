@@ -459,13 +459,16 @@ mod tests {
     #[test]
     fn test_chain_copy_to_bytes() {
         init_test("test_chain_copy_to_bytes");
-        let a = crate::bytes::Bytes::from_static(b"hello ").reader();
-        let b = crate::bytes::Bytes::from_static(b"world!").reader();
+        let first: &'static [u8] = b"hello ";
+        let second: &'static [u8] = b"world!";
+        let a = crate::bytes::Bytes::from_static(first).reader();
+        let b = crate::bytes::Bytes::from_static(second).reader();
         let mut chain = Chain::new(a, b);
 
-        // Copy within first segment
+        // Copy within first segment: a slice of its storage, no copy
         let s1 = chain.copy_to_bytes(3);
         assert_eq!(s1.as_ref(), b"hel");
+        assert_eq!(s1.as_ptr(), first.as_ptr(), "a copy within a half copied");
         assert_eq!(chain.remaining(), 9);
 
         // Copy straddling first and second segment
@@ -473,9 +476,14 @@ mod tests {
         assert_eq!(s2.as_ref(), b"lo wo");
         assert_eq!(chain.remaining(), 4);
 
-        // Copy remaining in second segment
+        // Copy remaining in second segment: again a slice, no copy
         let s3 = chain.copy_to_bytes(4);
         assert_eq!(s3.as_ref(), b"rld!");
+        assert_eq!(
+            s3.as_ptr(),
+            second[2..].as_ptr(),
+            "a copy within a half copied"
+        );
         assert_eq!(chain.remaining(), 0);
         crate::test_complete!("test_chain_copy_to_bytes");
     }

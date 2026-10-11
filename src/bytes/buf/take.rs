@@ -464,10 +464,13 @@ mod tests {
     #[test]
     fn test_take_copy_to_bytes() {
         init_test("test_take_copy_to_bytes");
-        let bytes = crate::bytes::Bytes::from_static(b"hello world");
+        let source: &'static [u8] = b"hello world";
+        let bytes = crate::bytes::Bytes::from_static(source);
         let mut take = bytes.reader().take(5);
         let sliced = take.copy_to_bytes(5);
         assert_eq!(sliced.as_ref(), b"hello");
+        // Delegating to the cursor slices its storage: no copy.
+        assert_eq!(sliced.as_ptr(), source.as_ptr(), "copy_to_bytes copied");
         assert_eq!(take.remaining(), 0);
         assert_eq!(take.limit(), 0);
         crate::test_complete!("test_take_copy_to_bytes");

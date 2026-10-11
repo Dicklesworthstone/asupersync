@@ -818,18 +818,38 @@ mod tests {
         }
     }
 
+    /// Runs `body` on a helper thread and re-raises its panic here. Without
+    /// the empty-chunk guard the copy loops on `advance(0)` forever, so a
+    /// regression must fail the test at the deadline instead of hanging it.
+    fn panic_within_deadline(body: impl FnOnce() + Send + 'static) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+            let _ = sender.send(result);
+        });
+        match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(Ok(())) => {}
+            Ok(Err(payload)) => std::panic::resume_unwind(payload),
+            Err(_) => panic!("the copy spun on an empty chunk instead of panicking"),
+        }
+    }
+
     #[test]
     #[should_panic(expected = "chunk returned empty with remaining() > 0")]
     fn test_copy_to_slice_panics_on_empty_chunk() {
-        let mut buf = EmptyChunkBuf(10);
-        let mut dst = [0u8; 5];
-        buf.copy_to_slice(&mut dst);
+        panic_within_deadline(|| {
+            let mut buf = EmptyChunkBuf(10);
+            let mut dst = [0u8; 5];
+            buf.copy_to_slice(&mut dst);
+        });
     }
 
     #[test]
     #[should_panic(expected = "chunk returned empty with remaining() > 0")]
     fn test_copy_to_bytes_panics_on_empty_chunk() {
-        let mut buf = EmptyChunkBuf(10);
-        let _ = buf.copy_to_bytes(5);
+        panic_within_deadline(|| {
+            let mut buf = EmptyChunkBuf(10);
+            let _ = buf.copy_to_bytes(5);
+        });
     }
 }
