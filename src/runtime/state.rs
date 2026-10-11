@@ -3100,6 +3100,7 @@ impl RuntimeState {
         validator.validate_task_transition_without_logging(task_id, event, context)
     }
 
+    #[allow(dead_code)]
     fn validate_live_task_protocol_transition(
         &self,
         task_id: TaskId,
@@ -12155,7 +12156,7 @@ pub(crate) mod completion_observer_test_support {
     /// Observes the actual completion lock and authoritative cleanup state.
     /// A failed try-lock is recorded instead of blocking the old implementation
     /// forever, so the same native test is a deterministic old-code failure.
-    pub(crate) struct LifecycleCompletionMetrics {
+    pub struct LifecycleCompletionMetrics {
         target: Mutex<Option<(Weak<ContendedMutex<RuntimeState>>, RegionId, TaskId)>>,
         events: Mutex<Vec<&'static str>>,
         reentries: AtomicUsize,
@@ -12164,7 +12165,7 @@ pub(crate) mod completion_observer_test_support {
     }
 
     impl LifecycleCompletionMetrics {
-        pub(crate) fn new(panic_on_lifecycle: bool) -> Arc<Self> {
+        pub fn new(panic_on_lifecycle: bool) -> Arc<Self> {
             Arc::new(Self {
                 target: Mutex::new(None),
                 events: Mutex::new(Vec::new()),
@@ -12174,7 +12175,7 @@ pub(crate) mod completion_observer_test_support {
             })
         }
 
-        pub(crate) fn arm(
+        pub fn arm(
             &self,
             state: &Arc<ContendedMutex<RuntimeState>>,
             region: RegionId,
@@ -12205,12 +12206,13 @@ pub(crate) mod completion_observer_test_support {
                     self.retired.fetch_add(1, Ordering::SeqCst);
                 }
             }
-            if self.panic_on_lifecycle && event != "completed" {
-                panic!("lifecycle observer sentinel: {event}");
-            }
+            assert!(
+                !(self.panic_on_lifecycle && event != "completed"),
+                "lifecycle observer sentinel: {event}"
+            );
         }
 
-        pub(crate) fn assert_completed(&self, discharged: &'static str) {
+        pub fn assert_completed(&self, discharged: &'static str) {
             assert_eq!(
                 *self.events.lock().unwrap(),
                 [discharged, "closed", "completed"]

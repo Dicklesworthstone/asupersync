@@ -4364,7 +4364,7 @@ fn region_close_validates_before_retiring_unified_and_sharded_validator_state() 
 
         // An absent machine really is invalid. The repair must preserve this
         // strict check rather than treating premature retirement as success.
-        state.dispatch_region_close_validation(region);
+        state.dispatch_region_close_validation(region, &mut None);
         let validator = state.cancel_protocol_validator().lock();
         assert_eq!(validator.violation_count(), 1);
         assert_eq!(validator.stats().0, 0);

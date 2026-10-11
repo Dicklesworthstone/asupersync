@@ -45,37 +45,49 @@ mod noop {
     /// No-op trace-level logging macro.
     #[macro_export]
     macro_rules! trace {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op debug-level logging macro.
     #[macro_export]
     macro_rules! debug {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op info-level logging macro.
     #[macro_export]
     macro_rules! info {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op warn-level logging macro.
     #[macro_export]
     macro_rules! warn {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op error-level logging macro.
     #[macro_export]
     macro_rules! error {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op event macro.
     #[macro_export]
     macro_rules! event {
-        ($($arg:tt)*) => {};
+        ($($arg:tt)*) => {
+            ()
+        };
     }
 
     /// No-op span macro that returns a `NoopSpan`.
