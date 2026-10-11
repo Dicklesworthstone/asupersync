@@ -69,11 +69,12 @@ impl Default for ReflectionRpcConfig {
 }
 
 impl ReflectionRpcConfig {
-    /// Configure reflection RPC limits honoring the server's configured max message size.
+    /// Configure reflection RPC limits honoring the server's configured message limits.
     #[must_use]
     pub fn for_server(config: &super::ServerConfig) -> Self {
         Self {
-            max_response_bytes: config.max_message_size,
+            max_request_bytes: config.max_recv_message_size,
+            max_response_bytes: config.max_send_message_size,
             ..Self::default()
         }
     }

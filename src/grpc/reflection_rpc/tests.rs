@@ -338,13 +338,15 @@ fn oversize_response_returns_in_band_error_reply_without_failing_stream() {
         other => panic!("expected in-band Error reply, got {other:?}"),
     }
 
-    // Case 3: for_server derives max_response_bytes from ServerConfig.
+    // Case 3: for_server derives message limits from ServerConfig.
     let server_config = crate::grpc::ServerConfig {
-        max_message_size: 1024 * 1024,
+        max_send_message_size: 1024 * 1024,
+        max_recv_message_size: 64 * 1024,
         ..Default::default()
     };
     let derived = ReflectionRpcConfig::for_server(&server_config);
     assert_eq!(derived.max_response_bytes, 1024 * 1024);
+    assert_eq!(derived.max_request_bytes, 64 * 1024);
 }
 
 async fn deadline_scenario(cx: Cx) {
