@@ -46,12 +46,16 @@ use crate::types::{CancelReason, Time};
 use parking_lot::Mutex;
 
 use super::connection::{CLIENT_PREFACE, ReceivedFrame};
-use super::{Connection, ConnectionState, ErrorCode, FrameCodec, H2Error, Header, Settings};
+use super::{Connection, ConnectionState, ErrorCode, Frame, FrameCodec, H2Error, Header, Settings};
 
 const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const HEADER_LIMIT: usize = 64 * 1024;
 const DATA_CHUNK: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
+/// Default maximum number of overhead frames (empty/padding-only DATA, PING,
+/// SETTINGS-ACK, PRIORITY, and unknown extension frames) permitted on a
+/// connection before closing it with `ENHANCE_YOUR_CALM`.
+const DEFAULT_MAX_OVERHEAD_FRAMES: usize = 10_000;
 /// Advertised receive-window bounds (RFC 9113 §6.9.2). The response body is
 /// buffered up to its limit anyway, so the windows track that limit within
 /// these bounds instead of granting 64 KiB of credit per round trip.
@@ -185,6 +189,7 @@ pub struct Http2Client {
     timeout: Duration,
     max_request_body: usize,
     max_response_body: usize,
+    max_overhead_frames: usize,
     #[cfg(feature = "tls")]
     tls_connector: Option<crate::tls::TlsConnector>,
     /// Idle connections kept for reuse ([`Self::reuse_connections`]).
@@ -197,6 +202,7 @@ impl fmt::Debug for Http2Client {
             .field("timeout", &self.timeout)
             .field("max_request_body", &self.max_request_body)
             .field("max_response_body", &self.max_response_body)
+            .field("max_overhead_frames", &self.max_overhead_frames)
             .finish_non_exhaustive()
     }
 }
@@ -207,6 +213,7 @@ impl Default for Http2Client {
             timeout: Duration::from_secs(30),
             max_request_body: DEFAULT_BODY_LIMIT,
             max_response_body: DEFAULT_BODY_LIMIT,
+            max_overhead_frames: DEFAULT_MAX_OVERHEAD_FRAMES,
             #[cfg(feature = "tls")]
             tls_connector: None,
             pool: None,
@@ -240,6 +247,15 @@ impl Http2Client {
     #[must_use]
     pub fn max_response_body(mut self, bytes: usize) -> Self {
         self.max_response_body = bytes;
+        self
+    }
+
+    /// Set the maximum number of overhead frames (empty/padding-only DATA, PING,
+    /// SETTINGS-ACK, PRIORITY, and unknown extension frames) permitted on a
+    /// connection before closing it with `ENHANCE_YOUR_CALM`.
+    #[must_use]
+    pub fn max_overhead_frames(mut self, limit: usize) -> Self {
+        self.max_overhead_frames = limit;
         self
     }
 
@@ -356,6 +372,14 @@ impl Http2RequestBuilder {
         self
     }
 
+    /// Override the maximum number of overhead frames permitted on this
+    /// request's connection before closing it with `ENHANCE_YOUR_CALM`.
+    #[must_use]
+    pub fn max_overhead_frames(mut self, limit: usize) -> Self {
+        self.client.max_overhead_frames = limit;
+        self
+    }
+
     /// Connect and execute in the caller's task. DNS, TLS, blocked flow control,
     /// and response collection share the same deadline and cancellation guard.
     pub async fn send(self, cx: &Cx) -> Result<Http2Response, Http2ClientError> {
@@ -388,6 +412,7 @@ impl Http2RequestBuilder {
                 // provably did not process on a reused connection is retried
                 // once, on a fresh one.
                 while let Some(mut conn) = pool.take(&origin, pool_now(cx)) {
+                    conn.max_overhead_frames = self.client.max_overhead_frames;
                     if conn.refresh().await.is_err() {
                         continue;
                     }
@@ -434,7 +459,8 @@ impl Http2RequestBuilder {
             } else {
                 transport
             };
-            let mut conn = Http2Conn::start(transport, limit).await?;
+            let mut conn =
+                Http2Conn::start(transport, limit, self.client.max_overhead_frames).await?;
             let (response, closed) = conn
                 .request(request, self.body, limit)
                 .await
@@ -467,7 +493,13 @@ impl Http2RequestBuilder {
         drive(
             cx,
             timeout,
-            exchange(transport, request, self.body, self.client.max_response_body),
+            exchange(
+                transport,
+                request,
+                self.body,
+                self.client.max_response_body,
+                self.client.max_overhead_frames,
+            ),
         )
         .await
     }
@@ -908,11 +940,12 @@ async fn exchange<T>(
     request: PreparedRequest,
     body: Bytes,
     limit: usize,
+    max_overhead_frames: usize,
 ) -> Result<Http2Response, Http2ClientError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut conn = Http2Conn::start(transport, limit).await?;
+    let mut conn = Http2Conn::start(transport, limit, max_overhead_frames).await?;
     conn.request(request, body, limit)
         .await
         .map(|(response, _)| response)
@@ -948,10 +981,25 @@ impl From<io::Error> for AttemptFailure {
     }
 }
 
+/// Whether an incoming frame counts against the connection's frame overhead budget
+/// (RFC 9113 / CVE-2019-9512, CVE-2019-9514, CVE-2019-9515, CVE-2019-9518).
+fn is_overhead_frame(frame: &Frame) -> bool {
+    match frame {
+        Frame::Ping(_) => true,
+        Frame::Settings(s) if s.ack => true,
+        Frame::Unknown { .. } => true,
+        Frame::Priority(_) => true,
+        Frame::Data(d) if d.data.is_empty() && !d.end_stream => true,
+        _ => false,
+    }
+}
+
 /// One client HTTP/2 connection, carrying one request at a time.
 struct Http2Conn<T> {
     wire: Framed<ReadErrorTap<T>, FrameCodec>,
     connection: Connection,
+    overhead_frames: usize,
+    max_overhead_frames: usize,
 }
 
 impl<T> Http2Conn<T>
@@ -959,7 +1007,11 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     /// Write the client preface and queue SETTINGS (sent with the request).
-    async fn start(mut transport: T, limit: usize) -> Result<Self, Http2ClientError> {
+    async fn start(
+        mut transport: T,
+        limit: usize,
+        max_overhead_frames: usize,
+    ) -> Result<Self, Http2ClientError> {
         transport.write_all(CLIENT_PREFACE).await?;
         let receive_window = u32::try_from(limit)
             .unwrap_or(u32::MAX)
@@ -979,7 +1031,12 @@ where
         };
         let wire =
             Framed::new(transport, FrameCodec::new()).with_max_buffer_len(DATA_CHUNK + 8192 + 9);
-        Ok(Self { wire, connection })
+        Ok(Self {
+            wire,
+            connection,
+            overhead_frames: 0,
+            max_overhead_frames,
+        })
     }
 
     /// Whether another request may open a stream on this connection. A
@@ -991,6 +1048,7 @@ where
             && !self.connection.goaway_received()
             && !self.connection.goaway_sent()
             && self.connection.remote_settings().max_concurrent_streams != 0
+            && self.overhead_frames < self.max_overhead_frames
     }
 
     /// Before reuse: take in what the server sent while the connection sat
@@ -1001,6 +1059,16 @@ where
             loop {
                 match Pin::new(&mut self.wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
+                        if is_overhead_frame(&frame) {
+                            if self.overhead_frames >= self.max_overhead_frames {
+                                return Poll::Ready(Err(H2Error::connection(
+                                    ErrorCode::EnhanceYourCalm,
+                                    "HTTP/2 connection frame overhead limit exceeded",
+                                )
+                                .into()));
+                            }
+                            self.overhead_frames = self.overhead_frames.saturating_add(1);
+                        }
                         self.connection.process_frame(frame)?;
                     }
                     Poll::Ready(Some(Err(error))) => return Poll::Ready(Err(error.into())),
@@ -1031,7 +1099,12 @@ where
         body: Bytes,
         limit: usize,
     ) -> Result<(Http2Response, bool), AttemptFailure> {
-        let Self { wire, connection } = self;
+        let Self {
+            wire,
+            connection,
+            overhead_frames,
+            max_overhead_frames,
+        } = self;
         let mut headers = Some(request.headers);
         let mut stream_id = None;
         let mut sent = 0;
@@ -1044,6 +1117,16 @@ where
                 match Pin::new(&mut *wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
                         progress = true;
+                        if is_overhead_frame(&frame) {
+                            if *overhead_frames >= *max_overhead_frames {
+                                return Poll::Ready(Err(H2Error::connection(
+                                    ErrorCode::EnhanceYourCalm,
+                                    "HTTP/2 connection frame overhead limit exceeded",
+                                )
+                                .into()));
+                            }
+                            *overhead_frames = overhead_frames.saturating_add(1);
+                        }
                         match connection.process_frame(frame)? {
                             Some(ReceivedFrame::Headers {
                                 stream_id: id,
@@ -1698,5 +1781,254 @@ mod tests {
         // take still answers with the newest live connection of its origin.
         pool.put(origin("d"), 6, Time::from_secs(63));
         assert_eq!(pool.take(&origin("d"), Time::from_secs(63)), Some(6));
+    }
+
+    struct ScriptedTransport {
+        incoming: crate::bytes::BytesMut,
+    }
+
+    impl ScriptedTransport {
+        fn new(incoming: crate::bytes::BytesMut) -> Self {
+            Self { incoming }
+        }
+    }
+
+    impl AsyncRead for ScriptedTransport {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.incoming.is_empty() {
+                return Poll::Pending;
+            }
+            let n = buf.remaining().min(this.incoming.len());
+            let chunk = this.incoming.split_to(n);
+            buf.put_slice(&chunk);
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for ScriptedTransport {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn drive_exchange(
+        builder: Http2RequestBuilder,
+        incoming: crate::bytes::BytesMut,
+    ) -> Result<Http2Response, Http2ClientError> {
+        let caller = Cx::for_testing();
+        let waker = Waker::from(Arc::new(CountWake::default()));
+        let mut task = Context::from_waker(&waker);
+        let mut future = Box::pin(builder.send_on(&caller, ScriptedTransport::new(incoming)));
+        for _ in 0..100 {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut task) {
+                return result;
+            }
+        }
+        panic!("scripted exchange did not complete in bounded poll steps");
+    }
+
+    #[test]
+    fn max_overhead_frames_enforces_empty_data_flood() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        // Response headers must precede DATA frames
+        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
+            .encode(&mut incoming)
+            .unwrap();
+        for _ in 0..3 {
+            Frame::Data(DataFrame::new(1, Bytes::new(), false))
+                .encode(&mut incoming)
+                .unwrap();
+        }
+
+        let client = Http2Client::new();
+        let res = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(2),
+            incoming,
+        );
+        match res {
+            Err(Http2ClientError::Protocol(err)) => {
+                assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+                assert!(err.message.contains("overhead limit exceeded"));
+            }
+            other => panic!("expected EnhanceYourCalm protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_overhead_frames_enforces_ping_flood() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{PingFrame, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        for i in 0..4 {
+            Frame::Ping(PingFrame::new([i as u8; 8]))
+                .encode(&mut incoming)
+                .unwrap();
+        }
+
+        let client = Http2Client::new();
+        let res = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(3),
+            incoming,
+        );
+        match res {
+            Err(Http2ClientError::Protocol(err)) => {
+                assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+                assert!(err.message.contains("overhead limit exceeded"));
+            }
+            other => panic!("expected EnhanceYourCalm protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_overhead_frames_enforces_settings_ack_and_priority_flood() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{PriorityFrame, PrioritySpec, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Settings(SettingsFrame::ack())
+            .encode(&mut incoming)
+            .unwrap();
+        Frame::Priority(PriorityFrame {
+            stream_id: 1,
+            priority: PrioritySpec {
+                exclusive: false,
+                dependency: 0,
+                weight: 16,
+            },
+        })
+        .encode(&mut incoming)
+        .unwrap();
+        Frame::Settings(SettingsFrame::ack())
+            .encode(&mut incoming)
+            .unwrap();
+
+        let client = Http2Client::new();
+        let res = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(2),
+            incoming,
+        );
+        match res {
+            Err(Http2ClientError::Protocol(err)) => {
+                assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+                assert!(err.message.contains("overhead limit exceeded"));
+            }
+            other => panic!("expected EnhanceYourCalm protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn overhead_frames_within_budget_succeed() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{DataFrame, HeadersFrame, PingFrame, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Ping(PingFrame::new([1; 8]))
+            .encode(&mut incoming)
+            .unwrap();
+        // HPACK static index 8 is (:status, 200), encoded as 0x88.
+        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
+            .encode(&mut incoming)
+            .unwrap();
+        Frame::Data(DataFrame::new(1, Bytes::new(), false))
+            .encode(&mut incoming)
+            .unwrap();
+        Frame::Data(DataFrame::new(1, Bytes::from_static(b"ok"), true))
+            .encode(&mut incoming)
+            .unwrap();
+
+        let client = Http2Client::new();
+        let response = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(5),
+            incoming,
+        )
+        .expect("request should succeed when overhead is within budget");
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body.as_ref(), b"ok");
+    }
+
+    #[test]
+    fn terminal_empty_data_is_not_counted_as_overhead() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        // Response headers without end_stream
+        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
+            .encode(&mut incoming)
+            .unwrap();
+        // Terminal empty DATA frame (end_stream: true)
+        Frame::Data(DataFrame::new(1, Bytes::new(), true))
+            .encode(&mut incoming)
+            .unwrap();
+
+        let client = Http2Client::new();
+        // Even with max_overhead_frames = 0, a terminal empty DATA frame is not overhead.
+        let response = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(0),
+            incoming,
+        )
+        .expect("terminal empty DATA frame must not be charged as overhead");
+
+        assert_eq!(response.status, 200);
+    }
+
+    #[test]
+    fn non_terminal_empty_data_with_zero_budget_fails() {
+        use crate::bytes::BytesMut;
+        use crate::http::h2::frame::{DataFrame, SettingsFrame};
+
+        let mut incoming = BytesMut::new();
+        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Data(DataFrame::new(1, Bytes::new(), false))
+            .encode(&mut incoming)
+            .unwrap();
+
+        let client = Http2Client::new();
+        let res = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(0),
+            incoming,
+        );
+        match res {
+            Err(Http2ClientError::Protocol(err)) => {
+                assert_eq!(err.code, ErrorCode::EnhanceYourCalm);
+                assert!(err.message.contains("overhead limit exceeded"));
+            }
+            other => panic!("expected EnhanceYourCalm protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_default_max_overhead_frames() {
+        let client = Http2Client::new();
+        assert_eq!(client.max_overhead_frames, DEFAULT_MAX_OVERHEAD_FRAMES);
+        assert_eq!(DEFAULT_MAX_OVERHEAD_FRAMES, 10_000);
+
+        let custom = client.max_overhead_frames(500);
+        assert_eq!(custom.max_overhead_frames, 500);
     }
 }
