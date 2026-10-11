@@ -7537,6 +7537,24 @@ mod tests {
         }
 
         #[test]
+        fn merge_preserves_method_not_allowed_layers_asupersync_vftw38_item8() {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let router = Router::new()
+                .route("/item", get(FnHandler::new(ok_handler)))
+                .layer(RecordingLayer::new("mw", Arc::clone(&log)))
+                .route("/item", post(FnHandler::new(created_handler)));
+
+            let resp = router.handle(Request::new("DELETE", "/item"));
+            assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+            assert_eq!(resp.header_value("allow"), Some("GET, POST"));
+            assert_eq!(
+                *log.lock().expect("log lock"),
+                vec!["enter:mw".to_string(), "exit:mw".to_string()],
+                "method-not-allowed must retain layer wrapping across merge"
+            );
+        }
+
+        #[test]
         fn cors_layer_handles_preflight_without_options_route() {
             use crate::web::middleware::{CorsLayer, CorsPolicy};
 
@@ -8006,23 +8024,6 @@ mod tests {
             assert_eq!(resp2.status, StatusCode::CREATED);
         }
 
-        #[test]
-        fn merge_preserves_method_not_allowed_layers_asupersync_vftw38_item8() {
-            let log = Arc::new(Mutex::new(Vec::new()));
-            let router = Router::new()
-                .route("/item", get(FnHandler::new(ok_handler)))
-                .layer(RecordingLayer::new("mw", Arc::clone(&log)))
-                .route("/item", post(FnHandler::new(created_handler)));
-
-            let resp = router.handle(Request::new("DELETE", "/item"));
-            assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
-            assert_eq!(resp.header_value("allow"), Some("GET, POST"));
-            assert_eq!(
-                *log.lock().expect("log lock"),
-                vec!["enter:mw".to_string(), "exit:mw".to_string()],
-                "method-not-allowed must retain layer wrapping across merge"
-            );
-        }
 
         #[test]
         fn nest_prefix_without_leading_slash_normalizes_asupersync_vftw38_item9() {
