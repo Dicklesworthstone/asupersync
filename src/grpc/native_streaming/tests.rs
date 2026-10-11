@@ -284,6 +284,19 @@ fn malformed_and_unnegotiated_response_headers_fail_closed() {
 }
 
 #[test]
+fn unnegotiated_response_compression_maps_to_internal_error() {
+    let headers = vec![(":status", "200"), ("content-type", "application/grpc"), ("grpc-encoding", "gzip")];
+    let mut bytes = frame(4, 0, 0, &[]);
+    bytes.extend(header_block(&headers, false));
+    let wire = Wire::new(bytes);
+    let cx = context(&Arc::new(VirtualClock::new()));
+    let result = complete(channel().server_streaming_on(&cx, ScriptIo(Arc::clone(&wire)), "/s/M", Request::new(Bytes::new()), IdentityCodec));
+    let err = result.expect_err("unnegotiated compression should fail");
+    assert_eq!(err.code(), Code::Internal);
+    assert_eq!(err.message(), "unnegotiated gRPC response compression");
+}
+
+#[test]
 fn cancellation_wakes_a_parked_read_and_preserves_attribution() {
     for (cause, code) in [(CancelKind::User, Code::Cancelled), (CancelKind::Deadline, Code::DeadlineExceeded), (CancelKind::CostBudget, Code::ResourceExhausted)] {
         let wire = Wire::new(initial());

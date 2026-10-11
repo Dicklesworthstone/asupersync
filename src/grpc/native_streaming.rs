@@ -507,9 +507,9 @@ impl ResponseState {
             }
             if let Some(encoding) = unique(&headers, "grpc-encoding")? {
                 let selected = CompressionEncoding::from_header_value(encoding)
-                    .ok_or_else(|| Status::unimplemented("unsupported gRPC response compression"))?;
+                    .ok_or_else(|| Status::internal("unsupported gRPC response compression"))?;
                 if selected != CompressionEncoding::Identity && !self.accepted.contains(&selected) {
-                    return Err(Status::unimplemented("unnegotiated gRPC response compression"));
+                    return Err(Status::internal("unnegotiated gRPC response compression"));
                 }
                 self.encoding = Some(encoding.to_owned());
             }

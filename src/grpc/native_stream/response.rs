@@ -144,7 +144,7 @@ impl ResponseHead {
             }
             if let Some(value) = &encoding {
                 if value != "identity" && !(value == "gzip" && self.accept_gzip) {
-                    return Err(Status::unimplemented("unsupported gRPC response compression"));
+                    return Err(Status::internal("unsupported gRPC response compression"));
                 }
             }
         } else if !end_stream {
@@ -292,5 +292,15 @@ mod tests {
         let mut state = ResponseHead::new(1024, false);
         state.headers(vec![Header::new(":status", "503"), Header::new("grpc-status", "7")], true).unwrap();
         assert_eq!(state.terminal.unwrap().code(), Code::PermissionDenied);
+    }
+
+    #[test]
+    fn unsupported_response_encoding_maps_to_internal() {
+        let mut state = ResponseHead::new(1024, false);
+        let mut headers = head();
+        headers.push(Header::new("grpc-encoding", "deflate"));
+        let err = state.headers(headers, false).unwrap_err();
+        assert_eq!(err.code(), Code::Internal);
+        assert_eq!(err.message(), "unsupported gRPC response compression");
     }
 }
