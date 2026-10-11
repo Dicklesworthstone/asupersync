@@ -1249,6 +1249,9 @@ Security:
   path for the life of the process (`dofi11`).
 - `ObligationLedger::try_commit` and `try_abort` return `NotFound`,
   `NotPending` or `TokenMismatch` where they panicked (`rrtgoy`).
+- wasm32: a `RuntimeBuilder` runtime's timer clock reads the host's monotonic
+  time. Before, the clock was never fed and stayed at zero, so every nonzero
+  sleep or timeout waited forever (`fqdvqn`).
 - Entry macros: `#[asupersync::main]` and `#[asupersync::test]` no longer
   trip `clippy::result_large_err` in the caller's crate for an entry that
   returns `Result<(), asupersync::Error>`.

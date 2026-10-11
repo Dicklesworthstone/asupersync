@@ -3661,7 +3661,7 @@ impl RuntimeBuilder {
             #[cfg(target_arch = "wasm32")]
             {
                 self.timer_driver = Some(TimerDriverHandle::with_browser_clock(Arc::new(
-                    crate::time::BrowserMonotonicClock::default(),
+                    crate::time::BrowserMonotonicClock::host_sampled(),
                 )));
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -6057,7 +6057,7 @@ impl RuntimeInner {
                 state.set_io_driver(IoDriverHandle::new(reactor));
                 #[cfg(target_arch = "wasm32")]
                 state.set_timer_driver(TimerDriverHandle::with_browser_clock(Arc::new(
-                    crate::time::BrowserMonotonicClock::default(),
+                    crate::time::BrowserMonotonicClock::host_sampled(),
                 )));
                 #[cfg(not(target_arch = "wasm32"))]
                 state.set_timer_driver(TimerDriverHandle::with_wall_clock());
@@ -6105,7 +6105,7 @@ impl RuntimeInner {
         if guard.timer_driver().is_none() {
             #[cfg(target_arch = "wasm32")]
             guard.set_timer_driver(TimerDriverHandle::with_browser_clock(Arc::new(
-                crate::time::BrowserMonotonicClock::default(),
+                crate::time::BrowserMonotonicClock::host_sampled(),
             )));
             #[cfg(not(target_arch = "wasm32"))]
             guard.set_timer_driver(TimerDriverHandle::with_wall_clock());

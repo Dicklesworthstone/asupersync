@@ -117,6 +117,9 @@ pub struct BrowserMonotonicClock {
     pending_catch_up_ns: AtomicU64,
     max_forward_step_ns: u64,
     jitter_floor_ns: u64,
+    /// Host time read on every [`TimeSource::now`] when nothing else feeds
+    /// this clock ([`Self::host_sampled`]).
+    host_sampler: Option<fn() -> u64>,
 }
 
 impl BrowserMonotonicClock {
@@ -132,7 +135,33 @@ impl BrowserMonotonicClock {
             pending_catch_up_ns: AtomicU64::new(0),
             max_forward_step_ns: duration_to_nanos_saturating(config.max_forward_step),
             jitter_floor_ns: duration_to_nanos_saturating(config.jitter_floor),
+            host_sampler: None,
         }
+    }
+
+    /// A clock that feeds itself: every [`TimeSource::now`] observes
+    /// `sampler`'s host nanoseconds first, through
+    /// [`Self::observe_host_nanos`], so the forward-step and suspend policy
+    /// still apply.
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+    pub(crate) fn with_host_sampler(config: BrowserClockConfig, sampler: fn() -> u64) -> Self {
+        Self {
+            host_sampler: Some(sampler),
+            ..Self::new(config)
+        }
+    }
+
+    /// The clock a wasm32 runtime's timer driver reads. `RuntimeBuilder`
+    /// keeps no handle to its clock, so nothing would call
+    /// [`Self::observe_host_time`], and a clock from [`Self::default`] stays
+    /// at zero: no nonzero sleep or timeout would ever fire
+    /// (br-asupersync-combinator-time-audit-fqdvqn item 5).
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn host_sampled() -> Self {
+        Self::with_host_sampler(
+            BrowserClockConfig::default(),
+            crate::time::wasm_monotonic_nanos,
+        )
     }
 
     /// Ingests a host-time sample and updates monotonic time.
@@ -157,7 +186,7 @@ impl BrowserMonotonicClock {
             .is_ok()
         {
             self.last_host_sample.store(host_ns, Ordering::Release);
-            return self.now();
+            return self.current();
         }
 
         // Clamp regressions by tracking the max host sample seen.
@@ -175,7 +204,7 @@ impl BrowserMonotonicClock {
                     Ordering::Release,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => return self.now(),
+                    Ok(_) => return self.current(),
                     Err(actual) => {
                         current_pending = actual;
                         continue;
@@ -236,9 +265,18 @@ impl BrowserMonotonicClock {
         Duration::from_nanos(self.pending_catch_up_ns.load(Ordering::Acquire))
     }
 
+    /// The clock's time, without sampling the host.
+    fn current(&self) -> Time {
+        if self.paused.load(Ordering::Acquire) {
+            Time::from_nanos(self.paused_at.load(Ordering::Acquire))
+        } else {
+            Time::from_nanos(self.now.load(Ordering::Acquire))
+        }
+    }
+
     fn advance_now(&self, delta: u64) -> Time {
         if delta == 0 {
-            return self.now();
+            return self.current();
         }
 
         let mut current = self.now.load(Ordering::Acquire);
@@ -263,10 +301,9 @@ impl Default for BrowserMonotonicClock {
 
 impl TimeSource for BrowserMonotonicClock {
     fn now(&self) -> Time {
-        if self.paused.load(Ordering::Acquire) {
-            Time::from_nanos(self.paused_at.load(Ordering::Acquire))
-        } else {
-            Time::from_nanos(self.now.load(Ordering::Acquire))
+        match self.host_sampler {
+            Some(sampler) => self.observe_host_nanos(sampler()),
+            None => self.current(),
         }
     }
 }
@@ -1467,6 +1504,54 @@ mod tests {
             t4
         );
         crate::test_complete!("browser_clock_suspend_resume_rebases_without_jump");
+    }
+
+    static FAKE_HOST_NANOS: AtomicU64 = AtomicU64::new(0);
+
+    fn fake_host_nanos() -> u64 {
+        FAKE_HOST_NANOS.load(Ordering::SeqCst)
+    }
+
+    /// fqdvqn item 5: a wasm32 `RuntimeBuilder` gave its timer driver a
+    /// `BrowserMonotonicClock::default()` that nothing fed, so the driver's
+    /// time stayed at zero and no nonzero sleep or timeout ever fired. A
+    /// host-sampled clock reads the host on every `now()`, through the same
+    /// rebase and forward-step policy, so a timer driver on it fires.
+    #[test]
+    fn browser_clock_with_a_host_sampler_advances_on_every_read() {
+        init_test("browser_clock_with_a_host_sampler_advances_on_every_read");
+        FAKE_HOST_NANOS.store(5_000_000, Ordering::SeqCst);
+        let clock = Arc::new(BrowserMonotonicClock::with_host_sampler(
+            BrowserClockConfig {
+                max_forward_step: Duration::from_millis(250),
+                jitter_floor: Duration::ZERO,
+            },
+            fake_host_nanos,
+        ));
+        assert_eq!(clock.now(), Time::ZERO, "the first read is the baseline");
+        FAKE_HOST_NANOS.store(25_000_000, Ordering::SeqCst);
+        assert_eq!(clock.now(), Time::from_millis(20), "a read takes the host");
+
+        // A long host gap is caught up one forward step per read.
+        FAKE_HOST_NANOS.store(1_025_000_000, Ordering::SeqCst);
+        let reads: Vec<Time> = (0..5).map(|_| clock.now()).collect();
+        assert_eq!(
+            reads,
+            [270, 520, 770, 1020, 1020].map(Time::from_millis).to_vec()
+        );
+
+        // A timer driver on the clock fires a due timer.
+        let driver = TimerDriver::with_clock(Arc::clone(&clock));
+        driver.register(Time::from_millis(1050), futures_waker());
+        assert_eq!(driver.process_timers(), 0, "not due yet");
+        FAKE_HOST_NANOS.store(1_055_000_000, Ordering::SeqCst);
+        assert_eq!(driver.process_timers(), 1, "due once the host moves on");
+
+        // A clock nothing samples stays where it is, as before.
+        let unfed = BrowserMonotonicClock::default();
+        FAKE_HOST_NANOS.store(9_000_000_000, Ordering::SeqCst);
+        assert_eq!(unfed.now(), Time::ZERO);
+        crate::test_complete!("browser_clock_with_a_host_sampler_advances_on_every_read");
     }
 
     // =========================================================================
