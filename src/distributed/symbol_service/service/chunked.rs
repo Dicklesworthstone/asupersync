@@ -58,6 +58,9 @@ impl SymbolChunkedLimits {
     /// Maximum binary payload in one upload chunk or range response.
     #[must_use]
     pub const fn max_chunk_bytes(self) -> usize { self.max_chunk_bytes }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) const fn max_uploads(self) -> usize { self.max_uploads }
 }
 
 /// Staged bytes only; successful immutable batches belong to the backing store.
@@ -114,6 +117,10 @@ impl CommitCompletion {
 struct Staging {
     entries: BTreeMap<(NodeId, u64), Stage>,
     reserved: usize,
+    // Identity changes whenever a commit marker retires. BEGIN retains an Arc
+    // while looking outside the lock, so generation reuse/overflow cannot turn
+    // a stale NotFound into permission to stage an already committed attempt.
+    commit_generation: Arc<()>,
 }
 
 impl Staging {
@@ -156,6 +163,7 @@ impl Drop for StagedCommit<'_> {
                 stage.commit.as_ref().is_some_and(|commit| Arc::ptr_eq(commit, &self.completion))
             }) {
                 state.remove(&self.id);
+                state.commit_generation = Arc::new(());
             }
         }
         self.completion.finish();
@@ -256,7 +264,9 @@ pub struct ChunkedSymbolService {
     limits: SymbolChunkedLimits,
     staging: Mutex<Staging>,
     #[cfg(test)]
-    commit_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pub(super) commit_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    #[cfg(test)]
+    lookup_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for ChunkedSymbolService {
@@ -283,6 +293,8 @@ impl ChunkedSymbolService {
         Self { store, limits, staging: Mutex::new(Staging::default()),
             #[cfg(test)]
             commit_hook: Mutex::new(None),
+            #[cfg(test)]
+            lookup_hook: Mutex::new(None),
         }
     }
 
@@ -298,6 +310,17 @@ impl ChunkedSymbolService {
     /// Returns the number removed. Retained immutable batches are unaffected.
     pub fn reap_expired(&self, now: Time) -> usize { self.staging.lock().reap(now) }
 
+    // A legitimate CHUNK has the target header, 68-byte upload identity,
+    // 8-byte offset, and at most the smaller chunk/batch allowance. BEGIN,
+    // COMMIT, ABORT and READ are shorter. Saturation at the address-space
+    // ceiling is conservative: no Rust slice can exceed that ceiling.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn request_byte_ceiling(&self) -> usize {
+        14usize.saturating_add(self.store.replica_id().len())
+            .saturating_add(76)
+            .saturating_add(self.limits.max_chunk_bytes.min(self.store.batch_limits().max_encoded_bytes))
+    }
+
     pub(super) fn handle(&self, peer: &NodeId, now: Time, input: &[u8]) -> Result<Vec<u8>, SymbolStoreError> {
         if !super::super::valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
         let (operation, body) = split_request(input, self.store.replica_id())?;
@@ -310,6 +333,7 @@ impl ChunkedSymbolService {
         if body.len() < 68 { return Err(SymbolStoreError::Truncated); }
         let upload = read_upload(&body[..68])?;
         let id = (peer.clone(), upload.attempt);
+        let mut committed = None;
         loop {
             if let Some(completion) = state.entries.get(&id).and_then(|stage| stage.commit.clone()) {
                 // Preserve the original per-attempt ordering without holding up
@@ -320,6 +344,7 @@ impl ChunkedSymbolService {
                 completion.wait();
                 state = self.staging.lock();
                 state.reap(now);
+                committed = None;
                 continue;
             }
             return match operation {
@@ -330,7 +355,28 @@ impl ChunkedSymbolService {
                         if stage.upload != upload { return Err(SymbolStoreError::Conflict); }
                         return progress(upload, stage.bytes.len(), self.limits.max_chunk_bytes);
                     }
-                    match self.store.get(peer, upload.key) {
+                    if committed.is_none() {
+                        // A durable lookup can wait behind another writer's
+                        // fsync. Never retain the staging mutex while waiting:
+                        // independent chunks, aborts, stats and expiry must
+                        // remain available. Recheck this exact attempt after
+                        // reacquiring the lock; another BEGIN may have won.
+                        let generation = Arc::clone(&state.commit_generation);
+                        drop(state);
+                        let found = self.store.get(peer, upload.key);
+                        #[cfg(test)]
+                        {
+                            let hook = self.lookup_hook.lock().clone();
+                            if let Some(hook) = hook { hook(); }
+                        }
+                        state = self.staging.lock();
+                        state.reap(now);
+                        if Arc::ptr_eq(&generation, &state.commit_generation) {
+                            committed = Some(found);
+                        }
+                        continue;
+                    }
+                    match committed.take().expect("committed lookup precedes new staging") {
                         Ok(batch) => {
                             if batch.as_ref().as_ref().len() != upload.total || batch.symbol_count() != upload.count {
                                 return Err(SymbolStoreError::Identity);
@@ -666,6 +712,67 @@ mod tests {
             assert!(!panic_after_release, "injected commit verification panic");
         }));
         (reached, CommitRelease(Some(release)))
+    }
+
+    #[test]
+    fn begin_lookup_rechecks_staging_and_completed_publication_without_holding_its_lock() {
+        for complete in [false, true] {
+            let batch = fixture(42);
+            let upload = make_upload(&batch, 1);
+            let service = make_service(2, 2 * upload.total, 2);
+            let peer = NodeId::new("origin");
+            let (entered, reached) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel();
+            let released = Mutex::new(released);
+            let lookups = std::sync::atomic::AtomicUsize::new(0);
+            *service.lookup_hook.lock() = Some(Arc::new(move || {
+                if lookups.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    entered.send(()).unwrap();
+                    released.lock().recv_timeout(Duration::from_secs(15)).expect("lookup release");
+                }
+            }));
+            std::thread::scope(|scope| {
+                let mut release = CommitRelease(Some(release));
+                let service = &service;
+                let peer = &peer;
+                let batch = &batch;
+                let first = scope.spawn(move || command(service, peer, 0, BEGIN, upload));
+                reached.recv_timeout(Duration::from_secs(5)).expect("first lookup returned NotFound");
+                let (progressed, progress) = std::sync::mpsc::channel();
+                let concurrent = scope.spawn(move || {
+                    assert_eq!(service.stats().uploads, 0);
+                    assert_eq!(service.reap_expired(Time::ZERO), 0);
+                    command(service, peer, 1, BEGIN, upload).unwrap();
+                    if complete {
+                        for (index, bytes) in batch.as_ref().chunks(128).enumerate() {
+                            piece(service, peer, 1, upload, index * 128, bytes).unwrap();
+                        }
+                        command(service, peer, 2, COMMIT, upload).unwrap();
+                        assert_eq!(service.stats().reserved_bytes, 0);
+                    } else {
+                        piece(service, peer, 1, upload, 0, &batch.as_ref()[..128]).unwrap();
+                    }
+                    progressed.send(()).unwrap();
+                });
+                progress.recv_timeout(Duration::from_secs(5))
+                    .expect("lookup cannot retain staging or block an independent winner");
+                release.release();
+                let reply = first.join().unwrap().unwrap();
+                assert_eq!(read_progress(&reply, upload).unwrap().0,
+                    if complete { upload.total } else { 128 });
+                concurrent.join().unwrap();
+            });
+            if complete {
+                assert_eq!(service.stats().uploads, 0,
+                    "a stale NotFound cannot recreate staging after the same attempt committed");
+                assert_eq!(service.stats().reserved_bytes, 0);
+                assert_eq!(service.store.stats().batches, 1);
+            } else {
+                assert_eq!(service.stats().uploads, 1, "the winning BEGIN is not duplicated");
+                assert_eq!(service.stats().reserved_bytes, upload.total);
+                command(&service, &peer, 3, ABORT, upload).unwrap();
+            }
+        }
     }
 
     #[test]
