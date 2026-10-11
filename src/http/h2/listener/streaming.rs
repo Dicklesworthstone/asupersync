@@ -458,11 +458,14 @@ impl StreamingRequests {
         }
         let suppress_response_body = head.method == Method::Head;
         let config = &self.dispatch.config;
-        if validate_host_header(&head.headers, &config.listener.allowed_hosts).is_err() {
+        if let Err(rejection) = validate_host_header(&head.headers, &config.listener.allowed_hosts) {
+            let date_str = crate::time::format_unix_nanos_http_date(crate::time::wall_now().as_nanos());
             self.reject(
                 conn,
                 stream_id,
-                Response::new(421, "Misdirected Request", Vec::new()),
+                Response::new(rejection.status(), rejection.reason(), rejection.body().into_bytes())
+                    .with_header("date", date_str)
+                    .with_header("content-type", "text/plain; charset=utf-8"),
                 suppress_response_body,
                 end_stream,
                 response_guards,
