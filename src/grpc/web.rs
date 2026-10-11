@@ -131,6 +131,17 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
         block.push_str("\r\n");
     }
 
+    let mut encoded_status_details = false;
+    if let Some(details) = status.details() {
+        if !details.is_empty() {
+            use base64::Engine;
+            block.push_str("grpc-status-details-bin: ");
+            block.push_str(&base64::engine::general_purpose::STANDARD.encode(details));
+            block.push_str("\r\n");
+            encoded_status_details = true;
+        }
+    }
+
     for (key, value) in metadata.iter() {
         let Some(key_lower) =
             normalize_metadata_key(key, matches!(value, MetadataValue::Binary(_)))
@@ -138,7 +149,10 @@ pub fn encode_trailers(status: &Status, metadata: &Metadata, dst: &mut BytesMut)
             continue;
         };
         // Skip status/message — already encoded above.
-        if key_lower == "grpc-status" || key_lower == "grpc-message" {
+        if key_lower == "grpc-status"
+            || key_lower == "grpc-message"
+            || (encoded_status_details && key_lower == "grpc-status-details-bin")
+        {
             continue;
         }
         block.push_str(&key_lower);
@@ -245,6 +259,7 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                     use base64::Engine;
                     let decoded = base64::engine::general_purpose::STANDARD
                         .decode(value)
+                        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(value))
                         .map_err(|e| {
                             GrpcError::protocol(format!(
                                 "malformed base64 in -bin trailer metadata for key with \
@@ -274,10 +289,16 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
     // Per gRPC spec, trailers MUST include grpc-status. If absent, treat as
     // internal error rather than success — a missing status is a protocol violation.
     let code = Code::from_i32(status_code.unwrap_or(13)); // 13 = INTERNAL
-    let status = if status_message.is_empty() {
-        Status::new(code, code.as_str())
+    let message = if status_message.is_empty() {
+        code.as_str().to_string()
     } else {
-        Status::new(code, status_message)
+        status_message
+    };
+    let status = match metadata.get("grpc-status-details-bin") {
+        Some(MetadataValue::Binary(details)) => {
+            Status::with_details(code, message, details.clone())
+        }
+        _ => Status::new(code, message),
     };
 
     Ok(TrailerFrame { status, metadata })
@@ -2655,4 +2676,41 @@ mod tests {
 
         crate::test_complete!("grpc_web_status_trailer_mapping_differential_conformance");
     }
+
+    #[test]
+    fn unpadded_bin_metadata_in_trailers_is_accepted_and_roundtrips() {
+        init_test("unpadded_bin_metadata_in_trailers_is_accepted_and_roundtrips");
+        // Payload whose standard base64 requires 1 or 2 padding characters:
+        // [0x01, 0x02] -> "AQI=" in padded, "AQI" in unpadded.
+        let raw_block = b"grpc-status: 0\r\nx-unpadded-bin: AQI\r\n";
+        let trailer = decode_trailers(raw_block).expect("unpadded base64 in -bin trailer must decode");
+        match trailer.metadata.get("x-unpadded-bin") {
+            Some(MetadataValue::Binary(b)) => {
+                assert_eq!(b.as_ref(), &[0x01, 0x02]);
+            }
+            other => panic!("expected Binary, got {other:?}"),
+        }
+        crate::test_complete!("unpadded_bin_metadata_in_trailers_is_accepted_and_roundtrips");
+    }
+
+    #[test]
+    fn status_details_encoded_and_decoded_through_trailers() {
+        init_test("status_details_encoded_and_decoded_through_trailers");
+        let details = Bytes::from_static(b"\x08\x01\x12\x04test");
+        let status = Status::with_details(Code::InvalidArgument, "invalid input", details.clone());
+        let mut buf = BytesMut::new();
+        encode_trailers(&status, &Metadata::new(), &mut buf);
+
+        // Verify the emitted block contains grpc-status-details-bin
+        let text = std::str::from_utf8(&buf[WEB_FRAME_HEADER_SIZE..]).expect("valid utf8");
+        assert!(text.contains("grpc-status-details-bin: "));
+
+        // Decode trailers and verify details roundtrip
+        let trailer = decode_trailers(&buf[WEB_FRAME_HEADER_SIZE..]).expect("decode trailers");
+        assert_eq!(trailer.status.code(), Code::InvalidArgument);
+        assert_eq!(trailer.status.message(), "invalid input");
+        assert_eq!(trailer.status.details(), Some(&details));
+        crate::test_complete!("status_details_encoded_and_decoded_through_trailers");
+    }
 }
+
