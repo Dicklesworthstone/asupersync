@@ -739,6 +739,10 @@ pub struct RebalanceResult {
 }
 
 /// A record returned from a Kafka consumer poll.
+///
+/// This compatibility representation maps null payloads and null header values
+/// to empty bytes. Use [`KafkaConsumer::poll_nullable`] when consuming compacted
+/// topics or otherwise distinguishing a Kafka null from an empty value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerRecord {
     /// Topic name.
@@ -755,6 +759,71 @@ pub struct ConsumerRecord {
     pub timestamp: Option<i64>,
     /// Header key/value pairs.
     pub headers: Vec<(String, Vec<u8>)>,
+}
+
+/// A Kafka consumer record that preserves null payloads and header values.
+///
+/// [`KafkaConsumer::poll_nullable`] retains this representation through broker
+/// polling and cancellation buffering. A keyed record with `payload: None` is
+/// a compaction tombstone; `Some(Vec::new())` is an ordinary empty value. Header
+/// order and duplicate header names are preserved, including each value's null
+/// versus empty distinction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NullableConsumerRecord {
+    /// Topic name.
+    pub topic: String,
+    /// Partition number.
+    pub partition: i32,
+    /// Offset of the record.
+    pub offset: i64,
+    /// Optional key; an empty key is distinct from a null key.
+    pub key: Option<Vec<u8>>,
+    /// Payload bytes, or `None` for a Kafka null value.
+    pub payload: Option<Vec<u8>>,
+    /// Record timestamp (ms since epoch).
+    pub timestamp: Option<i64>,
+    /// Ordered header key/value pairs, preserving duplicate names and nulls.
+    pub headers: Vec<(String, Option<Vec<u8>>)>,
+}
+
+impl From<NullableConsumerRecord> for ConsumerRecord {
+    /// Project into the compatibility representation, mapping null values to
+    /// empty bytes. This conversion intentionally loses null information.
+    fn from(record: NullableConsumerRecord) -> Self {
+        Self {
+            topic: record.topic,
+            partition: record.partition,
+            offset: record.offset,
+            key: record.key,
+            payload: record.payload.unwrap_or_default(),
+            timestamp: record.timestamp,
+            headers: record
+                .headers
+                .into_iter()
+                .map(|(key, value)| (key, value.unwrap_or_default()))
+                .collect(),
+        }
+    }
+}
+
+impl From<ConsumerRecord> for NullableConsumerRecord {
+    /// Wrap every payload and header value in `Some`. The compatibility record
+    /// has no null information to recover, including for empty byte vectors.
+    fn from(record: ConsumerRecord) -> Self {
+        Self {
+            topic: record.topic,
+            partition: record.partition,
+            offset: record.offset,
+            key: record.key,
+            payload: Some(record.payload),
+            timestamp: record.timestamp,
+            headers: record
+                .headers
+                .into_iter()
+                .map(|(key, value)| (key, Some(value)))
+                .collect(),
+        }
+    }
 }
 
 #[cfg(any(
@@ -946,6 +1015,15 @@ struct BrokerOperations {
     retired: parking_lot::Condvar,
     #[cfg(test)]
     before_lock: Mutex<Option<crate::channel::oneshot::Sender<()>>>,
+    #[cfg(test)]
+    after_record_buffered: Mutex<Option<BufferedRecordHook>>,
+}
+
+#[cfg(all(test, feature = "kafka"))]
+#[derive(Debug)]
+struct BufferedRecordHook {
+    published: crate::channel::oneshot::Sender<()>,
+    release: std::sync::mpsc::Receiver<()>,
 }
 
 #[cfg(feature = "kafka")]
@@ -1193,7 +1271,7 @@ struct BrokerSnapshot {
 #[cfg(feature = "kafka")]
 #[derive(Debug)]
 struct BrokerPollOutcome {
-    record: Option<ConsumerRecord>,
+    record: Option<NullableConsumerRecord>,
     snapshot: BrokerSnapshot,
     /// An informational librdkafka error that this poll swallowed (it
     /// self-heals; see `KafkaConsumer::poll`), named for observability.
@@ -1382,7 +1460,7 @@ fn capture_broker_snapshot(
 }
 
 #[cfg(feature = "kafka")]
-fn consumer_record_from_message(message: &rdkafka::message::BorrowedMessage<'_>) -> ConsumerRecord {
+fn consumer_record_from_message(message: &impl Message) -> NullableConsumerRecord {
     let headers = message
         .headers()
         .map(|headers| {
@@ -1391,23 +1469,19 @@ fn consumer_record_from_message(message: &rdkafka::message::BorrowedMessage<'_>)
                     let header = headers.get(index);
                     (
                         header.key.to_string(),
-                        header
-                            .value
-                            .map_or_else(Vec::new, std::borrow::ToOwned::to_owned),
+                        header.value.map(std::borrow::ToOwned::to_owned),
                     )
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    ConsumerRecord {
+    NullableConsumerRecord {
         topic: message.topic().to_string(),
         partition: message.partition(),
         offset: message.offset(),
         key: message.key().map(std::borrow::ToOwned::to_owned),
-        payload: message
-            .payload()
-            .map_or_else(Vec::new, std::borrow::ToOwned::to_owned),
+        payload: message.payload().map(std::borrow::ToOwned::to_owned),
         timestamp: message.timestamp().to_millis(),
         headers,
     }
@@ -1871,12 +1945,35 @@ impl KafkaConsumer {
     /// recorded and readable through [`KafkaConsumer::last_transient_error`]
     /// and traced once per distinct code. Transport failures still return
     /// `Err`.
-    #[allow(unused_variables, clippy::too_many_lines)]
+    ///
+    /// Null payloads and header values are mapped to empty bytes for backwards
+    /// compatibility. Use [`Self::poll_nullable`] to distinguish tombstones.
     pub async fn poll(
         &self,
         cx: &Cx,
         timeout: Duration,
     ) -> Result<Option<ConsumerRecord>, KafkaError> {
+        self.poll_nullable(cx, timeout)
+            .await
+            .map(|record| record.map(ConsumerRecord::from))
+    }
+
+    /// Poll for the next record without collapsing Kafka null values.
+    ///
+    /// A null payload remains `None`, while an empty payload remains
+    /// `Some(Vec::new())`. Null header values, duplicate header names, and their
+    /// order are also retained. This permits compacted-topic consumers to apply
+    /// keyed tombstones as deletes instead of overwriting a value with emptiness.
+    ///
+    /// Timeout, assignment, cancellation, offset storage and retry semantics are
+    /// identical to [`Self::poll`]. Both entry points consume the same stream;
+    /// switching between them does not redeliver or skip a buffered record.
+    #[allow(unused_variables, clippy::too_many_lines)]
+    pub async fn poll_nullable(
+        &self,
+        cx: &Cx,
+        timeout: Duration,
+    ) -> Result<Option<NullableConsumerRecord>, KafkaError> {
         cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
         self.ensure_open()?;
 
@@ -2053,11 +2150,23 @@ impl KafkaConsumer {
                                     return Ok(());
                                 }
                             };
+                            #[cfg(test)]
+                            let has_record = record.is_some();
                             *buffered_outcome.lock() = Some(Ok(BrokerPollOutcome {
                                 record,
                                 snapshot,
                                 transient_error,
                             }));
+                            #[cfg(test)]
+                            if has_record {
+                                let hook = broker_ops.after_record_buffered.lock().take();
+                                if let Some(hook) = hook {
+                                    let _ = hook.published.send_blocking(());
+                                    hook.release
+                                        .recv_timeout(Duration::from_secs(20))
+                                        .expect("release the buffered-record witness");
+                                }
+                            }
                             Ok(())
                         }
                     })
@@ -2589,7 +2698,7 @@ impl KafkaConsumer {
     }
 
     #[cfg(all(not(feature = "kafka"), any(test, feature = "test-internals")))]
-    fn try_poll_local_record(&self) -> Result<Option<ConsumerRecord>, KafkaError> {
+    fn try_poll_local_record(&self) -> Result<Option<NullableConsumerRecord>, KafkaError> {
         let mut state = self.state.lock();
         if self.closed.load(Ordering::Acquire) {
             return Err(KafkaError::Config("consumer is closed".to_string()));
@@ -2618,14 +2727,18 @@ impl KafkaConsumer {
                     .insert((topic.clone(), *partition), offset.saturating_add(1));
                 state.poll_cursor = (index + 1) % assignments.len();
                 drop(state);
-                return Ok(Some(ConsumerRecord {
+                return Ok(Some(NullableConsumerRecord {
                     topic: record.topic,
                     partition: record.partition,
                     offset,
                     key: record.key,
-                    payload: record.payload,
+                    payload: Some(record.payload),
                     timestamp: record.timestamp,
-                    headers: record.headers,
+                    headers: record
+                        .headers
+                        .into_iter()
+                        .map(|(key, value)| (key, Some(value)))
+                        .collect(),
                 }));
             }
         }
@@ -2738,6 +2851,342 @@ mod tests {
     };
     use crate::test_utils::run_test_with_cx;
 
+    #[test]
+    fn nullable_record_compatibility_conversion_never_invents_nulls() {
+        let legacy = ConsumerRecord {
+            topic: "compact".into(),
+            partition: 2,
+            offset: 17,
+            key: Some(Vec::new()),
+            payload: Vec::new(),
+            timestamp: Some(1700000000000),
+            headers: vec![("same".into(), Vec::new()), ("same".into(), b"x".to_vec())],
+        };
+        let nullable = NullableConsumerRecord::from(legacy.clone());
+        assert_eq!(nullable.payload, Some(Vec::new()));
+        assert_eq!(nullable.key, Some(Vec::new()));
+        assert_eq!(
+            nullable.headers,
+            vec![
+                ("same".into(), Some(Vec::new())),
+                ("same".into(), Some(b"x".to_vec())),
+            ]
+        );
+        assert_eq!(ConsumerRecord::from(nullable.clone()), legacy);
+
+        let tombstone = NullableConsumerRecord {
+            payload: None,
+            headers: vec![("same".into(), None), ("same".into(), Some(Vec::new()))],
+            ..nullable
+        };
+        let projected = ConsumerRecord::from(tombstone);
+        assert!(projected.payload.is_empty());
+        assert_eq!(
+            projected.headers,
+            vec![("same".into(), Vec::new()), ("same".into(), Vec::new()),]
+        );
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn nullable_native_headers() -> rdkafka::message::OwnedHeaders {
+        use rdkafka::message::{Header, OwnedHeaders};
+        OwnedHeaders::new()
+            .insert(Header {
+                key: "same",
+                value: None::<&[u8]>,
+            })
+            .insert(Header {
+                key: "same",
+                value: Some(&b""[..]),
+            })
+            .insert(Header {
+                key: "same",
+                value: Some(&b"header"[..]),
+            })
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn nullable_native_fixture(bootstrap: &str, topic: &str) {
+        use rdkafka::producer::{BaseProducer, BaseRecord, Producer};
+        // Raw rdkafka is the independent producer: it supplies actual nulls on
+        // the Kafka wire instead of constructing this crate's record type.
+        let producer: BaseProducer = rdkafka::ClientConfig::new()
+            .set("bootstrap.servers", bootstrap)
+            .set("message.timeout.ms", "10000")
+            .create()
+            .unwrap();
+        for payload in [
+            Some(&b"value"[..]),
+            Some(&b""[..]),
+            None,
+            Some(&b"tail"[..]),
+        ] {
+            let mut record: BaseRecord<'_, [u8], [u8]> = BaseRecord::to(topic)
+                .key(b"key")
+                .partition(0)
+                .timestamp(1700000000000)
+                .headers(nullable_native_headers());
+            record.payload = payload;
+            producer.send(record).unwrap();
+        }
+        producer.flush(Duration::from_secs(10)).unwrap();
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn assert_nullable_headers(record: &NullableConsumerRecord) {
+        assert_eq!(record.key.as_deref(), Some(&b"key"[..]));
+        assert_eq!(record.timestamp, Some(1700000000000));
+        assert_eq!(
+            record.headers,
+            vec![
+                ("same".into(), None),
+                ("same".into(), Some(Vec::new())),
+                ("same".into(), Some(b"header".to_vec())),
+            ]
+        );
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn nullable_native_journey(multithread: bool, abandon_buffered_poll: bool) {
+        use crate::cx::ChildRegionSpec;
+        use crate::cx::resource_bracket::{BracketConfig, BracketUseFuture};
+        use crate::runtime::RuntimeBuilder;
+        use crate::types::{Budget, Outcome};
+
+        let cluster = rdkafka::mocking::MockCluster::new(1).unwrap();
+        let topic = "nullable-records";
+        cluster.create_topic(topic, 1, 1).unwrap();
+        nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+        let config =
+            ConsumerConfig::new(vec![cluster.bootstrap_servers()], "nullable-records-group")
+                .force_real_kafka(true)
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .with_property("group.protocol", "classic");
+        let builder = if multithread {
+            RuntimeBuilder::new().worker_threads(2)
+        } else {
+            RuntimeBuilder::current_thread()
+        };
+        let runtime = builder.blocking_threads(1, 2).build().unwrap();
+        let owner = runtime.request_cx_with_budget(Budget::INFINITE);
+        runtime.block_on_with_cx(owner.clone(), async move {
+            let enclosing = owner
+                .open_child_region(ChildRegionSpec::inherit())
+                .await
+                .unwrap();
+            let mut handle = KafkaConsumer::spawn_scoped(
+                enclosing.cx(),
+                config.clone(),
+                BracketConfig::new(u32::MAX),
+                move |cx, consumer| -> BracketUseFuture<'_, (), KafkaError> {
+                    Box::pin(async move {
+                        consumer.subscribe(&cx, &[topic]).await.unwrap();
+                        for (offset, payload) in [(0, &b"value"[..]), (1, &b""[..])] {
+                            let record = consumer
+                                .poll_nullable(&cx, Duration::from_secs(10))
+                                .await
+                                .unwrap()
+                                .expect("record from the mock broker");
+                            assert_eq!((record.partition, record.offset), (0, offset));
+                            assert_eq!(record.payload.as_deref(), Some(payload));
+                            assert_nullable_headers(&record);
+                        }
+
+                        let tombstone = if abandon_buffered_poll {
+                            let operations = consumer.broker_ops.as_ref().unwrap();
+                            let (published, mut wait_published) =
+                                crate::channel::oneshot::channel();
+                            let (release, await_release) = std::sync::mpsc::channel();
+                            *operations.after_record_buffered.lock() = Some(BufferedRecordHook {
+                                published,
+                                release: await_release,
+                            });
+                            let mut polling =
+                                Box::pin(consumer.poll_nullable(&cx, Duration::from_secs(10)));
+                            let mut witnessing = Box::pin(wait_published.recv(&cx));
+                            std::future::poll_fn(|task_cx| {
+                                assert!(
+                                    polling.as_mut().poll(task_cx).is_pending(),
+                                    "the admitted poll must still await its blocking receipt"
+                                );
+                                witnessing.as_mut().poll(task_cx)
+                            })
+                            .await
+                            .unwrap();
+                            {
+                                let buffered = consumer.buffered_outcome.lock();
+                                let record = buffered
+                                    .as_ref()
+                                    .unwrap()
+                                    .as_ref()
+                                    .unwrap()
+                                    .record
+                                    .as_ref()
+                                    .expect("actual broker record is buffered");
+                                assert_eq!(record.offset, 2);
+                                assert!(record.payload.is_none());
+                            }
+                            drop(witnessing);
+                            drop(polling);
+                            // The old blocking call is still owned and parked.
+                            // Its result must be available exactly once to the
+                            // next API call without waiting for that receipt.
+                            let record = consumer
+                                .poll_nullable(&cx, Duration::ZERO)
+                                .await
+                                .unwrap()
+                                .expect("abandoned poll's tombstone");
+                            release.send(()).unwrap();
+                            record
+                        } else {
+                            consumer
+                                .poll_nullable(&cx, Duration::from_secs(10))
+                                .await
+                                .unwrap()
+                                .expect("tombstone from the mock broker")
+                        };
+                        assert_eq!((tombstone.partition, tombstone.offset), (0, 2));
+                        assert!(tombstone.payload.is_none(), "a tombstone must remain null");
+                        assert_nullable_headers(&tombstone);
+                        assert_eq!(consumer.position(topic, 0), Some(3));
+
+                        if abandon_buffered_poll {
+                            let tail = consumer
+                                .poll(&cx, Duration::from_secs(10))
+                                .await
+                                .unwrap()
+                                .expect("following record");
+                            assert_eq!((tail.offset, tail.payload.as_slice()), (3, &b"tail"[..]));
+                            assert!(
+                                consumer
+                                    .poll_nullable(&cx, Duration::ZERO)
+                                    .await
+                                    .unwrap()
+                                    .is_none()
+                            );
+                        } else {
+                            // Re-reading through the shipped API preserves its
+                            // compatibility semantics and advances the SAME stream.
+                            consumer
+                                .seek(&cx, &TopicPartitionOffset::new(topic, 0, 1))
+                                .await
+                                .unwrap();
+                            for offset in [1, 2] {
+                                let legacy = consumer
+                                    .poll(&cx, Duration::from_secs(10))
+                                    .await
+                                    .unwrap()
+                                    .expect("legacy empty value or tombstone");
+                                assert_eq!(legacy.offset, offset);
+                                assert!(legacy.payload.is_empty());
+                                assert_eq!(
+                                    legacy.headers,
+                                    vec![
+                                        ("same".into(), Vec::new()),
+                                        ("same".into(), Vec::new()),
+                                        ("same".into(), b"header".to_vec()),
+                                    ]
+                                );
+                            }
+                            consumer
+                                .commit_offsets(&cx, &[TopicPartitionOffset::new(topic, 0, 3)])
+                                .await
+                                .unwrap();
+                            assert_eq!(consumer.committed_offset(topic, 0), Some(3));
+                        }
+                        Outcome::Ok(())
+                    })
+                },
+            )
+            .unwrap();
+            let report = handle.join().await.unwrap();
+            assert!(matches!(
+                report.usage.as_ref().unwrap().outcome,
+                Outcome::Ok(())
+            ));
+            assert!(matches!(
+                report.release.as_ref().unwrap().outcome,
+                Outcome::Ok(())
+            ));
+            assert!(report.unreleased.is_none());
+
+            if !abandon_buffered_poll {
+                // A new native consumer in the same group must resume at the
+                // broker-committed next offset, after the tombstone.
+                let mut resumed = KafkaConsumer::spawn_scoped(
+                    enclosing.cx(),
+                    config,
+                    BracketConfig::new(u32::MAX),
+                    move |cx, consumer| -> BracketUseFuture<'_, (), KafkaError> {
+                        Box::pin(async move {
+                            consumer.subscribe(&cx, &[topic]).await.unwrap();
+                            let tail = consumer
+                                .poll_nullable(&cx, Duration::from_secs(10))
+                                .await
+                                .unwrap()
+                                .expect("resume from the committed next offset");
+                            assert_eq!(tail.offset, 3);
+                            assert_eq!(tail.payload.as_deref(), Some(&b"tail"[..]));
+                            assert_nullable_headers(&tail);
+                            Outcome::Ok(())
+                        })
+                    },
+                )
+                .unwrap();
+                let report = resumed.join().await.unwrap();
+                assert!(matches!(
+                    report.usage.as_ref().unwrap().outcome,
+                    Outcome::Ok(())
+                ));
+                assert!(matches!(
+                    report.release.as_ref().unwrap().outcome,
+                    Outcome::Ok(())
+                ));
+                assert!(report.unreleased.is_none());
+            }
+            enclosing.close().await.unwrap();
+        });
+        assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+        drop(runtime);
+        drop(cluster);
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    fn bounded_nullable_native(multithread: bool, abandon_buffered_poll: bool) {
+        let (send, receive) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(|| {
+                nullable_native_journey(multithread, abandon_buffered_poll);
+            });
+            let _ = send.send(result);
+        });
+        let result = receive
+            .recv_timeout(Duration::from_secs(60))
+            .expect("nullable Kafka journey and native teardown must finish");
+        thread.join().unwrap();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// br-asupersync-messaging-client-audit-k6pxks, item 22. Uses librdkafka's
+    /// native wire client and in-process mock broker, not live-cluster proof.
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_nullable_poll_preserves_tombstones_headers_seek_and_committed_resume() {
+        for multithread in [false, true] {
+            bounded_nullable_native(multithread, false);
+        }
+    }
+
+    #[cfg(all(feature = "kafka", not(target_arch = "wasm32")))]
+    #[test]
+    fn native_nullable_poll_recovers_tombstone_after_pending_future_drop_once() {
+        for multithread in [false, true] {
+            bounded_nullable_native(multithread, true);
+        }
+    }
+
     /// A broker poll result still buffered when the application seeks (a poll
     /// cancelled after its broker poll finished) kept its pre-seek record and
     /// position: the next poll delivered a record from before the seek and
@@ -2746,12 +3195,12 @@ mod tests {
     #[test]
     fn seek_rebases_a_buffered_poll_result() {
         let outcome = |partition| BrokerPollOutcome {
-            record: Some(ConsumerRecord {
+            record: Some(NullableConsumerRecord {
                 topic: "orders".to_string(),
                 partition,
                 offset: 41,
                 key: None,
-                payload: b"x".to_vec(),
+                payload: Some(b"x".to_vec()),
                 timestamp: None,
                 headers: Vec::new(),
             }),
@@ -2838,12 +3287,12 @@ mod tests {
             // The next poll's broker thread now waits for the lock; the dropped
             // poll's thread buffers its record and releases it.
             *consumer.buffered_outcome.lock() = Some(Ok(BrokerPollOutcome {
-                record: Some(ConsumerRecord {
+                record: Some(NullableConsumerRecord {
                     topic: "orders".to_string(),
                     partition: 0,
                     offset: 41,
                     key: None,
-                    payload: b"x".to_vec(),
+                    payload: Some(b"x".to_vec()),
                     timestamp: None,
                     headers: Vec::new(),
                 }),
