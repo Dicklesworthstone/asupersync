@@ -762,7 +762,12 @@ impl ConnectionRouter {
 
                     if let Some(short_data) = coalesced_1rtt {
                         packet.data = short_data;
-                        routing_info.kind = PacketRoutingKind::OneRtt;
+                        // A 1-RTT tail is ApplicationData, not the long header's space.
+                        routing_info = PacketRoutingInfo {
+                            destination_cid: connection_id,
+                            kind: PacketRoutingKind::OneRtt,
+                            space: PacketNumberSpace::ApplicationData,
+                        };
                     } else {
                         return Ok(RoutingResult::Routed {
                             connection_id,
@@ -5843,6 +5848,152 @@ mod tests {
                     reason_phrase: Bytes::new(),
                 }],
                 "FLOW_CONTROL_ERROR for a STREAM frame with an offset"
+            );
+        });
+    }
+
+    /// Review r29-e8 of 168379675 (H1): a peer that still holds Handshake keys
+    /// coalesces `[Handshake(ACK)][1-RTT(STREAM)]` in one datagram (RFC 9000
+    /// section 12.2), as mainstream stacks do until HANDSHAKE_DONE. The router
+    /// adopted the 1-RTT tail but kept the leading long header's Handshake
+    /// packet-number space, so the STREAM frame broke RFC 9000 section 12.4:
+    /// on the broken code the route returns `Err(PacketProcessingFailed)` and
+    /// the connection closes with PROTOCOL_VIOLATION. The tail belongs to
+    /// ApplicationData: its data is delivered and only that space owes output.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_coalesced_one_rtt_tail_is_processed_in_application_data_space() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"coalesce").unwrap();
+            let peer_cid = ConnectionId::new(b"coal-peer").unwrap();
+            let peer = "127.0.0.1:4494".parse().unwrap();
+            let origin = router.clock_origin;
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+
+            // The leading packet is a sealed Handshake ACK. The router never
+            // authenticates it: only its Length field bounds the 1-RTT tail.
+            let mut handshake_protection = deterministic_one_rtt_protection(&cx).await;
+            let mut transcript = QuicHandshakeTranscript::new();
+            transcript.record("handshake", b"coalesced 1-RTT tail");
+            handshake_protection
+                .derive_keys(
+                    &cx,
+                    PacketProtectionSpace::Handshake,
+                    &transcript,
+                    b"coalesced test",
+                )
+                .await
+                .expect("derive handshake keys");
+            let mut ack = BytesMut::new();
+            QuicFrame::Ack {
+                largest_acknowledged: VarInt::from_u64_unchecked(0),
+                ack_delay: VarInt::from_u64_unchecked(0),
+                ack_range_count: VarInt::from_u64_unchecked(0),
+                first_ack_range: VarInt::from_u64_unchecked(0),
+                ack_ranges: Vec::new(),
+                ecn_counts: None,
+            }
+            .encode(&mut ack)
+            .unwrap();
+            let header = PacketHeader::Long(LongHeader {
+                packet_type: LongPacketType::Handshake,
+                version: 1,
+                dst_cid: cid,
+                src_cid: peer_cid,
+                token: Vec::new(),
+                payload_length: 4 + ack.len() as u64 + 16,
+                packet_number: 0,
+                packet_number_len: 4,
+            });
+            let mut datagram = Vec::new();
+            header.encode(&mut datagram).unwrap();
+            let offset = datagram.len() - 4;
+            let sealed = handshake_protection
+                .protect_packet_now(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::Handshake,
+                        key_phase: false,
+                        packet_number: 0,
+                        associated_data: &datagram,
+                        payload: &ack,
+                    },
+                )
+                .expect("protect");
+            datagram.extend_from_slice(&sealed.ciphertext);
+            datagram.extend_from_slice(&sealed.tag);
+            let sample = header_protection_sample(&datagram, offset).unwrap();
+            let mask = handshake_protection
+                .header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample)
+                .expect("mask");
+            apply_header_protection(&mut datagram, offset, mask.bytes).unwrap();
+
+            // The coalesced tail: a genuine 1-RTT packet with application data.
+            let frames = [QuicFrame::Stream {
+                stream_id: VarInt(1),
+                offset: None,
+                data: Bytes::from_static(b"x"),
+                fin: false,
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let tail = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                1_000,
+                true,
+            )
+            .await
+            .unwrap();
+            datagram.extend_from_slice(&tail);
+
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data: datagram,
+                receive_time: origin + Duration::from_millis(1),
+                transmit_time: None,
+            };
+            match router.route_packet_with_output(&cx, packet, true).await {
+                Ok(RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets,
+                }) => {
+                    assert_eq!(connection_id, cid);
+                    assert!(outgoing_packets.is_empty());
+                }
+                other => panic!("the coalesced 1-RTT packet must be processed: {other:?}"),
+            }
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            assert_eq!(handle.connection.transport().close_code(), None);
+            assert_eq!(
+                handle.deferred_spaces,
+                [false, false, true],
+                "the tail's ACK is owed in ApplicationData, never in Handshake"
+            );
+            let stream = crate::net::quic_native::StreamId(1);
+            let readiness = handle
+                .connection
+                .next_readable_stream(&cx)
+                .unwrap()
+                .expect("the coalesced STREAM frame is delivered");
+            assert_eq!(readiness.stream_id, stream);
+            assert_eq!(
+                handle
+                    .connection
+                    .read_stream_bytes(&cx, stream, 32)
+                    .unwrap(),
+                Bytes::from_static(b"x")
             );
         });
     }

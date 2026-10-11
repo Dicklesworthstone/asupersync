@@ -1089,7 +1089,8 @@ impl QuicHandshakeDriver {
     /// processing (the latter belongs to the data plane). A packet for a space
     /// without live keys is skipped with a stale classification
     /// (`is_stale_handshake_packet_error`); an authentication failure under
-    /// live keys fails the call with `PACKET_UNPROTECT_CODE`. The result is
+    /// live keys fails the call with `PACKET_UNPROTECT_CODE`, unless an earlier
+    /// packet authenticated: then only the failed packet is discarded. The result is
     /// `Ok` when at least one packet authenticated, otherwise the first
     /// packet's error.
     pub fn recv_handshake_packet(&mut self, datagram: &[u8]) -> Result<ConnectionId, QuicTlsError> {
@@ -1143,10 +1144,12 @@ impl QuicHandshakeDriver {
                         skipped = Some(err);
                     }
                 }
-                // Once an earlier packet in the datagram has authenticated and
-                // advanced TLS state, an unauthenticated or invalid follower is
-                // ignored rather than voiding the entire datagram.
-                Err(_) if accepted.is_some() => break,
+                // Once an earlier packet in the datagram has authenticated, an
+                // unauthenticated or invalid follower is discarded and the rest
+                // are still processed (RFC 9000 section 12.2). A TLS refusal, a
+                // peer close or a Handshake-space protocol error stays fatal.
+                Err(err)
+                    if accepted.is_some() && is_unauthenticated_handshake_packet_error(&err) => {}
                 Err(err) => return Err(err),
             }
             offset += packet_len;
@@ -5330,6 +5333,145 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             server.peer_close_error_code(),
             Some(0x0100 + u64::from(u8::from(alert)))
         );
+    }
+
+    /// Review r29-e8 of 168379675 (M1): mainstream servers coalesce their first
+    /// flight as `[Initial(ServerHello)][Handshake(EE, Certificate, CV, Finished)]`.
+    /// A client that rejects the chain in the Handshake packet must still end
+    /// the call with the TLS alert, so its CRYPTO_ERROR close reaches the server
+    /// (br-asupersync-2eqmd2 M3). The broken code swallowed every follower error
+    /// once the Initial had authenticated: the call returned `Ok`, no close was
+    /// sent, and the client retransmitted until its flight budget ran out.
+    #[test]
+    fn a_rejected_certificate_in_a_coalesced_server_flight_fails_the_handshake() {
+        let alpn = vec![ATP_QUIC_ALPN.to_vec()];
+        let mut client = QuicHandshakeDriver::client(
+            // No trust anchor, so the server's chain fails verification.
+            client_config(Vec::new(), alpn.clone()).expect("client config"),
+            ServerName::try_from("localhost").expect("server name"),
+            Vec::new(),
+        )
+        .expect("client driver");
+        let mut server = QuicHandshakeDriver::server(
+            server_config(vec![leaf_cert()], leaf_key(), alpn).expect("server config"),
+            Vec::new(),
+        )
+        .expect("server driver");
+        client
+            .install_initial_keys(DCID_BYTES)
+            .expect("client keys");
+        server
+            .install_initial_keys(DCID_BYTES)
+            .expect("server keys");
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(&[0x11; 8]).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55; 8]).expect("server scid");
+        let server_addr: SocketAddr = "127.0.0.1:4433".parse().expect("address");
+
+        let segments = client.pump_outbound().expect("client pump");
+        let hello = client
+            .assemble_handshake_packet(&segments[0], dcid, client_scid, 0)
+            .expect("ClientHello");
+        server.recv_handshake_packet(&hello).expect("ClientHello");
+        // The server's whole first flight in one datagram.
+        let mut datagram = Vec::new();
+        let mut levels = Vec::new();
+        let flight = server.pump_outbound().expect("server pump");
+        let long_header = flight
+            .iter()
+            .filter(|segment| segment.level != HandshakeLevel::OneRtt);
+        for (packet_number, segment) in (0..).zip(long_header) {
+            let packet = server
+                .assemble_handshake_packet(segment, client_scid, server_scid, packet_number)
+                .expect("server packet");
+            datagram.extend_from_slice(&packet);
+            levels.push(segment.level);
+        }
+        assert_eq!(levels.first(), Some(&HandshakeLevel::Initial));
+        assert!(levels.contains(&HandshakeLevel::Handshake), "{levels:?}");
+
+        let refused = client
+            .recv_handshake_packet(&datagram)
+            .expect_err("the chain in the coalesced Handshake packet is rejected");
+        assert_eq!(failure_code(&refused), "read_hs_fatal_alert");
+        let alert = client.tls.alert().expect("TLS raised an alert");
+
+        let mut client_packet_number = 1;
+        let close =
+            client.assemble_crypto_error_close(server_addr, client_scid, &mut client_packet_number);
+        assert_eq!(close.len(), 1, "Handshake keys: Handshake space only");
+        let prefix = long_prefix(&close[0].data);
+        assert_eq!(prefix.packet_type, LongPacketType::Handshake);
+        assert_eq!(prefix.dst_cid, server_scid);
+        let closed = server
+            .recv_handshake_packet(&close[0].data)
+            .expect_err("the client closed");
+        assert_eq!(failure_code(&closed), PEER_CRYPTO_ERROR_CLOSE_CODE);
+        assert_eq!(
+            server.peer_close_error_code(),
+            Some(0x0100 + u64::from(u8::from(alert)))
+        );
+    }
+
+    /// Review r29-e8 of 168379675 (M1): RFC 9000 section 12.2 says a receiver
+    /// that cannot decrypt one coalesced packet must still process the rest.
+    /// In `[Initial ok][Handshake, corrupted tag][Handshake ok]` only the
+    /// corrupted packet is discarded. The broken code stopped at it, so the
+    /// genuine Handshake packet behind it, with the server Finished, was never
+    /// read: no Handshake packet number was recorded and the client did not
+    /// complete.
+    #[test]
+    fn a_corrupted_coalesced_packet_is_discarded_and_the_rest_are_processed() {
+        let (mut client, mut server) = protected_pair();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        let mut client_flight = client.pump_outbound().expect("client flight");
+        let client_initial = client
+            .assemble_handshake_packet(&client_flight.remove(0), dcid, client_scid, 0)
+            .expect("client Initial");
+        server
+            .recv_handshake_packet(&client_initial)
+            .expect("server accepts ClientHello");
+        let server_flight = server.pump_outbound().expect("server flight");
+        let server_initial_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Initial)
+            .expect("ServerHello segment");
+        let server_handshake_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Handshake)
+            .expect("server Handshake segment");
+        let mut datagram = server
+            .assemble_handshake_packet(server_initial_segment, client_scid, server_scid, 0)
+            .expect("server Initial");
+        // The same CRYPTO bytes twice: under packet number 1 with a corrupted
+        // tag, then intact under packet number 2.
+        let mut corrupted = server
+            .assemble_handshake_packet_at(server_handshake_segment, 0, client_scid, server_scid, 1)
+            .expect("corrupted server Handshake");
+        *corrupted.last_mut().expect("tag byte") ^= 0x01;
+        datagram.extend_from_slice(&corrupted);
+        let genuine = server
+            .assemble_handshake_packet(server_handshake_segment, client_scid, server_scid, 2)
+            .expect("server Handshake");
+        datagram.extend_from_slice(&genuine);
+
+        let peer = client
+            .recv_handshake_packet(&datagram)
+            .expect("the corrupted packet is discarded, not fatal");
+        assert_eq!(peer, server_scid);
+        assert_eq!(
+            client.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            vec![0]
+        );
+        assert_eq!(
+            client.received_handshake_packet_numbers(HandshakeLevel::Handshake),
+            vec![2],
+            "the genuine Handshake packet behind the corrupted one is processed"
+        );
+        assert!(client.is_complete(), "the client read the server Finished");
     }
 
     /// br-asupersync-2eqmd2 M3, over UDP: a refused ALPN ends both handshake
