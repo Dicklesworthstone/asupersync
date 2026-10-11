@@ -2743,6 +2743,11 @@ fn validate_h2_pseudo_headers(
                      (RFC 9113 §8.2.1 violation)",
                 );
             }
+            // RFC 9113 §8.2.1: field values MUST NOT start or end with SP or HTAB.
+            if h.value.starts_with([' ', '\t']) || h.value.ends_with([' ', '\t']) {
+                return Err("trailer field value has leading or trailing whitespace \
+                     (RFC 9113 §8.2.1 violation)");
+            }
             match name {
                 b"connection" | b"keep-alive" | b"proxy-connection" | b"transfer-encoding"
                 | b"upgrade" => {
@@ -2774,6 +2779,13 @@ fn validate_h2_pseudo_headers(
         let name: &[u8] = h.name.as_bytes();
         if name.is_empty() {
             return Err("empty header name");
+        }
+        // RFC 9113 §8.2.1: field values MUST NOT start or end with SP or HTAB.
+        if h.value.starts_with([' ', '\t']) || h.value.ends_with([' ', '\t']) {
+            return Err(
+                "header field value has leading or trailing whitespace \
+                 (RFC 9113 §8.2.1 violation)",
+            );
         }
         if name.first().copied() == Some(b':') {
             // Pseudo-header.
@@ -8302,6 +8314,49 @@ mod tests {
             h("user-agent", "test"),
         ];
         assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
+    }
+
+    /// asupersync-e427ys — RFC 9113 §8.2.1: Field values MUST NOT start or
+    /// end with an ASCII whitespace character (SP or HTAB). Such fields are
+    /// malformed and must elicit PROTOCOL_ERROR.
+    #[test]
+    fn e427ys_header_value_with_leading_or_trailing_whitespace_rejected() {
+        for (name, val) in [
+            ("x-pad", " leading"),
+            ("x-pad", "trailing "),
+            ("x-pad", "\tleading-tab"),
+            ("x-pad", "trailing-tab\t"),
+            (":path", " /with-space"),
+            (":path", "/with-space "),
+            (":status", " 200"),
+            (":status", "200 "),
+        ] {
+            let req = vec![
+                h(":method", "GET"),
+                h(":scheme", "https"),
+                h(":path", if name == ":path" { val } else { "/" }),
+                h(":authority", "example.com"),
+                h(if name == ":path" { "x-dummy" } else { name }, val),
+            ];
+            let err = validate_h2_pseudo_headers(&req, true, false)
+                .expect_err(&format!("expected rejection for {name}: {val:?}"));
+            assert!(err.contains("RFC 9113 §8.2.1"), "wrong reject reason: {err}");
+
+            let resp = vec![
+                h(":status", if name == ":status" { val } else { "200" }),
+                h(if name == ":status" { "x-dummy" } else { name }, val),
+            ];
+            let err = validate_h2_pseudo_headers(&resp, false, false)
+                .expect_err(&format!("expected rejection for {name}: {val:?}"));
+            assert!(err.contains("RFC 9113 §8.2.1"), "wrong reject reason: {err}");
+
+            if !name.starts_with(':') {
+                let trailers = vec![h(name, val)];
+                let err = validate_h2_pseudo_headers(&trailers, false, true)
+                    .expect_err(&format!("expected trailer rejection for {name}: {val:?}"));
+                assert!(err.contains("RFC 9113 §8.2.1"), "wrong reject reason: {err}");
+            }
+        }
     }
 
     /// br-asupersync-lcvdj0 — RFC 9113 §3.4 / §3.5 require the first

@@ -736,6 +736,12 @@ impl ResponseState {
                 validate_header_field(&header.name, &header.value)
                     .map_err(|error| protocol(error.to_string()))?;
             }
+            // RFC 9113 §8.2.1: field values MUST NOT start or end with SP or HTAB.
+            if header.value.starts_with([' ', '\t']) || header.value.ends_with([' ', '\t']) {
+                return Err(protocol(
+                    "response field value has leading or trailing whitespace (RFC 9113 8.2.1)",
+                ));
+            }
         }
         if self.response.status != 0 {
             if !end

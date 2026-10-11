@@ -997,3 +997,50 @@ fn a_pooled_connection_whose_server_admits_no_stream_is_not_reused() {
         started.elapsed()
     );
 }
+
+/// asupersync-e427ys — RFC 9113 §8.2.1: response headers with leading or
+/// trailing whitespace are malformed and must be rejected as protocol errors.
+#[test]
+fn response_headers_with_leading_or_trailing_whitespace_are_rejected() {
+    for workers in [1, 2] {
+        for (name, val) in [
+            ("x-pad", " leading"),
+            ("x-pad", "trailing "),
+            ("x-pad", "\tleading-tab"),
+            ("x-pad", "trailing-tab\t"),
+        ] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let mut peer = Peer::accept(listener, 65_535);
+                let id = peer.request();
+                let _ = peer.connection.send_headers(
+                    id,
+                    vec![
+                        Header::new(":status", "200"),
+                        Header::new(name, val),
+                    ],
+                    true,
+                );
+                peer.flush();
+                peer.eof();
+            });
+            let runtime = runtime(workers);
+            runtime.block_on(async move {
+                let cx = Cx::current().unwrap();
+                let result = Http2Client::new()
+                    .timeout(Duration::from_secs(3))
+                    .get(format!("http://{address}/whitespace-header"))
+                    .send(&cx)
+                    .await;
+                assert!(
+                    result.is_err(),
+                    "response with invalid header whitespace should be rejected: {name}={val:?}"
+                );
+            });
+            let _ = peer.join();
+            quiescent(&runtime);
+        }
+    }
+}
+
