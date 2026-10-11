@@ -397,14 +397,73 @@ fn is_valid_host_port(port: &str) -> bool {
     !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) && port.parse::<u16>().is_ok()
 }
 
-fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>, String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostRejection {
+    Missing,
+    Multiple,
+    Invalid(String),
+    NotAllowed(String),
+}
+
+impl HostRejection {
+    pub(crate) fn status(&self) -> u16 {
+        match self {
+            Self::Missing | Self::Multiple | Self::Invalid(_) => 400,
+            Self::NotAllowed(_) => 421,
+        }
+    }
+
+    pub(crate) fn reason(&self) -> &'static str {
+        match self {
+            Self::Missing | Self::Multiple | Self::Invalid(_) => "Bad Request",
+            Self::NotAllowed(_) => "Misdirected Request",
+        }
+    }
+
+    pub(crate) fn body(&self) -> String {
+        match self {
+            Self::Missing => "Missing required Host header".to_string(),
+            Self::Multiple => "multiple Host headers".to_string(),
+            Self::Invalid(host) => format!("Invalid Host header: '{host}'"),
+            Self::NotAllowed(host) => format!("Host '{host}' not in allowed-hosts allow-list"),
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Missing => "",
+            Self::Multiple => "multiple Host headers",
+            Self::Invalid(host) | Self::NotAllowed(host) => host.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for HostRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl PartialEq<str> for HostRejection {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for HostRejection {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>, HostRejection> {
     let mut host_value = None;
     for (name, value) in headers {
         if !name.eq_ignore_ascii_case("host") {
             continue;
         }
         if host_value.is_some() {
-            return Err("multiple Host headers".to_string());
+            return Err(HostRejection::Multiple);
         }
         host_value = Some(value.as_str());
     }
@@ -412,43 +471,54 @@ fn single_host_header_value(headers: &[(String, String)]) -> Result<Option<&str>
 }
 
 /// br-asupersync-scxixg: validate the request's `Host` header against
-/// the host policy. Returns `Ok(())` if validation passes (or is
-/// disabled); `Err(host_value)` carrying the offending host string
-/// for logging if the header is missing or not allow-listed.
+/// the host policy. Returns `Ok(())` if validation passes; `Err(HostRejection)`
+/// on failure with RFC 9112 §3.2 (400 Bad Request for missing/multiple/invalid)
+/// or §7.1 (421 Misdirected Request for unallowed hosts).
 pub(crate) fn validate_host_header(
     headers: &[(String, String)],
     host_policy: &HostPolicy,
-) -> Result<(), String> {
+) -> Result<(), HostRejection> {
     match host_policy {
-        HostPolicy::AllowAll => single_host_header_value(headers).map(|_| ()),
-        HostPolicy::RejectUnknown => {
-            // Reject all requests - most secure default
+        HostPolicy::AllowAll => {
             let host_value = single_host_header_value(headers)?;
-            Err(host_value.unwrap_or("").to_string())
+            let Some(host_value) = host_value else {
+                return Err(HostRejection::Missing);
+            };
+            if parse_host_header_host(host_value).is_some() {
+                Ok(())
+            } else {
+                Err(HostRejection::Invalid(host_value.to_string()))
+            }
+        }
+        HostPolicy::RejectUnknown => {
+            let host_value = single_host_header_value(headers)?;
+            let Some(host_value) = host_value else {
+                return Err(HostRejection::Missing);
+            };
+            let Some(parsed) = parse_host_header_host(host_value) else {
+                return Err(HostRejection::Invalid(host_value.to_string()));
+            };
+            Err(HostRejection::NotAllowed(parsed))
         }
         HostPolicy::AllowList(allow_list) => {
-            if allow_list.is_empty() {
-                // br-asupersync-scxixg: Empty allow-list MUST reject all hosts to prevent
-                // Host header injection attacks. Previous behavior of accepting all hosts
-                // with an empty list was a fail-open security vulnerability.
-                let host_value = single_host_header_value(headers)?;
-                return Err(host_value.unwrap_or("").to_string());
-            }
             let host_value = single_host_header_value(headers)?;
             let Some(host_value) = host_value else {
                 // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
-                return Err(String::new());
+                return Err(HostRejection::Missing);
             };
             let Some(parsed) = parse_host_header_host(host_value) else {
-                return Err(host_value.to_string());
+                return Err(HostRejection::Invalid(host_value.to_string()));
             };
+            if allow_list.is_empty() {
+                return Err(HostRejection::NotAllowed(parsed));
+            }
             if allow_list
                 .iter()
                 .any(|allowed| allowed.eq_ignore_ascii_case(&parsed))
             {
                 Ok(())
             } else {
-                Err(parsed)
+                Err(HostRejection::NotAllowed(parsed))
             }
         }
     }
@@ -1208,32 +1278,24 @@ where
             // handler never sees the request, eliminating the host-
             // injection attack surface for absolute-URL emission /
             // OAuth redirect_uri / cache-key computation.
-            if let Err(rejected_host) =
+            if let Err(rejection) =
                 validate_host_header(&req.headers, &self.config.allowed_hosts)
             {
                 state.phase = ConnectionPhase::Writing;
-                let body_msg = if rejected_host.is_empty() {
-                    "Missing required Host header".to_string()
-                } else {
-                    format!("Host '{rejected_host}' not in allowed-hosts allow-list")
-                };
-                // br-asupersync-t9yqht: 421 Misdirected Request per
-                // RFC 7540 §9.1.2 — semantically the right code for
-                // "the server is unable to produce a response for the
-                // combination of the URI and HOST header (effective
-                // request URI) presented".
+                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let reject_resp = Response {
-                    status: 421,
-                    reason: String::new(),
+                    status: rejection.status(),
+                    reason: rejection.reason().to_string(),
                     version: req.version,
                     headers: vec![
+                        ("date".to_string(), date_str),
                         (
                             "content-type".to_string(),
                             "text/plain; charset=utf-8".to_string(),
                         ),
                         ("connection".to_string(), "close".to_string()),
                     ],
-                    body: body_msg.into_bytes(),
+                    body: rejection.body().into_bytes(),
                     trailers: Vec::new(),
                 };
                 framed.send(reject_resp)?;
@@ -1662,26 +1724,23 @@ where
             };
             let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
 
-            if let Err(rejected_host) =
+            if let Err(rejection) =
                 validate_host_header(&head.headers, &self.config.allowed_hosts)
             {
-                let body = if rejected_host.is_empty() {
-                    "Missing required Host header".to_owned()
-                } else {
-                    format!("Host '{rejected_host}' not in allowed-hosts allow-list")
-                };
+                let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
                 let response = Response {
-                    status: 421,
-                    reason: String::new(),
+                    status: rejection.status(),
+                    reason: rejection.reason().to_string(),
                     version: head.version,
                     headers: vec![
+                        ("date".to_owned(), date_str),
                         (
                             "content-type".to_owned(),
                             "text/plain; charset=utf-8".to_owned(),
                         ),
                         ("connection".to_owned(), "close".to_owned()),
                     ],
-                    body: body.into_bytes(),
+                    body: rejection.body().into_bytes(),
                     trailers: Vec::new(),
                 };
                 state.phase = ConnectionPhase::Writing;
@@ -2050,24 +2109,21 @@ where
     let early_request_method = head.method.clone();
     let _in_flight = InFlightRequestGuard::acquire(in_flight_requests.as_ref());
 
-    if let Err(rejected_host) = validate_host_header(&head.headers, &config.allowed_hosts) {
-        let body = if rejected_host.is_empty() {
-            "Missing required Host header".to_owned()
-        } else {
-            format!("Host '{rejected_host}' not in allowed-hosts allow-list")
-        };
+    if let Err(rejection) = validate_host_header(&head.headers, &config.allowed_hosts) {
+        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
         let mut response = Response {
-            status: 421,
-            reason: String::new(),
+            status: rejection.status(),
+            reason: rejection.reason().to_string(),
             version: head.version,
             headers: vec![
+                ("date".to_owned(), date_str),
                 (
                     "content-type".to_owned(),
                     "text/plain; charset=utf-8".to_owned(),
                 ),
                 ("connection".to_owned(), "close".to_owned()),
             ],
-            body: body.into_bytes(),
+            body: rejection.body().into_bytes(),
             trailers: Vec::new(),
         };
         if early_request_method == Method::Head {
@@ -2359,6 +2415,8 @@ fn live_sse_head_only_response(version: Version) -> Response {
         .filter(|(name, _)| !name.eq_ignore_ascii_case("connection"))
         .map(|(name, value)| (name.to_owned(), value.to_owned()))
         .collect();
+    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
+    response.headers.push(("date".to_owned(), date_str));
     add_connection_close(&mut response);
     response
 }
@@ -2378,6 +2436,10 @@ fn validate_produced_response_head(
         .retain(|(name, _)| !name.eq_ignore_ascii_case("connection"));
     head.headers
         .push(("Connection".to_owned(), "close".to_owned()));
+    if head.status >= 200 && !head.headers.iter().any(|(name, _)| name.eq_ignore_ascii_case("date")) {
+        let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
+        head.headers.push(("date".to_owned(), date_str));
+    }
 
     let mut content_length = None;
     let mut transfer_encoding = None;
@@ -3141,11 +3203,13 @@ fn head_parse_failure_response(error: &HttpError) -> Option<Response> {
         | HttpError::PrefetchedDataRemaining(_)
         | HttpError::TooManyInformationalResponses { .. } => return None,
     };
+    let date_str = crate::time::format_unix_nanos_http_date(wall_now().as_nanos());
     Some(Response {
         status,
         reason: String::new(),
         version: Version::Http11,
         headers: vec![
+            ("date".to_string(), date_str),
             (
                 "content-type".to_string(),
                 "text/plain; charset=utf-8".to_string(),
