@@ -210,19 +210,23 @@ fn expand_entry(args: &EntryArgs, mut function: ItemFn, kind: EntryKind) -> Resu
                 .expect("asupersync entry macro failed to build the runtime");
             // Keep the runtime alive while unwinding the entry future so
             // root-owned children and finalizers still receive their drain.
+            // The closure returns the entry's output in a one-element tuple:
+            // a closure returning a `Result` with a large error type, such as
+            // `asupersync::Error`, trips `clippy::result_large_err` at the
+            // attribute, in the caller's crate.
             let __asupersync_entry_output = ::std::panic::catch_unwind(
                 ::std::panic::AssertUnwindSafe(|| {
-                    __asupersync_entry_runtime.block_on(async move {
+                    (__asupersync_entry_runtime.block_on(async move {
                         #cx_binding
                         #block
-                    })
+                    }),)
                 }),
             );
             let __asupersync_drain_output = ::std::panic::catch_unwind(
                 ::std::panic::AssertUnwindSafe(|| { #drain_step }),
             );
             match __asupersync_entry_output {
-                ::core::result::Result::Ok(output) => match __asupersync_drain_output {
+                ::core::result::Result::Ok((output,)) => match __asupersync_drain_output {
                     ::core::result::Result::Ok(()) => output,
                     ::core::result::Result::Err(panic) => ::std::panic::resume_unwind(panic),
                 },
