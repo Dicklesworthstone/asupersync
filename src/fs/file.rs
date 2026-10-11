@@ -32,7 +32,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(feature = "test-internals")]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "test-internals")]
 use std::sync::{Condvar, Mutex as StdMutex};
@@ -212,6 +211,8 @@ enum PendingIo {
         future: PollIoFuture<usize>,
         /// The submitted bytes; a retry's buffer starts with them.
         chunk: Arc<Vec<u8>>,
+        /// Read-ahead of a combined rewind-then-write job.
+        restore: Option<RewindRestore>,
     },
     Flush {
         future: PollIoFuture<()>,
@@ -220,7 +221,44 @@ enum PendingIo {
         future: PollIoFuture<u64>,
         /// The requested position; a retry asks for the same one.
         pos: SeekFrom,
+        /// Read-ahead of a combined rewind-then-seek job.
+        restore: Option<RewindRestore>,
     },
+}
+
+/// Read-ahead behind a poll-trait write or seek submitted as one job that
+/// first rewinds the OS cursor over it. One job keeps an abandoned operation
+/// whole: whatever settles it later finds it done, not just its rewind. If
+/// the rewind itself fails (a pipe or socket cannot seek back), the cursor
+/// still sits past these bytes, so they are handed back as read-ahead.
+struct RewindRestore {
+    bytes: Vec<u8>,
+    consumed: usize,
+    /// Set by the job once its rewind succeeded.
+    rewound: Arc<AtomicBool>,
+}
+
+impl RewindRestore {
+    /// After the job failed: restore the read-ahead unless the rewind ran.
+    fn restore_unless_rewound(self, pending: &mut Option<PendingIo>) {
+        if !self.rewound.load(Ordering::Acquire) {
+            *pending = Some(PendingIo::ReadAhead {
+                bytes: self.bytes,
+                consumed: self.consumed,
+            });
+        }
+    }
+
+    /// Bytes the OS cursor still sits past once the job ended: all the
+    /// unconsumed read-ahead if it failed before its rewind ran.
+    fn unrewound(restore: Option<Self>, failed: bool) -> usize {
+        match restore {
+            Some(restore) if failed && !restore.rewound.load(Ordering::Acquire) => {
+                restore.bytes.len() - restore.consumed
+            }
+            _ => 0,
+        }
+    }
 }
 
 /// A poll-trait write that a read, flush or owned operation settled before
@@ -497,17 +535,21 @@ impl File {
                 futures_lite::future::block_on(future)?;
                 0
             }
-            Some(PendingIo::Write { future, .. }) => {
-                let _ = futures_lite::future::block_on(future);
-                0
+            Some(PendingIo::Write {
+                future, restore, ..
+            }) => {
+                let failed = futures_lite::future::block_on(future).is_err();
+                RewindRestore::unrewound(restore, failed)
             }
             Some(PendingIo::Flush { future }) => {
                 let _ = futures_lite::future::block_on(future);
                 0
             }
-            Some(PendingIo::Seek { future, .. }) => {
-                let _ = futures_lite::future::block_on(future);
-                0
+            Some(PendingIo::Seek {
+                future, restore, ..
+            }) => {
+                let failed = futures_lite::future::block_on(future).is_err();
+                RewindRestore::unrewound(restore, failed)
             }
         };
         i64::try_from(unconsumed).map_err(|_| io::Error::other("read-ahead exceeds seek range"))
@@ -737,9 +779,17 @@ impl File {
                     Poll::Ready(Err(error))
                 }
             },
-            Some(PendingIo::Write { mut future, chunk }) => match future.as_mut().poll(poll_cx) {
+            Some(PendingIo::Write {
+                mut future,
+                chunk,
+                restore,
+            }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
-                    *pending = Some(PendingIo::Write { future, chunk });
+                    *pending = Some(PendingIo::Write {
+                        future,
+                        chunk,
+                        restore,
+                    });
                     Poll::Pending
                 }
                 // The bytes were committed to the file, which is the documented
@@ -754,6 +804,9 @@ impl File {
                             written: *written,
                         });
                     }
+                    if let (Err(_), Some(restore)) = (&result, restore) {
+                        restore.restore_unless_rewound(pending);
+                    }
                     Poll::Ready(result.map(|_| ()))
                 }
             },
@@ -764,12 +817,25 @@ impl File {
                 }
                 Poll::Ready(result) => Poll::Ready(result),
             },
-            Some(PendingIo::Seek { mut future, pos }) => match future.as_mut().poll(poll_cx) {
+            Some(PendingIo::Seek {
+                mut future,
+                pos,
+                restore,
+            }) => match future.as_mut().poll(poll_cx) {
                 Poll::Pending => {
-                    *pending = Some(PendingIo::Seek { future, pos });
+                    *pending = Some(PendingIo::Seek {
+                        future,
+                        pos,
+                        restore,
+                    });
                     Poll::Pending
                 }
-                Poll::Ready(result) => Poll::Ready(result.map(|_| ())),
+                Poll::Ready(result) => {
+                    if let (Err(_), Some(restore)) = (&result, restore) {
+                        restore.restore_unless_rewound(pending);
+                    }
+                    Poll::Ready(result.map(|_| ()))
+                }
             },
         }
     }
@@ -881,15 +947,26 @@ impl AsyncWrite for File {
                 // A retry passes the same bytes, so its buffer starts with
                 // the submitted chunk. Anything else is a new write after an
                 // abandoned one, settled below by the catch-all arm.
-                Some(PendingIo::Write { mut future, chunk }) if buf.starts_with(&chunk) => {
-                    match future.as_mut().poll(poll_cx) {
-                        Poll::Pending => {
-                            *pending = Some(PendingIo::Write { future, chunk });
-                            return Poll::Pending;
-                        }
-                        Poll::Ready(result) => return Poll::Ready(result),
+                Some(PendingIo::Write {
+                    mut future,
+                    chunk,
+                    restore,
+                }) if buf.starts_with(&chunk) => match future.as_mut().poll(poll_cx) {
+                    Poll::Pending => {
+                        *pending = Some(PendingIo::Write {
+                            future,
+                            chunk,
+                            restore,
+                        });
+                        return Poll::Pending;
                     }
-                }
+                    Poll::Ready(result) => {
+                        if let (Err(_), Some(restore)) = (&result, restore) {
+                            restore.restore_unless_rewound(&mut pending);
+                        }
+                        return Poll::Ready(result);
+                    }
+                },
                 None => {
                     // A caller retries with the same bytes until `Ready`, so
                     // the chunk is copied once and the count of that chunk is
@@ -900,28 +977,41 @@ impl AsyncWrite for File {
                         let mut file_ref: &std::fs::File = file;
                         Write::write(&mut file_ref, &submitted)
                     });
-                    *pending = Some(PendingIo::Write { future, chunk });
+                    *pending = Some(PendingIo::Write {
+                        future,
+                        chunk,
+                        restore: None,
+                    });
                 }
                 Some(read_ahead) if matches!(read_ahead, PendingIo::ReadAhead { .. }) => {
                     // The OS cursor sits past bytes the caller never consumed;
                     // rewind before writing so the write lands where the
-                    // caller believes the cursor is. Use PendingIo::Rewind
-                    // so if the rewind fails (e.g. on a pipe/socket), unconsumed
-                    // read-ahead bytes are retained rather than lost.
+                    // caller believes the cursor is. One job, so an abandoned
+                    // write is settled whole; a failed rewind (a pipe or
+                    // socket) hands the unconsumed read-ahead back.
                     let rewind = i64::try_from(Self::unconsumed_read_ahead(Some(&read_ahead)))
                         .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
                     let PendingIo::ReadAhead { bytes, consumed } = read_ahead else {
                         unreachable!()
                     };
+                    let chunk = Arc::new(buf[..buf.len().min(POLL_IO_CHUNK_BYTES)].to_vec());
+                    let submitted = Arc::clone(&chunk);
+                    let rewound = Arc::new(AtomicBool::new(false));
+                    let job_rewound = Arc::clone(&rewound);
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, SeekFrom::Current(-rewind))?;
-                        Ok(())
+                        job_rewound.store(true, Ordering::Release);
+                        Write::write(&mut file_ref, &submitted)
                     });
-                    *pending = Some(PendingIo::Rewind {
+                    *pending = Some(PendingIo::Write {
                         future,
-                        bytes,
-                        consumed,
+                        chunk,
+                        restore: Some(RewindRestore {
+                            bytes,
+                            consumed,
+                            rewound,
+                        }),
                     });
                 }
                 other => {
@@ -998,39 +1088,62 @@ impl AsyncSeek for File {
                 Some(PendingIo::Seek {
                     mut future,
                     pos: submitted,
+                    restore,
                 }) if submitted == pos => match future.as_mut().poll(poll_cx) {
                     Poll::Pending => {
-                        *pending = Some(PendingIo::Seek { future, pos });
+                        *pending = Some(PendingIo::Seek {
+                            future,
+                            pos,
+                            restore,
+                        });
                         return Poll::Pending;
                     }
-                    Poll::Ready(result) => return Poll::Ready(result),
+                    Poll::Ready(result) => {
+                        if let (Err(_), Some(restore)) = (&result, restore) {
+                            restore.restore_unless_rewound(&mut pending);
+                        }
+                        return Poll::Ready(result);
+                    }
                 },
                 None => {
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, pos)
                     });
-                    *pending = Some(PendingIo::Seek { future, pos });
+                    *pending = Some(PendingIo::Seek {
+                        future,
+                        pos,
+                        restore: None,
+                    });
                 }
                 Some(read_ahead) if matches!(read_ahead, PendingIo::ReadAhead { .. }) => {
                     // Reconcile the physical cursor before the requested
-                    // seek, as the owned seek path does. Use PendingIo::Rewind
-                    // so that if rewind fails (e.g. on a pipe/socket), unconsumed
-                    // read-ahead bytes are retained rather than lost.
+                    // seek, as the owned seek path does, in the same job: an
+                    // abandoned seek is then settled whole, not just its
+                    // rewind. A failed rewind (a pipe or socket) hands the
+                    // unconsumed read-ahead back; once the rewind ran, the
+                    // cursor is where the caller believes it is.
                     let unconsumed = i64::try_from(Self::unconsumed_read_ahead(Some(&read_ahead)))
                         .map_err(|_| io::Error::other("read-ahead exceeds seek range"))?;
                     let PendingIo::ReadAhead { bytes, consumed } = read_ahead else {
                         unreachable!()
                     };
+                    let rewound = Arc::new(AtomicBool::new(false));
+                    let job_rewound = Arc::clone(&rewound);
                     let future = this.submit_blocking(move |file| {
                         let mut file_ref: &std::fs::File = file;
                         Seek::seek(&mut file_ref, SeekFrom::Current(-unconsumed))?;
-                        Ok(())
+                        job_rewound.store(true, Ordering::Release);
+                        Seek::seek(&mut file_ref, pos)
                     });
-                    *pending = Some(PendingIo::Rewind {
+                    *pending = Some(PendingIo::Seek {
                         future,
-                        bytes,
-                        consumed,
+                        pos,
+                        restore: Some(RewindRestore {
+                            bytes,
+                            consumed,
+                            rewound,
+                        }),
                     });
                 }
                 other => {

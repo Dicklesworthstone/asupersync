@@ -584,3 +584,45 @@ fn abandoned_write_and_seek_are_not_credited_to_the_next_call() {
     });
     assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
 }
+
+/// A write behind unconsumed read-ahead rewinds and writes in one job, so an
+/// abandoned write still lands at the caller's cursor once it is settled.
+#[test]
+fn abandoned_write_after_read_ahead_lands_at_the_logical_cursor() {
+    let path = scratch_path("abandoned-write-after-read-ahead");
+    let expected = pattern(1024);
+    std::fs::write(&path, &expected).expect("write fixture");
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .expect("open fixture");
+    let mut file = File::from_std(std_file);
+    let runtime = RuntimeBuilder::current_thread()
+        .blocking_threads(1, 1)
+        .build()
+        .expect("runtime with a blocking pool");
+    let check_path = path.clone();
+    runtime.block_on(async move {
+        let mut abandoned = [0u8; 1024];
+        abandon_queued_io(file.read(&mut abandoned)).await;
+        let mut prefix = [0u8; 7];
+        file.read_exact(&mut prefix)
+            .await
+            .expect("resume small read");
+        assert_eq!(prefix, expected[..7], "1017 read-ahead bytes stay unread");
+
+        abandon_queued_io(file.write_all(b"XYZ")).await;
+        file.flush()
+            .await
+            .expect("flush settles the abandoned write");
+        let mut wanted = expected.clone();
+        wanted[7..10].copy_from_slice(b"XYZ");
+        assert_eq!(
+            std::fs::read(&check_path).expect("read back"),
+            wanted,
+            "the abandoned write landed at the caller's cursor, not past the read-ahead"
+        );
+    });
+    assert!(runtime.shutdown_timeout(Duration::from_secs(10)));
+}
