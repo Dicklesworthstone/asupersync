@@ -108,9 +108,13 @@ fn duplicate_or_invalid_extension_targets_and_numbers_are_refused() {
         let invalid = mutate_file(1, |file| file.extensions[0].extendee = Some(target.to_string()));
         assert_eq!(ReflectionDescriptorSet::decode(&invalid).unwrap_err().code(), Code::InvalidArgument);
     }
-    for number in [0, -1, 19_000, 536_870_912] {
+    for number in [0, -1, 19_000, 19_999] {
         let invalid = mutate_file(1, |file| file.extensions[0].number = Some(number));
         assert_eq!(ReflectionDescriptorSet::decode(&invalid).unwrap_err().code(), Code::InvalidArgument);
+    }
+    for number in [536_870_912, 1_000_000_000, i32::MAX] {
+        let valid = mutate_file(1, |file| file.extensions[0].number = Some(number));
+        assert!(ReflectionDescriptorSet::decode(&valid).is_ok());
     }
 }
 

@@ -226,7 +226,9 @@ impl ReflectionDescriptorSet {
             .filter(|name| qualified_name(name))
             .ok_or_else(|| Status::invalid_argument("extension target must be fully qualified"))?;
         let number = extension.number.unwrap_or_default();
-        if !(1..=536_870_911).contains(&number) || (19_000..=19_999).contains(&number) {
+        // Protobuf standard field numbers are 1..=536_870_911, but message_set_wire_format
+        // extensions can use any positive int32 up to 2^31 - 1 (RFC / descriptor.proto).
+        if !(1..=i32::MAX).contains(&number) || (19_000..=19_999).contains(&number) {
             return Err(Status::invalid_argument("invalid protobuf extension number"));
         }
         if self.extensions.entry(target.to_owned()).or_default()

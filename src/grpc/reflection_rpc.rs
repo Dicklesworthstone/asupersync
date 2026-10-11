@@ -26,7 +26,7 @@ use super::reflection::ReflectionService;
 use super::reflection_descriptor::ReflectionDescriptorSet;
 use super::service::{MethodDescriptor, NamedService, RegisteredServerStream, ServiceDescriptor, ServiceHandler, ServiceStreamingFuture};
 use super::streaming::{Request, Streaming};
-use super::{RegisteredRequestStream, Status};
+use super::{Code, RegisteredRequestStream, Status};
 use crate::bytes::Bytes;
 use crate::cx::Cx;
 use crate::types::CancelKind;
@@ -196,11 +196,17 @@ impl ReflectionRpcService {
                     message: status.message().to_owned(),
                 })
             });
-        let response = WireResponse {
+        let mut response = WireResponse {
             valid_host: request.host.clone(), original_request: Some(request), reply: Some(reply),
         };
         if response.encoded_len() > self.shared.config.max_response_bytes {
-            return Err(Status::resource_exhausted("reflection response byte limit exceeded"));
+            response.reply = Some(Reply::Error(wire::ErrorReply {
+                code: Code::ResourceExhausted as i32,
+                message: "reflection response byte limit exceeded".to_owned(),
+            }));
+            if response.encoded_len() > self.shared.config.max_response_bytes {
+                return Err(Status::resource_exhausted("reflection response byte limit exceeded"));
+            }
         }
         checkpoint(cx)?;
         Ok(Bytes::from(response.encode_to_vec()))

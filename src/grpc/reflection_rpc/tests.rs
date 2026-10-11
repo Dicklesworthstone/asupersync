@@ -264,6 +264,52 @@ fn versioned_services_register_with_exact_bidi_paths_and_no_unary_fallback() {
     assert!(matches!(refused.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(Err(status)) if status.code() == Code::Unimplemented));
 }
 
+#[test]
+fn enable_reflection_preserves_explicitly_registered_v1alpha_service() {
+    let service = rpc(registry().allow_anonymous(), ReflectionRpcConfig::default());
+    let alpha = service.v1alpha();
+    // Case 1: add_service(alpha) BEFORE enable_reflection_with_auth
+    let server1 = Server::builder()
+        .add_service(alpha.clone())
+        .enable_reflection_with_auth(|_, _| Ok(()))
+        .build();
+    let registered1 = server1.get_service(ReflectionRpcV1AlphaService::NAME).unwrap();
+    assert_eq!(registered1.descriptor().methods[0].path, ALPHA_PATH);
+    assert!(registered1.descriptor().methods[0].client_streaming);
+
+    // Case 2: enable_reflection_with_auth BEFORE add_service(alpha)
+    let server2 = Server::builder()
+        .enable_reflection_with_auth(|_, _| Ok(()))
+        .add_service(alpha)
+        .build();
+    let registered2 = server2.get_service(ReflectionRpcV1AlphaService::NAME).unwrap();
+    assert_eq!(registered2.descriptor().methods[0].path, ALPHA_PATH);
+    assert!(registered2.descriptor().methods[0].client_streaming);
+}
+
+#[test]
+fn oversize_response_returns_in_band_error_reply_without_failing_stream() {
+    let config = ReflectionRpcConfig {
+        max_response_bytes: 80,
+        ..Default::default()
+    };
+    let service = rpc(registry().allow_anonymous(), config);
+    let cx = remote();
+    let request = WireRequest {
+        host: "example.test".to_string(),
+        query: Some(Query::FileByName("echo.proto".to_string())),
+    };
+    let response = service.answer(&cx, &Bytes::from(request.encode_to_vec())).unwrap();
+    let reply = decode(response);
+    match reply.reply {
+        Some(Reply::Error(err)) => {
+            assert_eq!(err.code, Code::ResourceExhausted as i32);
+            assert!(err.message.contains("byte limit exceeded"));
+        }
+        other => panic!("expected in-band Error reply, got {other:?}"),
+    }
+}
+
 async fn deadline_scenario(cx: Cx) {
     use crate::cx::ChildRegionSpec;
     use crate::types::Budget;

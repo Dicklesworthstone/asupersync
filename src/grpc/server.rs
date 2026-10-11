@@ -1207,10 +1207,14 @@ impl ServerBuilder {
                 reflection.register_handler(service.as_ref());
             }
         }
-        self.services.insert(
-            ReflectionService::NAME.to_string(),
-            Arc::new(reflection.clone()),
-        );
+        let has_explicit_v1alpha =
+            self.services.contains_key(ReflectionService::NAME) && self.reflection.is_none();
+        if !has_explicit_v1alpha {
+            self.services.insert(
+                ReflectionService::NAME.to_string(),
+                Arc::new(reflection.clone()),
+            );
+        }
         self.reflection = Some(reflection);
         self
     }
@@ -1233,10 +1237,14 @@ impl ServerBuilder {
                 reflection.register_handler(service.as_ref());
             }
         }
-        self.services.insert(
-            ReflectionService::NAME.to_string(),
-            Arc::new(reflection.clone()),
-        );
+        let has_explicit_v1alpha =
+            self.services.contains_key(ReflectionService::NAME) && self.reflection.is_none();
+        if !has_explicit_v1alpha {
+            self.services.insert(
+                ReflectionService::NAME.to_string(),
+                Arc::new(reflection.clone()),
+            );
+        }
         self.reflection = Some(reflection);
         self
     }
