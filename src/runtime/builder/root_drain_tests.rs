@@ -3,7 +3,10 @@
 use super::*;
 use crate::cx::Cx;
 use crate::record::{ObligationAbortReason, ObligationKind};
-use crate::types::{CancelKind, Outcome, TaskId};
+use crate::types::{
+    CancelKind, CapabilityBudget, CapabilityBudgetDimension, CapabilityBudgetRefusal,
+    CapabilityBudgetRequirements, Outcome, TaskId,
+};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 
@@ -366,5 +369,309 @@ fn shutdown_drained_cancels_parked_child_settles_obligation_and_runs_finalizer()
         eprintln!(
             "{{\"bead\":\"asupersync-bi2462.92\",\"case\":{case},\"scenario\":\"child-obligation-finalizer\",\"task\":\"{task:?}\",\"report\":\"{report:?}\"}}"
         );
+    }
+}
+
+fn immediate_scope_region<T>(future: impl Future<Output = T>) -> T {
+    // The legacy region surface borrows RuntimeState. These fixtures create
+    // only empty regions with ready bodies, so no state lock may cross a
+    // Pending boundary or block native admission/completion.
+    let mut future = std::pin::pin!(future);
+    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(result) => result,
+        Poll::Pending => panic!("empty scope region must close in its first poll"),
+    }
+}
+
+fn assert_scope_root_drained(runtime: &Runtime, workers: u8) {
+    let report = runtime.shutdown_drained(Duration::from_secs(3));
+    assert_eq!(report.outcome, RootDrainOutcome::Quiescent);
+    assert_eq!(report.live_tasks, 0);
+    assert_eq!(report.pending_obligations, 0);
+    assert_eq!(report.live_regions, 0);
+    assert_eq!(report.queued_finalizers, 0);
+    assert_eq!(report.pending_spawns, 0);
+    assert!(!report.has_pending_obligation_posts);
+    eprintln!("SCOPE_ADMISSION bead=asupersync-bi2462.46 workers={workers} report={report:?}");
+}
+
+#[test]
+fn scope_region_admission_preserves_context_only_constraints_on_native_workers() {
+    use crate::runtime::resource_monitor::RegionPriority;
+    use crate::types::policy::FailFast;
+
+    for workers in [1, 2] {
+        let runtime = runtime_for(workers);
+        let state = Arc::downgrade(&runtime.inner.state);
+        let caller_thread = std::thread::current().id();
+        runtime.block_on(async {
+            let owner = Cx::current().expect("native block_on context");
+            let mut task = owner
+                .spawn(move |cx| async move {
+                    assert_ne!(std::thread::current().id(), caller_thread);
+                    let now = cx.now();
+                    let budget = Budget::new()
+                        .with_timeout(now, Duration::from_secs(60))
+                        .with_poll_quota(41)
+                        .with_cost_quota(73)
+                        .with_priority(211);
+                    let capabilities = CapabilityBudget::new()
+                        .with_memory_bytes(4_096)
+                        .with_cpu_units(32)
+                        .with_io_bytes(8_192)
+                        .with_artifact_bytes(512)
+                        .with_cleanup_budget(
+                            Budget::new()
+                                .with_timeout(now, Duration::from_secs(90))
+                                .with_poll_quota(7)
+                                .with_cost_quota(19)
+                                .with_priority(213),
+                        );
+                    let plain_scope = cx.scope_with_budget(budget);
+                    assert_eq!(plain_scope.budget(), budget);
+                    let scope = cx
+                        .scope_with_budget_and_capability_budget(
+                            budget,
+                            capabilities,
+                            CapabilityBudgetRequirements::NONE,
+                        )
+                        .expect("context-only envelopes are admitted");
+                    let state = state.upgrade().expect("live native state");
+                    let mut state = state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let parent = state.region(cx.region_id()).expect("native owner region");
+                    assert_eq!(parent.budget(), Budget::INFINITE);
+                    assert_eq!(parent.capability_budget(), CapabilityBudget::UNSPECIFIED);
+                    let mut observed_regions = Vec::new();
+
+                    let outcome = immediate_scope_region(plain_scope.region_with_budget(
+                        &mut state,
+                        &cx,
+                        Budget::INFINITE,
+                        FailFast,
+                        |child, _state| std::future::ready(Outcome::Ok(child.budget())),
+                    ))
+                    .expect("plain scope opens an empty child");
+                    assert!(matches!(outcome, Outcome::Ok(actual) if actual == budget));
+                    let exhausted_scope = cx.scope_with_budget(Budget::ZERO);
+                    let outcome = immediate_scope_region(exhausted_scope.region_with_budget(
+                        &mut state,
+                        &cx,
+                        Budget::INFINITE,
+                        FailFast,
+                        |child, _state| std::future::ready(Outcome::Ok(child.budget())),
+                    ))
+                    .expect("legacy admission represents exhausted scheduler constraints");
+                    assert!(matches!(outcome, Outcome::Ok(actual) if actual == Budget::ZERO));
+
+                    for entry in 0..5 {
+                        let inspect = |child: crate::cx::Scope<'_>, state: &mut RuntimeState| {
+                            let child_id = child.region_id();
+                            assert_eq!(child.budget(), budget, "entry={entry}");
+                            assert_eq!(child.capability_budget(), capabilities, "entry={entry}");
+                            let nested = immediate_scope_region(
+                                child.region_with_budget_and_capability_budget(
+                                    state,
+                                    &cx,
+                                    Budget::INFINITE,
+                                    CapabilityBudget::UNSPECIFIED,
+                                    CapabilityBudgetRequirements::NONE,
+                                    FailFast,
+                                    |leaf, state| {
+                                        let record = state.region(leaf.region_id()).expect("leaf");
+                                        assert_eq!(record.budget(), budget);
+                                        assert_eq!(record.capability_budget(), capabilities);
+                                        assert_eq!(leaf.budget(), budget);
+                                        assert_eq!(leaf.capability_budget(), capabilities);
+                                        std::future::ready(Outcome::Ok(leaf.region_id()))
+                                    },
+                                ),
+                            )
+                            .expect("nested child inherits every constraint");
+                            let Outcome::Ok(leaf_id) = nested else {
+                                panic!("empty nested region must close successfully");
+                            };
+                            assert!(state.region(leaf_id).is_none());
+                            std::future::ready(Outcome::Ok((child_id, leaf_id)))
+                        };
+                        let outcome = match entry {
+                            0 => immediate_scope_region(
+                                scope.region(&mut state, &cx, FailFast, inspect),
+                            ),
+                            1 => immediate_scope_region(scope.region_with_priority(
+                                &mut state,
+                                &cx,
+                                RegionPriority::Low,
+                                FailFast,
+                                inspect,
+                            )),
+                            2 => immediate_scope_region(scope.region_with_budget(
+                                &mut state,
+                                &cx,
+                                Budget::INFINITE,
+                                FailFast,
+                                inspect,
+                            )),
+                            3 => immediate_scope_region(scope.region_with_budget_and_priority(
+                                &mut state,
+                                &cx,
+                                Budget::INFINITE,
+                                RegionPriority::Low,
+                                FailFast,
+                                inspect,
+                            )),
+                            _ => immediate_scope_region(
+                                scope.region_with_budget_and_capability_budget(
+                                    &mut state,
+                                    &cx,
+                                    Budget::INFINITE,
+                                    CapabilityBudget::UNSPECIFIED,
+                                    CapabilityBudgetRequirements::NONE,
+                                    FailFast,
+                                    inspect,
+                                ),
+                            ),
+                        }
+                        .expect("scope entry point admits an empty child");
+                        let Outcome::Ok((child_id, leaf_id)) = outcome else {
+                            panic!("empty scope region must close successfully");
+                        };
+                        assert!(state.region(child_id).is_none());
+                        assert!(
+                            state
+                                .region(cx.region_id())
+                                .expect("parent")
+                                .child_ids()
+                                .is_empty()
+                        );
+                        observed_regions.push((entry, child_id, leaf_id));
+                    }
+                    drop(state);
+                    eprintln!(
+                        "SCOPE_ADMISSION workers={workers} task={:?} regions={observed_regions:?} budget={budget:?} capabilities={capabilities:?}",
+                        cx.task_id()
+                    );
+                })
+                .expect("spawn native scope owner");
+            crate::time::timeout(owner.now(), Duration::from_secs(10), task.join(&owner))
+                .await
+                .expect("native scope owner completes within bound")
+                .expect("native scope owner retains its successful result");
+        });
+        assert_scope_root_drained(&runtime, workers);
+    }
+}
+
+#[test]
+fn scope_region_admission_cannot_replenish_exhausted_native_capabilities() {
+    use crate::types::policy::FailFast;
+
+    for workers in [1, 2] {
+        let runtime = runtime_for(workers);
+        let state = Arc::downgrade(&runtime.inner.state);
+        runtime.block_on(async {
+            let owner = Cx::current().expect("native block_on context");
+            let mut task = owner
+                .spawn(move |cx| async move {
+                    let cases = [
+                        (
+                            CapabilityBudget::new().with_memory_bytes(0),
+                            CapabilityBudgetRequirements::new().require_memory_bytes(),
+                            CapabilityBudgetDimension::MemoryBytes,
+                        ),
+                        (
+                            CapabilityBudget::new().with_cpu_units(0),
+                            CapabilityBudgetRequirements::new().require_cpu_units(),
+                            CapabilityBudgetDimension::CpuUnits,
+                        ),
+                        (
+                            CapabilityBudget::new().with_io_bytes(0),
+                            CapabilityBudgetRequirements::new().require_io_bytes(),
+                            CapabilityBudgetDimension::IoBytes,
+                        ),
+                        (
+                            CapabilityBudget::new().with_artifact_bytes(0),
+                            CapabilityBudgetRequirements::new().require_artifact_bytes(),
+                            CapabilityBudgetDimension::ArtifactBytes,
+                        ),
+                        (
+                            CapabilityBudget::new()
+                                .with_cleanup_budget(Budget::new().with_poll_quota(0)),
+                            CapabilityBudgetRequirements::new().require_cleanup(),
+                            CapabilityBudgetDimension::Cleanup,
+                        ),
+                        (
+                            CapabilityBudget::new()
+                                .with_cleanup_budget(Budget::new().with_cost_quota(0)),
+                            CapabilityBudgetRequirements::new().require_cleanup(),
+                            CapabilityBudgetDimension::Cleanup,
+                        ),
+                    ];
+                    let replenishment = CapabilityBudget::new()
+                        .with_memory_bytes(1_024)
+                        .with_cpu_units(16)
+                        .with_io_bytes(1_024)
+                        .with_artifact_bytes(64)
+                        .with_cleanup_budget(Budget::INFINITE);
+                    for (exhausted, requirements, dimension) in cases {
+                        let scope = cx
+                            .scope_with_budget_and_capability_budget(
+                                Budget::INFINITE,
+                                exhausted,
+                                CapabilityBudgetRequirements::NONE,
+                            )
+                            .expect("non-required exhausted envelope can be represented");
+                        let state = state.upgrade().expect("live native state");
+                        let mut state = state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let before = state.live_region_count();
+                        let mut factory_called = false;
+                        let error = immediate_scope_region(
+                            scope.region_with_budget_and_capability_budget(
+                                &mut state,
+                                &cx,
+                                Budget::INFINITE,
+                                replenishment,
+                                requirements,
+                                FailFast,
+                                |_child, _state| {
+                                    factory_called = true;
+                                    std::future::ready(Outcome::Ok(()))
+                                },
+                            ),
+                        )
+                        .expect_err("new child cannot replenish a context-only exhausted envelope");
+                        assert!(matches!(
+                            error,
+                            crate::runtime::RegionCreateError::CapabilityBudgetRefused {
+                                parent,
+                                reason: CapabilityBudgetRefusal::Exhausted(actual),
+                            } if parent == cx.region_id() && actual == dimension
+                        ));
+                        assert!(!factory_called, "refusal must precede factory side effects");
+                        assert_eq!(state.live_region_count(), before);
+                        assert!(
+                            state
+                                .region(cx.region_id())
+                                .expect("parent")
+                                .child_ids()
+                                .is_empty()
+                        );
+                        drop(state);
+                        eprintln!(
+                            "SCOPE_ADMISSION workers={workers} task={:?} refused={dimension:?} exhausted={exhausted:?} live_regions={before}",
+                            cx.task_id()
+                        );
+                    }
+                })
+                .expect("spawn native refusal owner");
+            crate::time::timeout(owner.now(), Duration::from_secs(10), task.join(&owner))
+                .await
+                .expect("native capability refusals complete within bound")
+                .expect("native capability refusal owner completes successfully");
+        });
+        assert_scope_root_drained(&runtime, workers);
     }
 }
