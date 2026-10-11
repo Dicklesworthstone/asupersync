@@ -226,14 +226,19 @@ impl Http1Codec {
     /// Returns `false` once the head's end is buffered, so the full
     /// inspection runs exactly once per head.
     fn head_still_incomplete(&mut self, src: &[u8]) -> Result<bool, HttpError> {
+        let mut non_crlf_start = 0;
+        while src[non_crlf_start..].starts_with(b"\r\n") {
+            non_crlf_start += 2;
+        }
         // A caller that drained or replaced the buffer starts a new scan.
         let scanned = if self.head_scanned > src.len() {
             0
         } else {
             self.head_scanned
         };
-        // The terminator can straddle the previous end.
-        let from = scanned.saturating_sub(3);
+        // The terminator can straddle the previous end, but cannot start
+        // before any leading empty CRLFs.
+        let from = scanned.saturating_sub(3).max(non_crlf_start);
         #[cfg(test)]
         {
             self.head_bytes_scanned += src.len() - from;
@@ -254,8 +259,9 @@ impl Http1Codec {
         if src.len() > self.max_headers_size {
             return Err(HttpError::HeadersTooLarge);
         }
-        if src.len() > MAX_REQUEST_LINE {
-            match find_crlf(src) {
+        let unparsed = &src[non_crlf_start..];
+        if unparsed.len() > MAX_REQUEST_LINE {
+            match find_crlf(unparsed) {
                 Some(line_end) if line_end > MAX_REQUEST_LINE => {
                     return Err(HttpError::RequestLineTooLong);
                 }
@@ -309,9 +315,16 @@ impl Default for Http1Codec {
 
 /// Find the position of `\r\n\r\n` in `buf`, returning the index of the
 /// first byte after the delimiter.
+///
+/// Leading CRLF sequences (RFC 9112 §2.2) are skipped so they do not falsely
+/// match as an empty header block delimiter.
 #[inline]
 fn find_headers_end(buf: &[u8]) -> Option<usize> {
-    memmem::find(buf, b"\r\n\r\n").map(|idx| idx + 4)
+    let mut start = 0;
+    while buf[start..].starts_with(b"\r\n") {
+        start += 2;
+    }
+    memmem::find(&buf[start..], b"\r\n\r\n").map(|idx| start + idx + 4)
 }
 
 /// Find the position of the first CRLF (`\r\n`) in `buf`.
@@ -1375,8 +1388,13 @@ fn inspect_request_head_parts(
         }
         // Preserve request-line limit behavior for incomplete heads while
         // avoiding an extra scan on the common fully-buffered decode path.
-        if src.len() > MAX_REQUEST_LINE {
-            match find_crlf(src) {
+        let mut unparsed_start = 0;
+        while src[unparsed_start..].starts_with(b"\r\n") {
+            unparsed_start += 2;
+        }
+        let unparsed = &src[unparsed_start..];
+        if unparsed.len() > MAX_REQUEST_LINE {
+            match find_crlf(unparsed) {
                 Some(line_end) if line_end > MAX_REQUEST_LINE => {
                     return Err(HttpError::RequestLineTooLong);
                 }
@@ -1397,14 +1415,30 @@ fn inspect_request_head_parts(
     // the maximum 128 headers, unlike collecting offsets into a growable
     // vector before validation.
     let mut crlf_positions = memmem::find_iter(head, b"\r\n");
-    let request_line_end = crlf_positions.next().ok_or(HttpError::BadRequestLine)?;
-    if request_line_end > MAX_REQUEST_LINE {
+    let mut request_line_start = 0;
+    let mut request_line_end = None;
+    for pos in crlf_positions.by_ref() {
+        if pos == request_line_start {
+            // RFC 9112 §2.2: A server that is expecting to receive and parse a
+            // request-line SHOULD ignore at least one empty line (CRLF) received
+            // prior to the request-line.
+            request_line_start = pos + 2;
+        } else {
+            request_line_end = Some(pos);
+            break;
+        }
+    }
+    let Some(request_line_end) = request_line_end else {
+        return Err(HttpError::BadRequestLine);
+    };
+    let request_line_len = request_line_end - request_line_start;
+    if request_line_len > MAX_REQUEST_LINE {
         return Err(HttpError::RequestLineTooLong);
     }
     if request_line_end >= head.len() {
         return Err(HttpError::BadRequestLine);
     }
-    let request_line = &head[..request_line_end];
+    let request_line = &head[request_line_start..request_line_end];
     let (method, uri, version) = parse_request_line_ref(request_line)?;
 
     let header_block_start = request_line_end + 2;
@@ -1981,6 +2015,56 @@ mod tests {
         assert_eq!(req.headers[0].0, "Host");
         assert_eq!(req.headers[0].1, "localhost");
         assert!(req.body.is_empty());
+    }
+
+    #[test]
+    fn decode_request_with_leading_blank_lines_rfc9112() {
+        let mut codec = Http1Codec::new();
+
+        // Single leading CRLF per RFC 9112 §2.2
+        let req1 = decode_one(
+            &mut codec,
+            b"\r\nGET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap()
+        .expect("single leading CRLF must be ignored");
+        assert_eq!(req1.method, Method::Get);
+        assert_eq!(req1.uri, "/");
+
+        // Multiple leading CRLFs
+        let req2 = decode_one(
+            &mut codec,
+            b"\r\n\r\n\r\nGET /multi HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap()
+        .expect("multiple leading CRLFs must be ignored");
+        assert_eq!(req2.method, Method::Get);
+        assert_eq!(req2.uri, "/multi");
+
+        // Only CRLFs with no request line yet yields Ok(None) (waiting for request line)
+        let mut only_crlfs = BytesMut::from(&b"\r\n\r\n"[..]);
+        assert!(codec.decode(&mut only_crlfs).unwrap().is_none());
+        // Once request line and headers arrive, it completes successfully
+        only_crlfs.extend_from_slice(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let req3 = codec
+            .decode(&mut only_crlfs)
+            .unwrap()
+            .expect("delayed request must decode");
+        assert_eq!(req3.method, Method::Get);
+        assert_eq!(req3.uri, "/delayed");
+
+        // Streaming head decoder ignores leading CRLF
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut stream_buf =
+                BytesMut::from(&b"\r\nPOST /stream HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"[..]);
+            let (head, kind) = decode_streaming_request_head(&mut stream_buf, 4096, 4096)
+                .unwrap()
+                .expect("streaming head with leading CRLF must succeed");
+            assert_eq!(head.method, Method::Post);
+            assert_eq!(head.uri, "/stream");
+            assert_eq!(kind, StreamingBodyKind::Empty);
+        }
     }
 
     /// Feed `raw` one byte per decode call, as a peer trickling its request
