@@ -67,6 +67,36 @@ is dropped; the owning region must drain it. A stuck filesystem can delay drain.
 Connection loss can follow a completed commit. There is no rollback or exactly-once
 network guarantee, and this API introduces no automatic retry.
 
+## Concurrent chunked uploads
+
+For batches larger than one service frame, wrap the same durable store in
+`DurableChunkedSymbolService` with explicit `SymbolChunkedLimits`, then register
+it with `register_durable_chunked_symbol_service`. The existing chunked transport
+and authenticated capability remain compatible. BEGIN and CHUNK progress stays
+in memory; only a completed, synced COMMIT yields a durable batch receipt.
+
+The chunked adapter derives bounded request credits from the configured staging
+upload capacity, with additional control headroom. Each credit covers a queued
+or running request through actual blocking-worker retirement, including dropped
+network handlers. Incoming binary requests must fit the configured chunk size
+and protocol overhead before the adapter copies them. Staging retains its
+independent per-peer and global byte/upload reservations.
+
+This permits another admitted upload's CHUNK to progress while a COMMIT is in
+verification or disk work. Configure at least two blocking workers when that
+parallel progress is needed. The journal mutex still serializes disk mutations.
+BEGIN performs its committed-batch lookup outside the staging mutex and then
+rechecks staging state, so a slow journal lookup does not monopolize staging
+stats, expiry, or another upload's progress. Saturating the bounded request
+capacity still refuses; no retry loop or fairness guarantee is introduced.
+
+Both durable adapters preserve a completed outcome through their local dispatch
+and ordinary native task completion after observing late cancellation. Listener
+lease expiry or explicit remote cancellation can still choose a Cancelled wire
+response. A missing receipt remains ambiguous: neither cancellation nor a lost
+connection proves that a durable COMMIT rolled back. Chunked callers that retain
+their exact upload attempt can reconcile against the immutable recovered batch.
+
 ## Validation targets
 
 ```sh

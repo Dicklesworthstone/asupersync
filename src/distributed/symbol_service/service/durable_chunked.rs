@@ -12,7 +12,7 @@ use crate::remote::{NodeId, RemoteComputationRegistry, RemoteOutcome};
 use crate::types::Time;
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use zeroize::Zeroizing;
 
 /// Multi-frame authenticated uploads with commit-before-receipt disk storage.
@@ -31,13 +31,17 @@ use zeroize::Zeroizing;
 /// the authenticated immutable journal. A partial journal tail remains subject
 /// to the durable store's existing read-only recovery policy.
 ///
-/// Exactly one request per service may own a blocking job, across registrations
-/// and peers. Saturation refuses without an implicit queue. This is an explicit
-/// bounded disk-owner policy, not fair scheduling across peers. Incomplete stages
-/// retain their independent global/per-peer byte reservations between requests.
+/// Request credits allow independent uploads to progress while another COMMIT
+/// verifies and syncs. The request bound is the staging upload count plus one
+/// control slot, with a minimum of two, reduced if necessary so their complete
+/// frame allowances fit in `usize`. The durable store still serializes journal
+/// work. Saturation refuses before a request copy or spawn; queued/running jobs
+/// remain bounded, without a service-owned waiter queue. This is not a fairness
+/// guarantee across peers. Stages retain their separate byte reservations.
 pub struct DurableChunkedSymbolService {
     inner: ChunkedSymbolService,
-    gate: Arc<AtomicBool>,
+    gate: Arc<Credits>,
+    max_request_bytes: usize,
 }
 
 impl fmt::Debug for DurableChunkedSymbolService {
@@ -54,15 +58,16 @@ impl DurableChunkedSymbolService {
     /// Initialize the journal off the async executor before registering it.
     #[must_use]
     pub fn new(store: Arc<DurableSymbolReplicaStore>, limits: SymbolChunkedLimits) -> Self {
-        Self {
-            inner: ChunkedSymbolService::new_durable(store, limits),
-            gate: Arc::new(AtomicBool::new(false)),
-        }
+        let inner = ChunkedSymbolService::new_durable(store, limits);
+        let max_request_bytes = inner.request_byte_ceiling();
+        let maximum = limits.max_uploads().saturating_add(1).max(2)
+            .min(usize::MAX / max_request_bytes);
+        Self { inner, gate: Arc::new(Credits { active: AtomicUsize::new(0), maximum }), max_request_bytes }
     }
 
     /// Whether a queued/running job still owns its request, service and credit.
     #[must_use]
-    pub fn in_flight(&self) -> bool { self.gate.load(Ordering::Acquire) }
+    pub fn in_flight(&self) -> bool { self.gate.active.load(Ordering::Acquire) != 0 }
 
     /// Volatile upload reservations; committed batches belong to the journal.
     #[must_use]
@@ -73,17 +78,24 @@ impl DurableChunkedSymbolService {
     pub fn reap_expired(&self, now: Time) -> usize { self.inner.reap_expired(now) }
 }
 
-struct Credit(Arc<AtomicBool>);
+struct Credits {
+    active: AtomicUsize,
+    maximum: usize,
+}
+
+struct Credit(Arc<Credits>);
 
 impl Credit {
-    fn acquire(gate: &Arc<AtomicBool>) -> Option<Self> {
-        gate.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).ok()?;
+    fn acquire(gate: &Arc<Credits>) -> Option<Self> {
+        gate.active.fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < gate.maximum).then(|| active + 1)
+        }).ok()?;
         Some(Self(Arc::clone(gate)))
     }
 }
 
 impl Drop for Credit {
-    fn drop(&mut self) { self.0.store(false, Ordering::Release); }
+    fn drop(&mut self) { self.0.active.fetch_sub(1, Ordering::AcqRel); }
 }
 
 // Field order retires the frame and service owner before releasing admission.
@@ -124,6 +136,9 @@ async fn dispatch(
     if cx.blocking_pool_handle().is_none() {
         return RemoteOutcome::Failed("durable chunked symbol service requires a context blocking pool".to_owned());
     }
+    if source.len() > service.max_request_bytes {
+        return RemoteOutcome::Failed(SymbolStoreError::Limit("chunked request bytes").to_string());
+    }
     let Some(credit) = Credit::acquire(&service.gate) else {
         return RemoteOutcome::Failed("durable chunked symbol service is busy".to_owned());
     };
@@ -131,17 +146,23 @@ async fn dispatch(
     if input.try_reserve_exact(source.len()).is_err() {
         return RemoteOutcome::Failed(SymbolStoreError::Allocation.to_string());
     }
+    if input.capacity() > service.max_request_bytes {
+        return RemoteOutcome::Failed(SymbolStoreError::Limit("chunked request bytes").to_string());
+    }
     input.extend_from_slice(source);
     let job = Job { input, service, peer, _credit: credit };
     let mut task = match cx.spawn_blocking_drained(move |worker| job.execute(&worker)) {
         Ok(task) => task,
         Err(_) => return RemoteOutcome::Failed("durable chunked symbol worker admission refused".to_owned()),
     };
-    // A committed terminal result must not cross the cancelled invocation Cx
-    // again. The drained handle also keeps its region alive through worker
-    // retirement if this handler is dropped.
+    // The independent join retains actual worker retirement. Acknowledge an
+    // observed late cancellation so an enclosing native task's completion
+    // policy also preserves this completed result.
     match task.join().await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            if cx.is_cancel_requested() { let _ = cx.checkpoint(); }
+            outcome
+        }
         Err(_) => cancelled(cx),
     }
 }
@@ -155,13 +176,17 @@ async fn dispatch(
 /// Every request runs on a Cx-owned blocking worker, including BEGIN/READ paths
 /// that could otherwise wait behind journal fsync. A context blocking pool and
 /// spawn capability are required; there is no inline disk-I/O fallback. The
-/// single job credit is acquired before copying the frame and lives until the
-/// worker retires its request, including dropped handlers and unwinding.
+/// request credit and configured frame ceiling are checked before copying, and
+/// that credit lives until the worker retires its request, including dropped
+/// handlers and unwinding. Independent uploads may have bounded jobs in the
+/// pool while the journal serializes their disk operations.
 ///
 /// Cancellation is checked before a synchronous transaction. Once it starts,
 /// it cannot preempt fsync or undo a commit. The owning region must drain that
 /// blocking task; a stuck filesystem can delay the drain. A cancelled/lost
-/// response therefore must not be interpreted as rollback.
+/// response therefore must not be interpreted as rollback. Dispatch preserves
+/// an observed late cancellation's completed worker result; the remote server's
+/// lease/session cancellation policy can still report a cancelled operation.
 pub fn register_durable_chunked_symbol_service(
     registry: &mut RemoteComputationRegistry, service: Arc<DurableChunkedSymbolService>,
 ) -> Result<(), ComputationSchemaRegistryError> {
@@ -180,6 +205,7 @@ pub fn register_durable_chunked_symbol_service(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::channel::oneshot;
     use crate::distributed::symbol_service::durable::{DurableSymbolLimits, JournalStatus};
     use crate::distributed::symbol_service::service::chunked::{
         BEGIN, CHUNK, COMMIT, Upload, read_progress, request, upload_body,
@@ -189,12 +215,15 @@ mod tests {
     };
     use crate::security::{AuthKey, SecurityContext};
     use crate::types::symbol::Symbol;
-    use crate::runtime::RuntimeBuilder;
+    use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+    use crate::sync::Notify;
+    use crate::types::CancelReason;
     use std::fs::{File, OpenOptions};
     use std::future::{Future, poll_fn};
     use std::io::Write;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    use std::sync::{Condvar, Mutex as StdMutex};
     use std::task::Poll;
     use std::time::{Duration, Instant};
 
@@ -245,16 +274,203 @@ mod tests {
     }
 
     fn stage(service: &DurableChunkedSymbolService, batch: &EncodedSymbolBatch) -> Upload {
-        let upload = Upload { key: batch.key(), attempt: 77, total: batch.as_ref().len(), count: batch.symbol_count() };
-        command(service, BEGIN, upload).unwrap();
+        stage_for(service, &NodeId::new("origin"), batch, 77, Time::ZERO)
+    }
+
+    fn stage_for(service: &DurableChunkedSymbolService, peer: &NodeId, batch: &EncodedSymbolBatch, attempt: u64, now: Time) -> Upload {
+        let upload = Upload { key: batch.key(), attempt, total: batch.as_ref().len(), count: batch.symbol_count() };
+        service.inner.handle(peer, now,
+            &request(BEGIN, "replica", &upload_body(upload)).unwrap()).unwrap();
         for (index, piece) in batch.as_ref().chunks(128).enumerate() {
             let mut body = upload_body(upload);
             body.extend_from_slice(&((index * 128) as u64).to_le_bytes());
             body.extend_from_slice(piece);
-            service.inner.handle(&NodeId::new("origin"), Time::ZERO,
+            service.inner.handle(peer, now,
                 &request(CHUNK, "replica", &body).unwrap()).unwrap();
         }
         upload
+    }
+
+    #[derive(Default)]
+    struct CommitGate {
+        entered: AtomicBool,
+        changed: Notify,
+        released: StdMutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl CommitGate {
+        fn block(&self) {
+            self.entered.store(true, Ordering::Release);
+            self.changed.notify_waiters();
+            let released = self.released.lock().unwrap();
+            let (released, _) = self.release_changed
+                .wait_timeout_while(released, Duration::from_secs(15), |released| !*released).unwrap();
+            assert!(*released, "commit gate must be released");
+        }
+
+        fn release(&self) {
+            *self.released.lock().unwrap_or_else(|error| error.into_inner()) = true;
+            self.release_changed.notify_all();
+        }
+
+        async fn entered(&self) {
+            self.changed.wait_until(|| self.entered.load(Ordering::Acquire)).await;
+        }
+    }
+
+    struct ReleaseCommit(Arc<CommitGate>);
+
+    impl Drop for ReleaseCommit {
+        fn drop(&mut self) { self.0.release(); }
+    }
+
+    #[test]
+    fn independent_durable_upload_completes_while_another_commit_owns_credit_and_is_cancelled() {
+        for workers in [1, 2] {
+            let (path, file) = linked_file();
+            let mut bounds = limits();
+            bounds.store.max_batches = 2;
+            bounds.store.max_bytes = 8192;
+            bounds.max_journal_bytes = 16384;
+            let store = Arc::new(DurableSymbolReplicaStore::create(file, "replica",
+                AuthKey::from_seed(42), AuthKey::from_seed(99), bounds).unwrap());
+            let service = Arc::new(DurableChunkedSymbolService::new(Arc::clone(&store),
+                SymbolChunkedLimits::new(128, 2, 8192, 1, 4096, Duration::from_secs(60)).unwrap()));
+            let batch = batch();
+            let alice = NodeId::new("alice");
+            let bob = NodeId::new("bob");
+            let staged_at = crate::time::wall_now();
+            let first_upload = stage_for(&service, &alice, &batch, 1, staged_at);
+            let second_upload = Upload { attempt: 2, ..first_upload };
+            service.inner.handle(&bob, staged_at,
+                &request(BEGIN, "replica", &upload_body(second_upload)).unwrap()).unwrap();
+            let gate = Arc::new(CommitGate::default());
+            let paused = Arc::clone(&gate);
+            let commits = AtomicUsize::new(0);
+            *service.inner.commit_hook.lock() = Some(Arc::new(move || {
+                if commits.fetch_add(1, Ordering::SeqCst) == 0 { paused.block(); }
+            }));
+            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+                else { RuntimeBuilder::multi_thread().worker_threads(workers) };
+            // One actual pool worker holds the first COMMIT; the other must
+            // carry independent CHUNK/COMMIT traffic to completion.
+            let runtime = builder.blocking_threads(2, 2).build().unwrap();
+            let _release_on_unwind = ReleaseCommit(Arc::clone(&gate));
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                crate::time::timeout(cx.now(), Duration::from_secs(10), async {
+                    let first_service = Arc::clone(&service);
+                    let first_peer = alice.clone();
+                    let frame = request(COMMIT, "replica", &upload_body(first_upload)).unwrap();
+                    let (body_sender, mut body_receiver) = oneshot::channel();
+                    let mut first = cx.spawn(move |body| async move {
+                        body_sender.send_blocking(body.clone()).unwrap();
+                        dispatch(&body, first_service, first_peer, &frame).await
+                    }).unwrap();
+                    gate.entered().await;
+                    let body: Cx = body_receiver.recv(&cx).await.unwrap();
+                    assert!(service.in_flight());
+                    assert!(!first.is_finished());
+                    for (index, piece) in batch.as_ref().chunks(128).enumerate() {
+                        let mut body = upload_body(second_upload);
+                        body.extend_from_slice(&((index * 128) as u64).to_le_bytes());
+                        body.extend_from_slice(piece);
+                        let frame = request(CHUNK, "replica", &body).unwrap();
+                        let outcome = dispatch(&cx, Arc::clone(&service), bob.clone(), &frame).await;
+                        let RemoteOutcome::Success(progress) = outcome else {
+                            panic!("an independent chunk cannot be refused by another upload's COMMIT");
+                        };
+                        assert_eq!(read_progress(&progress, second_upload).unwrap().0,
+                            (index * 128) + piece.len());
+                    }
+                    let frame = request(COMMIT, "replica", &upload_body(second_upload)).unwrap();
+                    let outcome = dispatch(&cx, Arc::clone(&service), bob.clone(), &frame).await;
+                    let RemoteOutcome::Success(receipt) = outcome else { panic!("second upload must commit"); };
+                    super::super::validate_receipt(&receipt[8..], "replica", second_upload.key, second_upload.count).unwrap();
+                    assert_eq!(store.stats().batches, 1);
+                    assert_eq!(service.stats().reserved_bytes, first_upload.total);
+                    assert!(!first.is_finished());
+
+                    // This is a real spawned invocation, and cancellation is
+                    // observed without acknowledging it on dispatch's behalf.
+                    first.abort_with_reason(CancelReason::user("late chunked receipt cancellation"));
+                    body.cancelled().await;
+                    assert!(body.is_cancel_requested());
+                    gate.release();
+                    let outcome = first.join(&cx).await.expect("completed worker result survives task completion policy");
+                    let RemoteOutcome::Success(receipt) = outcome else { panic!("first upload must retain its durable receipt"); };
+                    super::super::validate_receipt(&receipt[8..], "replica", first_upload.key, first_upload.count).unwrap();
+                    assert!(!service.in_flight());
+                    assert_eq!(store.stats().batches, 2);
+                    assert_eq!(service.stats(), SymbolStagingStats { uploads: 0, reserved_bytes: 0, received_bytes: 0 });
+                }).await.expect("both independent uploads must complete before the watchdog");
+            });
+            let report = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+            assert_eq!(report.live_tasks, 0);
+            assert_eq!(report.live_regions, 0);
+            assert_eq!(report.pending_obligations, 0);
+            assert_eq!(report.pending_spawns, 0);
+            assert_eq!(report.queued_finalizers, 0);
+            assert!(!report.has_pending_obligation_posts);
+            assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+            assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+            drop(service);
+            drop(store);
+            let file = OpenOptions::new().read(true).write(true).open(path).unwrap();
+            let reopened = DurableSymbolReplicaStore::open(file, "replica",
+                AuthKey::from_seed(42), AuthKey::from_seed(99), bounds).unwrap();
+            assert_eq!(reopened.stats().batches, 2);
+            for peer in [&alice, &bob] {
+                assert_eq!(reopened.get(peer, batch.key()).unwrap().as_ref().as_ref(), batch.as_ref());
+            }
+        }
+    }
+
+    #[test]
+    fn request_frame_credit_accepts_the_full_chunk_and_refuses_excess_before_copy_or_spawn() {
+        let (_, file) = linked_file();
+        let store = Arc::new(DurableSymbolReplicaStore::create(file, "replica",
+            AuthKey::from_seed(42), AuthKey::from_seed(99), limits()).unwrap());
+        let service = Arc::new(make_service(Arc::clone(&store)));
+        assert_eq!(service.max_request_bytes, 14 + "replica".len() + 68 + 8 + 128);
+        let huge = DurableChunkedSymbolService::new(Arc::clone(&store),
+            SymbolChunkedLimits::new(128, usize::MAX, usize::MAX, usize::MAX,
+                usize::MAX, Duration::from_secs(60)).unwrap());
+        assert!(huge.gate.maximum.checked_mul(huge.max_request_bytes).is_some(),
+            "derived complete-frame credit cannot overflow the address-space bound");
+        assert!(huge.gate.maximum > 0);
+        let batch = batch();
+        let upload = Upload { key: batch.key(), attempt: 1, total: batch.as_ref().len(), count: batch.symbol_count() };
+        service.inner.handle(&NodeId::new("origin"), crate::time::wall_now(),
+            &request(BEGIN, "replica", &upload_body(upload)).unwrap()).unwrap();
+        let mut body = upload_body(upload);
+        body.extend_from_slice(&0_u64.to_le_bytes());
+        body.extend_from_slice(&batch.as_ref()[..128]);
+        let full_chunk = request(CHUNK, "replica", &body).unwrap();
+        assert_eq!(full_chunk.len(), service.max_request_bytes);
+        let oversized = vec![0; service.max_request_bytes + 1];
+        let before = store.committed_bytes();
+        let runtime = RuntimeBuilder::current_thread().blocking_threads(1, 1).build().unwrap();
+        let pool = runtime.blocking_handle().unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let outcome = dispatch(&cx, Arc::clone(&service), NodeId::new("origin"), &oversized).await;
+            assert!(matches!(outcome, RemoteOutcome::Failed(message)
+                if message == SymbolStoreError::Limit("chunked request bytes").to_string()));
+            assert!(!service.in_flight());
+            assert_eq!(pool.pending_count(), 0);
+            assert_eq!(service.stats().received_bytes, 0);
+            let outcome = dispatch(&cx, Arc::clone(&service), NodeId::new("origin"), &full_chunk).await;
+            let RemoteOutcome::Success(progress) = outcome else { panic!("maximum legitimate chunk must fit its frame credit"); };
+            assert_eq!(read_progress(&progress, upload).unwrap(), (128, 128));
+            assert!(!service.in_flight());
+        });
+        assert_eq!(store.committed_bytes(), before, "progress and oversized refusal do not commit");
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
     }
 
     #[test]
@@ -331,7 +547,7 @@ mod tests {
                 AuthKey::from_seed(42), AuthKey::from_seed(99), limits()).unwrap());
             let service = Arc::new(make_service(Arc::clone(&store)));
             let batch = batch();
-            let upload = stage(&service, &batch);
+            let upload = stage_for(&service, &NodeId::new("origin"), &batch, 77, crate::time::wall_now());
             let before = store.committed_bytes();
             let builder = if workers == 1 { RuntimeBuilder::current_thread() }
                 else { RuntimeBuilder::multi_thread().worker_threads(workers) };
@@ -340,7 +556,7 @@ mod tests {
             let (release, hold) = std::sync::mpsc::channel();
             let occupying = runtime.spawn_blocking(move || {
                 entered.send(()).unwrap();
-                hold.recv_timeout(Duration::from_secs(10)).unwrap();
+                hold.recv_timeout(Duration::from_secs(30)).unwrap();
             }).unwrap();
             parked.recv_timeout(Duration::from_secs(5)).expect("real blocking worker is occupied");
             let pool = runtime.blocking_handle().unwrap();
@@ -362,6 +578,18 @@ mod tests {
                 assert!(service.in_flight(), "dropping the network future cannot recycle worker credit");
                 assert_eq!(store.stats().batches, 0);
                 assert_eq!(service.stats().reserved_bytes, upload.total);
+                let mut second = Box::pin(dispatch(&cx, Arc::clone(&service), NodeId::new("origin"), &request));
+                poll_fn(|poll_cx| {
+                    assert!(second.as_mut().poll(poll_cx).is_pending());
+                    Poll::Ready(())
+                }).await;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while pool.pending_count() != 2 {
+                    assert!(Instant::now() < deadline, "both frame owners must reach the real pool queue");
+                    crate::runtime::yield_now().await;
+                }
+                drop(second);
+                assert_eq!(service.gate.active.load(Ordering::Acquire), 2);
                 let busy = dispatch(&cx, Arc::clone(&service), NodeId::new("origin"), &request).await;
                 assert!(matches!(busy, RemoteOutcome::Failed(message) if message == "durable chunked symbol service is busy"));
                 release.send(()).unwrap();

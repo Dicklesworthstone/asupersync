@@ -114,7 +114,13 @@ async fn dispatch(
     // its captures. A late invocation cancellation cannot discard an already
     // completed journal transaction by short-circuiting this retirement wait.
     match task.join().await {
-        Ok(outcome) => outcome,
+        Ok(outcome) => {
+            // An enclosing ordinary task must acknowledge a late cancellation
+            // before publishing this completed worker's typed result. The
+            // observation cannot replace a transaction that already finished.
+            if cx.is_cancel_requested() { let _ = cx.checkpoint(); }
+            outcome
+        }
         Err(_) => cancelled(cx),
     }
 }
@@ -262,6 +268,122 @@ mod tests {
             assert_eq!(report.pending_spawns, 0);
             assert_eq!(report.queued_finalizers, 0);
             assert!(!report.has_pending_obligation_posts);
+        }
+
+        struct ReleasePoolWorker(Option<std::sync::mpsc::Sender<()>>);
+
+        impl ReleasePoolWorker {
+            fn release(&mut self) {
+                if let Some(release) = self.0.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        impl Drop for ReleasePoolWorker {
+            fn drop(&mut self) { self.release(); }
+        }
+
+        #[test]
+        #[allow(clippy::too_many_lines)]
+        fn spawned_whole_frame_put_and_get_preserve_completed_results_after_cancellation() {
+            // p2gmw0 L2: the local task boundary. Listener lease/V3 cancellation
+            // retains its separate policy and does not promise this receipt.
+            for workers in [1, 2] {
+                for get in [false, true] {
+                    let (path, store) = linked_store();
+                    let peer = NodeId::new("origin");
+                    let batch = batch();
+                    if get { store.put(&peer, batch.as_ref()).unwrap(); }
+                    let before = store.committed_bytes();
+                    let input = if get { fetch_request("replica", batch.key()).unwrap() }
+                        else { put_request("replica", batch.as_ref()).unwrap() };
+                    let gate = Arc::new(AtomicBool::new(false));
+                    let handle = DurableSymbolServiceHandle(Arc::clone(&gate));
+                    let runtime = runtime(workers);
+                    let pool = runtime.blocking_handle().unwrap();
+                    let (entered, parked) = std::sync::mpsc::channel();
+                    let (release, hold) = std::sync::mpsc::channel();
+                    let mut release = ReleasePoolWorker(Some(release));
+                    let occupying = pool.spawn(move || {
+                        entered.send(()).unwrap();
+                        hold.recv_timeout(Duration::from_secs(15)).unwrap();
+                    });
+                    parked.recv_timeout(Duration::from_secs(5))
+                        .expect("real blocking worker is occupied");
+
+                    runtime.block_on(async {
+                        let cx = Cx::current().unwrap();
+                        let workflow = async {
+                            let task_store = Arc::clone(&store);
+                            let task_gate = Arc::clone(&gate);
+                            let task_peer = peer.clone();
+                            let (parked, mut parked_rx) = crate::channel::oneshot::channel();
+                            let (resume, mut resume_rx) = crate::channel::oneshot::channel();
+                            let mut task = cx.spawn(move |body| async move {
+                                let mut handler = Box::pin(dispatch(&body, task_store,
+                                    task_gate, &task_peer, &input));
+                                let mut parked = Some(parked);
+                                let mut resumed = false;
+                                poll_fn(|poll_cx| {
+                                    // Pause the real caller after its first
+                                    // Pending, so worker completion cannot let
+                                    // the ordinary task publish before abort.
+                                    if parked.is_none() && !resumed {
+                                        match resume_rx.poll_recv_uninterruptible(poll_cx) {
+                                            Poll::Pending => return Poll::Pending,
+                                            Poll::Ready(result) => {
+                                                result.unwrap();
+                                                resumed = true;
+                                            }
+                                        }
+                                    }
+                                    let poll = handler.as_mut().poll(poll_cx);
+                                    if poll.is_pending() && let Some(parked) = parked.take() {
+                                        parked.send_blocking(body.clone()).unwrap();
+                                    }
+                                    // No checkpoint in this witness: the
+                                    // dispatch boundary must acknowledge it.
+                                    poll
+                                }).await
+                            }).unwrap();
+                            let body: Cx = parked_rx.recv(&cx).await.unwrap();
+                            while pool.pending_count() != 1 { yield_now().await; }
+                            assert!(handle.in_flight());
+                            assert!(!task.is_finished());
+                            release.release();
+                            while handle.in_flight() { yield_now().await; }
+                            assert_eq!(store.stats().batches, 1);
+                            assert!(!task.is_finished(), "the caller still owns its parked handler");
+                            task.abort_with_reason(CancelReason::user("late whole-frame receipt"));
+                            // Abort may be published by a later scheduler
+                            // turn. Observation does not acknowledge it.
+                            body.cancelled().await;
+                            assert!(body.is_cancel_requested());
+                            resume.send(&cx, ()).unwrap();
+                            let outcome = task.join(&cx).await
+                                .expect("ordinary task completion must retain the durable result");
+                            let RemoteOutcome::Success(bytes) = outcome else {
+                                panic!("completed PUT/GET must preserve its exact terminal outcome");
+                            };
+                            if get {
+                                assert_eq!(bytes, batch.as_ref());
+                            } else {
+                                validate_receipt(&bytes, "replica", batch.key(), batch.symbol_count()).unwrap();
+                            }
+                            assert!(!handle.in_flight());
+                        };
+                        crate::time::timeout(cx.now(), Duration::from_secs(10), workflow)
+                            .await.expect("spawned whole-frame cancellation workflow");
+                    });
+                    assert!(occupying.wait_timeout(Duration::from_secs(1)));
+                    assert_eq!(std::fs::metadata(&path).unwrap().len(), store.committed_bytes());
+                    if get { assert_eq!(store.committed_bytes(), before); }
+                    else { assert!(store.committed_bytes() > before); }
+                    assert_drained(&runtime);
+                    assert!(runtime.shutdown_timeout(Duration::from_secs(5)));
+                }
+            }
         }
 
         #[test]
