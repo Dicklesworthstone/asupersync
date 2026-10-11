@@ -655,14 +655,15 @@ impl ConnectionRouter {
     pub(crate) async fn route_packet_with_output(
         &mut self,
         cx: &Cx,
-        packet: ReceivedPacket,
+        #[allow(unused_mut)] mut packet: ReceivedPacket,
         emit_output: bool,
     ) -> Result<RoutingResult, ConnectionRouterError> {
         if cx.checkpoint().is_err() {
             return Err(ConnectionRouterError::Cancelled);
         }
 
-        let routing_info = match self.decode_routing_info(&packet) {
+        #[allow(unused_mut)]
+        let mut routing_info = match self.decode_routing_info(&packet) {
             Ok(info) => info,
             Err(err) => {
                 return Ok(RoutingResult::Drop {
@@ -732,10 +733,42 @@ impl ConnectionRouter {
                         self.pending_deferred_packets.extend(retained);
                         authenticated.last_final_flight_retransmit = Some(packet.receive_time);
                     }
-                    return Ok(RoutingResult::Routed {
-                        connection_id,
-                        outgoing_packets: Vec::new(),
-                    });
+
+                    // RFC 9000 section 12.2: A datagram may coalesce a 1-RTT
+                    // short-header packet following a long-header packet.
+                    let coalesced_1rtt = if let Ok(ProtectedHeaderPrefix::Long(long_header)) =
+                        ProtectedHeaderPrefix::decode(&packet.data, 0)
+                    {
+                        if let Ok(long_len) = long_header.packet_len(packet.data.len()) {
+                            if long_len < packet.data.len() {
+                                let tail = &packet.data[long_len..];
+                                if matches!(
+                                    ProtectedHeaderPrefix::decode(tail, connection_id.len()),
+                                    Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) if dst_cid == connection_id
+                                ) {
+                                    Some(tail.to_vec())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(short_data) = coalesced_1rtt {
+                        packet.data = short_data;
+                        routing_info.kind = PacketRoutingKind::OneRtt;
+                    } else {
+                        return Ok(RoutingResult::Routed {
+                            connection_id,
+                            outgoing_packets: Vec::new(),
+                        });
+                    }
                 }
             }
             let authenticated = handle.clock_origin.is_some();

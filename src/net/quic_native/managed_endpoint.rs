@@ -465,7 +465,8 @@ impl PendingAuthenticatedAccept {
         self.authenticated_received_bytes = self
             .authenticated_received_bytes
             .saturating_add(packet.data.len() as u64);
-        self.address_validated |= header.packet_type == LongPacketType::Handshake;
+        self.address_validated |= header.packet_type == LongPacketType::Handshake
+            || self.driver.has_authenticated_handshake_packet();
         // A short-header packet can follow the client's Finished in the same
         // UDP datagram (RFC 9000 section 12.2). TLS consumes only the long-
         // header prefix. Preserve the exact remaining ciphertext for the

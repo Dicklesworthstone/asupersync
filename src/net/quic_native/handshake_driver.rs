@@ -1143,6 +1143,10 @@ impl QuicHandshakeDriver {
                         skipped = Some(err);
                     }
                 }
+                // Once an earlier packet in the datagram has authenticated and
+                // advanced TLS state, an unauthenticated or invalid follower is
+                // ignored rather than voiding the entire datagram.
+                Err(_) if accepted.is_some() => break,
                 Err(err) => return Err(err),
             }
             offset += packet_len;
@@ -1695,7 +1699,7 @@ impl QuicHandshakeDriver {
     /// Whether a Handshake-space packet from the peer has authenticated. For
     /// a server this validates the client's address (RFC 9000 section 8.1):
     /// only a client that received the server's Initial can protect one.
-    fn has_authenticated_handshake_packet(&self) -> bool {
+    pub(crate) fn has_authenticated_handshake_packet(&self) -> bool {
         !self.handshake_recv_packet_numbers[1].is_empty()
     }
 
