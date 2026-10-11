@@ -13,7 +13,9 @@ use crate::remote::{
 use crate::security::{AuthKey, AuthenticatedSymbol};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::{Future, poll_fn};
 use std::sync::Arc;
+use std::task::Poll;
 
 mod admission;
 use admission::Admission;
@@ -137,6 +139,55 @@ impl RemoteSymbolTransport {
     /// Shared admission ceiling (`usize::MAX` for the compatibility constructor).
     #[must_use]
     pub fn max_in_flight(&self) -> usize { self.admission.limit() }
+
+    // Reconciliation must use the same authenticated origin for metadata and
+    // ordinary symbol reads, with a configured source and bounded batch codec.
+    pub(crate) fn repair_binding(&self, origin: &crate::remote::NodeId, replica: &str, maximum: usize)
+        -> Option<SymbolBatchLimits>
+    {
+        (self.hello.peer_node() == origin && self.routes.contains_key(replica)
+            && self.limits.max_encoded_bytes <= maximum && self.max_in_flight() > 0)
+            .then_some(self.limits)
+    }
+
+    // A cursor can be resumed by a new task, but borrowing a transport must not
+    // transfer or revive that transport's original cancellation authority. Both
+    // owners govern this one read; its ordinary clone-shared credit remains held
+    // until the complete inner fetch future is retired.
+    pub(crate) async fn fetch_symbols_for_repair(&self, cx: &Cx, replica: &str, key: SymbolBatchKey)
+        -> Result<Vec<AuthenticatedSymbol>, RemoteSymbolError>
+    {
+        let timer = if let Some(deadline) = cx.budget().deadline {
+            let clock = cx.timer_driver().ok_or(RemoteSymbolError::Configuration)?;
+            Some(crate::time::Sleep::with_timer_driver(deadline, clock))
+        } else { None };
+        let mut timer = std::pin::pin!(timer);
+        let mut cancelled = std::pin::pin!(cx.cancelled());
+        let mut transport_cancelled = std::pin::pin!(self.cx.cancelled());
+        let mut operation = std::pin::pin!(self.with_owner_deadline(self.fetch_symbols(replica, key)));
+        let mut refusal = |task: &mut std::task::Context<'_>| {
+            if cancelled.as_mut().poll(task).is_ready() {
+                let _ = cx.checkpoint();
+                return Some(RemoteSymbolError::Cancelled);
+            }
+            if transport_cancelled.as_mut().poll(task).is_ready() {
+                let _ = self.cx.checkpoint();
+                return Some(RemoteSymbolError::Cancelled);
+            }
+            if timer.as_mut().as_pin_mut().is_some_and(|timer| timer.poll_deadline(task).is_ready()) {
+                return Some(RemoteSymbolError::Deadline);
+            }
+            None
+        };
+        poll_fn(|task| {
+            if let Some(error) = refusal(task) { return Poll::Ready(Err(error)); }
+            let result = operation.as_mut().poll(task);
+            if result.is_ready() {
+                if let Some(error) = refusal(task) { return Poll::Ready(Err(error)); }
+            }
+            result
+        }).await
+    }
 
     async fn call(&self, replica: &str, input: Vec<u8>) -> Result<Vec<u8>, RemoteSymbolError> {
         self.call_named(replica, SYMBOL_SERVICE_COMPUTATION, input).await

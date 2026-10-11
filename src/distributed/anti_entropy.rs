@@ -8,7 +8,7 @@
 //! exchanging `O(k log n)` hashes for `k` divergent keys (the Dynamo-lineage
 //! breakthrough).
 //!
-//! This module is the pure tree + diff core. Keys are bucketed by the high bits
+//! The compatibility tree below is a pure tree + diff core. Keys use the high bits
 //! of a fixed FNV-1a-64 hash into a complete binary tree of `2^depth` leaves, so
 //! two replicas build the *same* tree shape regardless of which keys each holds
 //! (a key present on only one side simply makes its bucket's hash differ). The
@@ -16,11 +16,19 @@
 //! `det_hash` machinery (so it is independent of the `det_hash` reseed fix the
 //! bead notes), and identical content yields identical roots across replicas.
 //!
-//! The anti-entropy *session* protocol (transport-agnostic state machine), the
-//! saga/snapshot consumers, and the partition-heal trigger layer on top of this
-//! core; the diff output feeds the existing repair / lattice-merge paths.
+//! This legacy FNV tree is a local comparison core. The additive [`catalog`],
+//! [`symbols`] and native repair modules provide bounded SHA-256 catalog pages,
+//! authenticated origin isolation and resumable repair of retained symbol
+//! batches. Automatic partition-heal triggers and saga-state merge remain
+//! separate work; the FNV hashes are never network authentication authority.
 
 use std::collections::BTreeMap;
+
+pub mod catalog;
+pub mod symbols;
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+pub mod native;
+mod wire;
 
 /// FNV-1a 64-bit hash (fixed constants → stable across builds and replicas).
 fn fnv1a64(bytes: &[u8]) -> u64 {

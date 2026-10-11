@@ -1465,6 +1465,11 @@ path = "tests/sqlite_wal_checkpoint_audit.rs"
 required-features = ["sqlite"]
 
 [[test]]
+name = "symbol_anti_entropy_native"
+path = "tests/symbol_anti_entropy_native.rs"
+required-features = ["test-internals", "tls"]
+
+[[test]]
 name = "symbol_checkpoint_striped_native"
 path = "tests/symbol_checkpoint_striped_native.rs"
 required-features = ["test-internals", "tls"]

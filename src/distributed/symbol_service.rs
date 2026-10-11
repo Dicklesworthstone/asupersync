@@ -135,6 +135,25 @@ impl SymbolReplicaStore {
             .filter(|batch| batch.key() == key)
             .map(Arc::clone).ok_or(SymbolStoreError::NotFound)
     }
+
+    // One atomic metadata cut, restricted to an already authenticated origin.
+    // The catalog adapter hashes outside this lock and never copies batch data.
+    pub(crate) fn catalog_entries(&self, peer: &NodeId, maximum: usize)
+        -> Result<Vec<(SymbolBatchKey, usize)>, SymbolStoreError>
+    {
+        if !valid_identity(peer.as_str()) { return Err(SymbolStoreError::InvalidIdentity); }
+        let state = self.state.lock();
+        let range = (peer.clone(), ObjectId::from_u128(0))..=(peer.clone(), ObjectId::from_u128(u128::MAX));
+        let count = state.entries.range(range.clone()).take(maximum.saturating_add(1)).count();
+        if count > maximum { return Err(SymbolStoreError::Limit("catalog entries")); }
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(count).map_err(|_| SymbolStoreError::Allocation)?;
+        if entries.capacity() > maximum { return Err(SymbolStoreError::Limit("catalog capacity")); }
+        for (_, batch) in state.entries.range(range) {
+            entries.push((batch.key(), batch.as_ref().as_ref().len()));
+        }
+        Ok(entries)
+    }
 }
 
 #[cfg(test)]
