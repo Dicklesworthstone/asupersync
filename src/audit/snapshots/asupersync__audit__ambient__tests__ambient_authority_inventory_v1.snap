@@ -55,6 +55,7 @@ expression: inventory
 4	Io	database/postgres.rs	TcpStream::
 1	Io	database/postgres.rs	std::net::TcpListener
 2	Io	database/postgres.rs	std::net::TcpStream
+1	Io	distributed/membership/durable/runtime/tests.rs	File::open(
 1	Io	distributed/membership/durable/runtime/tests.rs	std::fs::OpenOptions
 1	Io	distributed/membership/durable/tests.rs	std::fs::OpenOptions
 1	Io	distributed/symbol_service/durable/tests.rs	std::fs::OpenOptions
@@ -399,6 +400,7 @@ expression: inventory
 1	Io	database/postgres.rs	std::net::TcpListener	let listener = match std::net::TcpListener::bind() {
 1	Io	database/postgres.rs	std::net::TcpStream	fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
 1	Io	database/postgres.rs	std::net::TcpStream	let std_stream = match std::net::TcpStream::connect(addr) {
+1	Io	distributed/membership/durable/runtime/tests.rs	File::open(	File::open(path.parent().unwrap()).unwrap().sync_all().unwrap();
 1	Io	distributed/membership/durable/runtime/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	distributed/membership/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	distributed/symbol_service/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;

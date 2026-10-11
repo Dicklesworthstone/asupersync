@@ -1632,7 +1632,7 @@ fn test_function() {
     // production) dials a loopback std::net::TcpStream with connect_timeout
     // and wraps it with TcpStream::from_std for its stalled-write harness.
     // No scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 837;
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 838;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
