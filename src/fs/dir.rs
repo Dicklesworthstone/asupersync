@@ -24,7 +24,7 @@ pub async fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_mkdirat(&path, DEFAULT_CREATE_DIR_MODE)
+        spawn_blocking_io(move || uring_mkdirat(&path, DEFAULT_CREATE_DIR_MODE)).await
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -55,7 +55,7 @@ pub async fn remove_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
     let path = path.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_unlinkat_dir(&path)
+        spawn_blocking_io(move || uring_unlinkat_dir(&path)).await
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -88,7 +88,7 @@ fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
             .push(entry)
             .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
     }
-    ring.submit_and_wait(1)?;
+    super::path_ops::submit_and_wait_one(&mut ring)?;
     let result = ring
         .completion()
         .next()
@@ -118,7 +118,7 @@ fn uring_unlinkat_dir(path: &std::path::Path) -> io::Result<()> {
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(libc::AT_REMOVEDIR)
         .build();
-    uring_submit_one(&entry)
+    super::path_ops::uring_or_blocking(|| uring_submit_one(&entry), || std::fs::remove_dir(path))
 }
 
 /// Uses io_uring's MKDIRAT opcode for directory creation.
@@ -130,7 +130,13 @@ fn uring_mkdirat(path: &std::path::Path, mode: libc::mode_t) -> io::Result<()> {
     let entry = opcode::MkDirAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .mode(mode)
         .build();
-    uring_submit_one(&entry)
+    super::path_ops::uring_or_blocking(
+        || uring_submit_one(&entry),
+        || {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(mode).create(path)
+        },
+    )
 }
 
 #[cfg(test)]

@@ -279,7 +279,7 @@ pub async fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<
     let to = to_path.to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_renameat(&from, &to)
+        spawn_blocking_io(move || uring_renameat(&from, &to)).await
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -300,7 +300,7 @@ pub async fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path = path_ref.to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_unlinkat(&path)
+        spawn_blocking_io(move || uring_unlinkat(&path)).await
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -379,7 +379,7 @@ pub async fn symlink(original: impl AsRef<Path>, link: impl AsRef<Path>) -> io::
     let link = link.as_ref().to_owned();
     #[cfg(all(target_os = "linux", feature = "io-uring"))]
     {
-        uring_symlinkat(&original, &link)
+        spawn_blocking_io(move || uring_symlinkat(&original, &link)).await
     }
     #[cfg(not(all(target_os = "linux", feature = "io-uring")))]
     {
@@ -796,7 +796,7 @@ fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
             .push(entry)
             .map_err(|_| io::Error::new(io::ErrorKind::WouldBlock, "submission queue full"))?;
     }
-    ring.submit_and_wait(1)?;
+    submit_and_wait_one(&mut ring)?;
     let result = ring
         .completion()
         .next()
@@ -806,6 +806,59 @@ fn uring_submit_one(entry: &io_uring::squeue::Entry) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(-result))
     } else {
         Ok(())
+    }
+}
+
+/// Submit the queued entry and wait for its completion. A signal can
+/// interrupt the wait after the kernel took the entry, and the operation then
+/// still commits; waiting again collects its completion without submitting it
+/// twice, where returning the interruption reported a committed rename as
+/// failed (br-asupersync-pxg07b M2).
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub(super) fn submit_and_wait_one(ring: &mut io_uring::IoUring) -> io::Result<()> {
+    loop {
+        match ring.submit_and_wait(1) {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            result => return result.map(drop),
+        }
+    }
+}
+
+/// Whether io_uring itself refused the work, rather than the operation
+/// failing: no kernel support (ENOSYS, as under gVisor), a seccomp filter or
+/// `kernel.io_uring_disabled` (EPERM, as in Docker's default profile), a
+/// locked-memory limit (ENOMEM), or an opcode this kernel does not know
+/// (EINVAL, EOPNOTSUPP). The same errno from the operation itself means it did
+/// nothing, so the blocking syscall returns it again.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+fn io_uring_refused(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::ENOSYS | libc::EPERM | libc::ENOMEM | libc::EINVAL | libc::EOPNOTSUPP)
+    )
+}
+
+/// Run a path operation through io_uring, or through the blocking syscall
+/// when io_uring is refused, so the operation never fails only because the
+/// kernel or sandbox does not offer io_uring (br-asupersync-pxg07b M2).
+/// Callers run this on a blocking thread: the io_uring wait blocks it.
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub(super) fn uring_or_blocking(
+    uring: impl FnOnce() -> io::Result<()>,
+    blocking: impl FnOnce() -> io::Result<()>,
+) -> io::Result<()> {
+    #[cfg(test)]
+    let uring = || match tests::forced_uring_refusal() {
+        Some(errno) => Err(io::Error::from_raw_os_error(errno)),
+        None => uring(),
+    };
+    match uring() {
+        Err(error) if io_uring_refused(&error) => {
+            #[cfg(test)]
+            tests::note_blocking_fallback();
+            blocking()
+        }
+        result => result,
     }
 }
 
@@ -825,7 +878,7 @@ fn uring_unlinkat(path: &Path) -> io::Result<()> {
     let entry = opcode::UnlinkAt::new(types::Fd(libc::AT_FDCWD), c_path.as_ptr())
         .flags(0)
         .build();
-    uring_submit_one(&entry)
+    uring_or_blocking(|| uring_submit_one(&entry), || std::fs::remove_file(path))
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -841,7 +894,7 @@ fn uring_renameat(from: &Path, to: &Path) -> io::Result<()> {
         c_to.as_ptr(),
     )
     .build();
-    uring_submit_one(&entry)
+    uring_or_blocking(|| uring_submit_one(&entry), || std::fs::rename(from, to))
 }
 
 #[cfg(all(target_os = "linux", feature = "io-uring"))]
@@ -856,7 +909,10 @@ fn uring_symlinkat(target: &Path, linkpath: &Path) -> io::Result<()> {
         c_link.as_ptr(),
     )
     .build();
-    uring_submit_one(&entry)
+    uring_or_blocking(
+        || uring_submit_one(&entry),
+        || std::os::unix::fs::symlink(target, linkpath),
+    )
 }
 
 #[cfg(test)]
@@ -906,6 +962,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    /// The errno io_uring path operations are refused with while a test
+    /// forces it (0: none). Process-wide, because the operations run on
+    /// blocking threads. A refused operation still completes through the
+    /// blocking syscall, so a concurrent test sees the same results.
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    static FORCED_URING_REFUSAL: std::sync::atomic::AtomicI32 =
+        std::sync::atomic::AtomicI32::new(0);
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    static BLOCKING_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    pub(super) fn forced_uring_refusal() -> Option<i32> {
+        match FORCED_URING_REFUSAL.load(Ordering::SeqCst) {
+            0 => None,
+            errno => Some(errno),
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    pub(super) fn note_blocking_fallback() {
+        BLOCKING_FALLBACKS.fetch_add(1, Ordering::SeqCst);
     }
 
     fn init_test(name: &str) {
@@ -1643,5 +1722,65 @@ mod tests {
             crate::assert_with_log!(is_symlink, "is_symlink", true, is_symlink);
         });
         crate::test_complete!("symlink_metadata_basic");
+    }
+
+    /// br-asupersync-pxg07b M2: when io_uring itself is refused, every io_uring
+    /// path operation still completes through the blocking syscall. The
+    /// refusals are EPERM (a seccomp profile such as Docker's default, or
+    /// `kernel.io_uring_disabled`), ENOSYS (gVisor), ENOMEM (locked memory),
+    /// and EINVAL or EOPNOTSUPP (an opcode the kernel does not know).
+    #[cfg(all(target_os = "linux", feature = "io-uring"))]
+    #[test]
+    fn io_uring_path_operations_fall_back_when_io_uring_is_refused() {
+        struct Refusal;
+        impl Drop for Refusal {
+            fn drop(&mut self) {
+                FORCED_URING_REFUSAL.store(0, Ordering::SeqCst);
+            }
+        }
+
+        init_test("io_uring_path_operations_fall_back_when_io_uring_is_refused");
+        let dir = TempDir::new("uring_refused").unwrap();
+        for errno in [
+            libc::EPERM,
+            libc::ENOSYS,
+            libc::ENOMEM,
+            libc::EINVAL,
+            libc::EOPNOTSUPP,
+        ] {
+            let _refusal = Refusal;
+            FORCED_URING_REFUSAL.store(errno, Ordering::SeqCst);
+            let fallbacks = BLOCKING_FALLBACKS.load(Ordering::SeqCst);
+            let base = dir.path().join(format!("errno_{errno}"));
+            let file = base.join("file");
+            let renamed = base.join("renamed");
+            let link = base.join("link");
+            future::block_on(async {
+                crate::fs::create_dir(&base).await.expect("create_dir");
+                write(&file, b"x").await.unwrap();
+                rename(&file, &renamed).await.expect("rename");
+                symlink(&renamed, &link).await.expect("symlink");
+                let target = fs::read_link(&link).unwrap();
+                crate::assert_with_log!(target == renamed, "link target", renamed, target);
+                remove_file(&link).await.expect("remove_file (link)");
+                remove_file(&renamed).await.expect("remove_file");
+                crate::fs::remove_dir(&base).await.expect("remove_dir");
+            });
+            let removed = !base.exists();
+            crate::assert_with_log!(
+                removed,
+                format!("errno {errno}: directory removed"),
+                true,
+                removed
+            );
+            let taken = BLOCKING_FALLBACKS.load(Ordering::SeqCst) - fallbacks;
+            crate::assert_with_log!(
+                taken >= 6,
+                format!("errno {errno}: all six operations took the blocking path"),
+                ">= 6",
+                taken
+            );
+        }
+        crate::test_complete!("io_uring_path_operations_fall_back_when_io_uring_is_refused");
     }
 }
