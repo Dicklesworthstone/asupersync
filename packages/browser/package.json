@@ -31,6 +31,11 @@
       "import": "./dist/fetch-events.js",
       "default": "./dist/fetch-events.js"
     },
+    "./batch": {
+      "types": "./dist/fetch-batch.d.ts",
+      "import": "./dist/fetch-batch.js",
+      "default": "./dist/fetch-batch.js"
+    },
     "./concurrency": {
       "types": "./dist/fetch-combinators.d.ts",
       "import": "./dist/fetch-combinators.js",
