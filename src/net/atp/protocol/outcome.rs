@@ -832,7 +832,7 @@ impl AtpCancelReason {
             Self::Timeout => CancelReason::timeout(),
             Self::Shutdown => CancelReason::shutdown(),
             Self::FailFast(_) => CancelReason::fail_fast().with_message("fail-fast"),
-            Self::ParentCancel => CancelReason::linked_exit(),
+            Self::ParentCancel => CancelReason::parent_cancelled(),
             Self::PathRaceLost => CancelReason::user("path race lost"),
             Self::RepairDecodeAbandoned => CancelReason::user("repair decode abandoned"),
             Self::DaemonRestart => CancelReason::user("daemon restart"),
@@ -1162,34 +1162,41 @@ impl TransferTranscript {
     fn parse_atp_cancel_reason(reason: &CancelReason) -> Option<AtpCancelReason> {
         let message = reason.message().unwrap_or("");
 
-        // Check for ATP-specific custom conditions in the message that have no native CancelKind equivalent
-        if message.contains("path race") {
-            return Some(AtpCancelReason::PathRaceLost);
-        } else if message.contains("repair decode") {
-            return Some(AtpCancelReason::RepairDecodeAbandoned);
-        } else if message.contains("daemon restart") {
-            return Some(AtpCancelReason::DaemonRestart);
-        } else if message.contains("resource budget") {
-            return Some(AtpCancelReason::ResourceBudgetExhausted(
-                message.to_string(),
-            ));
-        }
-
-        // Map based on typed CancelKind
+        // Map based on typed CancelKind first
         match reason.kind() {
-            CancelKind::Timeout | CancelKind::Deadline => Some(AtpCancelReason::Timeout),
             CancelKind::Shutdown => Some(AtpCancelReason::Shutdown),
-            CancelKind::User => Some(AtpCancelReason::UserCancel(if message.is_empty() {
-                "user cancelled".to_string()
-            } else {
-                message.to_string()
-            })),
+            CancelKind::Timeout | CancelKind::Deadline => {
+                if message.contains("resource budget") {
+                    Some(AtpCancelReason::ResourceBudgetExhausted(
+                        message.to_string(),
+                    ))
+                } else {
+                    Some(AtpCancelReason::Timeout)
+                }
+            }
+            CancelKind::User => {
+                if message.contains("path race") {
+                    Some(AtpCancelReason::PathRaceLost)
+                } else if message.contains("repair decode") {
+                    Some(AtpCancelReason::RepairDecodeAbandoned)
+                } else if message.contains("daemon restart") {
+                    Some(AtpCancelReason::DaemonRestart)
+                } else {
+                    Some(AtpCancelReason::UserCancel(if message.is_empty() {
+                        "user cancelled".to_string()
+                    } else {
+                        message.to_string()
+                    }))
+                }
+            }
             CancelKind::FailFast => Some(AtpCancelReason::FailFast(if message.is_empty() {
                 "fail-fast".to_string()
             } else {
                 message.to_string()
             })),
-            CancelKind::ParentCancelled => Some(AtpCancelReason::ParentCancel),
+            CancelKind::ParentCancelled | CancelKind::LinkedExit => {
+                Some(AtpCancelReason::ParentCancel)
+            }
             CancelKind::RaceLost => Some(AtpCancelReason::PathRaceLost),
             CancelKind::PollQuota | CancelKind::CostBudget | CancelKind::ResourceUnavailable => {
                 Some(AtpCancelReason::ResourceBudgetExhausted(
@@ -1200,7 +1207,6 @@ impl TransferTranscript {
                     },
                 ))
             }
-            CancelKind::LinkedExit => None,
         }
     }
 }
@@ -1611,6 +1617,68 @@ mod tests {
             transcript.cancellation_source,
             Some(AtpCancelReason::PathRaceLost)
         );
+    }
+
+    #[test]
+    fn parse_atp_cancel_reason_typed_kind_precedence_and_round_trip() {
+        // 1. Shutdown with message containing "repair decode" must not be overridden
+        let shutdown_with_repair = CancelReason::shutdown().with_message("repair decode abandoned");
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&shutdown_with_repair),
+            Some(AtpCancelReason::Shutdown)
+        );
+
+        // 2. Shutdown with message containing "path race" must not be overridden
+        let shutdown_with_race = CancelReason::shutdown().with_message("path race lost");
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&shutdown_with_race),
+            Some(AtpCancelReason::Shutdown)
+        );
+
+        // 3. Message-less kinds
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&CancelReason::timeout()),
+            Some(AtpCancelReason::Timeout)
+        );
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&CancelReason::shutdown()),
+            Some(AtpCancelReason::Shutdown)
+        );
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&CancelReason::parent_cancelled()),
+            Some(AtpCancelReason::ParentCancel)
+        );
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&CancelReason::race_lost()),
+            Some(AtpCancelReason::PathRaceLost)
+        );
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(&CancelReason::linked_exit()),
+            Some(AtpCancelReason::ParentCancel)
+        );
+
+        // 4. Round trip for all AtpCancelReason variants
+        let variants = [
+            AtpCancelReason::UserCancel("custom user cancel".to_string()),
+            AtpCancelReason::Timeout,
+            AtpCancelReason::Shutdown,
+            AtpCancelReason::FailFast("fail-fast".to_string()),
+            AtpCancelReason::ParentCancel,
+            AtpCancelReason::PathRaceLost,
+            AtpCancelReason::RepairDecodeAbandoned,
+            AtpCancelReason::DaemonRestart,
+            AtpCancelReason::ResourceBudgetExhausted("resource budget exhausted".to_string()),
+        ];
+        for variant in &variants {
+            let base = variant.to_base_reason();
+            let parsed = TransferTranscript::parse_atp_cancel_reason(&base);
+            assert_eq!(
+                parsed.as_ref(),
+                Some(variant),
+                "round-trip mismatch for {:?}",
+                variant
+            );
+        }
     }
 
     #[test]
