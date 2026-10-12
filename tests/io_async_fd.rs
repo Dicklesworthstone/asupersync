@@ -70,8 +70,7 @@ fn would_block_clears_readiness_and_the_next_wait_parks_until_data() {
     let fd = AsyncFd::new(local).expect("wrap");
     // Writable at once (an empty socket buffer); readable only after the
     // peer writes. The guard from `ready` says which direction it saw.
-    let writer = write_later(peer, Duration::from_millis(300), b"x");
-    block_on(async {
+    let writer = block_on(async {
         assert!(fd.writable().await.expect("writable").is_writable());
 
         // A read before the data arrives blocks: try_io clears the readiness.
@@ -83,7 +82,11 @@ fn would_block_clears_readiness_and_the_next_wait_parks_until_data() {
             assert!(early.is_err(), "no data yet, so the read would block");
         }
 
+        // The writer starts only now, so the wait below is measured from the
+        // same instant on any load (asupersync-do94zr: spawned before the
+        // runtime build, a slow build ate the margin).
         let started = Instant::now();
+        let writer = write_later(peer, Duration::from_millis(300), b"x");
         let mut guard = fd.readable().await.expect("readable");
         assert!(guard.is_readable());
         let n = guard
@@ -92,6 +95,7 @@ fn would_block_clears_readiness_and_the_next_wait_parks_until_data() {
             .expect("read");
         assert_eq!((n, byte[0]), (1, b'x'));
         assert!(started.elapsed() >= Duration::from_millis(200));
+        writer
     });
     drop(writer.join().expect("writer"));
 }
