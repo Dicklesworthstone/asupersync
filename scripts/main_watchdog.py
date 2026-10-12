@@ -1205,6 +1205,7 @@ def run_engine(
     now: str,
     target_exists: TargetExists | None = None,
     parallel: int = 1,
+    open_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     commits = {c["sha"]: c for c in plan["commits"]}
     batch = [c["sha"] for c in plan["commits"]]
@@ -1251,6 +1252,21 @@ def run_engine(
                 receipt["still_red"] = {t: lane_known[t].get("bead") for t in still}
                 notes.append(f"{lane['id']}: still red: " + ", ".join(f"{t} (bead {lane_known[t].get('bead')})" for t in still))
             new_targets = failing - set(lane_known)
+            # A new red that an open bead already names is tracked there: attach it and
+            # skip the bisect. On 10-12 a run's serial bisects would have spent about 30 h
+            # re-deriving culprits that open beads already recorded.
+            tracked = {t: bead for t in sorted(new_targets) if (bead := existing_bead_for([t], open_issues or []))}
+            for target, bead in tracked.items():
+                lane_known[target] = {
+                    "culprit": None,
+                    "first_seen": now,
+                    "bead": bead,
+                    "signature": red_signature(lane["id"], {target}),
+                }
+            if tracked:
+                receipt["tracked_red"] = tracked
+                notes.append(f"{lane['id']}: tracked, not bisected: " + ", ".join(f"{t} (bead {b})" for t, b in tracked.items()))
+            new_targets -= set(tracked)
             if new_targets:
                 base = plan.get("since")
                 groups = attribute_new_reds(lane, batch, runner, new_targets, target_exists, base)
@@ -1898,6 +1914,26 @@ def existing_bead_for(new_targets: list[str], open_issues: list[dict[str, Any]])
         if all(re.search(rf"\b{re.escape(name)}\b", text) for name in names):
             return issue.get("id")
     return None
+
+
+def tracker_issues_with_origin() -> list[dict[str, Any]]:
+    """Open beads as origin/main records them, plus working-tree rows origin lacks.
+
+    A bead committed by plumbing reaches origin before any shared checkout pulls it, so
+    the working tree alone can miss the bead that already tracks a red. Origin's row
+    wins for each id, so a bead closed on origin no longer tracks anything.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for line in git("show", "origin/main:.beads/issues.jsonl", check=False).splitlines():
+        try:
+            issue = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(issue, dict) and issue.get("id"):
+            rows[issue["id"]] = issue
+    for issue in open_tracker_issues():
+        rows.setdefault(issue.get("id"), issue)
+    return [issue for issue in rows.values() if issue.get("status") not in ("closed", "tombstone")]
 
 
 def open_tracker_issues(issues_path: Path = Path(".beads/issues.jsonl")) -> list[dict[str, Any]]:
@@ -3011,6 +3047,7 @@ def main(argv: list[str]) -> int:
             scenario.get("now", "2026-01-01T00:00:00+00:00"),
             None if scenario.get("disable_target_filter") else fake_target_exists,
             scenario.get("parallel", 1),
+            scenario.get("open_issues", []),
         )
         # As in run mode: drop healed queued filings, then report heals (the br
         # calls are recorded, not executed).
@@ -3108,7 +3145,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"], "receipt_escalations": escalations}))
         return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
-    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
+    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel, tracker_issues_with_origin())
     forget_healed_pending(state, result["bead_heals"])
     if args.file_beads:
         file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)

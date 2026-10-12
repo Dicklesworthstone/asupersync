@@ -1564,6 +1564,61 @@ fn reds_in_one_lane_from_different_commits_are_each_blamed_on_their_own_commit()
     );
 }
 
+/// A new red that an open bead already names is attached to that bead without a
+/// bisect; only the untracked red is bisected. On 10-12 a run's serial bisects would
+/// have spent about 30 h re-deriving culprits that open beads already recorded.
+#[test]
+fn a_new_red_an_open_bead_already_names_is_attached_to_it_without_a_bisect() {
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native", "--test", "gamma_native"],
+        "expected_targets": ["alpha_native", "gamma_native"],
+    });
+    let mut logs = serde_json::Map::new();
+    for n in 1..=8u8 {
+        logs.insert(sha(n), json!({"log": alpha_gamma_log(n >= 3, n >= 6)}));
+    }
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=8u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-tests[default]": logs},
+        "open_issues": [{
+            "id": "asupersync-tracked", "status": "open",
+            "title": "alpha_native flake", "description": "alpha_case fails under load",
+        }],
+    }));
+
+    let lane = receipt(&result, "targeted-tests[default]");
+    assert_eq!(
+        lane["tracked_red"],
+        json!({"alpha_native::alpha_case": "asupersync-tracked"}),
+        "{result:#}"
+    );
+    let known = &result["state"]["known_reds"]["targeted-tests[default]"];
+    assert_eq!(
+        known["alpha_native::alpha_case"]["bead"],
+        "asupersync-tracked"
+    );
+    assert!(known["alpha_native::alpha_case"]["culprit"].is_null());
+    assert_eq!(known["gamma_native::gamma_case"]["culprit"], sha(6));
+    let payloads = result["bead_payloads"].as_array().expect("payloads");
+    assert_eq!(payloads.len(), 1, "{result:#}");
+    assert_eq!(
+        payloads[0]["new_targets"],
+        json!(["gamma_native::gamma_case"])
+    );
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    assert!(
+        probes
+            .iter()
+            .all(|p| p["command"] == "cargo test --test gamma_native"),
+        "only the untracked red is bisected: {probes:#?}"
+    );
+}
+
 #[test]
 fn a_targeted_green_heals_only_the_targets_it_ran() {
     let lane = json!({
