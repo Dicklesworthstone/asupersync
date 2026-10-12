@@ -283,7 +283,7 @@ impl<F: Future> Future for TimeoutFuture<F> {
         }
 
         let deadline = this.sleep.deadline();
-        if let Some(now) = ambient_timer_now()
+        if let Some(now) = deadline_clock_now(this.sleep)
             && now > deadline
             && this.sleep.poll_ready_with_time(now).is_ready()
         {
@@ -368,6 +368,20 @@ pub fn timeout<F>(now: Time, duration: Duration, future: F) -> TimeoutFuture<F> 
 #[must_use]
 pub fn timeout_at<F>(deadline: Time, future: F) -> TimeoutFuture<F> {
     TimeoutFuture::new(future, deadline)
+}
+
+/// The ambient runtime timer's now, for the expired-deadline check before the
+/// inner future is polled; `None` when the sleep keeps its own clock. A custom
+/// clock's deadline is checked by the sleep itself, after the inner future, as
+/// it always was: comparing it here with the runtime timer (a test clock
+/// starting at zero, or any clock not anchored to the runtime's) expired a
+/// deadline the custom clock had not reached before the inner future was polled.
+fn deadline_clock_now(sleep: &Sleep) -> Option<Time> {
+    if sleep.time_getter.is_some() {
+        None
+    } else {
+        ambient_timer_now()
+    }
 }
 
 #[cfg(test)]

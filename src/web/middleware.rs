@@ -3405,6 +3405,34 @@ mod tests {
         assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
     }
 
+    fn frozen_at_zero() -> Time {
+        Time::ZERO
+    }
+
+    /// Review r28-e8 of 14d252b8f (M3-1): a custom clock is the timeout's only
+    /// clock. Its deadline was compared with the runtime's timer, which counts
+    /// from process start, so once that passed the deadline every request was
+    /// a 504 and its handler never ran.
+    #[test]
+    fn a_custom_clock_timeout_never_reads_the_runtime_clock() {
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("runtime build");
+        let resp = runtime.block_on(async {
+            // Put the runtime's clock past the 1 ms deadline; the frozen
+            // custom clock never reaches it.
+            crate::time::sleep(crate::time::wall_now(), Duration::from_millis(5)).await;
+            let cx = crate::Cx::for_testing();
+            let mw = TimeoutMiddleware::with_time_getter(
+                FnHandler::new(ok_handler),
+                Duration::from_millis(1),
+                frozen_at_zero,
+            );
+            Handler::call(&mw, &cx, make_request()).await
+        });
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
     // --- CircuitBreakerMiddleware ---
 
     #[test]
