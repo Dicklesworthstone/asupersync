@@ -656,6 +656,9 @@ struct BondRecvArgs {
     /// listings (`ps`, `/proc`). Prefer `--rq-auth-key-stdin` to pass key material securely.
     #[arg(long, value_name = "HEX")]
     rq_auth_key_hex: Option<String>,
+    /// Read one 64-hex RQ authentication key line from stdin.
+    #[arg(long)]
+    rq_auth_key_stdin: bool,
     /// Explicitly disable RQ symbol authentication for loopback/lab-only runs.
     #[arg(long)]
     rq_allow_unauthenticated_lab: bool,
@@ -2172,12 +2175,19 @@ async fn bond_donate_transfer(
 /// protocol never transmits the descriptor, it only cross-checks agreement —
 /// then enroll `--expect-donors` donors and drive [`transport_rq::receive_bonded`]
 /// to a fail-closed commit.
-fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
+fn run_bond_recv(mut args: BondRecvArgs) -> Result<(), String> {
     validate_bond_expected_donors(args.expect_donors)?;
     validate_receiver_sparse_platform(args.sparse_files)?;
     let receive_options = rq_receive_options(args.allow_special_files, args.sparse_files);
+    let stdin = std::io::stdin();
+    let rq_auth = resolve_rq_auth_choice_with_stdin(
+        args.rq_auth_key_hex.take().map(SecretString::from_string),
+        args.rq_allow_unauthenticated_lab,
+        args.rq_auth_key_stdin,
+        &mut stdin.lock(),
+    )?;
     let symbol_size = resolved_symbol_size(args.symbol_size, false);
-    let mut config = rq_config(
+    let config = rq_config_base(
         args.max_bytes,
         symbol_size,
         DEFAULT_UDP_FANOUT,
@@ -2185,14 +2195,11 @@ fn run_bond_recv(args: BondRecvArgs) -> Result<(), String> {
         args.repair_overhead,
         0.0,
         DEFAULT_ROUND_TAIL_DRAIN_MS,
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
     )?;
+    let mut config = config_with_rq_auth(config, &rq_auth);
     config.accept_timeout = recv_accept_timeout(args.accept_timeout_secs)?;
-    let auth_key_id = bond_auth_key_id(
-        args.rq_auth_key_hex.as_deref(),
-        args.rq_allow_unauthenticated_lab,
-    )?;
+    let auth_key_id = bond_auth_key_id_for_choice(&rq_auth);
+    drop(rq_auth);
     let chosen_fanout = config.udp_fanout.max(1);
     let udp_bind_ip = args
         .udp_bind
@@ -10870,6 +10877,25 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         .expect("parse protected local stdin key source");
         let Command::Send(args) = cli.command else {
             panic!("expected send command");
+        };
+        assert!(args.rq_auth_key_stdin);
+        assert!(args.rq_auth_key_hex.is_none());
+    }
+
+    #[test]
+    fn bond_recv_rq_auth_key_stdin_flag_parses_without_key_material_in_argv() {
+        let cli = Cli::try_parse_from([
+            "atp",
+            "bond-recv",
+            "./dest",
+            "./source",
+            "--expect-donors",
+            "2",
+            "--rq-auth-key-stdin",
+        ])
+        .expect("parse bond-recv stdin key source");
+        let Command::BondRecv(args) = cli.command else {
+            panic!("expected bond-recv command");
         };
         assert!(args.rq_auth_key_stdin);
         assert!(args.rq_auth_key_hex.is_none());
