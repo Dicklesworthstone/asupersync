@@ -5,6 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { stripTypeScriptTypes } from "node:module";
@@ -24,7 +25,7 @@ const head = (status = 200, headers = []) => ({ status, statusText: "", url: "ht
 const turn = () => new Promise((resolve) => setImmediate(resolve));
 async function pending(promise) { let done = false; void promise.then(() => { done = true; }, () => { done = true; }); await turn(); assert.equal(done, false); }
 async function api(globals = {}) {
-  const module = new SourceTextModule(code, { context: createContext({ ReadableStream, ReadableStreamDefaultReader, ...globals }) });
+  const module = new SourceTextModule(code, { context: createContext({ ReadableStream, ReadableStreamDefaultReader, AbortSignal, EventTarget, ...globals }) });
   await module.link(() => { throw new Error("selection unexpectedly added a runtime dependency"); });
   await module.evaluate(); return module.namespace;
 }
@@ -257,4 +258,96 @@ test("real HTTP selection rejects 503, drains its connection and returns 200 bod
   const result = await admitted.value.result; assert.equal(result.outcome, "ok"); assert.equal(result.value.index, 1);
   assert.equal(await new Response(result.value.body).text(), "chosen payload"); await disconnected.promise;
   assert.equal((await bad.closed).outcome, "cancelled"); assert.equal((await good.closed).outcome, "ok");
+});
+
+test("external signal cancels selection with every header parked and waits for cleanup", async (t) => {
+  const signal = new AbortController(), gate = deferred(); const a = member(t),
+    b = member(t, { cleanup: gate.promise, release: gate.resolve });
+  const group = select([a, b], 1, { signal: signal.signal }); signal.abort("uninspected reason");
+  await pending(group.result); assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+  gate.resolve(); const result = await group.result; assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.kind, "fetch_selection_signal");
+});
+test("pre-aborted signal drains acquired inputs without invoking response or predicate", async (t) => {
+  const signal = new AbortController(); signal.abort(); const a = member(t), b = member(t); let predicates = 0;
+  const group = select([a, b], 1, { signal: signal.signal, accept() { predicates += 1; return true; } });
+  assert.equal((await group.result).outcome, "cancelled"); assert.equal(predicates, 0);
+  assert.equal(a.count.responses, 0); assert.equal(b.count.responses, 0); assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+});
+test("signal cancellation during loser drain also retires proposed winners", async (t) => {
+  const signal = new AbortController(), gate = deferred(); const a = member(t),
+    b = member(t, { cleanup: gate.promise, release: gate.resolve }); a.respond();
+  const group = select([a, b], 1, { signal: signal.signal }); await pending(group.result); signal.abort();
+  await pending(group.result); assert.equal(a.count.cancels, 1); gate.resolve(); assert.equal((await group.result).outcome, "cancelled");
+});
+test("earlier stopImmediatePropagation listener cannot hide signal cancellation", async (t) => {
+  const signal = new AbortController(); signal.signal.addEventListener("abort", (event) => event.stopImmediatePropagation());
+  const a = member(t); const group = select([a], 1, { signal: signal.signal }); signal.abort();
+  assert.equal((await group.result).outcome, "cancelled"); assert.equal(a.count.cancels, 1);
+});
+test("group cancellation never aborts the caller-owned signal", async (t) => {
+  const signal = new AbortController(); const a = member(t); const group = select([a], 1, { signal: signal.signal });
+  await group.cancel(); assert.equal(signal.signal.aborted, false);
+});
+test("signal aborted after success cannot reclaim transferred bodies", async (t) => {
+  const signal = new AbortController(); const a = member(t); a.respond(); const group = select([a], 1, { signal: signal.signal });
+  assert.equal((await group.result).outcome, "ok"); signal.abort(); await turn(); assert.equal(a.count.cancels, 0);
+});
+test("abort listener is removed at successful settlement", async (t) => {
+  let dependent;
+  const tracked = await api({ AbortSignal: { prototype: AbortSignal.prototype,
+    any(signals) { dependent = AbortSignal.any(signals); return dependent; } } });
+  const signal = new AbortController(); const a = member(t); const admitted = tracked.quorumFetchResponses([a.handle], 1, { signal: signal.signal });
+  assert.equal(admitted.outcome, "ok"); assert.equal(getEventListeners(dependent, "abort").length, 1);
+  a.respond(); assert.equal((await admitted.value.result).outcome, "ok"); assert.equal(getEventListeners(dependent, "abort").length, 0);
+});
+test("missing AbortSignal.any refuses supplied signals before locking inputs", async (t) => {
+  const restricted = await api({ AbortSignal: { prototype: AbortSignal.prototype } }); const a = member(t);
+  assert.equal(restricted.quorumFetchResponses([a.handle], 1, { signal: new AbortController().signal }).outcome, "err");
+  assert.equal(a.count.conversions, 0); assert.equal(a.count.cancels, 0);
+  const withoutSignal = restricted.quorumFetchResponses([a.handle], 1); assert.equal(withoutSignal.outcome, "ok");
+  await withoutSignal.value.cancel();
+});
+test("fake signals are refused without reading presentation getters", async (t) => {
+  const a = member(t); let touched = 0;
+  const fake = { get aborted() { touched += 1; return false; }, get reason() { touched += 1; return "secret"; } };
+  assert.equal(methods.quorumFetchResponses([a.handle], 1, { signal: fake }).outcome, "err");
+  assert.equal(touched, 0); assert.equal(a.count.conversions, 0);
+});
+test("overridden signal accessors are refused before native composition or body acquisition", async (t) => {
+  const signal = new AbortController(); let touched = 0;
+  Object.defineProperties(signal.signal, { aborted: { get() { touched += 1; throw new Error("aborted override"); } },
+    reason: { get() { touched += 1; throw new Error("reason override"); } } });
+  const a = member(t); const admitted = methods.quorumFetchResponses([a.handle], 1, { signal: signal.signal });
+  assert.equal(admitted.outcome, "err"); assert.equal(touched, 0); assert.equal(a.count.conversions, 0);
+});
+test("overridden listener methods and arbitrary abort reason are not invoked", async (t) => {
+  const signal = new AbortController(); let touched = 0;
+  signal.signal.addEventListener = () => { touched += 1; throw new Error("listener override"); };
+  const a = member(t); const group = select([a], 1, { signal: signal.signal });
+  signal.abort({ toString() { touched += 1; throw new Error("reason formatting"); } });
+  assert.equal((await group.result).outcome, "cancelled"); assert.equal(touched, 0);
+});
+test("a host-compatible proxied native signal still propagates cancellation on Node", async (t) => {
+  const controller = new AbortController(); const signal = new Proxy(controller.signal, {});
+  const a = member(t); const admitted = methods.quorumFetchResponses([a.handle], 1, { signal });
+  assert.equal(admitted.outcome, "ok"); controller.abort(); assert.equal((await admitted.value.result).outcome, "cancelled");
+});
+test("signal abort inside predicate cannot publish a selected response", async (t) => {
+  const signal = new AbortController(); const a = member(t); a.respond();
+  const group = select([a], 1, { signal: signal.signal, accept() { signal.abort(); return true; } });
+  assert.equal((await group.result).outcome, "cancelled"); assert.equal(a.count.cancels, 1);
+});
+test("signal cancellation preserves cleanup panic precedence", async (t) => {
+  const signal = new AbortController(); const a = member(t, { terminal: { outcome: "panicked", message: "drain panic" } });
+  const group = select([a], 1, { signal: signal.signal }); signal.abort();
+  assert.equal((await group.result).outcome, "panicked");
+});
+test("an aborted signal does not cancel caller work when setup is refused", async (t) => {
+  const signal = new AbortController(); signal.abort(); const a = member(t), b = member(t); const locked = b.stream.getReader();
+  const admitted = methods.quorumFetchResponses([a.handle, b.handle], 1, { signal: signal.signal });
+  assert.equal(admitted.outcome, "err"); assert.equal(a.count.cancels, 0); assert.equal(a.stream.locked, false); locked.releaseLock();
+});
+test("null signal is equivalent to omission", async (t) => {
+  const a = member(t); a.respond(); assert.equal((await select([a], 1, { signal: null }).result).outcome, "ok");
 });

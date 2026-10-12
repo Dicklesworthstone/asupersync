@@ -20,6 +20,8 @@ export interface FetchSelection<T> {
 export interface FetchSelectionOptions {
   /** Synchronous header predicate; defaults to HTTP 200..299. Must return a boolean. */
   accept?: (response: BrowserFetchResponse, index: number) => boolean;
+  /** Borrowed unmodified same-realm native signal; observed through loser drain. */
+  signal?: AbortSignal | null;
 }
 
 /** Independent selection bounds; selection never admits additional requests. */
@@ -39,6 +41,19 @@ const READER = typeof ReadableStreamDefaultReader === "undefined" ? undefined : 
 const CANCEL = READER?.prototype.cancel;
 const RELEASE = READER?.prototype.releaseLock;
 const CLOSED = READER && Object.getOwnPropertyDescriptor(READER.prototype, "closed")?.get;
+const SIGNAL = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
+const ANY_SIGNAL = SIGNAL?.any;
+const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "aborted")?.get;
+const TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
+const ADD_LISTENER = TARGET?.prototype.addEventListener;
+const REMOVE_LISTENER = TARGET?.prototype.removeEventListener;
+
+function cancellation(reason: string, signal = false): Failure {
+  return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
+    kind: signal ? "fetch_selection_signal" : "fetch_selection_cancel", phase: "completed", origin_region: "browser-fetch-selection",
+    origin_task: null, timestamp_nanos: 0, message: reason, truncated: false,
+  }) });
+}
 
 // Copy envelopes before retaining them. Never trust an exception's .cause or
 // stringify caller-controlled exceptions, headers, or response bodies.
@@ -126,6 +141,16 @@ interface Member {
  * A selected member failing during drain also fails the group; no replacement
  * requests are started. Cleanup panics outrank errors and cancellation.
  *
+ * An optional unmodified same-realm AbortSignal uses the same drain barrier,
+ * even with every header parked or while loser cleanup is pending. A pre-aborted
+ * signal retires all acquired inputs without calling response methods/predicates.
+ * Setup refusal still leaves ownership with the caller. Native AbortSignal.any is
+ * required only when a signal is supplied: a private dependent signal prevents
+ * earlier caller listeners from suppressing cancellation. The supplied signal is
+ * never aborted or mutated, its arbitrary reason is not inspected/stringified,
+ * and the listener is removed at settlement. No deadline/timer is created here;
+ * callers may explicitly supply their own timeout signal.
+ *
  * Input handles must be distinct, exclusively owned and unlocked. Refused setup
  * releases acquired locks without cancelling caller work. A conversion already
  * made by toReadableStream() cannot be undone: resume using the native stream.
@@ -144,6 +169,7 @@ export function quorumFetchResponses(
 ): Outcome<FetchSelection<readonly SelectedFetchResponse[]>> {
   const members: Member[] = [];
   let accept: NonNullable<FetchSelectionOptions["accept"]>;
+  let signal: AbortSignal | undefined;
   try {
     const count = Array.isArray(fetches) ? fetches.length : -1;
     if (!Number.isSafeInteger(count) || !Number.isSafeInteger(required) || required < 1
@@ -152,6 +178,22 @@ export function quorumFetchResponses(
     }
     accept = options.accept ?? ((head) => head.status >= 200 && head.status < 300);
     if (typeof accept !== "function") return fail("fetch selection accept must be a function");
+    const suppliedSignal = options.signal;
+    if (suppliedSignal != null) {
+      if (!SIGNAL || !ANY_SIGNAL || !ABORTED || !ADD_LISTENER || !REMOVE_LISTENER) {
+        return fail("fetch selection signals require native AbortSignal.any and EventTarget");
+      }
+      // Some native hosts read public accessors inside AbortSignal.any. Refuse
+      // customized signals before that call, without invoking those accessors.
+      if (Object.getPrototypeOf(suppliedSignal) !== SIGNAL.prototype
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "aborted")
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "reason")) {
+        return fail("fetch selection requires an unmodified same-realm native signal");
+      }
+      Reflect.apply(ABORTED, suppliedSignal, []);
+      signal = Reflect.apply(ANY_SIGNAL, SIGNAL, [[suppliedSignal]]) as AbortSignal;
+      Reflect.apply(ABORTED, signal, []);
+    }
     if (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !CLOSED) return fail("fetch selection requires native stream readers");
     const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"] }[] = [];
     const seen = new Set<FetchStreamHandle>();
@@ -193,6 +235,7 @@ export function quorumFetchResponses(
   let waiting = members.length;
   const accepted: number[] = [];
   const cleanupErrors = new Map<number, Failure>();
+  let onAbort: (() => void) | undefined;
 
   function stop(outcome: Failure): void {
     if (finished) return;
@@ -220,6 +263,13 @@ export function quorumFetchResponses(
     })();
     return member.draining;
   }
+  if (signal) {
+    onAbort = () => stop(cancellation("fetch selection aborted by caller signal", true));
+    try {
+      Reflect.apply(ADD_LISTENER!, signal, ["abort", onAbort, { once: true }]);
+      if (Reflect.apply(ABORTED!, signal, [])) onAbort();
+    } catch { stop(internal("fetch selection signal observer failed")); }
+  }
   // Register completion observers before invoking caller methods.
   for (const member of members) {
     void member.closed.then((terminal) => {
@@ -228,6 +278,7 @@ export function quorumFetchResponses(
     });
   }
   for (let index = 0; index < members.length; index += 1) {
+    if (stopped) break;
     const member = members[index];
     const observe = (value: unknown) => {
       if (finished || stopped || chosen) return;
@@ -275,6 +326,10 @@ export function quorumFetchResponses(
     const failure = stopped?.outcome === "panicked" && cleanupFailure?.outcome !== "panicked" ? stopped
       : cleanupFailure ?? stopped;
     finished = true;
+    if (signal && onAbort) {
+      Reflect.apply(REMOVE_LISTENER!, signal, ["abort", onAbort]);
+      onAbort = undefined;
+    }
     for (const member of members) { try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ } }
     if (failure) resolveResult(failure);
     else if (!chosen) resolveResult(internal("fetch selection ended without quorum"));
@@ -285,10 +340,7 @@ export function quorumFetchResponses(
   })();
   return ok(Object.freeze({ result, cancel(reason = "fetch selection cancelled by caller") {
     if (typeof reason !== "string") return Promise.resolve(fail("fetch selection cancellation reason must be a string"));
-    if (!finished && !stopped) stop(Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
-      kind: "fetch_selection_cancel", phase: "completed", origin_region: "browser-fetch-selection",
-      origin_task: null, timestamp_nanos: 0, message: reason, truncated: false,
-    }) }));
+    if (!finished && !stopped) stop(cancellation(reason));
     return settlement;
   } }));
 }

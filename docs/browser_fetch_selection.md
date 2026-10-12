@@ -59,3 +59,34 @@ or full-package integration evidence. The runner prints the tested source hash.
 
 Targeted negative controls that omit the loser-drain barrier or fail to cancel a
 proposed winner are rejected by the corresponding slow-cleanup tests.
+
+## Cancelling a selection through an AbortSignal
+
+Both entry points accept an optional borrowed native signal:
+
+```ts
+const controller = new AbortController();
+const admitted = quorumFetchResponses(handles, 2, { signal: controller.signal });
+// Later, while headers or loser cleanup are pending:
+controller.abort();
+// When admitted.outcome === "ok", await admitted.value.result for the drain barrier.
+```
+
+A pre-aborted signal drains the acquired inputs without invoking their response
+methods or the acceptance predicate. Refused setup still leaves cleanup with the
+original caller. Aborting during loser cleanup retires the proposed winners too;
+neither result nor cancel reports completion before owned cleanup settles.
+
+A supplied signal must be an unmodified same-realm native AbortSignal, with native
+AbortSignal.any support. Subclasses, foreign-realm signals and overridden
+aborted/reason accessors are outside the supported boundary. A private dependent
+signal prevents a caller's earlier stopImmediatePropagation listener from hiding
+an abort. The adapter does not invoke an overridden addEventListener method or
+format an arbitrary abort reason; it reports a fixed typed cancellation message.
+
+The group never aborts the supplied signal. Its listener is detached at settlement,
+and aborts after successful transfer do not reclaim caller-owned winners. Null
+is equivalent to omission; hosts lacking AbortSignal.any can still use selection
+without a signal. Selection creates no timer: a deadline may be supplied explicitly
+by the caller through a timeout signal. A timeout requests cancellation but cannot
+force a nonsettling host to finish cleanup.
