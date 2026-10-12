@@ -626,8 +626,9 @@ impl Stream {
         if self.deferred_recv_bytes.is_some() {
             return None;
         }
-        // Use 25% threshold instead of 50% to be more conservative about flow control
-        let low_watermark = self.initial_recv_window / 4;
+        // Use 25% threshold instead of 50% to be more conservative about flow control.
+        // At least 1, so a window of 1-3 bytes is refilled once it is used up.
+        let low_watermark = (self.initial_recv_window / 4).max(1);
         if self.recv_window < low_watermark {
             let increment = i64::from(self.initial_recv_window) - i64::from(self.recv_window);
             u32::try_from(increment).ok().filter(|&inc| inc > 0)
@@ -2062,6 +2063,20 @@ mod tests {
 
         // After replenishing, should no longer need an update.
         assert!(stream.auto_window_update_increment().is_none());
+    }
+
+    /// Review r27-e8 (br-asupersync-grpc-client-server-audit-jq0c7j): a window
+    /// of 1-3 bytes had a low watermark of 0, so once used up it was never
+    /// refilled and the stream stalled.
+    #[test]
+    fn auto_window_update_refills_a_tiny_window_once_it_is_used_up() {
+        for initial in 1..=3_u32 {
+            let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
+            stream.send_headers(false).unwrap();
+            assert!(stream.auto_window_update_increment().is_none());
+            stream.recv_data(initial, false).unwrap();
+            assert_eq!(stream.auto_window_update_increment(), Some(initial));
+        }
     }
 
     // =========================================================================
