@@ -189,6 +189,15 @@ WORKER_FAULT_RE = re.compile(
 # A crate built from a local path ("Checking franken-kernel v0.1.0 (/…/franken_kernel)")
 # belongs to this repository; registry and git dependencies carry no absolute path.
 LOCAL_CRATE_RE = re.compile(r"^\s*(?:Compiling|Checking) (\S+) v\S+ \(/", re.MULTILINE)
+
+
+def is_worker_fault(clean: str) -> bool:
+    """A worker fault while only third-party crates failed: nothing of this repository ran."""
+    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
+    local_crates = set(LOCAL_CRATE_RE.findall(clean))
+    return bool(WORKER_FAULT_RE.search(clean)) and not any(
+        name.startswith("asupersync") or name in local_crates for name in failing_crates
+    )
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # The browser SDK's Node suites read the TypeScript sources through Node's own type
@@ -685,11 +694,7 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # dep-info fault can also stop cargo before any crate reports `could not compile`
     # (a syn build script on hz4, 2026-09-29, filed as false P0 bi2462.147.66): with no
     # failing crate at all, nothing of this repository ran either.
-    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
-    local_crates = set(LOCAL_CRATE_RE.findall(clean))
-    worker_fault = bool(WORKER_FAULT_RE.search(clean)) and not any(
-        name.startswith("asupersync") or name in local_crates for name in failing_crates
-    )
+    worker_fault = is_worker_fault(clean)
     fault_reason = (
         "the worker could not build a third-party dependency (missing registry files, "
         "an unexecutable rustc, a failed download, or a missing rustup target): "
@@ -1205,6 +1210,7 @@ def run_engine(
     now: str,
     target_exists: TargetExists | None = None,
     parallel: int = 1,
+    open_issues: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     commits = {c["sha"]: c for c in plan["commits"]}
     batch = [c["sha"] for c in plan["commits"]]
@@ -1251,6 +1257,21 @@ def run_engine(
                 receipt["still_red"] = {t: lane_known[t].get("bead") for t in still}
                 notes.append(f"{lane['id']}: still red: " + ", ".join(f"{t} (bead {lane_known[t].get('bead')})" for t in still))
             new_targets = failing - set(lane_known)
+            # A new red that an open bead already names is tracked there: attach it and
+            # skip the bisect. On 10-12 a run's serial bisects would have spent about 30 h
+            # re-deriving culprits that open beads already recorded.
+            tracked = {t: bead for t in sorted(new_targets) if (bead := existing_bead_for([t], open_issues or []))}
+            for target, bead in tracked.items():
+                lane_known[target] = {
+                    "culprit": None,
+                    "first_seen": now,
+                    "bead": bead,
+                    "signature": red_signature(lane["id"], {target}),
+                }
+            if tracked:
+                receipt["tracked_red"] = tracked
+                notes.append(f"{lane['id']}: tracked, not bisected: " + ", ".join(f"{t} (bead {b})" for t, b in tracked.items()))
+            new_targets -= set(tracked)
             if new_targets:
                 base = plan.get("since")
                 groups = attribute_new_reds(lane, batch, runner, new_targets, target_exists, base)
@@ -1837,16 +1858,21 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
             proc = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
             text, code = proc.stdout + proc.stderr, proc.returncode
             admission = code == 103 and not REMOTE_EXIT_RE.search(text) and not DEPENDENCY_PREFLIGHT_RE.search(text)
+            clean = ANSI_RE.sub("", text)
+            # A worker fault (only third-party crates failed, e.g. an unexecutable rustc
+            # on hz2, 2026-10-12) is no evidence either: another try may land elsewhere.
+            fault = code != 0 and is_worker_fault(clean)
             transport = (
                 not admission
                 and transport_retries < TRANSPORT_RETRIES
-                and rch_transport_retryable(ANSI_RE.sub("", text), code, time.monotonic() - started)
+                and (rch_transport_retryable(clean, code, time.monotonic() - started) or fault)
             )
             if not (admission or transport):
                 break
             if transport:
                 transport_retries += 1
-                retried.append(f"[main-watchdog] rch transport failure before any remote result (exit {code}); retried\n")
+                kind = "worker fault" if fault else "rch transport failure before any remote result"
+                retried.append(f"[main-watchdog] {kind} (exit {code}); retried\n")
             subprocess.run(["sleep", str(admission_sleep)], check=False)
         text = "".join(retried) + text
         return text, code
@@ -1898,6 +1924,26 @@ def existing_bead_for(new_targets: list[str], open_issues: list[dict[str, Any]])
         if all(re.search(rf"\b{re.escape(name)}\b", text) for name in names):
             return issue.get("id")
     return None
+
+
+def tracker_issues_with_origin() -> list[dict[str, Any]]:
+    """Open beads as origin/main records them, plus working-tree rows origin lacks.
+
+    A bead committed by plumbing reaches origin before any shared checkout pulls it, so
+    the working tree alone can miss the bead that already tracks a red. Origin's row
+    wins for each id, so a bead closed on origin no longer tracks anything.
+    """
+    rows: dict[str, dict[str, Any]] = {}
+    for line in git("show", "origin/main:.beads/issues.jsonl", check=False).splitlines():
+        try:
+            issue = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(issue, dict) and issue.get("id"):
+            rows[issue["id"]] = issue
+    for issue in open_tracker_issues():
+        rows.setdefault(issue.get("id"), issue)
+    return [issue for issue in rows.values() if issue.get("status") not in ("closed", "tombstone")]
 
 
 def open_tracker_issues(issues_path: Path = Path(".beads/issues.jsonl")) -> list[dict[str, Any]]:
@@ -3011,6 +3057,7 @@ def main(argv: list[str]) -> int:
             scenario.get("now", "2026-01-01T00:00:00+00:00"),
             None if scenario.get("disable_target_filter") else fake_target_exists,
             scenario.get("parallel", 1),
+            scenario.get("open_issues", []),
         )
         # As in run mode: drop healed queued filings, then report heals (the br
         # calls are recorded, not executed).
@@ -3041,6 +3088,7 @@ def main(argv: list[str]) -> int:
                 rch_transport_retryable(case["text"], case["code"], case["elapsed"])
                 for case in probes.get("rch_transport_retryable", [])
             ],
+            "is_worker_fault": [is_worker_fault(text) for text in probes.get("is_worker_fault", [])],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
@@ -3108,7 +3156,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps({"schema": SCHEMA_VERSION, "status": "no new commits", "since": plan["since"], "receipt_escalations": escalations}))
         return 0
     runner = rch_runner(str(args.state_dir / "target"), args.admission_attempts, args.admission_sleep, args.state_dir / "logs")
-    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel)
+    result = run_engine(plan, runner, state, now.isoformat(), git_target_exists, args.parallel, tracker_issues_with_origin())
     forget_healed_pending(state, result["bead_heals"])
     if args.file_beads:
         file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)

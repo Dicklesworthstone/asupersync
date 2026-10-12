@@ -878,6 +878,28 @@ fn a_quick_rch_transport_failure_is_retried_and_nothing_else_is() {
     );
 }
 
+/// A worker fault where only third-party crates failed is retried like a transport
+/// failure (rch_run); on 10-12 hz2 could not execute rustc for any dependency. A fault
+/// beside a failing crate of this repository is a real red and is not retried.
+#[test]
+fn a_worker_fault_is_recognised_only_when_no_crate_of_this_repository_failed() {
+    let no_rustc = "error: could not compile `tinystr` (lib)\n\nCaused by:\n  could not execute process `rustc --crate-name tinystr --edition=2021 /data/tmp/rch-cargo-cache-hz2/registry/src/x/tinystr-0.8.4/src/lib.rs` (never executed)\n\nCaused by:\n  No such file or directory (os error 2)\n  Remote command finished: exit=101 in 60000ms\n";
+    let ours = format!(
+        "   Compiling asupersync v0.6.0 (/data/tmp/rch/asupersync/x)\n{no_rustc}error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib)\n"
+    );
+    let user = "   Compiling asupersync v0.6.0 (/data/tmp/rch/asupersync/x)\nerror[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib)\n  Remote command finished: exit=101 in 60000ms\n";
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"is_worker_fault": [no_rustc, ours, user]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["is_worker_fault"],
+        json!([true, false, false]),
+        "{probed:#}"
+    );
+}
+
 /// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
 /// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
 /// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's
@@ -1561,6 +1583,61 @@ fn reds_in_one_lane_from_different_commits_are_each_blamed_on_their_own_commit()
             .iter()
             .any(|p| p["command"] == "cargo test --test gamma_native"),
         "{probes:#?}"
+    );
+}
+
+/// A new red that an open bead already names is attached to that bead without a
+/// bisect; only the untracked red is bisected. On 10-12 a run's serial bisects would
+/// have spent about 30 h re-deriving culprits that open beads already recorded.
+#[test]
+fn a_new_red_an_open_bead_already_names_is_attached_to_it_without_a_bisect() {
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native", "--test", "gamma_native"],
+        "expected_targets": ["alpha_native", "gamma_native"],
+    });
+    let mut logs = serde_json::Map::new();
+    for n in 1..=8u8 {
+        logs.insert(sha(n), json!({"log": alpha_gamma_log(n >= 3, n >= 6)}));
+    }
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=8u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-tests[default]": logs},
+        "open_issues": [{
+            "id": "asupersync-tracked", "status": "open",
+            "title": "alpha_native flake", "description": "alpha_case fails under load",
+        }],
+    }));
+
+    let lane = receipt(&result, "targeted-tests[default]");
+    assert_eq!(
+        lane["tracked_red"],
+        json!({"alpha_native::alpha_case": "asupersync-tracked"}),
+        "{result:#}"
+    );
+    let known = &result["state"]["known_reds"]["targeted-tests[default]"];
+    assert_eq!(
+        known["alpha_native::alpha_case"]["bead"],
+        "asupersync-tracked"
+    );
+    assert!(known["alpha_native::alpha_case"]["culprit"].is_null());
+    assert_eq!(known["gamma_native::gamma_case"]["culprit"], sha(6));
+    let payloads = result["bead_payloads"].as_array().expect("payloads");
+    assert_eq!(payloads.len(), 1, "{result:#}");
+    assert_eq!(
+        payloads[0]["new_targets"],
+        json!(["gamma_native::gamma_case"])
+    );
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    assert!(
+        probes
+            .iter()
+            .all(|p| p["command"] == "cargo test --test gamma_native"),
+        "only the untracked red is bisected: {probes:#?}"
     );
 }
 
