@@ -287,6 +287,10 @@ pub use router::{
 };
 pub use sse::Http1SseResponse;
 
+#[cfg(all(test, feature = "http3", feature = "tls", not(target_arch = "wasm32")))]
+#[path = "router/h3_listener/response_isolation_tests.rs"]
+mod response_isolation_tests;
+
 #[cfg(test)]
 mod body_diagnostic_tests {
     use super::WebBodyDiagnostic;
