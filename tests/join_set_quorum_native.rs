@@ -262,6 +262,7 @@ fn cancellation_during_slow_drain_keeps_selected_value_until_cleanup() {
                 let (parked_send, mut parked_receive) = oneshot::channel();
                 let (draining_send, mut draining_receive) = oneshot::channel();
                 let (release, mut wait_release) = oneshot::channel();
+                let (release_winner, mut wait_winner) = oneshot::channel();
                 let count = Arc::clone(&cleaned);
                 let winning = DropAfterCleanup {
                     cleaned: Arc::clone(&cleaned), dropped: Arc::clone(&dropped),
@@ -276,10 +277,16 @@ fn cancellation_during_slow_drain_keeps_selected_value_until_cleanup() {
                         count.fetch_add(1, Ordering::SeqCst);
                         Err("cleanup finished")
                     }).unwrap();
-                    set.spawn(&owner, move |_| async move { Ok(winning) }).unwrap();
+                    set.spawn(&owner, move |child| async move {
+                        wait_winner.recv(&child).await.unwrap();
+                        Ok(winning)
+                    }).unwrap();
                     set.join_first_ok(&owner).await
                 }).unwrap();
                 parked_receive.recv(&cx).await.unwrap();
+                // The winner cannot trigger loser cancellation until the
+                // parent has observed the loser's real parked-state witness.
+                release_winner.send_blocking(()).unwrap();
                 draining_receive.recv(&cx).await.unwrap();
                 assert_eq!(cleaned.load(Ordering::SeqCst), 0);
                 assert_eq!(dropped.load(Ordering::SeqCst), 0);
@@ -291,6 +298,102 @@ fn cancellation_during_slow_drain_keeps_selected_value_until_cleanup() {
                     Err(QuorumError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
                 assert_eq!(cleaned.load(Ordering::SeqCst), 1);
                 assert_eq!(dropped.load(Ordering::SeqCst), 1);
+            });
+        }
+    });
+}
+
+#[test]
+fn dropping_an_unpolled_quorum_requests_cancellation_and_region_drains() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let (ready, mut witness) = oneshot::channel();
+                let (cleaned, mut cleanup) = oneshot::channel();
+                let mut set = JoinSet::<u8, (), _>::in_cx(&cx);
+                set.spawn(&cx, move |child| async move {
+                    parked(&child, ready).await;
+                    cleaned.send_blocking(()).unwrap();
+                    Ok(1)
+                }).unwrap();
+                witness.recv(&cx).await.unwrap();
+                // Do not poll the consuming future at all: its captured set
+                // must already own the abort-on-drop obligation.
+                drop(set.join_quorum(&cx, 1));
+                cleanup.recv(&cx).await.unwrap();
+            });
+        }
+    });
+}
+
+#[test]
+fn dropping_a_pending_quorum_does_not_abandon_its_parked_members() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let mut set = JoinSet::<u8, (), _>::in_cx(&cx);
+                let mut cleanups = Vec::new();
+                for _ in 0..3 {
+                    let (ready, mut witness) = oneshot::channel();
+                    let (cleaned, cleanup) = oneshot::channel();
+                    set.spawn(&cx, move |child| async move {
+                        parked(&child, ready).await;
+                        cleaned.send_blocking(()).unwrap();
+                        Ok(1)
+                    }).unwrap();
+                    witness.recv(&cx).await.unwrap();
+                    cleanups.push(cleanup);
+                }
+                let mut selection = Box::pin(set.join_quorum(&cx, 2));
+                poll_fn(|task| {
+                    assert!(selection.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                }).await;
+                drop(selection);
+                for cleanup in &mut cleanups {
+                    cleanup.recv(&cx).await.unwrap();
+                }
+            });
+        }
+    });
+}
+
+#[test]
+fn a_large_quorum_crosses_collection_quanta_without_cloning_results() {
+    #[derive(Debug)]
+    struct Value(usize);
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let mut set = JoinSet::<Value, (), _>::in_cx(&cx);
+                for index in 0..193 {
+                    set.spawn(&cx, move |_| async move { Ok(Value(index)) }).unwrap();
+                }
+                let values = set.join_quorum(&cx, 193).await.unwrap();
+                let mut indices: Vec<_> = values.into_iter().map(|value| value.0).collect();
+                indices.sort_unstable();
+                assert_eq!(indices, (0..193).collect::<Vec<_>>());
+            });
+        }
+    });
+}
+
+#[test]
+fn worker_pinned_non_send_futures_participate_in_a_success_quorum() {
+    bounded(|| {
+        for workers in [1, 2] {
+            run(workers, |cx| async move {
+                let mut set = JoinSet::<usize, (), _>::in_cx(&cx);
+                for index in 0..3 {
+                    set.spawn_local(&cx, move |_| async move {
+                        let local = std::rc::Rc::new(index);
+                        asupersync::runtime::yield_now().await;
+                        Ok(*local)
+                    }).unwrap();
+                }
+                let mut values = set.join_quorum(&cx, 3).await.unwrap();
+                values.sort_unstable();
+                assert_eq!(values, [0, 1, 2]);
             });
         }
     });
