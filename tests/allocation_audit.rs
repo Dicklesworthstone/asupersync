@@ -192,8 +192,10 @@ fn mutex_and_rwlock_uncontended_paths_zero_alloc() {
     );
 }
 
-/// The first queued waiter pays for the lazy slab and stable-id index. Removing
-/// that waiter retains both capacities, so the next contention reuses them.
+/// The first queued waiter pays for the lazy slab and stable-id index, and its
+/// cancellation subscription for the context's wake registry and one wake
+/// target. Removing that waiter retains every capacity and returns the target
+/// to the context's pool, so the next contention reuses them all.
 #[test]
 fn mutex_waiter_storage_allocates_once_then_reuses_capacity() {
     let _guard = ALLOC_TEST_GUARD.lock();
@@ -228,8 +230,9 @@ fn mutex_waiter_storage_allocates_once_then_reuses_capacity() {
     drop(held);
 
     assert_eq!(
-        first_allocs, 2,
-        "first contention allocates the slab and stable-id index"
+        first_allocs, 4,
+        "first contention allocates the slab, the stable-id index, the context's \
+         cancellation registry and one wake target"
     );
     assert!(first_bytes > 0, "first contention must allocate storage");
     assert_eq!(reuse_allocs, 0, "retained waiter capacity must be reused");

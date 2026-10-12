@@ -57,7 +57,18 @@ impl CancelWaker {
     pub fn wake_by_ref(&self) {
         self.waker.wake_by_ref();
     }
+
+    /// Swap the target of an exclusively owned (recycled) instance. The
+    /// returned Waker must be dropped without a `CxInner` guard.
+    #[inline]
+    pub(crate) fn replace_waker(&mut self, waker: Waker) -> Waker {
+        std::mem::replace(&mut self.waker, waker)
+    }
 }
+
+/// Retired cancellation wake targets a context keeps for reuse, so repeated
+/// cancel-aware waits stop allocating once a few targets exist.
+pub(crate) const CANCEL_WAKER_POOL_CAP: usize = 4;
 
 /// A detached cancellation wake target whose retirement delivers its wake.
 ///
@@ -998,6 +1009,9 @@ pub struct CxInner {
     pub(crate) untracked_cancel_waker: Option<Arc<CancelWaker>>,
     /// Exactly-owned wake registrations for cancel-aware child futures.
     pub(crate) cancel_waker_registrations: Vec<CancelWakerRegistration>,
+    /// Retired, exclusively owned wake targets (holding a no-op Waker) for the
+    /// next registration; at most [`CANCEL_WAKER_POOL_CAP`].
+    pub(crate) cancel_waker_pool: Vec<Arc<CancelWaker>>,
     /// Monotonic source for live registration tokens. Zero is reserved for the
     /// closed-registry sentinel and is never stored in the registration table.
     pub(crate) next_cancel_waker_token: u64,
@@ -1071,6 +1085,7 @@ impl CxInner {
             cancel_waker: None,
             untracked_cancel_waker: None,
             cancel_waker_registrations: Vec::new(),
+            cancel_waker_pool: Vec::new(),
             next_cancel_waker_token: 0,
             cancel_waker_registry_closed: false,
             budget_deadline_timer: None,
@@ -1154,6 +1169,9 @@ impl CxInner {
         let deliver_owed_wakes = self.cancel_requested && self.cancel_wakers_pending;
         self.cancel_waker_registry_closed = true;
         self.cancel_wakers_pending = false;
+        // Pooled targets hold no-op Wakers, so dropping them here runs no user
+        // code; a closed registry takes no new registrations to reuse them.
+        self.cancel_waker_pool.clear();
         // A finished task's deadline cancels nothing: take its timer out of the
         // wheel now, not when the context drops (br-asupersync-pev2xi).
         drop(self.budget_deadline_timer.take());
