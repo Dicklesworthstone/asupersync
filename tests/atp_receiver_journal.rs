@@ -494,6 +494,19 @@ impl Drop for Process {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
+        // A failing test's worker log stays on the (remote) test machine; put
+        // its tail in the test output so the receiver-side error is visible.
+        if thread::panicking() {
+            let log =
+                std::fs::read(self.root.join(format!("{}.log", self.mode))).unwrap_or_default();
+            let tail = &log[log.len().saturating_sub(16 * 1024)..];
+            eprintln!(
+                "---- worker {} log (last {} bytes) ----\n{}",
+                self.mode,
+                tail.len(),
+                String::from_utf8_lossy(tail)
+            );
+        }
     }
 }
 
