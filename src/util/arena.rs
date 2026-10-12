@@ -1026,8 +1026,14 @@ mod tests {
 
     /// br-asupersync-01oghn L2: removing a slot whose generation reaches
     /// `ARENA_MAX_GENERATION` (2^31 - 1) retires the slot permanently so that
-    /// no future arena index is minted with bit 31 set.
+    /// no future arena index is minted with bit 31 set. Debug builds flag the
+    /// retirement with a panic; release builds keep the value and never reuse
+    /// the slot.
     #[test]
+    #[cfg_attr(
+        debug_assertions,
+        should_panic(expected = "ArenaIndex generation wrap detected")
+    )]
     fn remove_at_generation_max_2_to_31_minus_1_retires_slot() {
         let mut arena: Arena<u32> = Arena::new();
         let idx = arena.insert(42);
@@ -1041,20 +1047,16 @@ mod tests {
         };
 
         let prev_free_head = arena.free_head;
-        let val = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.remove(recovered)));
-        match val {
-            Ok(Some(42)) => {
-                assert_eq!(
-                    arena.free_head, prev_free_head,
-                    "slot retired at ARENA_MAX_GENERATION must not be added to free list"
-                );
-            }
-            Ok(Some(v)) => panic!("expected 42, got {v}"),
-            Ok(None) => panic!("expected to remove the value"),
-            Err(_) => {
-                // Debug-style behavior: debug_assert fired.
-            }
-        }
+        assert_eq!(arena.remove(recovered), Some(42));
+        assert_eq!(
+            arena.free_head, prev_free_head,
+            "slot retired at ARENA_MAX_GENERATION must not be added to free list"
+        );
+        assert_ne!(
+            arena.insert(7).index(),
+            idx.index(),
+            "a retired slot is never reused"
+        );
     }
 
     /// br-asupersync-01oghn L2: verify that valid arena indices never collide
@@ -1066,9 +1068,22 @@ mod tests {
 
         let mut arena: Arena<u32> = Arena::new();
         let idx = arena.insert(100);
-        let task_id = TaskId::from_arena(idx);
-        assert!(!is_spawn_mailbox_id(task_id));
-        assert!(idx.generation() < ARENA_MAX_GENERATION);
+        assert!(!is_spawn_mailbox_id(TaskId::from_arena(idx)));
+
+        // The last generation a slot is ever issued with: removed one below
+        // the cap (not yet retired), the slot comes back at the cap itself.
+        if let Some(Slot::Occupied { generation, .. }) = arena.slots.get_mut(idx.index() as usize) {
+            *generation = ARENA_MAX_GENERATION - 1;
+        }
+        let below_cap = ArenaIndex {
+            index: idx.index(),
+            generation: ARENA_MAX_GENERATION - 1,
+        };
+        assert_eq!(arena.remove(below_cap), Some(100));
+        let last = arena.insert(101);
+        assert_eq!(last.index(), idx.index(), "the slot is reused once more");
+        assert_eq!(last.generation(), ARENA_MAX_GENERATION);
+        assert!(!is_spawn_mailbox_id(TaskId::from_arena(last)));
     }
 }
 
