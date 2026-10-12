@@ -5259,3 +5259,10 @@
 {"file":"src/fs/dir.rs","lines":0,"batch":"asupersync-pxg07b","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"M2: io-uring create_dir/remove_dir same fallback and off-worker execution (7ecd7a3ac)"}
 {"file":"src/http/h1/server.rs","lines":0,"batch":"asupersync-8udzw7","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"A-L1: trailing CRLF then EOF is a clean close in the streaming server, not a 400 counted as served (059849d47)"}
 {"file":"tests/quic_h3_listener_streaming.rs","lines":0,"batch":"asupersync-bi2462.147","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"feature clippy match_wildcard_for_single_variants at :534 since 7091e0415 (e22d652a3)"}
+{"file":"src/time/timeout_future.rs","lines":1162,"batch":"asupersync-pblpeg","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in 75bbc5e66"}
+{"file":"src/cx/tracked_registry.rs","lines":651,"batch":"asupersync-hqtdri","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in 903ee7b9c"}
+{"file":"src/server/connection.rs","lines":1962,"batch":"asupersync-kpsj1n","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in ed57d915d"}
+{"file":"src/util/entropy.rs","lines":1008,"batch":"asupersync-01oghn","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in a2bc83fb2"}
+{"file":"src/sync/pool.rs","lines":3192,"batch":"asupersync-myvrjv","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in c04c015ac"}
+{"file":"src/net/atp/transport_quic/mod.rs","lines":11586,"batch":"asupersync-nnm3gw","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in 030b41188"}
+{"file":"src/runtime/state.rs","lines":12882,"batch":"asupersync-909482","date":"2026-10-12","agent":"SapphireHill","verdict":"FIXED","bugs":1,"notes":"r28/r29-e8 review finding fixed in f9f551034"}
