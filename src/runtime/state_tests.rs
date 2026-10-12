@@ -8680,6 +8680,42 @@ fn region_closed_metric_fires_on_close() {
     crate::test_complete!("region_closed_metric_fires_on_close");
 }
 
+/// Review r29-e8 of 6d9daa46c (HIGH-1): the unwind completion that keeps its
+/// cancellation-Waker retirements (the three-lane unwind path) suppresses the
+/// completion observer too, and the region-close observation it carries is
+/// still delivered, as it was before observers were deferred past the unlock.
+#[test]
+#[allow(clippy::significant_drop_tightening)]
+fn region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements() {
+    init_test("region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements");
+    let metrics = Arc::new(RegionCloseMetrics::default());
+    let mut state = RuntimeState::new_with_metrics(metrics.clone());
+    let root = state.create_root_region(Budget::INFINITE);
+    let task = insert_task(&mut state, root);
+    {
+        let region = state.regions.get(root.arena_index()).expect("root");
+        region.begin_close(None);
+    }
+    state
+        .task_mut(task)
+        .expect("task")
+        .complete(Outcome::Ok(()));
+    let (_waiters, retirements) = state
+        .task_completed(task)
+        .into_waiters_and_retirements_without_observers();
+    retirements.retire();
+    let closed = metrics.closed.lock().len();
+    crate::assert_with_log!(
+        closed == 1,
+        "region_closed metric fired exactly once",
+        1usize,
+        closed
+    );
+    crate::test_complete!(
+        "region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements"
+    );
+}
+
 #[test]
 #[allow(clippy::significant_drop_tightening)]
 fn region_close_clears_resource_monitor_priority() {

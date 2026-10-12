@@ -748,29 +748,29 @@ impl TaskCompletionEffects {
     pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
         let Self {
             waiters,
-            observer: _,
+            observer,
             retired_cancel_wakers,
         } = self;
-        // This suppression path may still be running beneath a caller-owned
-        // runtime-state lock. Abandoning the token intentionally leaks its
-        // opaque observer payload, while dropping the retirement token leaks
-        // detached wake targets rather than invoking RawWaker destructors.
+        // Suppression may still run beneath a caller-owned runtime-state lock:
+        // lifecycle observations are delivered inline, panic-contained, as before
+        // deferral; the rest of the payload and the detached wake targets leak.
+        deliver_suppressed_lifecycle(observer);
         drop(retired_cancel_wakers);
         waiters
     }
 
-    /// Splits callback-free waiters from cancellation-Waker retirement for a
-    /// panic/unwind path that still owns an outer runtime-state lock. The
-    /// undispatched observer payload is leaked; the caller must retire the
-    /// returned cancellation Wakers only after releasing that lock.
+    /// Splits callback-free waiters from cancellation-Waker retirement for an
+    /// unwind path that still owns an outer runtime-state lock: lifecycle
+    /// observations are delivered inline, the rest of the payload leaks.
     pub(crate) fn into_waiters_and_retirements_without_observers(
         self,
     ) -> (SmallVec<[TaskId; 4]>, TaskCompletionRetirements) {
         let Self {
             waiters,
-            observer: _,
+            observer,
             retired_cancel_wakers,
         } = self;
+        deliver_suppressed_lifecycle(observer);
         (waiters, retired_cancel_wakers)
     }
 }
@@ -5999,6 +5999,10 @@ impl RuntimeState {
                     "obligation leaks detected (fail-fast)"
                 );
                 self.finish_obligation_leak_batch(regions, tasks, obligations, effects, &leak_ids);
+                // This panic unwinds through the completion walk, which drops
+                // what it buffered for post-unlock dispatch: deliver it inline
+                // first, as before deferral (r29-e8 review of 6d9daa46c).
+                self.flush_completion_observations_inline(effects);
                 std::panic::panic_any(msg);
             }
             ObligationLeakResponse::Log => {
@@ -6754,6 +6758,16 @@ impl RuntimeState {
             observers.push(effect);
         } else {
             contain_metrics_hook(|| effect.dispatch(&*self.metrics));
+        }
+    }
+
+    /// Delivers the observations a completion walk has buffered so far, inline
+    /// and each panic-contained, for a walk about to unwind.
+    fn flush_completion_observations_inline(&self, sink: &mut LifecycleEffectsSink<'_>) {
+        if let LifecycleEffectsSink::Completion(buffer) = sink {
+            for effect in buffer.drain(..) {
+                contain_metrics_hook(|| effect.dispatch(&*self.metrics));
+            }
         }
     }
 
@@ -12577,6 +12591,22 @@ pub(crate) mod spawn_observer_test_support {
 /// Runs a metrics hook that the runtime calls under its own lock, so a
 /// panicking provider cannot unwind through runtime bookkeeping. The payload
 /// is user data whose drop could panic again; it is leaked, as elsewhere here.
+/// Delivers the lifecycle observations (region close and drain, obligation
+/// metrics, leak and protocol logs, debt work) that a completion with suppressed
+/// observers carries, inline and each panic-contained, as they were delivered
+/// before they were deferred past the unlock (r29-e8 review of 6d9daa46c). The
+/// rest of the token then drops, leaking its payload as its `Drop` documents.
+fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
+    if let Some(TaskCompletionObserverPayload::Completed { metrics, .. }) =
+        observer.payload.as_ref()
+    {
+        for effect in observer.lifecycle.drain(..) {
+            contain_metrics_hook(|| effect.dispatch(&**metrics));
+        }
+    }
+    drop(observer);
+}
+
 fn contain_metrics_hook(hook: impl FnOnce()) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
         std::mem::forget(payload);
