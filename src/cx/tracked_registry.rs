@@ -376,8 +376,13 @@ impl TrackedNameLease {
     /// and `whereis` / `whereis_cx` will subsequently return the new task ID.
     ///
     /// If the transfer fails, the lease remains owned by the original task context.
+    /// A destination in the root region is refused with
+    /// [`TrackedNameError::UnscopedRegion`], as acquisition refuses it.
     pub fn try_transfer(&mut self, destination: &Cx) -> Result<(), TrackedNameError> {
         self.registry.check_runtime(destination)?;
+        if destination.region_id().as_u64() == 0 {
+            return Err(TrackedNameError::UnscopedRegion);
+        }
         let Some(token) = self.obligation.take() else {
             return Err(TrackedNameError::Cancelled);
         };

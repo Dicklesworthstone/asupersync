@@ -329,3 +329,48 @@ fn lease_transfer_rebinds_name_to_child_task_without_leak_or_settlement_rejectio
     // Child completes and verifies all invariants and stats
     finish(lab, &child_cx, child_handle, 1);
 }
+
+/// Review r28-e8 of dfba198ce (C3-M1): a lease cannot be moved into the root
+/// region, which every acquisition path refuses (`UnscopedRegion`). It used to
+/// transfer, leaving a name and its obligation held by an unscoped task
+/// (`block_on`, `RuntimeHandle::spawn`). The refusal leaves the lease where it
+/// was.
+#[test]
+fn lease_transfer_to_a_root_region_task_is_refused_and_keeps_the_lease() {
+    crate::test_utils::init_test_logging();
+    let mut lab = LabRuntime::new(LabConfig::new(0x100_1ea5f).max_steps(512));
+    let root = lab.state.create_root_region(Budget::INFINITE);
+    assert_eq!(root.as_u64(), 0, "the root region is the sentinel");
+    let region = lab
+        .state
+        .create_child_region(root, Budget::INFINITE)
+        .unwrap();
+    let (task, handle) = lab
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .unwrap();
+    let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
+    let (root_task, mut root_handle) = lab
+        .state
+        .create_task(root, Budget::INFINITE, async {})
+        .unwrap();
+    let root_cx = lab.state.task(root_task).unwrap().cx.clone().unwrap();
+
+    let names = TrackedNameRegistry::new();
+    let mut lease = names.register(&cx, "service").unwrap();
+    let refused = lease.try_transfer(&root_cx);
+    assert!(
+        matches!(refused, Err(TrackedNameError::UnscopedRegion)),
+        "{refused:?}"
+    );
+    assert_eq!(lease.holder(), cx.task_id());
+    assert_eq!(lease.region(), cx.region_id());
+    assert_eq!(names.whereis("service"), Some(cx.task_id()));
+    lease.release().unwrap();
+
+    flush(&mut lab);
+    lab.scheduler.lock().schedule(root_task, 0);
+    let _steps = lab.run_until_idle();
+    assert!(root_handle.try_join().unwrap().is_some());
+    finish(lab, &cx, handle, 1);
+}
