@@ -260,7 +260,7 @@ impl IoTape {
                     out.0.push(if slices.is_some() { 2 } else { 1 });
                     put(&mut out.0, *length)?;
                     put(&mut out.0, *accepted)?;
-                    out.0.extend_from_slice(digest);
+                    out.0.extend_from_slice(&digest[..]);
                     if let Some(slices) = slices {
                         put(&mut out.0, slices.len())?;
                         for length in slices {
@@ -393,10 +393,11 @@ impl IoTape {
                     if accepted > length || length > write_bytes - seen_write {
                         return Err(IoTapeError::Invalid("write count"));
                     }
-                    let digest = input
+                    let raw_digest: [u8; 32] = input
                         .take(32)?
                         .try_into()
                         .map_err(|_| IoTapeError::Truncated)?;
+                    let digest = zeroize::Zeroizing::new(raw_digest);
                     let slices = if tag == 2 {
                         let count = input.size()?;
                         if count > limits.capture.max_vectored_slices {
@@ -532,7 +533,7 @@ mod tests {
                 Event::Write {
                     length: 3,
                     slices: Some(vec![1, 0, 2]),
-                    digest: [42; 32],
+                    digest: zeroize::Zeroizing::new([42; 32]),
                     accepted: 2,
                     error: None,
                 },

@@ -467,21 +467,23 @@ impl AsyncRead for WasmReadableStreamSource {
                 self.pending_read = None;
 
                 let done = Reflect::get(&result, &JsValue::from_str("done"))
-                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.done"))?
-                    .as_bool()
-                    .unwrap_or(false);
+                    .map_err(|err| js_host_io_error(&err, "ReadableStream read result.done"))?.as_bool().unwrap_or(false);
                 if done {
                     self.done = true;
                     return Poll::Ready(Ok(()));
                 }
-
                 let value = Reflect::get(&result, &JsValue::from_str("value"))
                     .map_err(|err| js_host_io_error(&err, "ReadableStream read result.value"))?;
                 if value.is_null() || value.is_undefined() {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
                 }
-
+                if !value.is_instance_of::<Uint8Array>() && !value.is_instance_of::<ArrayBuffer>() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "ReadableStream chunk must be Uint8Array or ArrayBuffer",
+                    )));
+                }
                 self.staged = Uint8Array::new(&value).to_vec();
                 self.staged_offset = 0;
                 if self.staged.is_empty() {
@@ -534,9 +536,7 @@ impl WasmWritableStreamSink {
     /// Construct from a browser `WritableStream`.
     pub fn new(stream: &WritableStream) -> Result<Self, BrowserStreamError> {
         let writer = stream.get_writer().map_err(|err| {
-            BrowserStreamError::HostError(
-                js_host_io_error(&err, "WritableStream.getWriter").to_string(),
-            )
+            BrowserStreamError::HostError(js_host_io_error(&err, "WritableStream.getWriter").to_string())
         })?;
         Ok(Self {
             writer,
@@ -636,7 +636,7 @@ impl AsyncWrite for WasmWritableStreamSink {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.closed {
+        if self.closed || self.pending_close.is_some() {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "browser writable stream is closed",

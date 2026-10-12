@@ -30,7 +30,7 @@ use std::fmt;
 use std::io::{self, IoSlice};
 use std::pin::Pin;
 use std::task::{Context, Poll, Waker, ready};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Logical bounds for one capture. Allocator and inner-stream memory are separate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +130,7 @@ enum Event {
     Write {
         length: usize,
         slices: Option<Vec<usize>>,
-        digest: [u8; 32],
+        digest: Zeroizing<[u8; 32]>,
         accepted: usize,
         error: Option<IoFailure>,
     },
@@ -244,15 +244,11 @@ impl<T: AsyncWrite> RecordingIo<T> {
     #[must_use]
     pub fn new(inner: T, limits: IoCaptureLimits) -> Self {
         let vectored = inner.is_write_vectored();
-        let mut events = Vec::new();
-        if limits.max_operations > 0 {
-            let _ = events.try_reserve_exact(limits.max_operations);
-        }
         Self {
             inner,
             limits,
             tape: IoTape {
-                events,
+                events: Vec::new(),
                 read_bytes: 0,
                 write_bytes: 0,
                 vectored,
@@ -305,14 +301,24 @@ impl<T> RecordingIo<T> {
             Some(IoCaptureError::Limit("write bytes"))
         } else if slices > self.limits.max_vectored_slices {
             Some(IoCaptureError::Limit("vectored slices"))
-        } else if self.tape.events.try_reserve(1).is_err() {
-            Some(IoCaptureError::Allocation)
         } else {
             None
         };
         if let Some(error) = error {
             self.fail(error);
             return false;
+        }
+        if self.tape.events.len() == self.tape.events.capacity() {
+            let extra = (self.limits.max_operations - self.tape.events.len())
+                .min(self.tape.events.len().max(8));
+            let mut grown = Vec::new();
+            if grown.try_reserve_exact(self.tape.events.len() + extra).is_err() {
+                self.fail(IoCaptureError::Allocation);
+                return false;
+            }
+            grown.append(&mut self.tape.events);
+            self.tape.events.spare_capacity_mut().zeroize();
+            self.tape.events = grown;
         }
         self.tape.read_bytes += read;
         self.tape.write_bytes += write;
@@ -387,7 +393,7 @@ impl WriteInput<'_, '_> {
         }
     }
 
-    fn digest(self) -> [u8; 32] {
+    fn digest(self) -> Zeroizing<[u8; 32]> {
         let mut hash = Sha256::new();
         hash.update(b"asupersync.io-write.v1");
         match self {
@@ -398,7 +404,7 @@ impl WriteInput<'_, '_> {
                 }
             }
         }
-        hash.finalize().into()
+        Zeroizing::new(hash.finalize().into())
     }
 
     fn matches_slices(self, recorded: Option<&Vec<usize>>) -> bool {
@@ -678,7 +684,7 @@ impl ReplayIo {
         };
         if input.length() != Some(*length)
             || !input.matches_slices(slices.as_ref())
-            || input.digest() != *digest
+            || input.digest().as_ref() != digest.as_ref()
         {
             return Poll::Ready(Err(self.refuse(operation, IoReplayMismatch::Request)));
         }
@@ -1092,6 +1098,21 @@ mod tests {
             capture.into_parts().1,
             Err(IoCaptureError::InterruptedPoll)
         ));
+    }
+
+    #[test]
+    fn replay_write_events_box_and_zeroize_digest() {
+        let input = WriteInput::Scalar(b"confidential data payload");
+        let digest = input.digest();
+        assert_ne!(&**digest, &[0u8; 32]);
+        let event = Event::Write {
+            length: 25,
+            slices: None,
+            digest,
+            accepted: 25,
+            error: None,
+        };
+        drop(event);
     }
 }
 
