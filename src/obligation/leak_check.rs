@@ -544,6 +544,9 @@ pub struct LeakChecker {
     peak_outstanding_by_kind: BTreeMap<ObligationKind, usize>,
     /// Peak ambiguous outstanding obligations after kind-losing joins.
     peak_ambiguous_outstanding: usize,
+    /// May-hold variables that some joined path had already resolved: only
+    /// these make a later commit or abort a potential double resolve.
+    may_be_resolved: BTreeSet<ObligationVar>,
 }
 
 impl LeakChecker {
@@ -565,6 +568,7 @@ impl LeakChecker {
         self.peak_outstanding = 0;
         self.peak_outstanding_by_kind.clear();
         self.peak_ambiguous_outstanding = 0;
+        self.may_be_resolved.clear();
         self.record_budget_snapshot();
 
         self.check_instructions(&body.instructions, &[], &[]);
@@ -620,6 +624,7 @@ impl LeakChecker {
                     }
                 }
                 self.state.insert(*var, VarState::Held(*kind));
+                self.may_be_resolved.remove(var);
             }
 
             Instruction::Commit { var } | Instruction::Abort { var } => {
@@ -633,14 +638,23 @@ impl LeakChecker {
                         self.state.insert(*var, VarState::Resolved);
                     }
                     Some(VarState::MayHold(_) | VarState::MayHoldAmbiguous) => {
-                        self.push_diagnostic(
-                            DiagnosticCode::DoubleResolve,
-                            DiagnosticKind::DoubleResolve,
-                            *var,
-                            self.state.get(var).and_then(VarState::kind),
-                            location,
-                            format!("{var} may already be resolved, {action} is a potential double resolve"),
-                        );
+                        // Only a path that already resolved the variable makes
+                        // this a double resolve. Reservations of different kinds
+                        // on each path (MayHoldAmbiguous) or a reservation on
+                        // only some paths still leave exactly one live
+                        // obligation to settle.
+                        if self.may_be_resolved.remove(var) {
+                            self.push_diagnostic(
+                                DiagnosticCode::DoubleResolve,
+                                DiagnosticKind::DoubleResolve,
+                                *var,
+                                self.state.get(var).and_then(VarState::kind),
+                                location,
+                                format!(
+                                    "{var} may already be resolved, {action} is a potential double resolve"
+                                ),
+                            );
+                        }
                         self.state.insert(*var, VarState::Resolved);
                     }
                     Some(VarState::Resolved) => {
@@ -683,19 +697,41 @@ impl LeakChecker {
         }
 
         let entry_state = self.state.clone();
+        let entry_may_be_resolved = self.may_be_resolved.clone();
         let mut arm_states: Vec<BTreeMap<ObligationVar, VarState>> = Vec::new();
+        let mut arm_may_be_resolved: Vec<BTreeSet<ObligationVar>> = Vec::new();
 
         // Analyze each arm independently, starting from the entry state.
         for (arm_index, arm) in arms.iter().enumerate() {
             self.state.clone_from(&entry_state);
+            self.may_be_resolved.clone_from(&entry_may_be_resolved);
             let mut branch_path = parent_branch_arms.to_vec();
             branch_path.push(arm_index);
             self.check_instructions(arm, parent_instruction_path, &branch_path);
             arm_states.push(self.state.clone());
+            arm_may_be_resolved.push(self.may_be_resolved.clone());
         }
 
         // Join all arm exit states.
         self.state = Self::join_states(&arm_states);
+        // A joined may-hold variable may already be resolved if some arm
+        // resolved it, or carried that doubt from a nested join.
+        self.may_be_resolved = self
+            .state
+            .iter()
+            .filter(|(_, joined)| {
+                matches!(joined, VarState::MayHold(_) | VarState::MayHoldAmbiguous)
+            })
+            .filter(|&(var, _)| {
+                arm_states
+                    .iter()
+                    .zip(&arm_may_be_resolved)
+                    .any(|(arm, doubt)| {
+                        arm.get(var) == Some(&VarState::Resolved) || doubt.contains(var)
+                    })
+            })
+            .map(|(var, _)| *var)
+            .collect();
     }
 
     fn join_states(
@@ -1742,6 +1778,39 @@ mod tests {
     }
 
     // ---- Resolve unheld ----------------------------------------------------
+
+    /// Review r28-e8 of 20d6e522f (27bbrg C2-M1): a branch that reserves a
+    /// different kind on each path, then one commit, settles exactly one live
+    /// obligation; it is clean, as in v0.4.3, not a double resolve.
+    #[test]
+    fn branch_reserving_different_kinds_then_one_commit_is_clean() {
+        init_test("branch_reserving_different_kinds_then_one_commit_is_clean");
+        let body = Body::new(
+            "branch_kinds_then_commit",
+            vec![
+                Instruction::Branch {
+                    arms: vec![
+                        vec![Instruction::Reserve {
+                            var: v(0),
+                            kind: ObligationKind::SendPermit,
+                        }],
+                        vec![Instruction::Reserve {
+                            var: v(0),
+                            kind: ObligationKind::IoOp,
+                        }],
+                    ],
+                },
+                Instruction::Commit { var: v(0) },
+            ],
+        );
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let doubles = result.double_resolves().len();
+        crate::assert_with_log!(doubles == 0, "no double resolve", 0, doubles);
+        let is_clean = result.is_clean();
+        crate::assert_with_log!(is_clean, "clean", true, is_clean);
+        crate::test_complete!("branch_reserving_different_kinds_then_one_commit_is_clean");
+    }
 
     #[test]
     fn resolve_unheld_detected() {
