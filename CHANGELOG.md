@@ -227,6 +227,13 @@ return typed errors (`asupersync-bi2462.127`):
   a committed stream with zero bytes sent, a verdict that compared the
   object id's own hash with itself, and a `NoAvailablePaths` diagnosis that
   never probed a path.
+- `write_buffer`, `write_file`, `create_writer`, `create_sink`,
+  `resume_writer` and `create_stream_writer` return
+  `AtpError::Policy(PolicyError::FeatureDisabled)`. `AtpWriter::finalize`,
+  `AtpWriter::write_buffer`, `AtpWriter::write_file` and `AtpSink::close`
+  refuse the same way rather than fabricate a mock `TransferProof` with
+  unkeyed local signatures for a transfer that never moved bytes over network
+  transports (`asupersync-txa7vi`).
 - `cancel_transfer` on an id the session does not hold returns
   `ProtocolError::SessionStateMismatch`. Before, it returned `Ok(())`.
 

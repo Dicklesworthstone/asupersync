@@ -9,7 +9,7 @@ use crate::atp::object::{ContentId, ObjectId};
 use crate::atp::transfer::TransferId;
 use crate::cx::Cx;
 use crate::fs::File;
-use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, ProtocolError};
+use crate::net::atp::protocol::outcome::{AtpError, AtpOutcome, DiskError, PolicyError, ProtocolError};
 use crate::types::outcome::Outcome;
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -429,6 +429,11 @@ impl AtpWriter {
     }
 
     /// Finalize the transfer and get the proof bundle.
+    ///
+    /// The legacy writer has no network transport and transmits no bytes to
+    /// `remote_peer`. It refuses with `AtpError::Policy(PolicyError::FeatureDisabled)`
+    /// rather than fabricate a mock `TransferProof` for an unperformed transfer
+    /// (asupersync-txa7vi). Use `crate::net::atp::sdk`.
     pub async fn finalize(&mut self, cx: &Cx) -> AtpOutcome<TransferProof> {
         cx.trace("atp_writer_finalize");
 
@@ -463,24 +468,12 @@ impl AtpWriter {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
-        // Generate final proof
-        let proof = match self.generate_proof(cx).await {
-            Outcome::Ok(proof) => proof,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        };
+        self.state = WriterState::Error;
 
-        self.state = WriterState::Completed;
-
-        // Emit final progress
-        if self.config.enable_progress {
-            if let Some(callback) = &self.progress_callback {
-                callback(self.progress());
-            }
-        }
-
-        Outcome::ok(proof)
+        cx.trace(
+            "atp_writer_finalize has no network transport; refusing to fabricate TransferProof",
+        );
+        Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
     }
 
     /// Cancel the transfer and clean up resources.
@@ -686,6 +679,7 @@ impl AtpWriter {
         self.refresh_transfer_identity()
     }
 
+    #[allow(dead_code)]
     async fn generate_proof(&self, cx: &Cx) -> AtpOutcome<TransferProof> {
         cx.trace("atp_writer_generate_proof");
 
@@ -795,6 +789,7 @@ impl AtpWriter {
         hasher.finalize().into()
     }
 
+    #[allow(dead_code)]
     fn generate_proof_signatures(
         &self,
         transfer_id: TransferId,
@@ -877,6 +872,11 @@ impl AtpSink {
     }
 
     /// Close the sink and get the final proof.
+    ///
+    /// The legacy sink has no network transport and transmits no bytes to
+    /// `remote_peer`. It refuses with `AtpError::Policy(PolicyError::FeatureDisabled)`
+    /// rather than fabricate a mock `TransferProof` for an unperformed transfer
+    /// (asupersync-txa7vi). Use `crate::net::atp::sdk`.
     pub async fn close(mut self, cx: &Cx) -> AtpOutcome<TransferProof> {
         self.writer.finalize(cx).await
     }
@@ -1018,18 +1018,13 @@ mod tests {
         let progress = writer.progress();
         assert!(progress.bytes_written >= data.len() as u64);
 
-        // Finalize and get proof
-        let proof = writer.finalize(&cx).await.unwrap();
-        assert_eq!(writer.state(), WriterState::Completed);
-        assert_eq!(proof.total_bytes, data.len() as u64);
-        assert_eq!(proof.proof_mode, ProofMode::Full);
-        assert_ne!(proof.verified_hash, [0; 32]);
-        assert_ne!(proof.manifest_root, MerkleRoot::zero());
-        assert!(!proof.signatures.is_empty());
-        assert_ne!(
-            proof.transfer_id,
-            TransferId::derive([0; 32], remote_peer, [0; 32], [0; 32])
-        );
+        // Finalize refuses rather than fabricate a TransferProof (asupersync-txa7vi)
+        let result = writer.finalize(&cx).await;
+        assert!(matches!(
+            result,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        ));
+        assert_eq!(writer.state(), WriterState::Error);
     }
 
     #[test]
@@ -1039,7 +1034,11 @@ mod tests {
             let object_id = ObjectId::content(ContentId::new([1; 32]));
             let mut writer = AtpWriter::new(object_id, [2; 32], WriterConfig::default());
 
-            let proof = writer.write_buffer(&cx, b"final payload").await.unwrap();
+            let result = writer.write_buffer(&cx, b"final payload").await;
+            assert!(matches!(
+                result,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
             let completed_bytes = writer.bytes_written;
             let completed_chunks = writer.verified_chunks.len();
 
@@ -1049,11 +1048,10 @@ mod tests {
                 late_write,
                 Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
             ));
-            assert_eq!(writer.state(), WriterState::Completed);
+            assert_eq!(writer.state(), WriterState::Error);
             assert_eq!(writer.bytes_written, completed_bytes);
             assert_eq!(writer.verified_chunks.len(), completed_chunks);
             assert_eq!(writer.buffer, Vec::<u8>::new());
-            assert_eq!(proof.total_bytes, completed_bytes);
         });
     }
 
@@ -1064,24 +1062,26 @@ mod tests {
             let object_id = ObjectId::content(ContentId::new([1; 32]));
             let mut writer = AtpWriter::new(object_id, [2; 32], WriterConfig::default());
 
-            let proof = writer
+            let result = writer
                 .write_buffer(&cx, b"cannot resume this")
-                .await
-                .unwrap();
+                .await;
+            assert!(matches!(
+                result,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
             let cancellation = writer.cancel(&cx).await;
 
             assert!(matches!(
                 cancellation,
                 Outcome::Err(AtpError::Protocol(ProtocolError::SessionStateMismatch))
             ));
-            assert_eq!(writer.state(), WriterState::Completed);
-            assert_eq!(writer.bytes_written, proof.total_bytes);
+            assert_eq!(writer.state(), WriterState::Error);
             assert!(writer.resume_token.is_none());
         });
     }
 
     #[test]
-    fn test_writer_proof_is_bound_to_payload() {
+    fn test_writer_refuses_to_fabricate_proof() {
         futures_lite::future::block_on(async {
             let cx = Cx::for_testing();
             let remote_peer = [9; 32];
@@ -1097,16 +1097,17 @@ mod tests {
                 config,
             );
 
-            let proof_a = writer_a.write_buffer(&cx, b"payload-A").await.unwrap();
-            let proof_b = writer_b.write_buffer(&cx, b"payload-B").await.unwrap();
+            let result_a = writer_a.write_buffer(&cx, b"payload-A").await;
+            let result_b = writer_b.write_buffer(&cx, b"payload-B").await;
 
-            assert_ne!(proof_a.verified_hash, [0; 32]);
-            assert_ne!(proof_a.manifest_root, MerkleRoot::zero());
-            assert_ne!(proof_a.verified_hash, proof_b.verified_hash);
-            assert_ne!(proof_a.manifest_root, proof_b.manifest_root);
-            assert_ne!(proof_a.transfer_id, proof_b.transfer_id);
-            assert_eq!(proof_a.object_id.hash_bytes(), &proof_a.verified_hash);
-            assert_eq!(proof_b.object_id.hash_bytes(), &proof_b.verified_hash);
+            assert!(matches!(
+                result_a,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
+            assert!(matches!(
+                result_b,
+                Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+            ));
         });
     }
 
@@ -1127,10 +1128,14 @@ mod tests {
         config.backpressure_threshold = 8;
 
         let mut writer = AtpWriter::new(object_id, remote_peer, config);
-        let proof = writer.write_file(&cx, &path).await.unwrap();
+        let result = writer.write_file(&cx, &path).await;
+        assert!(matches!(
+            result,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        ));
 
-        assert_eq!(writer.state(), WriterState::Completed);
-        assert_eq!(proof.total_bytes, payload.len() as u64);
+        assert_eq!(writer.state(), WriterState::Error);
+        assert_eq!(writer.bytes_written, payload.len() as u64);
     }
 
     #[tokio::test]
@@ -1171,9 +1176,12 @@ mod tests {
         let progress = sink.progress();
         assert!(progress.bytes_written >= data.len() as u64);
 
-        // Close and get proof
-        let proof = sink.close(&cx).await.unwrap();
-        assert_eq!(proof.total_bytes, data.len() as u64);
+        // Close refuses to mint a TransferProof without transport
+        let result = sink.close(&cx).await;
+        assert!(matches!(
+            result,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        ));
     }
 
     #[tokio::test]
@@ -1192,9 +1200,14 @@ mod tests {
         // Resume with new writer
         let mut writer2 = AtpWriter::from_resume_token(resume_token, remote_peer, config).unwrap();
         writer2.write_all(&cx, b" Second part").await.unwrap();
-        let proof = writer2.finalize(&cx).await.unwrap();
+        let result = writer2.finalize(&cx).await;
+        assert!(matches!(
+            result,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        ));
 
-        assert!(proof.total_bytes >= 21); // "First part Second part"
+        assert_eq!(writer2.state(), WriterState::Error);
+        assert!(writer2.bytes_written >= 21); // "First part Second part"
     }
 
     #[tokio::test]
@@ -1214,7 +1227,11 @@ mod tests {
         // Writer should handle backpressure internally
         assert_ne!(writer.state(), WriterState::Error);
 
-        let proof = writer.finalize(&cx).await.unwrap();
-        assert_eq!(proof.total_bytes, large_data.len() as u64);
+        let result = writer.finalize(&cx).await;
+        assert!(matches!(
+            result,
+            Outcome::Err(AtpError::Policy(PolicyError::FeatureDisabled))
+        ));
+        assert_eq!(writer.bytes_written, large_data.len() as u64);
     }
 }
