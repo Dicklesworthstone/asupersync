@@ -4574,8 +4574,8 @@ mod tests {
         crate::assert_with_log!(
             matches!(result, Err(ProcessError::NotFound(_))),
             "not found error",
-            true,
-            result.is_err()
+            "Some(NotFound(..))",
+            result.as_ref().err()
         );
         crate::test_complete!("test_command_not_found");
     }
