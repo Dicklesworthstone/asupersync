@@ -3526,10 +3526,10 @@ impl<Caps> Cx<Caps> {
         self.handles.entropy.as_ref()
     }
 
-    /// Derives an entropy source for a child task, lazily forking to avoid running
-    /// user entropy fork callbacks under the runtime state lock.
+    /// Derives an entropy source for a child task: forked now, in spawn order, with
+    /// a panicking user fork contained and retried lazily (`fork_contained`).
     pub(crate) fn child_entropy(&self, task: TaskId) -> Arc<dyn EntropySource> {
-        Arc::new(DeferredFork::new(Arc::clone(&self.handles.entropy), task))
+        crate::util::entropy::fork_contained(&self.handles.entropy, task)
     }
 
     /// Returns a cloned entropy handle for capability-aware subsystems.

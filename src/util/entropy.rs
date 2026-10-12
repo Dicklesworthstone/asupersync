@@ -74,6 +74,19 @@ impl EntropySource for DeferredFork {
     }
 }
 
+/// Forks `parent` for `task` now, so a source whose children depend on fork
+/// order (`DetEntropy` counts forks) forks in spawn order, independent of the
+/// schedule. Callers hold runtime locks, so a user fork that panics is caught
+/// here and retried lazily on first use ([`DeferredFork`]), where the panic
+/// reaches the task instead of unwinding through the lock.
+pub(crate) fn fork_contained(
+    parent: &Arc<dyn EntropySource>,
+    task: TaskId,
+) -> Arc<dyn EntropySource> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parent.fork(task)))
+        .unwrap_or_else(|_| Arc::new(DeferredFork::new(Arc::clone(parent), task)))
+}
+
 /// OS-backed entropy source for production use.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct OsEntropy;

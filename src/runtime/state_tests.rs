@@ -11388,3 +11388,42 @@ fn a_spawn_from_a_closed_branch_regions_context_goes_to_its_unsealed_ancestor() 
         }
     }
 }
+
+/// Review r28-e8 of bb179eb0a (HIGH): a task's entropy does not depend on the
+/// order tasks first use it. `DetEntropy` counts forks, so deferring every fork
+/// to first use made the seed a task got follow the schedule, breaking lab
+/// replay across schedules. Two identical runs that use tasks A and B in
+/// opposite orders must give each task the same values.
+#[test]
+fn task_entropy_does_not_depend_on_first_use_order() {
+    init_test("task_entropy_does_not_depend_on_first_use_order");
+
+    fn run(b_first: bool) -> (u64, u64) {
+        let mut state = RuntimeState::new();
+        state.set_entropy_source(Arc::new(crate::util::DetEntropy::new(0x5eed)));
+        let region = state.create_root_region(Budget::INFINITE);
+        let system_cx = state.create_system_cx();
+        let (_, _, cx_a, _, _) = state
+            .create_task_infrastructure::<()>(&system_cx, region, Budget::new(), false)
+            .expect("task a");
+        let (_, _, cx_b, _, _) = state
+            .create_task_infrastructure::<()>(&system_cx, region, Budget::new(), false)
+            .expect("task b");
+        if b_first {
+            let b = cx_b.random_u64();
+            (cx_a.random_u64(), b)
+        } else {
+            let a = cx_a.random_u64();
+            (a, cx_b.random_u64())
+        }
+    }
+
+    let a_first = run(false);
+    let b_first = run(true);
+    crate::assert_with_log!(
+        a_first == b_first,
+        "per-task entropy is independent of first-use order",
+        a_first,
+        b_first
+    );
+}
