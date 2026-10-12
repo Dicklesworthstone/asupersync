@@ -40,6 +40,11 @@
       "types": "./dist/fetch-combinators.d.ts",
       "import": "./dist/fetch-combinators.js",
       "default": "./dist/fetch-combinators.js"
+    },
+    "./selection": {
+      "types": "./dist/fetch-selection.d.ts",
+      "import": "./dist/fetch-selection.js",
+      "default": "./dist/fetch-selection.js"
     }
   },
   "files": [
