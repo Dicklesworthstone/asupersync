@@ -10490,6 +10490,22 @@ fn run_native_completion_lifecycle_observers(
     if let Some(shards) = &shards {
         move_runtime_task_to_shard(&state, &shards.task_shard_handle(), task);
         move_runtime_task_to_shard(&state, &shards.task_shard_handle(), healthy);
+        // Moving a record out of the runtime table revokes its holder's
+        // obligation admission (TaskTable::remove). A task spawned straight into
+        // the shard keeps a live one, so re-arm it before the obligation below.
+        let admission = state
+            .lock()
+            .unwrap()
+            .region(child)
+            .expect("child region")
+            .obligation_admission_handle(task);
+        let task_table = shards.task_shard_handle();
+        let mut task_table = task_table
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = task_table.task_mut(task).expect("moved task record");
+        let cx = record.cx.take().expect("moved task cx");
+        record.cx = Some(cx.with_obligation_admission(Some(admission)));
     }
     {
         let mut state = state.lock().unwrap();
