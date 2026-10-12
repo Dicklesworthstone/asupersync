@@ -852,6 +852,32 @@ fn a_lib_filter_that_ran_no_test_is_reported_not_hidden() {
     assert_eq!(lib["unexercised_filters"], json!(["database::postgres"]));
 }
 
+/// A quick rch transport failure (RCH-E1xx, no remote result) is retried; on 10-12 a
+/// 20 s SSH timeout on hz4 left a run's check-features lane without evidence, which kept
+/// the whole batch uncovered. A long timeout, a remote result, an admission refusal (its
+/// own retry), a dependency preflight refusal or a success is not a transport retry.
+#[test]
+fn a_quick_rch_transport_failure_is_retried_and_nothing_else_is() {
+    let ssh = "  WARN rch::hook: Remote execution failed on hz4; refusing local fallback: SSH command timed out after 20s\n[RCH] remote hz4 failed [RCH-E104] SSH command timed out (no local fallback)\n";
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"rch_transport_retryable": [
+            {"text": ssh, "code": 1, "elapsed": 32.0},
+            {"text": "[RCH] remote vmi1153651 failed [RCH-E104] SSH command timed out after 10800s\n", "code": 1, "elapsed": 10_801.0},
+            {"text": format!("{ssh}  Remote command finished: exit=101 in 9000ms\n"), "code": 101, "elapsed": 40.0},
+            {"text": "[RCH] no admissible workers [RCH-I001]\n", "code": 103, "elapsed": 5.0},
+            {"text": "[RCH] dependency preflight refused [RCH-E413]\n", "code": 1, "elapsed": 3.0},
+            {"text": "  Remote command finished: exit=0 in 1000ms\n", "code": 0, "elapsed": 9.0},
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["rch_transport_retryable"],
+        json!([true, false, false, false, false, false]),
+        "{probed:#}"
+    );
+}
+
 /// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
 /// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
 /// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's

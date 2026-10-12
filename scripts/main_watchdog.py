@@ -54,6 +54,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -123,6 +124,24 @@ REMOTE_EXIT_RE = re.compile(r"Remote command finished: exit=(\d+)")
 # refused again on every retry: nothing ran, and nothing will.
 DEPENDENCY_PREFLIGHT_RE = re.compile(r"\bRCH-E413\b")
 DEPENDENCY_PREFLIGHT_REASON = "rch dependency preflight refused this commit's tree (RCH-E413): nothing ran"
+# rch transport failures (RCH-E1xx: an SSH timeout or a refused connection) that end an
+# invocation before any remote result. On 2026-10-12 `SSH command timed out after 20s`
+# on hz4 (RCH-E104) left a run's check-features lane without evidence, and one such lane
+# keeps the whole batch uncovered, so a quick one is retried. A long one (a build that
+# used up its whole timeout, also RCH-E104) is not.
+RCH_TRANSPORT_RE = re.compile(r"\bRCH-E1\d\d\b")
+TRANSPORT_RETRIES = 2
+TRANSPORT_RETRY_MAX_SECONDS = 600
+
+
+def rch_transport_retryable(text: str, code: int, elapsed: float) -> bool:
+    """True when this rch invocation failed in transport, quickly, before any remote result."""
+    return (
+        code != 0
+        and elapsed < TRANSPORT_RETRY_MAX_SECONDS
+        and not REMOTE_EXIT_RE.search(text)
+        and bool(RCH_TRANSPORT_RE.search(text))
+    )
 WORKER_RE = re.compile(r"Selected worker: (\S+)")
 EXECUTED_TEST_RE = re.compile(r"^test (\S+) \.\.\. (?:ok|FAILED)$")
 TEST_RESULT_RE = re.compile(
@@ -1811,12 +1830,25 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
             env["RCH_WORKER"] = os.environ["WATCHDOG_CLIPPY_WORKERS"]
         argv = ["rch", "exec", "--base", sha, "--clean-overlay", "--no-overlay", "--", *lane["argv"]]
         text, code = "", 103
+        transport_retries = 0
+        retried: list[str] = []
         for _ in range(admission_attempts):
+            started = time.monotonic()
             proc = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
             text, code = proc.stdout + proc.stderr, proc.returncode
-            if not (code == 103 and not REMOTE_EXIT_RE.search(text)) or DEPENDENCY_PREFLIGHT_RE.search(text):
+            admission = code == 103 and not REMOTE_EXIT_RE.search(text) and not DEPENDENCY_PREFLIGHT_RE.search(text)
+            transport = (
+                not admission
+                and transport_retries < TRANSPORT_RETRIES
+                and rch_transport_retryable(ANSI_RE.sub("", text), code, time.monotonic() - started)
+            )
+            if not (admission or transport):
                 break
+            if transport:
+                transport_retries += 1
+                retried.append(f"[main-watchdog] rch transport failure before any remote result (exit {code}); retried\n")
             subprocess.run(["sleep", str(admission_sleep)], check=False)
+        text = "".join(retried) + text
         return text, code
 
     return run
@@ -3005,6 +3037,10 @@ def main(argv: list[str]) -> int:
                 touches_test_registration(paths) for paths in probes.get("touches_test_registration", [])
             ],
             "touches_rustdoc": [touches_rustdoc(paths) for paths in probes.get("touches_rustdoc", [])],
+            "rch_transport_retryable": [
+                rch_transport_retryable(case["text"], case["code"], case["elapsed"])
+                for case in probes.get("rch_transport_retryable", [])
+            ],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
