@@ -83,6 +83,22 @@ pub struct NativeH3ListenerConfig {
     /// metadata, and separately encoded QUIC retransmission data are excluded.
     /// Use produced responses when a buffered body exceeds this boundary.
     pub max_total_buffered_response_bytes: usize,
+    /// Optional aggregate buffered-response ceiling for each connection.
+    ///
+    /// `None` preserves shared-pool-only admission. `Some(bytes)` additionally
+    /// limits one peer's retained response backings, across all of its request
+    /// tasks and queued publications. Set this below the listener-wide limit
+    /// to prevent one flow-blocked peer from retaining that entire pool.
+    /// `Some(0)` permits only bodies with no retained backing allocation.
+    ///
+    /// This is a ceiling, not a reservation or a fairness guarantee. Multiple
+    /// connections can still fill the shared pool; the limit is per connection,
+    /// not per IP address or authenticated identity. Both charges are retained
+    /// until the original body is dropped. Produced-response queues, protocol
+    /// headers, retransmission storage and application-owned allocations have
+    /// their existing, separate bounds. Over-budget responses are cancelled
+    /// using the existing response-admission failure path, without waiting.
+    pub max_buffered_response_bytes_per_connection: Option<usize>,
     /// Opt in to live request bodies dispatched after validated HEADERS.
     ///
     /// This bounds queued body bytes per request. The listener also retains
@@ -121,6 +137,7 @@ impl Default for NativeH3ListenerConfig {
             drain_timeout: Duration::from_secs(5),
             max_buffered_response_bytes: 16 * 1024 * 1024,
             max_total_buffered_response_bytes: 64 * 1024 * 1024,
+            max_buffered_response_bytes_per_connection: None,
             streaming_request_body_buffer_bytes: None,
         }
     }
@@ -151,9 +168,12 @@ pub struct NativeH3ListenerReport {
     /// Closed request regions whose finalizers failed or exhausted cleanup.
     /// These requests also count as cancelled; other peers continue serving.
     pub failed_request_cleanups: u64,
-    /// Admitted requests whose buffered responses exceeded an individual or
-    /// aggregate retention limit before publication. Also counted as cancelled.
+    /// Admitted requests whose buffered responses exceeded an individual,
+    /// connection or global limit before publication. Also counted as cancelled.
     pub rejected_buffered_responses: u64,
+    /// Subset of rejected buffered responses refused by a connection ceiling.
+    /// Individual response-size and global-pool refusals are excluded.
+    pub rejected_connection_buffered_responses: u64,
     /// Largest aggregate buffered response backing capacity retained at once.
     pub peak_buffered_response_bytes: usize,
     /// The graceful deadline forced cancellation of remaining work.
@@ -362,6 +382,8 @@ impl NativeH3Listener {
         std::future::poll_fn(|task_cx| state.poll_cleanup(cx, task_cx)).await;
         state.report.rejected_buffered_responses =
             state.response_budget.rejected.load(Ordering::Acquire);
+        state.report.rejected_connection_buffered_responses =
+            state.response_budget.connection_rejected.load(Ordering::Acquire);
         state.report.peak_buffered_response_bytes =
             state.response_budget.peak.load(Ordering::Acquire);
         let shutdown_result = self.endpoint.shutdown(cx).await;
@@ -390,6 +412,10 @@ struct ResponseBudget {
     used: AtomicUsize,
     peak: AtomicUsize,
     rejected: AtomicU64,
+    connection_rejected: AtomicU64,
+    // A connection points to the one listener budget. The listener has no
+    // parent; it never retains its connection budgets, so there is no cycle.
+    parent: Option<Arc<Self>>,
 }
 
 impl ResponseBudget {
@@ -399,6 +425,38 @@ impl ResponseBudget {
             used: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             rejected: AtomicU64::new(0),
+            connection_rejected: AtomicU64::new(0),
+            parent: None,
+        }
+    }
+
+    fn for_connection(self: &Arc<Self>, limit: Option<usize>) -> Arc<Self> {
+        let Some(limit) = limit else {
+            return Arc::clone(self);
+        };
+        debug_assert!(
+            self.parent.is_none(),
+            "connection budgets have one listener parent"
+        );
+        Arc::new(Self {
+            parent: Some(Arc::clone(self)),
+            ..Self::new(limit)
+        })
+    }
+
+    fn reserve(&self, bytes: usize) -> Option<usize> {
+        self.used
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|next| *next <= self.limit)
+            })
+            .ok()
+    }
+
+    fn reject(&self, connection_limited: bool) {
+        let aggregate = self.parent.as_deref().unwrap_or(self);
+        aggregate.rejected.fetch_add(1, Ordering::Relaxed);
+        if connection_limited {
+            aggregate.connection_rejected.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -408,18 +466,28 @@ impl ResponseBudget {
         response_limit: usize,
     ) -> Option<RetainedResponseBody> {
         let bytes = body.retained_capacity().max(body.len());
-        let reserved = (body.len() <= response_limit)
-            .then(|| {
-                self.used
-                    .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-                        used.checked_add(bytes).filter(|next| *next <= self.limit)
-                    })
-            })
-            .and_then(Result::ok);
-        let Some(previous) = reserved else {
-            self.rejected.fetch_add(1, Ordering::Relaxed);
+        if body.len() > response_limit {
+            self.reject(false);
+            return None;
+        }
+        let Some(previous) = self.reserve(bytes) else {
+            self.reject(self.parent.is_some());
             return None;
         };
+        if let Some(aggregate) = &self.parent {
+            let Some(aggregate_previous) = aggregate.reserve(bytes) else {
+                // No await, callback or publication occurs between the two
+                // reservations. Refund the first if the global ceiling loses
+                // a race with another connection; never retain a half-grant.
+                drop(body);
+                self.used.fetch_sub(bytes, Ordering::Release);
+                self.reject(false);
+                return None;
+            };
+            aggregate
+                .peak
+                .fetch_max(aggregate_previous + bytes, Ordering::Relaxed);
+        }
         self.peak.fetch_max(previous + bytes, Ordering::Relaxed);
         Some(RetainedResponseBody {
             bytes: body,
@@ -446,6 +514,9 @@ struct ResponseCredit {
 impl Drop for ResponseCredit {
     fn drop(&mut self) {
         self.budget.used.fetch_sub(self.bytes, Ordering::Release);
+        if let Some(aggregate) = &self.budget.parent {
+            aggregate.used.fetch_sub(self.bytes, Ordering::Release);
+        }
     }
 }
 
@@ -1323,7 +1394,9 @@ impl ListenerState {
                             Arc::clone(&self.router),
                             self.config.router,
                         ),
-                        response_budget: Arc::clone(&self.response_budget),
+                        response_budget: self.response_budget.for_connection(
+                            self.config.max_buffered_response_bytes_per_connection,
+                        ),
                         control,
                         requests: BTreeMap::new(),
                         seen_requests: BTreeSet::new(),
@@ -2312,6 +2385,199 @@ impl ListenerConnection {
 #[cfg(test)]
 mod response_retention_tests {
     use super::*;
+
+    #[test]
+    fn omitted_connection_ceiling_preserves_shared_pool_admission() {
+        assert_eq!(
+            NativeH3ListenerConfig::default().max_buffered_response_bytes_per_connection,
+            None
+        );
+        let aggregate = Arc::new(ResponseBudget::new(8));
+        let peer = aggregate.for_connection(None);
+        assert!(Arc::ptr_eq(&peer, &aggregate));
+        let retained = peer.try_retain(Bytes::from(vec![1; 8]), 8).unwrap();
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 8);
+        assert!(peer.try_retain(Bytes::from(vec![2; 1]), 1).is_none());
+        assert_eq!(aggregate.rejected.load(Ordering::Acquire), 1);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 0);
+        drop(retained);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_full_peer_budget_leaves_shared_capacity_for_another_connection() {
+        let aggregate = Arc::new(ResponseBudget::new(8));
+        let slow = aggregate.for_connection(Some(4));
+        let survivor = aggregate.for_connection(Some(4));
+        let held = slow.try_retain(Bytes::from(vec![1; 4]), 4).unwrap();
+        assert!(slow.try_retain(Bytes::from(vec![2; 1]), 1).is_none());
+        let served = survivor.try_retain(Bytes::from(vec![3; 4]), 4).unwrap();
+        assert_eq!(slow.used.load(Ordering::Acquire), 4);
+        assert_eq!(survivor.used.load(Ordering::Acquire), 4);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 8);
+        assert_eq!(aggregate.peak.load(Ordering::Acquire), 8);
+        assert_eq!(aggregate.rejected.load(Ordering::Acquire), 1);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 1);
+        drop(held);
+        assert_eq!(slow.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 4);
+        drop(served);
+        assert_eq!(survivor.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn global_refusal_rolls_back_the_connection_reservation() {
+        let aggregate = Arc::new(ResponseBudget::new(5));
+        let first = aggregate.for_connection(Some(4));
+        let second = aggregate.for_connection(Some(4));
+        let held = first.try_retain(Bytes::from(vec![1; 4]), 4).unwrap();
+        assert!(second.try_retain(Bytes::from(vec![2; 3]), 3).is_none());
+        assert_eq!(second.used.load(Ordering::Acquire), 0);
+        assert_eq!(second.peak.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 4);
+        assert_eq!(aggregate.rejected.load(Ordering::Acquire), 1);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 0);
+        let retry = second.try_retain(Bytes::from(vec![3; 1]), 1).unwrap();
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 5);
+        drop((held, retry));
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        assert_eq!(first.used.load(Ordering::Acquire), 0);
+        assert_eq!(second.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn connection_ceiling_charges_backing_capacity_not_the_body_slice() {
+        let aggregate = Arc::new(ResponseBudget::new(512));
+        let peer = aggregate.for_connection(Some(128));
+        let mut allocation = Vec::with_capacity(256);
+        allocation.extend_from_slice(b"one retained allocation");
+        let view = Bytes::from(allocation).slice(0..1);
+        assert_eq!(view.len(), 1);
+        assert_eq!(view.retained_capacity(), 256);
+        assert!(peer.try_retain(view, 1).is_none());
+        assert_eq!(peer.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.peak.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn dropped_connection_publication_refunds_both_budgets() {
+        let aggregate = Arc::new(ResponseBudget::new(8));
+        let peer = aggregate.for_connection(Some(4));
+        let retained = peer.try_retain(Bytes::from(vec![7; 4]), 4).unwrap();
+        let (publication, receiver) = oneshot::channel();
+        assert!(
+            publication
+                .send_blocking(RequestReply::Buffered {
+                    head: H3ResponseHead::new(200, Vec::new()).unwrap(),
+                    body: retained,
+                })
+                .is_ok()
+        );
+        assert_eq!(peer.used.load(Ordering::Acquire), 4);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 4);
+        drop(receiver);
+        assert_eq!(peer.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        // The same connection can immediately admit another full response.
+        let replacement = peer.try_retain(Bytes::from(vec![8; 4]), 4).unwrap();
+        drop(peer);
+        // The retained body keeps its peer and parent accounting alive.
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 4);
+        drop(replacement);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        assert_eq!(Arc::strong_count(&aggregate), 1);
+    }
+
+    #[test]
+    fn individual_size_refusal_does_not_spend_connection_or_global_credit() {
+        let aggregate = Arc::new(ResponseBudget::new(8));
+        let peer = aggregate.for_connection(Some(4));
+        assert!(peer.try_retain(Bytes::from(vec![1; 4]), 3).is_none());
+        assert_eq!(peer.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.rejected.load(Ordering::Acquire), 1);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn zero_connection_ceiling_distinguishes_empty_body_from_empty_backing_slice() {
+        let aggregate = Arc::new(ResponseBudget::new(8));
+        let peer = aggregate.for_connection(Some(0));
+        let empty = peer.try_retain(Bytes::new(), 0).unwrap();
+        drop(empty);
+        let backed_empty = Bytes::from(vec![1; 4]).slice(0..0);
+        assert!(peer.try_retain(backed_empty, 0).is_none());
+        assert!(peer.try_retain(Bytes::from(vec![2; 1]), 1).is_none());
+        assert_eq!(peer.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+        assert_eq!(aggregate.rejected.load(Ordering::Acquire), 2);
+        assert_eq!(aggregate.connection_rejected.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn concurrent_peer_reservations_cannot_exceed_the_global_ceiling() {
+        contended_budgets(false);
+    }
+
+    #[test]
+    fn concurrent_requests_cannot_exceed_their_connection_ceiling() {
+        contended_budgets(true);
+    }
+
+    fn contended_budgets(one_peer: bool) {
+        const REQUESTS: usize = 8;
+        let aggregate = Arc::new(ResponseBudget::new(if one_peer { 64 } else { 12 }));
+        let shared = aggregate.for_connection(Some(6));
+        let ready = std::sync::Barrier::new(REQUESTS + 1);
+        let release = std::sync::Barrier::new(REQUESTS + 1);
+        std::thread::scope(|scope| {
+            let mut joins = Vec::new();
+            for _ in 0..REQUESTS {
+                let peer = if one_peer {
+                    Arc::clone(&shared)
+                } else {
+                    aggregate.for_connection(Some(6))
+                };
+                let ready = &ready;
+                let release = &release;
+                joins.push(scope.spawn(move || {
+                    let retained = peer.try_retain(Bytes::from(vec![1; 4]), 4);
+                    ready.wait();
+                    release.wait();
+                    retained.is_some()
+                }));
+            }
+            ready.wait();
+            // Capture the charged state while every accepted body is held.
+            // Release all workers before asserting so a regression cannot
+            // strand a barrier waiter during unwinding.
+            let used = aggregate.used.load(Ordering::Acquire);
+            let peer_used = shared.used.load(Ordering::Acquire);
+            release.wait();
+            let admitted = joins
+                .into_iter()
+                .map(|join| usize::from(join.join().unwrap()))
+                .sum::<usize>();
+            let expected = if one_peer { 1 } else { 3 };
+            assert_eq!(admitted, expected);
+            assert_eq!(used, expected * 4);
+            assert_eq!(peer_used, if one_peer { 4 } else { 0 });
+            assert_eq!(aggregate.peak.load(Ordering::Acquire), expected * 4);
+            assert_eq!(aggregate.used.load(Ordering::Acquire), 0);
+            assert_eq!(shared.used.load(Ordering::Acquire), 0);
+            assert_eq!(
+                aggregate.rejected.load(Ordering::Acquire),
+                u64::try_from(REQUESTS - expected).unwrap()
+            );
+            assert_eq!(
+                aggregate.connection_rejected.load(Ordering::Acquire),
+                if one_peer { 7 } else { 0 }
+            );
+        });
+    }
 
     #[test]
     fn prepared_response_keeps_backing_credit_until_publication_is_dropped() {
