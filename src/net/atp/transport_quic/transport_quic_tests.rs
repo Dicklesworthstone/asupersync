@@ -7549,4 +7549,22 @@ mod tests {
         let back: ReceiveReceipt = serde_json::from_slice(&json).unwrap();
         assert_eq!(receipt, back);
     }
+
+    /// nnm3gw review item 4: peer-supplied text in a progress line cannot carry
+    /// terminal escapes or line breaks into stderr; ordinary text is unchanged.
+    #[test]
+    fn progress_lines_escape_peer_control_characters() {
+        let reason = "receiver refused the manifest: x\u{1b}[2J\r\n[atp-quic] forged";
+        let line = escape_line_controls(format_args!("receiver: transfer refused: {reason}"));
+        assert_eq!(
+            line,
+            "receiver: transfer refused: receiver refused the manifest: x\\u{1b}[2J\\r\\n[atp-quic] forged"
+        );
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        let plain = escape_line_controls(format_args!(
+            "receiver: decode_complete round={} sbn={}",
+            3, 7
+        ));
+        assert_eq!(plain, "receiver: decode_complete round=3 sbn=7");
+    }
 }

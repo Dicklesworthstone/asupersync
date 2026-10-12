@@ -144,13 +144,36 @@ use crate::types::symbol::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind}
 /// capture both paths.
 fn quic_rqtrace(args: std::fmt::Arguments<'_>) {
     if std::env::var_os("ATP_RQ_TRACE").is_some() {
-        eprintln!("[ATP_RQ_TRACE] [atp-quic] {args}");
+        let line = escape_line_controls(args);
+        eprintln!("[ATP_RQ_TRACE] [atp-quic] {line}");
     }
 }
 
 #[allow(dead_code)]
 pub(crate) fn quic_progress(args: std::fmt::Arguments<'_>) {
-    eprintln!("[atp-quic] {args}");
+    let line = escape_line_controls(args);
+    eprintln!("[atp-quic] {line}");
+}
+
+/// Formats a progress or trace line with its control characters escaped. These
+/// lines carry peer-supplied text (a receiver's refusal reason built from the
+/// sender's manifest, a manifest's transfer id), so a peer could otherwise write
+/// terminal escape sequences or forge extra lines into the other side's stderr
+/// (br-asupersync-nnm3gw review item 4).
+fn escape_line_controls(args: std::fmt::Arguments<'_>) -> String {
+    let line = args.to_string();
+    if !line.chars().any(char::is_control) {
+        return line;
+    }
+    let mut escaped = String::with_capacity(line.len() + 8);
+    for c in line.chars() {
+        if c.is_control() {
+            escaped.extend(c.escape_default());
+        } else {
+            escaped.push(c);
+        }
+    }
+    escaped
 }
 
 // Reuse the manifest / receipt / report wire+value types so QUIC and TCP share
