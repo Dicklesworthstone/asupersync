@@ -17,7 +17,7 @@
 //! ```
 
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -281,6 +281,7 @@ pub struct MemoryStore {
 #[derive(Default)]
 struct MemoryStoreState {
     sessions: HashMap<String, SessionData>,
+    access_order: BTreeSet<(u64, String)>,
     max_sessions: Option<usize>,
 }
 
@@ -309,6 +310,7 @@ impl MemoryStore {
         Self {
             state: Arc::new(Mutex::new(MemoryStoreState {
                 sessions: HashMap::new(),
+                access_order: BTreeSet::new(),
                 max_sessions: Some(max_sessions),
             })),
         }
@@ -350,29 +352,33 @@ impl SessionStore for MemoryStore {
         // which would cause unnecessary re-saves and Set-Cookie headers.
         stored.modified = false;
         let mut state = self.state.lock();
-        if !state.sessions.contains_key(id)
-            && state
+        if state.max_sessions.is_some() {
+            let old_ts = state.sessions.get(id).map(session_last_accessed);
+            if let Some(old_ts) = old_ts {
+                state.access_order.remove(&(old_ts, id.to_string()));
+            } else if state
                 .max_sessions
                 .is_some_and(|max_sessions| state.sessions.len() >= max_sessions)
-        {
-            let evicted = state
-                .sessions
-                .iter()
-                .min_by(|(id_a, data_a), (id_b, data_b)| {
-                    session_last_accessed(data_a)
-                        .cmp(&session_last_accessed(data_b))
-                        .then_with(|| id_a.cmp(id_b))
-                })
-                .map(|(evicted_id, _)| evicted_id.clone());
-            if let Some(evicted_id) = evicted {
-                state.sessions.remove(&evicted_id);
+            {
+                if let Some((_, evicted_id)) = state.access_order.pop_first() {
+                    state.sessions.remove(&evicted_id);
+                }
             }
+            let ts = session_last_accessed(&stored);
+            state.access_order.insert((ts, id.to_string()));
         }
         state.sessions.insert(id.to_string(), stored);
     }
 
     fn delete(&self, id: &str) {
-        self.state.lock().sessions.remove(id);
+        let mut state = self.state.lock();
+        if let Some(data) = state.sessions.remove(id) {
+            if state.max_sessions.is_some() {
+                state
+                    .access_order
+                    .remove(&(session_last_accessed(&data), id.to_string()));
+            }
+        }
     }
 }
 
