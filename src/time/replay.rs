@@ -100,14 +100,10 @@ impl<S: TimeSource + ?Sized> RecordingTimeSource<S> {
     /// Wrap a supplied clock without sampling it. Zero is a valid capture limit.
     #[must_use]
     pub fn new(source: Arc<S>, max_observations: usize) -> Self {
-        let mut samples = Vec::new();
-        if max_observations > 0 {
-            let _ = samples.try_reserve_exact(max_observations);
-        }
         Self {
             source,
             state: Mutex::new(CaptureState {
-                samples,
+                samples: Vec::new(),
                 limit: max_observations,
                 in_flight: false,
                 finished: false,

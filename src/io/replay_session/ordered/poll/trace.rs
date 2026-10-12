@@ -167,18 +167,10 @@ struct RecordState {
 pub(super) struct RecordTrace(Mutex<RecordState>);
 impl RecordTrace {
     pub(super) fn new(limits: PollCaptureLimits) -> Self {
-        let mut io = Vec::new();
-        if limits.max_io_polls > 0 {
-            let _ = io.try_reserve_exact(limits.max_io_polls);
-        }
-        let mut frames = Vec::new();
-        if limits.max_polls > 0 {
-            let _ = frames.try_reserve_exact(limits.max_polls);
-        }
         Self(Mutex::new(RecordState {
             tape: PollTape {
-                io,
-                frames,
+                io: Vec::new(),
+                frames: Vec::new(),
                 construction: Checkpoint::default(),
                 terminal: Checkpoint::default(),
             },
@@ -222,10 +214,19 @@ impl RecordTrace {
         if state.tape.io.len() == state.tape.io.capacity() {
             let extra =
                 (state.limits.max_io_polls - state.tape.io.len()).min(state.tape.io.len().max(8));
-            if state.tape.io.try_reserve_exact(extra).is_err() {
+            // Grow into a fresh buffer and zero the old one, so no copy of a
+            // recorded write digest stays behind in freed memory.
+            let mut grown = Vec::new();
+            if grown
+                .try_reserve_exact(state.tape.io.len() + extra)
+                .is_err()
+            {
                 state.failure = Some(PollCaptureError::Allocation);
                 return None;
             }
+            grown.append(&mut state.tape.io);
+            state.tape.io.spare_capacity_mut().zeroize();
+            state.tape.io = grown;
         }
         // Only bounded internal hashing runs here, never a provider/waker callback.
         let index = state.tape.io.len();
@@ -433,5 +434,47 @@ impl ReplayTrace {
             return Err(state.refuse(PollMismatch::Completion));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Capacity follows the recorded polls, not the caller's ceilings, and
+    /// growing the I/O tape keeps every recorded step (br-asupersync-01d60c).
+    #[test]
+    fn capture_capacity_follows_recorded_polls_not_the_limits() {
+        let trace = RecordTrace::new(PollCaptureLimits {
+            max_polls: 1_000_000,
+            max_io_polls: 1_000_000,
+            max_write_bytes: 1 << 20,
+            max_vectored_slices: 16,
+        });
+        for effect in 0..20 {
+            trace
+                .begin(&Request::Write(b"payload"), effect)
+                .expect("poll admitted")
+                .finish(false);
+            trace.boundary(effect + 1, true);
+        }
+        let state = trace.0.lock();
+        assert!(state.failure.is_none());
+        assert!(
+            state.tape.io.capacity() <= 64,
+            "{}",
+            state.tape.io.capacity()
+        );
+        assert!(
+            state.tape.frames.capacity() <= 64,
+            "{}",
+            state.tape.frames.capacity()
+        );
+        let digest = Request::Write(b"payload").digest();
+        assert_eq!(state.tape.io.len(), 20);
+        for (index, step) in state.tape.io.iter().enumerate() {
+            assert_eq!((step.effect, step.length), (index, 7));
+            assert_eq!(step.digest, digest);
+        }
     }
 }

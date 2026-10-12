@@ -168,15 +168,11 @@ impl RecordOrder {
         limit: usize,
         pending_limits: Option<PendingIoCaptureLimits>,
     ) -> Self {
-        let mut entries = Vec::new();
-        if limit > 0 {
-            let _ = entries.try_reserve_exact(limit);
-        }
         Self(Mutex::new(RecordState {
             pending_limits,
             pending_polls: 0,
             pending_bytes: 0,
-            entries,
+            entries: Vec::new(),
             limit,
             sources: 1,
             active: false,

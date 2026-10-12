@@ -370,14 +370,15 @@ fn captured_clock_replays_real_timer_driver_expiration() {
 }
 
 #[test]
-fn recording_time_source_preallocates_up_to_limit() {
+fn recording_time_source_capacity_follows_observations_not_the_limit() {
+    // A generous ceiling costs nothing until used (br-asupersync-01d60c).
     let source = Arc::new(ScriptedClock::new(&[1, 2, 3, 4, 5, 6, 7, 8, 9]));
-    let recorder = RecordingTimeSource::new(source, 64);
-    assert_eq!(recorder.state.lock().samples.capacity(), 64);
+    let recorder = RecordingTimeSource::new(source, 1_000_000);
+    assert_eq!(recorder.state.lock().samples.capacity(), 0);
     for _ in 0..9 {
         recorder.now();
     }
-    assert_eq!(recorder.state.lock().samples.capacity(), 64);
+    assert_eq!(recorder.state.lock().samples.capacity(), 16);
     let tape = recorder.finish().unwrap();
     assert_eq!(tape.observations(), 9);
 }
