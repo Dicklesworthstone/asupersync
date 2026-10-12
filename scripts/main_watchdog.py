@@ -956,17 +956,20 @@ def uncompiled_owners(outcome: dict[str, Any]) -> set[str]:
 
 def bisect_first_red(
     lane: dict[str, Any], batch: list[str], runner: Runner, new_targets: set[str], target_exists: TargetExists | None = None
-) -> tuple[int, bool, list[dict[str, Any]]]:
+) -> tuple[int, bool, list[dict[str, Any]], dict[str, Any] | None]:
     """Index in `batch` of the first commit at which any of `new_targets` is red.
 
-    Assumes they are red at the batch head. Returns (index, exact, probes). A probe
-    that is not decisive (deferred or no evidence) stops the search; the answer is
-    then the earliest index still known to be red and `exact` is False, so the bead
-    names a range instead of claiming a single culprit.
+    Assumes they are red at the batch head. Returns (index, exact, probes, red_outcome).
+    A probe that is not decisive (deferred or no evidence) stops the search; the answer
+    is then the earliest index still known to be red and `exact` is False, so the bead
+    names a range instead of claiming a single culprit. `red_outcome` is the probe
+    outcome at that index, or None when the index was not probed (the batch head, where
+    all of them are red).
     """
     probes: list[dict[str, Any]] = []
     lo, hi = 0, len(batch) - 1  # invariant: batch[hi] is red for new_targets
     exact = True
+    red_outcome: dict[str, Any] | None = None
     while lo < hi:
         mid = (lo + hi) // 2
         kind, outcome = probe(lane, batch[mid], runner, new_targets, target_exists)
@@ -979,12 +982,118 @@ def bisect_first_red(
         )
         if kind == "red":
             hi = mid
+            red_outcome = outcome
         elif kind == "clear":
             lo = mid + 1
         else:
             exact = False
             break
-    return hi, exact and lo == hi, probes
+    return hi, exact and lo == hi, probes, red_outcome
+
+
+def attribute_new_reds(
+    lane: dict[str, Any],
+    batch: list[str],
+    runner: Runner,
+    new_targets: set[str],
+    target_exists: TargetExists | None,
+    base: str | None,
+) -> list[dict[str, Any]]:
+    """Group a lane's new reds by the commit that made each red, earliest first.
+
+    One bisect finds the first commit at which any of them is red. A target that was
+    not red there turned red later, so it is bisected again over the commits after that
+    one. Before this, every new red in a lane got one culprit: on 10-12 the allocation
+    red from d7ba86cfe and the fs red from f9a806fa2, both in targeted-tests[default],
+    would both have been blamed on d7ba86cfe.
+
+    Each group is {targets, index, exact, probes, pre_existing, not_reproduced}.
+    """
+    groups: list[dict[str, Any]] = []
+    remaining = set(new_targets)
+    start = 0
+    while remaining and start < len(batch):
+        index, exact, probes, at_index = bisect_first_red(lane, batch[start:], runner, remaining, target_exists)
+        index += start
+        group = set(remaining)
+        if exact and at_index is not None:
+            group = red_targets(at_index) & remaining
+            # A target whose binary did not compile there never ran there: its first
+            # red cannot be placed after this commit (asupersync-bi2462.147.15).
+            unrun = {t for t in remaining - group if target_of(t) in uncompiled_owners(at_index)}
+            if unrun:
+                group |= unrun
+                exact = False
+        pre_existing = False
+        not_reproduced = False
+        split: set[str] = set()
+        if exact and index == len(batch) - 1 and lane["kind"] == "test":
+            # Every probe below the head was clear, so only the head run saw this red.
+            # A test that fails once on a loaded worker lands here too (147.139 blamed
+            # a beads-only commit), so the head is probed once more before it is named.
+            kind, again = probe(lane, batch[index], runner, group, target_exists)
+            probes.append(
+                {
+                    "sha": batch[index],
+                    "verdict": again["verdict"] if again else "target-absent",
+                    "command": again["command"] if again else None,
+                    "confirm": True,
+                }
+            )
+            if kind == "clear":
+                not_reproduced = True
+            elif kind == "undecided":
+                exact = False
+        if index == 0 and base and not not_reproduced:
+            # Red at the first commit of the batch: it may predate the batch.
+            kind, base_outcome = probe(lane, base, runner, group, target_exists)
+            probes.append(
+                {
+                    "sha": base,
+                    "verdict": base_outcome["verdict"] if base_outcome else "target-absent",
+                    "command": base_outcome["command"] if base_outcome else None,
+                    "batch_base": True,
+                }
+            )
+            if kind == "red":
+                pre_existing = True
+                older = red_targets(base_outcome) & group if base_outcome else group
+                # The others were clear at the base and red at the first commit.
+                split = group - older
+                group = older
+            elif kind == "undecided":
+                exact = False
+        groups.append(
+            {
+                "targets": group,
+                "index": index,
+                "exact": exact,
+                "probes": probes,
+                "pre_existing": pre_existing,
+                "not_reproduced": not_reproduced,
+                "start": start,
+            }
+        )
+        if split:
+            groups.append(
+                {
+                    "targets": split,
+                    "index": 0,
+                    "exact": exact,
+                    "probes": [],
+                    "pre_existing": False,
+                    "not_reproduced": False,
+                    "start": 0,
+                }
+            )
+        remaining -= group | split
+        if not exact:
+            # Without an exact first red, the rest cannot be ordered after it.
+            if remaining:
+                groups[-1]["targets"] = groups[-1]["targets"] | remaining
+            break
+        start = index + 1
+    return groups
 
 
 def record_heals(
@@ -1124,82 +1233,65 @@ def run_engine(
                 notes.append(f"{lane['id']}: still red: " + ", ".join(f"{t} (bead {lane_known[t].get('bead')})" for t in still))
             new_targets = failing - set(lane_known)
             if new_targets:
-                index, exact, probes = bisect_first_red(lane, batch, runner, new_targets, target_exists)
-                pre_existing = False
-                not_reproduced = False
                 base = plan.get("since")
-                if exact and index == len(batch) - 1 and lane["kind"] == "test":
-                    # Every probe below the head was clear, so only the head run saw this red.
-                    # A test that fails once on a loaded worker lands here too (147.139 blamed
-                    # a beads-only commit), so the head is probed once more before it is named.
-                    kind, again = probe(lane, head, runner, new_targets, target_exists)
-                    probes.append(
-                        {
-                            "sha": head,
-                            "verdict": again["verdict"] if again else "target-absent",
-                            "command": again["command"] if again else None,
-                            "confirm": True,
+                groups = attribute_new_reds(lane, batch, runner, new_targets, target_exists, base)
+                for group in groups:
+                    exact, pre_existing, not_reproduced = group["exact"], group["pre_existing"], group["not_reproduced"]
+                    culprit = commits[batch[group["index"]]]
+                    payload = bead_payload(lane, culprit, outcome, batch, group["targets"])
+                    if not_reproduced:
+                        payload["title"] = payload["title"].replace("[main-watchdog] RED ", "[main-watchdog] FLAKY ", 1)
+                        payload["description"] = (
+                            f"**Not reproduced:** red in the head run at `{head}`, but it passed when the head was probed "
+                            "again, and every earlier probe was clear. No commit is blamed: the test depends on timing or "
+                            "load. The commit named below is only where the red was seen.\n\n" + payload["description"]
+                        )
+                        payload["priority"] = 1
+                        payload["labels"] = [*payload["labels"], "flaky"]
+                        payload["culprit"] = None
+                    elif pre_existing:
+                        payload["title"] = payload["title"].replace(
+                            f"at {culprit['sha'][:9]}", f"already red at batch base {base[:9]}"
+                        )
+                        payload["description"] = (
+                            f"**Pre-existing:** already red at `{base}` (the last covered commit before this batch), so no commit in "
+                            "this batch caused it. The commit named below is only the first one checked.\n\n" + payload["description"]
+                        )
+                        payload["culprit"] = None
+                    elif not exact:
+                        payload["title"] = payload["title"].replace(
+                            f"at {culprit['sha'][:9]}", f"in {batch[group['start']][:9]}..{culprit['sha'][:9]}"
+                        )
+                    payloads.append(payload)
+                    group["culprit"] = culprit["sha"] if not (pre_existing or not_reproduced) else None
+                    for target in group["targets"]:
+                        lane_known[target] = {
+                            "culprit": group["culprit"],
+                            "first_seen": now,
+                            "bead": None,
+                            "signature": payload["signature"],
                         }
-                    )
-                    if kind == "clear":
-                        not_reproduced = True
-                    elif kind == "undecided":
-                        exact = False
-                if index == 0 and base and not not_reproduced:
-                    # Red at the first commit of the batch: it may predate the batch.
-                    kind, base_outcome = probe(lane, base, runner, new_targets, target_exists)
-                    probes.append(
-                        {
-                            "sha": base,
-                            "verdict": base_outcome["verdict"] if base_outcome else "target-absent",
-                            "command": base_outcome["command"] if base_outcome else None,
-                            "batch_base": True,
-                        }
-                    )
-                    if kind == "red":
-                        pre_existing = True
-                    elif kind == "undecided":
-                        exact = False
-                culprit = commits[batch[index]]
-                payload = bead_payload(lane, culprit, outcome, batch, new_targets)
-                if not_reproduced:
-                    payload["title"] = payload["title"].replace("[main-watchdog] RED ", "[main-watchdog] FLAKY ", 1)
-                    payload["description"] = (
-                        f"**Not reproduced:** red in the head run at `{head}`, but it passed when the head was probed "
-                        "again, and every earlier probe was clear. No commit is blamed: the test depends on timing or "
-                        "load. The commit named below is only where the red was seen.\n\n" + payload["description"]
-                    )
-                    payload["priority"] = 1
-                    payload["labels"] = [*payload["labels"], "flaky"]
-                    payload["culprit"] = None
-                elif pre_existing:
-                    payload["title"] = payload["title"].replace(
-                        f"at {culprit['sha'][:9]}", f"already red at batch base {base[:9]}"
-                    )
-                    payload["description"] = (
-                        f"**Pre-existing:** already red at `{base}` (the last covered commit before this batch), so no commit in "
-                        "this batch caused it. The commit named below is only the first one checked.\n\n" + payload["description"]
-                    )
-                    payload["culprit"] = None
-                elif not exact:
-                    payload["title"] = payload["title"].replace(f"at {culprit['sha'][:9]}", f"in {batch[0][:9]}..{culprit['sha'][:9]}")
-                payloads.append(payload)
-                blamed = not (pre_existing or not_reproduced)
+                first = groups[0]
                 receipt.update(
                     new_red=sorted(new_targets),
-                    culprit=culprit["sha"] if blamed else None,
-                    culprit_exact=exact and blamed,
-                    pre_existing=pre_existing,
-                    not_reproduced=not_reproduced,
-                    bisect_probes=probes,
+                    culprit=first["culprit"],
+                    culprit_exact=first["exact"] and first["culprit"] is not None,
+                    pre_existing=first["pre_existing"],
+                    not_reproduced=first["not_reproduced"],
+                    bisect_probes=[p for group in groups for p in group["probes"]],
                 )
-                for target in new_targets:
-                    lane_known[target] = {
-                        "culprit": culprit["sha"] if blamed else None,
-                        "first_seen": now,
-                        "bead": None,
-                        "signature": payload["signature"],
-                    }
+                if len(groups) > 1:
+                    # Reds in one lane that different commits caused, each with its own bead.
+                    receipt["red_groups"] = [
+                        {
+                            "targets": sorted(group["targets"]),
+                            "culprit": group["culprit"],
+                            "culprit_exact": group["exact"] and group["culprit"] is not None,
+                            "pre_existing": group["pre_existing"],
+                            "not_reproduced": group["not_reproduced"],
+                        }
+                        for group in groups
+                    ]
         elif outcome["verdict"] == VERDICT_GREEN and lane_known:
             healed = heal_candidates(lane, lane_known, set(), outcome)
             record_heals(lane, lane_known, healed, head, outcome, receipt, notes, heals)
@@ -1707,7 +1799,10 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         env.update(
             RCH_REQUIRE_REMOTE="1",
             # A loaded all-targets check at -j 2..4 exceeded 5400 s (RCH-E104) on 2026-09-24.
-            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "10800"),
+            RCH_BUILD_TIMEOUT_SEC=env.get("RCH_BUILD_TIMEOUT_SEC", "21600"),
+            # `cargo test` lanes obey this one, not RCH_BUILD_TIMEOUT_SEC: the 10-11 full-lib
+            # head lane died at exactly 10800 s on a small worker, leaving no evidence.
+            RCH_TEST_TIMEOUT_SEC=env.get("RCH_TEST_TIMEOUT_SEC", "21600"),
             RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=env.get("RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS", "3000"),
             # One target directory per lane: parallel lanes must not share a cargo build lock.
             CARGO_TARGET_DIR=f"{target_dir}_{re.sub(r'[^A-Za-z0-9_.+-]', '_', lane['id'])}",
@@ -2303,7 +2398,10 @@ def watchdog_runs(receipts: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "recorded_at": recorded,
             "green": all(receipt_covers(r) for r in rs),
             "red": any(r["verdict"] == VERDICT_RED for r in rs),
-            "culprits": sorted({r["culprit"] for r in rs if r.get("culprit")}),
+            "culprits": sorted(
+                {r["culprit"] for r in rs if r.get("culprit")}
+                | {g["culprit"] for r in rs for g in r.get("red_groups", []) if g.get("culprit")}
+            ),
         }
         for (recorded, head), rs in sorted(grouped.items())
     ]

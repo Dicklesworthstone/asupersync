@@ -1011,6 +1011,8 @@ pub enum PathType {
 mod tests {
     use super::*;
     use crate::atp::actor::{TransferActorId, TransferActorTopology, TransferRegionId};
+    use crate::atp::manifest::MerkleRoot;
+    use crate::atp::object::ContentId;
     use crate::atp::stream_object::EpochState;
     use crate::atp::sync::{
         DirectoryEarlyUsabilityState, DirectoryEntryKind, DirectoryEntryMetadata,
@@ -1020,6 +1022,7 @@ mod tests {
     use crate::cx::{Cx, cap};
     use crate::types::{Budget, RegionId, TaskId};
     use std::collections::BTreeSet;
+    use std::time::{Duration, SystemTime};
 
     fn test_cx() -> Cx<cap::All> {
         Cx::new(

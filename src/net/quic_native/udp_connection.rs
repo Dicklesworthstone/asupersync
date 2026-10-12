@@ -445,6 +445,11 @@ impl NativeQuicUdpConnection {
                 };
             }
         };
+        // ATP's links call the handshake directly with their own parameter
+        // encoding, so this standard-encoding check lives here, not in it.
+        driver
+            .verify_server_connection_ids(initial_dcid)
+            .map_err(NativeQuicUdpConnectionError::Handshake)?;
         Self::from_completed_handshake(
             cx,
             endpoint,

@@ -201,6 +201,24 @@ struct CaptureShared {
     state: Mutex<CaptureState>,
 }
 
+/// Make room for one more event without leaving a copy of the recorded ones in
+/// freed memory: a full stream moves into a buffer twice its size, and the old
+/// buffer is zeroed before it is freed. Capacity follows use, not the capture
+/// bound, so a generous bound costs nothing until it is used.
+fn reserve_event_slot(
+    stream: &mut Vec<Option<Event>>,
+) -> Result<(), std::collections::TryReserveError> {
+    if stream.len() < stream.capacity() {
+        return Ok(());
+    }
+    let mut grown = Vec::new();
+    grown.try_reserve_exact(stream.capacity().saturating_mul(2).max(4))?;
+    grown.append(stream);
+    stream.spare_capacity_mut().zeroize();
+    *stream = grown;
+    Ok(())
+}
+
 /// Wraps a real entropy provider and captures its actual outputs and forks.
 ///
 /// The underlying provider is never called while the capture mutex is held.
@@ -236,21 +254,12 @@ impl RecordingEntropy {
         if limits.max_streams == 0 {
             return Err(EntropyCaptureError::NoRootCapacity);
         }
-        let mut root_stream = Vec::new();
-        if limits.max_calls > 0 {
-            let _ = root_stream.try_reserve_exact(limits.max_calls);
-        }
-        let mut streams = Vec::new();
-        if limits.max_streams > 0 {
-            let _ = streams.try_reserve_exact(limits.max_streams);
-        }
-        streams.push(root_stream);
         Ok(Self {
             source,
             shared: Arc::new(CaptureShared {
                 limits,
                 state: Mutex::new(CaptureState {
-                    streams,
+                    streams: vec![Vec::new()],
                     calls: 0,
                     bytes: 0,
                     in_flight: 0,
@@ -332,7 +341,7 @@ impl RecordingEntropy {
             state.failure = Some(error);
             return None;
         }
-        if state.streams[self.stream].try_reserve(1).is_err()
+        if reserve_event_slot(&mut state.streams[self.stream]).is_err()
             || (matches!(request, EntropyRequest::Fork(_)) && state.streams.try_reserve(1).is_err())
         {
             state.failure = Some(EntropyCaptureError::Allocation);
@@ -340,12 +349,7 @@ impl RecordingEntropy {
         }
         let child = if matches!(request, EntropyRequest::Fork(_)) {
             let child = state.streams.len();
-            let mut child_stream = Vec::new();
-            let remaining = self.shared.limits.max_calls.saturating_sub(state.calls);
-            if remaining > 0 {
-                let _ = child_stream.try_reserve_exact(remaining);
-            }
-            state.streams.push(child_stream);
+            state.streams.push(Vec::new());
             Some(child)
         } else {
             None
@@ -755,6 +759,35 @@ mod tests {
                 replay.verify_complete().unwrap();
             }
         }
+    }
+
+    /// A generous bound costs nothing until used: capacity follows the
+    /// recorded calls, and a fork's stream does not reserve the remaining
+    /// call budget (br-asupersync-01d60c).
+    #[test]
+    fn capture_capacity_follows_recorded_calls_not_the_bound() {
+        let capture = recorder(EntropyCaptureLimits::new(1_000_000, 8_000_000, 64));
+        let children: Vec<_> = (0..63).map(|index| capture.fork(task(index, 0))).collect();
+        for child in &children {
+            child.next_u64();
+        }
+        let values: Vec<u64> = (0..10).map(|_| capture.next_u64()).collect();
+        {
+            let state = capture.shared.state.lock();
+            let reserved: usize = state.streams.iter().map(Vec::capacity).sum();
+            assert_eq!(state.calls, 136);
+            assert!(
+                reserved <= 1_000,
+                "{reserved} event slots reserved for {} calls",
+                state.calls
+            );
+        }
+        let replay = capture.finish().unwrap().replay();
+        for index in 0..63 {
+            replay.try_fork(task(index, 0)).unwrap();
+        }
+        let replayed: Vec<u64> = (0..10).map(|_| replay.try_next_u64().unwrap()).collect();
+        assert_eq!(replayed, values, "values survive the zeroizing growth");
     }
 
     #[test]

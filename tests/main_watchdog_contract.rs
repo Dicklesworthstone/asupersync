@@ -1452,6 +1452,92 @@ fn a_head_only_red_is_confirmed_before_the_head_commit_is_blamed() {
     assert_eq!(real["bead_payloads"][0]["culprit"], sha(5));
 }
 
+fn alpha_gamma_log(alpha_red: bool, gamma_red: bool) -> String {
+    let mut log = String::new();
+    for (target, test, red) in [
+        ("alpha_native", "alpha_case", alpha_red),
+        ("gamma_native", "gamma_case", gamma_red),
+    ] {
+        log.push_str(&format!(
+            "     Running tests/{target}.rs (x)\nrunning 2 tests\n"
+        ));
+        log.push_str(&if red {
+            format!("test {test} ... FAILED\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n")
+        } else {
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.00s\n".to_owned()
+        });
+    }
+    log.push_str(if alpha_red || gamma_red {
+        "  Remote command finished: exit=101 in 1000ms\n"
+    } else {
+        "  Remote command finished: exit=0 in 1000ms\n"
+    });
+    log
+}
+
+/// Two reds in one lane that different commits caused get one bead each, blaming each
+/// one's own first red commit. On 10-12 an allocation red (d7ba86cfe) and an fs red
+/// (f9a806fa2) shared targeted-tests[default], and the single bisect of the pair
+/// would have blamed both on d7ba86cfe.
+#[test]
+fn reds_in_one_lane_from_different_commits_are_each_blamed_on_their_own_commit() {
+    let lane = json!({
+        "id": "targeted-tests[default]", "kind": "test",
+        "argv": ["cargo", "test", "--test", "alpha_native", "--test", "gamma_native"],
+        "expected_targets": ["alpha_native", "gamma_native"],
+    });
+    // alpha_case is red from commit 3, gamma_case from commit 6.
+    let mut logs = serde_json::Map::new();
+    for n in 1..=8u8 {
+        logs.insert(sha(n), json!({"log": alpha_gamma_log(n >= 3, n >= 6)}));
+    }
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=8u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-tests[default]": logs},
+    }));
+
+    let payloads = result["bead_payloads"].as_array().expect("payloads");
+    assert_eq!(payloads.len(), 2, "{result:#}");
+    let blamed: Vec<(Value, Value)> = payloads
+        .iter()
+        .map(|p| (p["new_targets"].clone(), p["culprit"].clone()))
+        .collect();
+    assert_eq!(
+        blamed,
+        vec![
+            (json!(["alpha_native::alpha_case"]), json!(sha(3))),
+            (json!(["gamma_native::gamma_case"]), json!(sha(6))),
+        ],
+        "{result:#}"
+    );
+    let known = &result["state"]["known_reds"]["targeted-tests[default]"];
+    assert_eq!(known["alpha_native::alpha_case"]["culprit"], sha(3));
+    assert_eq!(known["gamma_native::gamma_case"]["culprit"], sha(6));
+    let lane = receipt(&result, "targeted-tests[default]");
+    assert_eq!(lane["culprit"], sha(3));
+    assert_eq!(
+        lane["red_groups"],
+        json!([
+            {"targets": ["alpha_native::alpha_case"], "culprit": sha(3), "culprit_exact": true,
+             "pre_existing": false, "not_reproduced": false},
+            {"targets": ["gamma_native::gamma_case"], "culprit": sha(6), "culprit_exact": true,
+             "pre_existing": false, "not_reproduced": false},
+        ])
+    );
+    // The second bisect builds only the binary that owns the later red.
+    let probes = lane["bisect_probes"].as_array().expect("probes");
+    assert!(
+        probes
+            .iter()
+            .any(|p| p["command"] == "cargo test --test gamma_native"),
+        "{probes:#?}"
+    );
+}
+
 #[test]
 fn a_targeted_green_heals_only_the_targets_it_ran() {
     let lane = json!({

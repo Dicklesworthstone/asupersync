@@ -728,6 +728,8 @@ pub struct QuicHandshakeDriver {
     crypto_send_offset: [u64; 3],
     /// A validated Retry token is repeated in every subsequent client Initial.
     initial_token: Vec<u8>,
+    /// Source connection ID of the Retry this client accepted, if any.
+    retry_source_cid: Option<ConnectionId>,
     /// Exact authenticated packet numbers already accepted for Initial/Handshake.
     handshake_recv_packet_numbers: [BTreeSet<u64>; 2],
     /// Largest authenticated packet number per Initial/Handshake space: the
@@ -849,6 +851,7 @@ impl QuicHandshakeDriver {
             peer_connection_id: None,
             crypto_send_offset: [0; 3],
             initial_token: Vec::new(),
+            retry_source_cid: None,
             handshake_recv_packet_numbers: [BTreeSet::new(), BTreeSet::new()],
             handshake_recv_largest_packet_number: [None, None],
             handshake_crypto_reassembly: [
@@ -1391,6 +1394,7 @@ impl QuicHandshakeDriver {
     ) {
         self.provider
             .install_retry_initial_keys(retry.src_cid.as_bytes(), &self.transcript);
+        self.retry_source_cid = Some(retry.src_cid);
         self.initial_token = retry.token;
         // TLS has already consumed the ClientHello through write_hs. Re-send
         // the exact saved bytes without creating another TLS connection or
@@ -1415,6 +1419,34 @@ impl QuicHandshakeDriver {
             .peer_connection_id
             .ok_or_else(|| handshake_failure("retry_server_cid_missing"))?;
         validate_retry_transport_parameters(encoded, original_dcid, retry_scid, server_scid)
+    }
+
+    /// RFC 9000 section 7.3 for a client whose peer uses the standard
+    /// transport-parameter encoding: a server's original_destination_connection_id
+    /// must be this client's first Destination Connection ID, and its
+    /// retry_source_connection_id is legal only after an accepted Retry
+    /// ([`Self::verify_completed_retry`] matches it then). Both are checked when
+    /// present, not required: asupersync servers through 0.5.0 send neither.
+    pub(crate) fn verify_server_connection_ids(
+        &self,
+        original_dcid: ConnectionId,
+    ) -> Result<(), QuicTlsError> {
+        let encoded = self
+            .peer_transport_parameters()
+            .ok_or_else(|| handshake_failure("transport_parameters_missing"))?;
+        let parameters = TransportParameters::decode(encoded)
+            .map_err(|_| handshake_failure("transport_parameters_decode"))?;
+        for parameter in &parameters.unknown {
+            let code = match parameter.id {
+                0x00 if parameter.value.as_slice() != original_dcid.as_bytes() => {
+                    "original_destination_cid_mismatch"
+                }
+                0x10 if self.retry_source_cid.is_none() => "retry_source_cid_without_retry",
+                _ => continue,
+            };
+            return Err(handshake_failure(code));
+        }
+        Ok(())
     }
 
     /// Drain all currently-available outbound handshake bytes, installing each
@@ -3153,9 +3185,13 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         let peer = std::thread::spawn(move || {
             let protocols = vec![ATP_QUIC_ALPN.to_vec()];
             let config = server_config(vec![leaf_cert()], leaf_key(), protocols).unwrap();
+            // Without a Retry, an invalid 0x10 is one the server sends unasked.
+            let sent_retry_cid = token_len
+                .map(|_| retry_cid)
+                .or((invalid_parameter == Some(0x10)).then_some(retry_cid));
             let parameters = client_retry_parameters(
                 original_cid,
-                token_len.map(|_| retry_cid),
+                sent_retry_cid,
                 server_cid,
                 invalid_parameter,
             );
@@ -3358,6 +3394,22 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         );
         match invalid_parameter {
             None => result.expect("native caller establishes despite ignored Retry datagrams"),
+            Some(id) if token_len.is_none() => {
+                let error = result.unwrap_err();
+                let expected = match (id, &error) {
+                    (0x00, NativeQuicUdpConnectionError::Handshake(error)) => {
+                        failure_code(error) == "original_destination_cid_mismatch"
+                    }
+                    (0x10, NativeQuicUdpConnectionError::Handshake(error)) => {
+                        failure_code(error) == "retry_source_cid_without_retry"
+                    }
+                    (0x0f, NativeQuicUdpConnectionError::TransportParameters(message)) => {
+                        message.contains("initial_source_connection_id")
+                    }
+                    _ => false,
+                };
+                assert!(expected, "parameter {id:#x} without Retry: {error:?}");
+            }
             Some(id) => {
                 let NativeQuicUdpConnectionError::Handshake(error) = result.unwrap_err() else {
                     panic!("Retry CID mismatch must fail in authenticated handshake completion");
@@ -3401,6 +3453,18 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
         for workers in [1, 2] {
             for id in [0x00, 0x0f, 0x10] {
                 run_client_retry_native(workers, Some(16), Some(id));
+            }
+        }
+    }
+
+    /// RFC 9000 section 7.3 without a Retry: a server that names another
+    /// original DCID (a rewritten first Initial), another source CID, or a
+    /// Retry source CID although no Retry was accepted is refused.
+    #[test]
+    fn client_without_retry_rejects_each_authenticated_cid_mismatch() {
+        for workers in [1, 2] {
+            for id in [0x00, 0x0f, 0x10] {
+                run_client_retry_native(workers, None, Some(id));
             }
         }
     }
