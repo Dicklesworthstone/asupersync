@@ -531,7 +531,9 @@ mod native_h3_listener_live {
                         owner.drive_io_once(cx, Duration::from_millis(20)).await.unwrap();
                         received.extend(drain_h3_events(cx, session, owner.connection_mut()));
                     }
-                    other => panic!("incremental request must progress: {other:?}"),
+                    other @ Poll::Ready(_) => {
+                        panic!("incremental request must progress: {other:?}")
+                    }
                 }
             }
         }
