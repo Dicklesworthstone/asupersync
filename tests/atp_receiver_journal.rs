@@ -97,7 +97,10 @@ fn profile() -> LiveStreamConfig {
     let mut profile = LiveStreamConfig::default();
     profile.epoch_bytes = 8;
     profile.max_bytes = 64;
-    profile.operation_timeout = Duration::from_secs(8);
+    // One receiver checkpoint is several fsyncs, and loaded test machines have
+    // shown single fsyncs of nearly 10 s; stay below WAIT so a real stall is
+    // still reported by the worker first (pnfzwd).
+    profile.operation_timeout = Duration::from_secs(30);
     profile
 }
 fn sdk() -> AtpSdk {
