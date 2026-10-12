@@ -1101,10 +1101,10 @@ mod tests {
     }
 
     #[test]
-    fn replay_write_events_box_and_zeroize_digest() {
+    fn replay_write_events_zeroize_digest() {
         let input = WriteInput::Scalar(b"confidential data payload");
         let digest = input.digest();
-        assert_ne!(&**digest, &[0u8; 32]);
+        assert_ne!(&*digest, &[0u8; 32]);
         let event = Event::Write {
             length: 25,
             slices: None,
@@ -1113,6 +1113,18 @@ mod tests {
             error: None,
         };
         drop(event);
+    }
+
+    #[test]
+    fn capture_capacity_follows_recorded_operations_not_the_limit() {
+        let mut limits = limits();
+        limits.max_operations = 1_000_000;
+        let mut capture = RecordingIo::new(Duplex::default(), limits);
+        assert_eq!(capture.tape.events.capacity(), 0);
+        for _ in 0..10 {
+            value(Pin::new(&mut capture).poll_write(&mut cx(), b"x")).unwrap();
+        }
+        assert!(capture.tape.events.capacity() <= 64);
     }
 }
 
