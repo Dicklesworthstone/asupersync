@@ -52,9 +52,11 @@ const DEFAULT_BODY_LIMIT: usize = 16 * 1024 * 1024;
 const HEADER_LIMIT: usize = 64 * 1024;
 const DATA_CHUNK: usize = 16 * 1024;
 const POLL_STEPS: usize = 32;
-/// Default maximum number of overhead frames (empty/padding-only DATA, PING,
-/// SETTINGS-ACK, PRIORITY, and unknown extension frames) permitted on a
-/// connection before closing it with `ENHANCE_YOUR_CALM`.
+/// Default number of overhead frames (PING, unsolicited SETTINGS, PRIORITY,
+/// unknown extension frames, and empty or padding-only DATA without
+/// END_STREAM) a server may send during one use of a connection; one more
+/// fails the request with a connection error `ENHANCE_YOUR_CALM` and drops
+/// the connection. See `is_overhead_frame`.
 const DEFAULT_MAX_OVERHEAD_FRAMES: usize = 10_000;
 /// Advertised receive-window bounds (RFC 9113 §6.9.2). The response body is
 /// buffered up to its limit anyway, so the windows track that limit within
@@ -250,9 +252,20 @@ impl Http2Client {
         self
     }
 
-    /// Set the maximum number of overhead frames (empty/padding-only DATA, PING,
-    /// SETTINGS-ACK, PRIORITY, and unknown extension frames) permitted on a
-    /// connection before closing it with `ENHANCE_YOUR_CALM`.
+    /// Set how many overhead frames the server may send during one use of a
+    /// connection: PING, SETTINGS other than the server's connection-preface
+    /// SETTINGS, PRIORITY, unknown extension frames, and empty or
+    /// padding-only DATA without END_STREAM. One more fails the request with
+    /// a connection error `ENHANCE_YOUR_CALM` and drops the connection.
+    /// Acknowledgements of the client's own SETTINGS are not counted, nor is
+    /// WINDOW_UPDATE, which an upload legitimately receives many of.
+    ///
+    /// The budget covers one use of the connection, not its lifetime: a
+    /// request, plus, on a reused pooled connection
+    /// ([`Self::reuse_connections`]), what the server sent while the
+    /// connection sat idle before it. A pooled connection that used its whole
+    /// budget is not reused. `0` admits no overhead frame at all. Defaults to
+    /// 10,000.
     #[must_use]
     pub fn max_overhead_frames(mut self, limit: usize) -> Self {
         self.max_overhead_frames = limit;
@@ -372,8 +385,12 @@ impl Http2RequestBuilder {
         self
     }
 
-    /// Override the maximum number of overhead frames permitted on this
-    /// request's connection before closing it with `ENHANCE_YOUR_CALM`.
+    /// Override, for this request, how many overhead frames the server may
+    /// send during this use of its connection
+    /// ([`Http2Client::max_overhead_frames`]). The budget is per use, not per
+    /// connection lifetime: a reused pooled connection starts this request
+    /// with a fresh budget, which also covers what the server sent while the
+    /// connection sat idle.
     #[must_use]
     pub fn max_overhead_frames(mut self, limit: usize) -> Self {
         self.client.max_overhead_frames = limit;
@@ -981,12 +998,24 @@ impl From<io::Error> for AttemptFailure {
     }
 }
 
-/// Whether an incoming frame counts against the connection's frame overhead budget
-/// (RFC 9113 / CVE-2019-9512, CVE-2019-9514, CVE-2019-9515, CVE-2019-9518).
-fn is_overhead_frame(frame: &Frame) -> bool {
+/// Whether an incoming frame counts against the per-use frame overhead budget
+/// ([`Http2Client::max_overhead_frames`]): a frame that costs the client work
+/// without carrying the response (CVE-2019-9512 PING flood, CVE-2019-9515
+/// SETTINGS flood, and the empty-DATA form of the CVE-2019-9518 empty-frame
+/// flood). `connection` is the state before the frame is processed.
+///
+/// A SETTINGS that is not an ACK forces the client to queue an ACK, so each
+/// unsolicited one counts. The exception is the server's connection-preface
+/// SETTINGS: the connection stays `Handshaking` until it has processed the
+/// first non-ACK SETTINGS, so exactly that one is exempt. A SETTINGS ACK is
+/// the server's mandatory reply to the client's own SETTINGS and does not
+/// count. WINDOW_UPDATE does not count either: a client uploading a large
+/// body legitimately receives thousands. RST_STREAM floods (CVE-2019-9514)
+/// are bounded by the connection's peer-reset rate limit, not by this budget.
+fn is_overhead_frame(frame: &Frame, connection: &Connection) -> bool {
     match frame {
         Frame::Ping(_) => true,
-        Frame::Settings(s) if s.ack => true,
+        Frame::Settings(s) if !s.ack => connection.state() != ConnectionState::Handshaking,
         Frame::Unknown { .. } => true,
         Frame::Priority(_) => true,
         Frame::Data(d) if d.data.is_empty() && !d.end_stream => true,
@@ -998,6 +1027,8 @@ fn is_overhead_frame(frame: &Frame) -> bool {
 struct Http2Conn<T> {
     wire: Framed<ReadErrorTap<T>, FrameCodec>,
     connection: Connection,
+    /// Overhead frames received during the current use of the connection:
+    /// since it was started, or since `refresh` prepared it for reuse.
     overhead_frames: usize,
     max_overhead_frames: usize,
 }
@@ -1042,7 +1073,8 @@ where
     /// Whether another request may open a stream on this connection. A
     /// server that lowered SETTINGS_MAX_CONCURRENT_STREAMS to 0 admits none
     /// for now; a request would wait out its timeout there, so a fresh
-    /// connection serves it instead.
+    /// connection serves it instead. One that used its whole overhead budget
+    /// during its current use is retired.
     fn reusable(&self) -> bool {
         self.connection.state() == ConnectionState::Open
             && !self.connection.goaway_received()
@@ -1054,12 +1086,17 @@ where
     /// Before reuse: take in what the server sent while the connection sat
     /// idle, without waiting, and queue the answers (PING, SETTINGS). Fails
     /// when the server closed the connection or sent GOAWAY.
+    ///
+    /// Starts a new use of the connection, so a fresh overhead budget: it
+    /// covers what arrived while idle plus the request that follows. The
+    /// pool reuses a connection only through here (br-asupersync-r96ybl).
     async fn refresh(&mut self) -> Result<(), Http2ClientError> {
+        self.overhead_frames = 0;
         poll_fn(|task| {
             loop {
                 match Pin::new(&mut self.wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
-                        if is_overhead_frame(&frame) {
+                        if is_overhead_frame(&frame, &self.connection) {
                             if self.overhead_frames >= self.max_overhead_frames {
                                 return Poll::Ready(Err(H2Error::connection(
                                     ErrorCode::EnhanceYourCalm,
@@ -1117,7 +1154,7 @@ where
                 match Pin::new(&mut *wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
                         progress = true;
-                        if is_overhead_frame(&frame) {
+                        if is_overhead_frame(&frame, connection) {
                             if *overhead_frames >= *max_overhead_frames {
                                 return Poll::Ready(Err(H2Error::connection(
                                     ErrorCode::EnhanceYourCalm,
@@ -1842,17 +1879,73 @@ mod tests {
         panic!("scripted exchange did not complete in bounded poll steps");
     }
 
+    /// The bytes a scripted server sends: `frames`, encoded in order.
+    fn server_frames(frames: impl IntoIterator<Item = Frame>) -> crate::bytes::BytesMut {
+        let mut incoming = crate::bytes::BytesMut::new();
+        for frame in frames {
+            frame
+                .encode(&mut incoming)
+                .expect("encode a scripted frame");
+        }
+        incoming
+    }
+
+    /// A complete bodyless `:status 200` response on `stream_id` (HPACK
+    /// static index 8 is (:status, 200), encoded as 0x88).
+    fn ok_response(stream_id: u32) -> Frame {
+        Frame::Headers(crate::http::h2::frame::HeadersFrame::new(
+            stream_id,
+            Bytes::from_static(&[0x88]),
+            true,
+            true,
+        ))
+    }
+
+    /// `count` PINGs, as a server sending keepalives would.
+    fn pings(count: usize) -> Vec<Frame> {
+        vec![Frame::Ping(crate::http::h2::frame::PingFrame::new([7; 8])); count]
+    }
+
+    /// Queue `frames` on a scripted connection's transport, after whatever it
+    /// has not read yet.
+    fn feed(conn: &mut Http2Conn<ScriptedTransport>, frames: impl IntoIterator<Item = Frame>) {
+        let bytes = server_frames(frames);
+        conn.wire.get_mut().inner.incoming.extend_from_slice(&bytes);
+    }
+
+    /// Poll `future` to completion in bounded steps. A scripted transport
+    /// answers Pending only once its queued bytes are used up, so a step that
+    /// still needs more of them never completes.
+    fn complete<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(CountWake::default()));
+        let mut task = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        for _ in 0..100 {
+            if let Poll::Ready(output) = future.as_mut().poll(&mut task) {
+                return output;
+            }
+        }
+        panic!("scripted connection step did not complete in bounded poll steps");
+    }
+
     #[test]
     fn max_overhead_frames_enforces_empty_data_flood() {
         use crate::bytes::BytesMut;
         use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
-        // Response headers must precede DATA frames
-        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
+        Frame::Settings(SettingsFrame::new(vec![]))
             .encode(&mut incoming)
             .unwrap();
+        // Response headers must precede DATA frames
+        Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::from_static(&[0x88]),
+            false,
+            true,
+        ))
+        .encode(&mut incoming)
+        .unwrap();
         for _ in 0..3 {
             Frame::Data(DataFrame::new(1, Bytes::new(), false))
                 .encode(&mut incoming)
@@ -1879,7 +1972,9 @@ mod tests {
         use crate::http::h2::frame::{PingFrame, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Settings(SettingsFrame::new(vec![]))
+            .encode(&mut incoming)
+            .unwrap();
         for i in 0..4 {
             Frame::Ping(PingFrame::new([i as u8; 8]))
                 .encode(&mut incoming)
@@ -1900,14 +1995,21 @@ mod tests {
         }
     }
 
+    /// Unsolicited SETTINGS (each forces a queued ACK) and PRIORITY share the
+    /// budget. Until review r31-e8 of 3ba51cd7e (br-asupersync-r96ybl) this
+    /// test flooded SETTINGS ACKs, which are the server's mandatory reply to
+    /// the client's own SETTINGS and are no longer counted.
     #[test]
-    fn max_overhead_frames_enforces_settings_ack_and_priority_flood() {
+    fn max_overhead_frames_enforces_unsolicited_settings_and_priority_flood() {
         use crate::bytes::BytesMut;
         use crate::http::h2::frame::{PriorityFrame, PrioritySpec, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
-        Frame::Settings(SettingsFrame::ack())
+        // The connection-preface SETTINGS is exempt.
+        Frame::Settings(SettingsFrame::new(vec![]))
+            .encode(&mut incoming)
+            .unwrap();
+        Frame::Settings(SettingsFrame::new(vec![]))
             .encode(&mut incoming)
             .unwrap();
         Frame::Priority(PriorityFrame {
@@ -1920,7 +2022,7 @@ mod tests {
         })
         .encode(&mut incoming)
         .unwrap();
-        Frame::Settings(SettingsFrame::ack())
+        Frame::Settings(SettingsFrame::new(vec![]))
             .encode(&mut incoming)
             .unwrap();
 
@@ -1944,14 +2046,21 @@ mod tests {
         use crate::http::h2::frame::{DataFrame, HeadersFrame, PingFrame, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Settings(SettingsFrame::new(vec![]))
+            .encode(&mut incoming)
+            .unwrap();
         Frame::Ping(PingFrame::new([1; 8]))
             .encode(&mut incoming)
             .unwrap();
         // HPACK static index 8 is (:status, 200), encoded as 0x88.
-        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
-            .encode(&mut incoming)
-            .unwrap();
+        Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::from_static(&[0x88]),
+            false,
+            true,
+        ))
+        .encode(&mut incoming)
+        .unwrap();
         Frame::Data(DataFrame::new(1, Bytes::new(), false))
             .encode(&mut incoming)
             .unwrap();
@@ -1976,11 +2085,18 @@ mod tests {
         use crate::http::h2::frame::{DataFrame, HeadersFrame, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
-        // Response headers without end_stream
-        Frame::Headers(HeadersFrame::new(1, Bytes::from_static(&[0x88]), false, true))
+        Frame::Settings(SettingsFrame::new(vec![]))
             .encode(&mut incoming)
             .unwrap();
+        // Response headers without end_stream
+        Frame::Headers(HeadersFrame::new(
+            1,
+            Bytes::from_static(&[0x88]),
+            false,
+            true,
+        ))
+        .encode(&mut incoming)
+        .unwrap();
         // Terminal empty DATA frame (end_stream: true)
         Frame::Data(DataFrame::new(1, Bytes::new(), true))
             .encode(&mut incoming)
@@ -2003,7 +2119,9 @@ mod tests {
         use crate::http::h2::frame::{DataFrame, SettingsFrame};
 
         let mut incoming = BytesMut::new();
-        Frame::Settings(SettingsFrame::new(vec![])).encode(&mut incoming).unwrap();
+        Frame::Settings(SettingsFrame::new(vec![]))
+            .encode(&mut incoming)
+            .unwrap();
         Frame::Data(DataFrame::new(1, Bytes::new(), false))
             .encode(&mut incoming)
             .unwrap();
@@ -2030,5 +2148,130 @@ mod tests {
 
         let custom = client.max_overhead_frames(500);
         assert_eq!(custom.max_overhead_frames, 500);
+    }
+
+    /// Review r31-e8 of 3ba51cd7e (br-asupersync-r96ybl) MEDIUM-1: the
+    /// overhead budget counted over the connection's whole life, so a pooled
+    /// connection to a server that sends a few PINGs per request (keepalive)
+    /// eventually failed a healthy request with ENHANCE_YOUR_CALM, which is
+    /// not retried. This drives one connection the way the pool does (start
+    /// and request; then refresh and request for each reuse) with `LIMIT - 1`
+    /// PINGs in every use. On the old code the second request fails with
+    /// ENHANCE_YOUR_CALM, since 2 * (LIMIT - 1) >= LIMIT. The last two uses
+    /// show that frames received while idle count toward the next use, and
+    /// that a use which takes the whole budget retires the connection.
+    #[test]
+    fn overhead_budget_is_per_use_not_per_connection_lifetime() {
+        use crate::http::h2::frame::SettingsFrame;
+
+        const LIMIT: usize = 3;
+        let request = Http2Client::new()
+            .get("http://localhost/")
+            .prepare()
+            .expect("valid request");
+        let run = |conn: &mut Http2Conn<ScriptedTransport>| {
+            complete(conn.request(request.clone(), Bytes::new(), DEFAULT_BODY_LIMIT))
+                .map(|(response, _)| response.status)
+                .map_err(|failure| failure.error)
+        };
+        let mut conn = complete(Http2Conn::start(
+            ScriptedTransport::new(crate::bytes::BytesMut::new()),
+            DEFAULT_BODY_LIMIT,
+            LIMIT,
+        ))
+        .expect("client preface");
+
+        // Use 1, a fresh connection: the preface SETTINGS (exempt), LIMIT - 1
+        // PINGs, and the response.
+        feed(&mut conn, [Frame::Settings(SettingsFrame::new(vec![]))]);
+        feed(&mut conn, pings(LIMIT - 1));
+        feed(&mut conn, [ok_response(1)]);
+        assert_eq!(run(&mut conn).expect("first use within budget"), 200);
+        assert!(conn.reusable());
+
+        // Use 2, reused: nothing arrived while idle, LIMIT - 1 PINGs during
+        // the request.
+        complete(conn.refresh()).expect("nothing arrived while idle");
+        feed(&mut conn, pings(LIMIT - 1));
+        feed(&mut conn, [ok_response(3)]);
+        assert_eq!(
+            run(&mut conn).expect("a reused connection starts a fresh budget"),
+            200
+        );
+        assert!(conn.reusable());
+
+        // Use 3: one keepalive PING while idle and LIMIT - 2 during the
+        // request, LIMIT - 1 in all.
+        feed(&mut conn, pings(1));
+        complete(conn.refresh()).expect("an idle PING within budget");
+        feed(&mut conn, pings(LIMIT - 2));
+        feed(&mut conn, [ok_response(5)]);
+        assert_eq!(run(&mut conn).expect("third use within budget"), 200);
+        assert!(conn.reusable());
+
+        // Use 4: one PING while idle and LIMIT - 1 during the request take the
+        // whole budget. The request still succeeds, but the connection is not
+        // reused; had refresh not charged the idle PING to this use, it would
+        // be.
+        feed(&mut conn, pings(1));
+        complete(conn.refresh()).expect("an idle PING within budget");
+        feed(&mut conn, pings(LIMIT - 1));
+        feed(&mut conn, [ok_response(7)]);
+        assert_eq!(run(&mut conn).expect("the budget admits its limit"), 200);
+        assert!(
+            !conn.reusable(),
+            "a connection that used its whole budget must be retired"
+        );
+    }
+
+    /// Review r31-e8 of 3ba51cd7e (br-asupersync-r96ybl) MEDIUM-2: the budget
+    /// counted the SETTINGS ACK, the server's mandatory reply to the client's
+    /// own SETTINGS, but not an unsolicited SETTINGS, each of which forces
+    /// the client to queue an ACK (CVE-2019-9515). On the old code the first
+    /// exchange fails with ENHANCE_YOUR_CALM (a conforming server's ACK
+    /// breached a limit of 0), and the flood below completes with 200
+    /// instead of being stopped.
+    #[test]
+    fn settings_ack_is_not_overhead_but_unsolicited_settings_are() {
+        use crate::http::h2::frame::SettingsFrame;
+
+        let settings = || Frame::Settings(SettingsFrame::new(vec![]));
+        let ack = || Frame::Settings(SettingsFrame::ack());
+        let client = Http2Client::new();
+
+        // A conforming server: its preface SETTINGS, the ACK of the client's
+        // SETTINGS, and the response. Neither counts, so even 0 admits it.
+        let response = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(0),
+            server_frames([settings(), ack(), ok_response(1)]),
+        )
+        .expect("the preface SETTINGS and the SETTINGS ACK are not overhead");
+        assert_eq!(response.status, 200);
+
+        // After the preface, a limit of 2 admits two unsolicited SETTINGS...
+        let response = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(2),
+            server_frames([settings(), settings(), settings(), ack(), ok_response(1)]),
+        )
+        .expect("two unsolicited SETTINGS are within a limit of 2");
+        assert_eq!(response.status, 200);
+
+        // ...and the third fails the request before its response is read.
+        match drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(2),
+            server_frames([
+                settings(),
+                settings(),
+                settings(),
+                settings(),
+                ok_response(1),
+            ]),
+        ) {
+            Err(Http2ClientError::Protocol(error)) => {
+                assert_eq!(error.code, ErrorCode::EnhanceYourCalm);
+                assert!(error.message.contains("overhead limit exceeded"));
+            }
+            other => panic!("an unsolicited SETTINGS flood must be stopped, got {other:?}"),
+        }
     }
 }
