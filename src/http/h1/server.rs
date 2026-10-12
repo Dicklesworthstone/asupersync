@@ -2998,7 +2998,12 @@ where
             }
         };
         if count == 0 {
-            if buffer.is_empty() {
+            // RFC 9112 section 2.2 tolerates empty lines before a
+            // request-line, and a client may send a CRLF after a request
+            // body. A peer that closes after only those sent no request, so
+            // the connection closes without a 400 (br-asupersync-8udzw7
+            // A-L1). A partial head is still refused.
+            if buffer.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
                 return Ok(None);
             }
             return Err(HttpError::BadRequestLine);
@@ -7459,6 +7464,57 @@ mod tests {
                 limit: 4,
             })
         );
+    }
+
+    /// br-asupersync-8udzw7 A-L1: a client may send a CRLF after a request
+    /// body (RFC 9112 section 2.2). If it then closes, it sent no second
+    /// request: the connection closes without a 400, and only the real request
+    /// counts as served. A partial head followed by EOF is still refused.
+    #[test]
+    fn streaming_server_closes_cleanly_after_a_trailing_crlf_and_eof() {
+        for (case, input, served, bad_requests) in [
+            (
+                "trailing CRLF",
+                &b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello\r\n"[..],
+                1,
+                0,
+            ),
+            (
+                "partial head",
+                &b"POST /first HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\nhello\r\nGET /partial HTT"[..],
+                2,
+                1,
+            ),
+        ] {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let io = TestIo::new(input.to_vec(), Arc::clone(&written));
+            let server = Http1StreamingServer::with_config(
+                |_cx, request| async move {
+                    Response::new(200, "OK", request.head.uri.into_bytes())
+                },
+                localhost_server_config(),
+            );
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("build current-thread runtime");
+
+            let state = runtime
+                .block_on(async {
+                    let cx = Cx::current().expect("runtime connection context");
+                    server.serve(&cx, io).await
+                })
+                .expect("the connection closes without an error");
+
+            let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+            assert_eq!(written.matches("HTTP/1.1 200 OK").count(), 1, "{case}: {written}");
+            assert_eq!(
+                written.matches("HTTP/1.1 400 ").count(),
+                bad_requests,
+                "{case}: {written}"
+            );
+            assert_eq!(state.requests_served, served, "{case}");
+            assert_eq!(state.phase, ConnectionPhase::Closing, "{case}");
+        }
     }
 
     #[test]
