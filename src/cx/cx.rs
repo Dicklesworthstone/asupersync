@@ -3707,7 +3707,7 @@ impl<Caps> Cx<Caps> {
 
         // Clone without a live Cx guard: a custom RawWaker clone callback may
         // reenter this same context.
-        let mut incoming = Some(Arc::new(CancelWaker::new(waker.clone())));
+        let mut incoming = Some(self.recycled_cancel_waker(waker));
         let (token, retired_waker) = {
             let mut inner = self.inner.write();
 
@@ -3810,7 +3810,7 @@ impl<Caps> Cx<Caps> {
         };
         // A safe Wake payload can run arbitrary destructor code; retire the
         // exact owner only after the Cx guard has been released.
-        drop(retired_waker);
+        self.recycle_cancel_waker(retired_waker);
     }
 
     /// Arms a timer at this context's budget deadline that cancels it with
@@ -6068,6 +6068,52 @@ impl<Caps> Drop for SpanGuard<Caps> {
         self.cx
             .log(LogEntry::debug(format!("span exit: {name}")).with_target("tracing"));
         self.cx.set_diagnostic_context(self.prev.clone());
+    }
+}
+
+// Cancellation wake targets recycled per context, so a repeated cancel-aware
+// wait (a contended Mutex lock, a Cancelled observer) allocates nothing once
+// one target exists. These run without a Cx guard: Waker clone and drop are
+// user callbacks.
+impl<Caps> Cx<Caps> {
+    /// A wake target for `waker`: a retired one from this context's pool when
+    /// it holds one, otherwise a new allocation.
+    fn recycled_cancel_waker(&self, waker: &Waker) -> Arc<CancelWaker> {
+        let pooled = self.inner.write().cancel_waker_pool.pop();
+        let incoming = waker.clone();
+        match pooled {
+            Some(mut target) => {
+                if let Some(slot) = Arc::get_mut(&mut target) {
+                    // The pooled target holds a no-op Waker.
+                    drop(slot.replace_waker(incoming));
+                    target
+                } else {
+                    Arc::new(CancelWaker::new(incoming))
+                }
+            }
+            None => Arc::new(CancelWaker::new(incoming)),
+        }
+    }
+
+    /// Retires a cleared wake target after the Cx guard is released. If no
+    /// in-flight wake still holds it, its Waker is dropped here and the
+    /// allocation goes back to the pool while the registry is open.
+    fn recycle_cancel_waker(&self, retired: Option<Arc<CancelWaker>>) {
+        let Some(mut target) = retired else {
+            return;
+        };
+        let Some(slot) = Arc::get_mut(&mut target) else {
+            return;
+        };
+        drop(slot.replace_waker(Waker::noop().clone()));
+        let mut inner = self.inner.write();
+        if !inner.cancel_waker_registry_closed
+            && inner.cancel_waker_pool.len() < crate::types::task_context::CANCEL_WAKER_POOL_CAP
+        {
+            inner.cancel_waker_pool.push(target);
+        }
+        // Otherwise the target, now holding a no-op Waker, drops here and
+        // runs no user code under the guard.
     }
 }
 
@@ -9217,6 +9263,58 @@ mod tests {
             assert_eq!(child.inner.read().mask_depth, 1);
             assert_eq!(parent.inner.read().mask_depth, 0);
         });
+    }
+
+    /// asupersync-445rt7: a cleared cancellation wake target goes back to its
+    /// context's pool, the next observer reuses that allocation with its own
+    /// Waker, and a target something else still holds is never pooled.
+    #[test]
+    fn a_retired_cancellation_wake_target_is_reused_by_the_next_observer() {
+        struct CountWake(std::sync::atomic::AtomicUsize);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        let target_of =
+            |cx: &Cx<cap::None>| Arc::as_ptr(&cx.inner.read().cancel_waker_registrations[0].target);
+
+        let cx = Cx::detached_cancel_context();
+        let mut noop = std::task::Context::from_waker(Waker::noop());
+        let first = {
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            assert!(cancelled.as_mut().poll(&mut noop).is_pending());
+            target_of(&cx)
+        };
+        assert_eq!(cx.inner.read().cancel_waker_pool.len(), 1);
+
+        let counter = Arc::new(CountWake(std::sync::atomic::AtomicUsize::new(0)));
+        let counting = Waker::from(Arc::clone(&counter));
+        let mut task = std::task::Context::from_waker(&counting);
+        let held = {
+            let mut cancelled = std::pin::pin!(cx.cancelled());
+            assert!(cancelled.as_mut().poll(&mut task).is_pending());
+            assert_eq!(target_of(&cx), first, "the allocation is reused");
+            assert!(cx.inner.read().cancel_waker_pool.is_empty());
+            // Stands in for an in-flight wake that cloned the target.
+            let held = Arc::clone(&cx.inner.read().cancel_waker_registrations[0].target);
+            cx.cancel_fast(CancelKind::User);
+            assert_eq!(
+                counter.0.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "the reused target wakes the new observer's Waker"
+            );
+            assert!(cancelled.as_mut().poll(&mut task).is_ready());
+            held
+        };
+        assert!(
+            cx.inner.read().cancel_waker_pool.is_empty(),
+            "a target another owner still holds is not pooled"
+        );
+        drop(held);
     }
 
     /// br-asupersync-93zkbz: inside a spawned task, `Cx::current()` is the
