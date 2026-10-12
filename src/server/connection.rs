@@ -388,24 +388,33 @@ impl ConnectionManager {
         self.shutdown_signal.trigger_immediate();
     }
 
-    /// Transitions from `Running` or `Draining` to `ForceClosing` on the shared
-    /// shutdown signal, snapshotting the active connection count under the registry
-    /// lock if not already recorded.
+    /// Transitions the shared shutdown signal from `Draining` to `ForceClosing`,
+    /// snapshotting the active connection count if not already recorded.
     ///
-    /// The snapshot is recorded while holding the connection registry lock before
-    /// notifying shutdown waiters, preventing force-close races against drops.
+    /// The transition and the snapshot happen together under the connection
+    /// registry lock, so a connection that closes concurrently is counted on one
+    /// side of the boundary only; shutdown waiters are notified after unlocking.
+    /// In any other phase this changes nothing: admission and the drain counts
+    /// stay as they were.
     ///
     /// Returns `true` if this call transitioned the shutdown signal to `ForceClosing`.
     pub fn begin_force_close(&self) -> bool {
-        {
+        let entered = {
             let connections = self.state.lock();
-            self.accepting.store(false, Ordering::Release);
-            if self.force_close_initial_count.load(Ordering::Acquire) == DRAIN_COUNT_UNSET {
-                self.force_close_initial_count
-                    .store(connections.len(), Ordering::Release);
+            let entered = self.shutdown_signal.enter_force_closing();
+            if entered {
+                self.accepting.store(false, Ordering::Release);
+                if self.force_close_initial_count.load(Ordering::Acquire) == DRAIN_COUNT_UNSET {
+                    self.force_close_initial_count
+                        .store(connections.len(), Ordering::Release);
+                }
             }
+            entered
+        };
+        if entered {
+            self.shutdown_signal.notify_force_closing();
         }
-        self.shutdown_signal.begin_force_close()
+        entered
     }
 
     /// Returns the number of active connections.
@@ -1828,6 +1837,40 @@ mod tests {
         set_test_time(31 * 1_000_000_000);
         let idle = manager.drop_idle_connections();
         assert_eq!(idle.len(), 3);
+    }
+
+    /// Review r28-e8 of f42354543 (C4-M1): `begin_force_close` on a server
+    /// that is not draining refuses without side effects. It used to close
+    /// admission and record a force-close count before the signal refused, so a
+    /// running server dropped every new connection while reporting `Running`,
+    /// and a later drain that timed out counted graceful closes as force-closed.
+    #[test]
+    fn begin_force_close_on_a_running_server_changes_nothing() {
+        init_test("begin_force_close_on_a_running_server_changes_nothing");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal.clone());
+        let early = manager.register(test_addr(1)).expect("register 1");
+
+        let forced = manager.begin_force_close();
+        crate::assert_with_log!(!forced, "refused while running", false, forced);
+        crate::assert_with_log!(
+            signal.phase() == ShutdownPhase::Running,
+            "still running",
+            ShutdownPhase::Running,
+            signal.phase()
+        );
+        let admitted = manager.register(test_addr(2));
+        crate::assert_with_log!(
+            admitted.is_some(),
+            "still accepting",
+            true,
+            admitted.is_some()
+        );
+        let unset = manager.force_close_initial_count.load(Ordering::Acquire) == DRAIN_COUNT_UNSET;
+        crate::assert_with_log!(unset, "no force-close count recorded", true, unset);
+        drop(admitted);
+        drop(early);
+        crate::test_complete!("begin_force_close_on_a_running_server_changes_nothing");
     }
 
     #[test]

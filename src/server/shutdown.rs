@@ -679,19 +679,33 @@ impl ShutdownSignal {
     /// must be terminated. Returns `false` if not currently draining.
     #[must_use]
     pub fn begin_force_close(&self) -> bool {
-        let result = self.state.phase.compare_exchange(
-            ShutdownPhase::Draining as u8,
-            ShutdownPhase::ForceClosing as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-        if result.is_ok() {
-            self.state.force_close_notify.notify_waiters();
-            self.state.phase_notify.notify_waiters();
+        if self.enter_force_closing() {
+            self.notify_force_closing();
             true
         } else {
             false
         }
+    }
+
+    /// The `Draining -> ForceClosing` transition alone, without waking anyone,
+    /// so a caller can make it under its own lock and notify after unlocking.
+    pub(crate) fn enter_force_closing(&self) -> bool {
+        self.state
+            .phase
+            .compare_exchange(
+                ShutdownPhase::Draining as u8,
+                ShutdownPhase::ForceClosing as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Wakes the waiters of a force-close entered with
+    /// [`Self::enter_force_closing`].
+    pub(crate) fn notify_force_closing(&self) {
+        self.state.force_close_notify.notify_waiters();
+        self.state.phase_notify.notify_waiters();
     }
 
     /// Marks the server as fully stopped.
