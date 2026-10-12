@@ -694,22 +694,57 @@ impl ConnectionRouter {
                     });
                 }
                 if routing_info.kind != PacketRoutingKind::OneRtt {
-                    if handle.packet_protection.as_mut().is_some_and(|protection| {
-                        authenticated_handshake_ack_only(
-                            cx,
-                            connection_id,
-                            &mut protection.protection,
-                            &packet.data,
-                        )
-                    }) {
-                        return Ok(RoutingResult::Routed {
-                            connection_id,
-                            outgoing_packets: Vec::new(),
-                        });
+                    // RFC 9000 section 12.2: a datagram may coalesce several
+                    // long-header packets and then one 1-RTT short-header
+                    // packet. Each long-header packet is bounded by its Length
+                    // field and classified alone, so a peer that still holds
+                    // Handshake keys and sends [Handshake(ACK)][1-RTT] neither
+                    // requests the final flight nor loses its 1-RTT packet.
+                    let mut offset = 0;
+                    let mut only_handshake_acks = true;
+                    let mut coalesced_1rtt = None;
+                    while offset < packet.data.len() {
+                        let rest = &packet.data[offset..];
+                        match ProtectedHeaderPrefix::decode(rest, connection_id.len()) {
+                            Ok(ProtectedHeaderPrefix::Long(long_header))
+                                if long_header.dst_cid == connection_id =>
+                            {
+                                let Ok(long_len) = long_header.packet_len(rest.len()) else {
+                                    only_handshake_acks = false;
+                                    break;
+                                };
+                                only_handshake_acks = only_handshake_acks
+                                    && handle.packet_protection.as_mut().is_some_and(
+                                        |protection| {
+                                            authenticated_handshake_ack_only(
+                                                cx,
+                                                connection_id,
+                                                &mut protection.protection,
+                                                &rest[..long_len],
+                                            )
+                                        },
+                                    );
+                                offset += long_len;
+                            }
+                            Ok(ProtectedHeaderPrefix::Short { dst_cid, .. })
+                                if offset > 0 && dst_cid == connection_id =>
+                            {
+                                coalesced_1rtt = Some(rest.to_vec());
+                                break;
+                            }
+                            // Padding, a malformed trailer or a packet for
+                            // another connection ends the datagram; a leading
+                            // packet of any other kind still requests recovery.
+                            _ => {
+                                only_handshake_acks &= offset > 0;
+                                break;
+                            }
+                        }
                     }
                     // These encrypted handshake bytes belong to the retained
                     // TLS flight, never the legacy plaintext-frame path.
-                    if authenticated.pending_final_flight_packets == 0
+                    if !only_handshake_acks
+                        && authenticated.pending_final_flight_packets == 0
                         && !authenticated.final_handshake_flight.is_empty()
                         && authenticated
                             .last_final_flight_retransmit
@@ -733,32 +768,6 @@ impl ConnectionRouter {
                         self.pending_deferred_packets.extend(retained);
                         authenticated.last_final_flight_retransmit = Some(packet.receive_time);
                     }
-
-                    // RFC 9000 section 12.2: A datagram may coalesce a 1-RTT
-                    // short-header packet following a long-header packet.
-                    let coalesced_1rtt = if let Ok(ProtectedHeaderPrefix::Long(long_header)) =
-                        ProtectedHeaderPrefix::decode(&packet.data, 0)
-                    {
-                        if let Ok(long_len) = long_header.packet_len(packet.data.len()) {
-                            if long_len < packet.data.len() {
-                                let tail = &packet.data[long_len..];
-                                if matches!(
-                                    ProtectedHeaderPrefix::decode(tail, connection_id.len()),
-                                    Ok(ProtectedHeaderPrefix::Short { dst_cid, .. }) if dst_cid == connection_id
-                                ) {
-                                    Some(tail.to_vec())
-                                } else {
-                                    None
-                                }
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
 
                     if let Some(short_data) = coalesced_1rtt {
                         packet.data = short_data;
@@ -2473,11 +2482,13 @@ pub(crate) async fn unprotect_1rtt_packet_with_connection(
     unprotect_1rtt_packet_now(cx, connection_id, packet_protection, connection, packet)
 }
 
-/// Recognize an authenticated, standalone Handshake ACK without mistaking it
-/// for a retransmitted TLS flight.
+/// Recognize an authenticated Handshake ACK without mistaking it for a
+/// retransmitted TLS flight.
 ///
-/// Unknown, coalesced, or invalid packets keep
-/// the existing recovery behavior; only verified ACK/PADDING is suppressed.
+/// `packet` is one long-header packet bounded by its Length field: the router
+/// classifies each packet of a coalesced datagram on its own. Unknown or
+/// invalid packets keep the existing recovery behavior; only verified
+/// ACK/PADDING is suppressed.
 pub(crate) fn authenticated_handshake_ack_only(
     cx: &Cx,
     connection_id: ConnectionId,
@@ -5995,6 +6006,247 @@ mod tests {
                     .unwrap(),
                 Bytes::from_static(b"x")
             );
+        });
+    }
+
+    /// Seal one Handshake packet under fixture keys.
+    #[cfg(feature = "tls")]
+    fn seal_handshake_packet(
+        cx: &Cx,
+        protection: &mut AtpPacketProtection,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+        frame: &QuicFrame,
+    ) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        frame.encode(&mut payload).unwrap();
+        let header = PacketHeader::Long(LongHeader {
+            packet_type: LongPacketType::Handshake,
+            version: 1,
+            dst_cid,
+            src_cid,
+            token: Vec::new(),
+            payload_length: 4 + payload.len() as u64 + 16,
+            packet_number,
+            packet_number_len: 4,
+        });
+        let mut packet = Vec::new();
+        header.encode(&mut packet).unwrap();
+        let offset = packet.len() - 4;
+        let sealed = protection
+            .protect_packet_now(
+                cx,
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::Handshake,
+                    key_phase: false,
+                    packet_number,
+                    associated_data: &packet,
+                    payload: &payload,
+                },
+            )
+            .expect("protect");
+        packet.extend_from_slice(&sealed.ciphertext);
+        packet.extend_from_slice(&sealed.tag);
+        let sample = header_protection_sample(&packet, offset).unwrap();
+        let mask = protection
+            .header_protection_mask_now(cx, PacketProtectionSpace::Handshake, &sample)
+            .expect("mask");
+        apply_header_protection(&mut packet, offset, mask.bytes).unwrap();
+        packet
+    }
+
+    /// br-asupersync-1r3f5u L2/L4: each long-header packet of a datagram is
+    /// classified on its own, bounded by its Length field, and a 1-RTT tail
+    /// after any number of them is processed. A peer that still holds
+    /// Handshake keys sends [Handshake(ACK)][1-RTT]; that requests no
+    /// final-flight retransmission, nor does trailing padding. A Handshake
+    /// packet carrying more than ACKs still requests it, and a tail for
+    /// another connection is ignored.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_coalesced_long_header_packets_are_classified_one_by_one() {
+        run_test_with_cx(|cx| async move {
+            let ack = QuicFrame::Ack {
+                largest_acknowledged: VarInt::from_u64_unchecked(0),
+                ack_delay: VarInt::from_u64_unchecked(0),
+                ack_range_count: VarInt::from_u64_unchecked(0),
+                first_ack_range: VarInt::from_u64_unchecked(0),
+                ack_ranges: Vec::new(),
+                ecn_counts: None,
+            };
+            let crypto = QuicFrame::Crypto {
+                offset: VarInt::from_u64_unchecked(0),
+                data: Bytes::from_static(b"finished"),
+            };
+            let cid = ConnectionId::new(b"coalesce").unwrap();
+            let stranger = ConnectionId::new(b"stranger").unwrap();
+            let peer_cid = ConnectionId::new(b"coal-peer").unwrap();
+            let peer = "127.0.0.1:4495".parse().unwrap();
+            // (case, leading Handshake frames, padding, 1-RTT tail CID,
+            // final flight requested, tail delivered)
+            for (case, leading, padding, tail_cid, requested, delivered) in [
+                ("ack + tail", vec![&ack], 0, Some(cid), false, true),
+                (
+                    "ack + ack + tail",
+                    vec![&ack, &ack],
+                    0,
+                    Some(cid),
+                    false,
+                    true,
+                ),
+                ("crypto + tail", vec![&crypto], 0, Some(cid), true, true),
+                (
+                    "ack + stranger's tail",
+                    vec![&ack],
+                    0,
+                    Some(stranger),
+                    false,
+                    false,
+                ),
+                ("ack + padding", vec![&ack], 24, None, false, false),
+            ] {
+                let config = NativeQuicConnectionConfig::default();
+                let mut router = ConnectionRouter::new(config);
+                let origin = router.clock_origin;
+                add_authenticated_close_test_connection(
+                    &cx,
+                    &mut router,
+                    cid,
+                    peer_cid,
+                    peer,
+                    origin,
+                )
+                .await;
+                let mut transcript = QuicHandshakeTranscript::new();
+                transcript.record("handshake", b"coalesced classification");
+                let mut handshake_protection = deterministic_one_rtt_protection(&cx).await;
+                handshake_protection
+                    .derive_keys(
+                        &cx,
+                        PacketProtectionSpace::Handshake,
+                        &transcript,
+                        b"classification test",
+                    )
+                    .await
+                    .expect("derive handshake keys");
+                {
+                    let handle = router.connections.get_mut(&cid).unwrap();
+                    handle
+                        .packet_protection
+                        .as_mut()
+                        .unwrap()
+                        .protection
+                        .derive_keys(
+                            &cx,
+                            PacketProtectionSpace::Handshake,
+                            &transcript,
+                            b"classification test",
+                        )
+                        .await
+                        .expect("derive the router's handshake keys");
+                    handle
+                        .authenticated
+                        .as_mut()
+                        .unwrap()
+                        .final_handshake_flight = vec![OutgoingPacket {
+                        dst_addr: peer,
+                        data: vec![0xe5; 48],
+                        send_time: None,
+                    }];
+                }
+
+                let mut datagram = Vec::new();
+                for (number, frame) in (0u64..).zip(&leading) {
+                    datagram.extend(seal_handshake_packet(
+                        &cx,
+                        &mut handshake_protection,
+                        cid,
+                        peer_cid,
+                        number,
+                        frame,
+                    ));
+                }
+                datagram.resize(datagram.len() + padding, 0);
+                if let Some(tail_cid) = tail_cid {
+                    let frames = [QuicFrame::Stream {
+                        stream_id: VarInt(1),
+                        offset: None,
+                        data: Bytes::from_static(b"x"),
+                        fin: false,
+                    }];
+                    let mut payload = BytesMut::new();
+                    NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+                    let mut sender = NativeQuicConnection::new(config);
+                    establish_for_application_data(&cx, &mut sender);
+                    let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+                    datagram.extend(
+                        assemble_protected_1rtt_packet(
+                            &cx,
+                            tail_cid,
+                            &mut sender,
+                            &mut sender_protection,
+                            &frames,
+                            &payload,
+                            1_000,
+                            true,
+                        )
+                        .await
+                        .unwrap(),
+                    );
+                }
+
+                let packet = ReceivedPacket {
+                    src_addr: peer,
+                    data: datagram,
+                    receive_time: origin + Duration::from_millis(1),
+                    transmit_time: None,
+                };
+                match router.route_packet_with_output(&cx, packet, true).await {
+                    Ok(RoutingResult::Routed {
+                        connection_id,
+                        outgoing_packets,
+                    }) => {
+                        assert_eq!(connection_id, cid, "{case}");
+                        assert!(outgoing_packets.is_empty(), "{case}");
+                    }
+                    other => panic!("{case}: the datagram must be routed: {other:?}"),
+                }
+                let retransmitted = router
+                    .pending_deferred_packets
+                    .iter()
+                    .filter(|packet| packet.final_handshake_flight)
+                    .count();
+                assert_eq!(
+                    retransmitted,
+                    usize::from(requested),
+                    "{case}: final flight requested"
+                );
+                let handle = router.connections.get_mut(&cid).unwrap();
+                assert_eq!(
+                    handle.connection.state(),
+                    QuicConnectionState::Established,
+                    "{case}"
+                );
+                assert_eq!(handle.connection.transport().close_code(), None, "{case}");
+                assert_eq!(
+                    handle.deferred_spaces,
+                    [false, false, delivered],
+                    "{case}: only a processed tail owes output, in ApplicationData"
+                );
+                let readable = handle.connection.next_readable_stream(&cx).unwrap();
+                assert_eq!(readable.is_some(), delivered, "{case}: tail delivered");
+                if delivered {
+                    assert_eq!(
+                        handle
+                            .connection
+                            .read_stream_bytes(&cx, crate::net::quic_native::StreamId(1), 32)
+                            .unwrap(),
+                        Bytes::from_static(b"x"),
+                        "{case}"
+                    );
+                }
+            }
         });
     }
 

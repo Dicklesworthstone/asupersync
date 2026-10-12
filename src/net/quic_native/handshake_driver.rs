@@ -2148,9 +2148,12 @@ pub async fn client_handshake_over_udp_with_early_data(
                 }
             };
             accepted_batch = true;
+            // Only a coalesced 1-RTT packet addressed to this client is handed
+            // to the data plane: padding, a malformed long-header trailer or
+            // a packet for another connection is not.
             if consumed < packet.data.len()
                 && packet.src_addr == server_addr
-                && packet.data[consumed..].iter().any(|&b| b != 0)
+                && is_short_header_for(&packet.data[consumed..], client_scid)
                 && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
             {
                 early_one_rtt.push(ReceivedPacket {
@@ -2432,8 +2435,10 @@ pub(crate) async fn server_handshake_over_udp_with_early_data(
                         return Err(err);
                     }
                 };
+            // As on the client: only a coalesced 1-RTT packet addressed to
+            // this server is kept.
             if consumed < packet.data.len()
-                && packet.data[consumed..].iter().any(|&b| b != 0)
+                && is_short_header_for(&packet.data[consumed..], server_scid)
                 && early_one_rtt.len() < MAX_EARLY_ONE_RTT_PACKETS
             {
                 early_one_rtt.push(ReceivedPacket {
@@ -5802,6 +5807,184 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
                     .all(|packet| is_short_header_for(&packet.data, client_scid)),
                 "packets for another connection are dropped"
             );
+        });
+    }
+
+    /// A short-header packet for `cid` with an arbitrary protected body.
+    fn short_packet_for(cid: ConnectionId) -> Vec<u8> {
+        let mut data = vec![0x40];
+        data.extend_from_slice(cid.as_bytes());
+        data.extend_from_slice(&[0xaa; 24]);
+        data
+    }
+
+    /// br-asupersync-1r3f5u L1: after the long-header packets of a datagram,
+    /// the client hands only a 1-RTT packet addressed to it to the data
+    /// plane. A short header for another connection, or a malformed long
+    /// header, coalesced behind the server's Initial is dropped.
+    #[test]
+    fn only_a_coalesced_one_rtt_packet_for_this_client_is_kept_as_early_data() {
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_scid = ConnectionId::new(&[0x51; 8]).unwrap();
+        let server_scid = ConnectionId::new(&[0x52; 8]).unwrap();
+        let other_cid = ConnectionId::new(&[0x53; 8]).unwrap();
+        // A version-1 Initial header whose Length runs past the datagram.
+        let mut malformed = vec![0xC0, 0, 0, 0, 1, 8];
+        malformed.extend_from_slice(client_scid.as_bytes());
+        malformed.extend_from_slice(&[0, 0, 0xBF, 0xFF, 0xFF, 0xFF]);
+        malformed.extend_from_slice(&[0x5a; 16]);
+        let kept = short_packet_for(client_scid);
+        // Each handshake carries one kind of junk behind the server's Initial
+        // and the client's own 1-RTT packet behind the last Handshake packet.
+        for junk in [short_packet_for(other_cid), malformed] {
+            udp_runtime().block_on(async {
+                let cx = Cx::current().expect("native context");
+                let mut server_endpoint = loopback_endpoint(&cx).await;
+                let mut client_endpoint = loopback_endpoint(&cx).await;
+                let server_addr = server_endpoint.local_addr();
+                let (mut client, mut server) = alpn_pair(ATP_QUIC_ALPN);
+                server.install_initial_keys(DCID_BYTES).unwrap();
+                let scripted = async {
+                    let hello = loop {
+                        let batch = server_endpoint.receive_batch(&cx, 1).await.unwrap();
+                        if let Some(packet) = batch.into_iter().next() {
+                            break packet;
+                        }
+                    };
+                    server.recv_handshake_packet(&hello.data).unwrap();
+                    let mut packet_number = 0;
+                    let flight = server
+                        .assemble_pending_flight(
+                            1200,
+                            hello.src_addr,
+                            client_scid,
+                            server_scid,
+                            &mut packet_number,
+                        )
+                        .unwrap();
+                    let (mut initial, mut handshake): (Vec<_>, Vec<_>) =
+                        flight.packets.into_iter().partition(|packet| {
+                            long_prefix(&packet.data).packet_type == LongPacketType::Initial
+                        });
+                    assert!(
+                        !initial.is_empty() && !handshake.is_empty(),
+                        "{} Initial and {} Handshake packets",
+                        initial.len(),
+                        handshake.len()
+                    );
+                    initial[0].data.extend_from_slice(&junk);
+                    handshake.last_mut().unwrap().data.extend_from_slice(&kept);
+                    server_endpoint.send_batch(&cx, &initial).await.unwrap();
+                    server_endpoint.send_batch(&cx, &handshake).await.unwrap();
+                };
+                let (scripted, connected) = join_within(
+                    &cx,
+                    Duration::from_secs(20),
+                    scripted,
+                    client_handshake_over_udp_with_early_data(
+                        &cx,
+                        &mut client_endpoint,
+                        server_addr,
+                        &mut client,
+                        original_cid,
+                        client_scid,
+                    ),
+                )
+                .await;
+                scripted.expect("the scripted server finishes");
+                let early = connected
+                    .expect("the client's handshake ends")
+                    .expect("the client completes");
+                assert_eq!(
+                    early.len(),
+                    1,
+                    "only the 1-RTT packet for this client is kept"
+                );
+                assert_eq!(early[0].data, kept);
+            });
+        }
+    }
+
+    /// br-asupersync-1r3f5u L1, server side: a 1-RTT packet coalesced behind
+    /// the client's handshake packets is kept only when it is addressed to
+    /// this server.
+    #[test]
+    fn only_a_coalesced_one_rtt_packet_for_this_server_is_kept_as_early_data() {
+        let original_cid = ConnectionId::new(DCID_BYTES).unwrap();
+        let client_scid = ConnectionId::new(&[0x61; 8]).unwrap();
+        let server_scid = ConnectionId::new(&[0x62; 8]).unwrap();
+        let other_cid = ConnectionId::new(&[0x63; 8]).unwrap();
+        let kept = short_packet_for(server_scid);
+        udp_runtime().block_on(async {
+            let cx = Cx::current().expect("native context");
+            let mut server_endpoint = loopback_endpoint(&cx).await;
+            let mut client_endpoint = loopback_endpoint(&cx).await;
+            let server_addr = server_endpoint.local_addr();
+            let (mut client, mut server) = alpn_pair(ATP_QUIC_ALPN);
+            let scripted = async {
+                client.install_initial_keys(DCID_BYTES).unwrap();
+                let hello = client.pump_outbound().unwrap();
+                assert_eq!(hello.len(), 1, "one ClientHello segment");
+                let mut initial = client
+                    .assemble_handshake_packet(&hello[0], original_cid, client_scid, 0)
+                    .unwrap();
+                initial.extend_from_slice(&short_packet_for(other_cid));
+                let send = |data| OutgoingPacket {
+                    dst_addr: server_addr,
+                    data,
+                    send_time: None,
+                };
+                client_endpoint
+                    .send_batch(&cx, &[send(initial)])
+                    .await
+                    .unwrap();
+                let mut finished = Vec::new();
+                while !client.is_complete() {
+                    for packet in client_endpoint.receive_batch(&cx, 16).await.unwrap() {
+                        if client.recv_handshake_packet(&packet.data).is_ok() {
+                            finished.extend(
+                                client
+                                    .pump_outbound()
+                                    .unwrap()
+                                    .into_iter()
+                                    .filter(|segment| segment.level == HandshakeLevel::Handshake),
+                            );
+                        }
+                    }
+                }
+                assert_eq!(finished.len(), 1, "the client's Finished");
+                let mut data = client
+                    .assemble_handshake_packet(&finished[0], server_scid, client_scid, 0)
+                    .unwrap();
+                data.extend_from_slice(&kept);
+                client_endpoint
+                    .send_batch(&cx, &[send(data)])
+                    .await
+                    .unwrap();
+            };
+            let (served, scripted) = join_within(
+                &cx,
+                Duration::from_secs(20),
+                server_handshake_over_udp_with_early_data(
+                    &cx,
+                    &mut server_endpoint,
+                    &mut server,
+                    original_cid,
+                    server_scid,
+                ),
+                scripted,
+            )
+            .await;
+            scripted.expect("the scripted client finishes");
+            let (_, early) = served
+                .expect("the server's handshake ends")
+                .expect("the server completes");
+            assert_eq!(
+                early.len(),
+                1,
+                "only the 1-RTT packet for this server is kept"
+            );
+            assert_eq!(early[0].data, kept);
         });
     }
 }

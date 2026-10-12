@@ -465,8 +465,11 @@ impl PendingAuthenticatedAccept {
         self.authenticated_received_bytes = self
             .authenticated_received_bytes
             .saturating_add(packet.data.len() as u64);
-        self.address_validated |= header.packet_type == LongPacketType::Handshake
-            || self.driver.has_authenticated_handshake_packet();
+        // RFC 9000 section 8.1: only an authenticated Handshake packet proves
+        // the address. The datagram's first packet may be a Handshake packet
+        // that was skipped for want of keys while a coalesced Initial
+        // authenticated.
+        self.address_validated |= self.driver.has_authenticated_handshake_packet();
         // A short-header packet can follow the client's Finished in the same
         // UDP datagram (RFC 9000 section 12.2). TLS consumes only the long-
         // header prefix. Preserve the exact remaining ciphertext for the
@@ -6636,6 +6639,121 @@ mod tests {
                 let pending = endpoint.pending_authenticated_accept.front().unwrap();
                 assert_eq!(pending.authenticated_received_bytes, initial_bytes);
                 assert_eq!(pending.received_packets, 1);
+                endpoint.shutdown(&cx).await.unwrap();
+            }));
+        }
+
+        /// br-asupersync-1r3f5u L3 and T6 (RFC 9000 §8.1): only an
+        /// authenticated Handshake packet validates the client's address.
+        /// The server cannot open a Handshake packet before the ClientHello,
+        /// so one that leads a datagram is skipped. The real Initial coalesced
+        /// after it authenticates, but proves nothing about the address. The
+        /// client's Finished, coalesced after an Initial, does prove it.
+        #[test]
+        fn managed_accept_validates_the_address_only_on_an_authenticated_handshake_packet() {
+            use super::super::super::handshake_driver::{
+                client_config, server_config,
+                tests::{CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert},
+            };
+
+            let runtime = crate::runtime::RuntimeBuilder::current_thread()
+                .build()
+                .unwrap();
+            runtime.block_on(runtime.handle().spawn(async {
+                let (cx, _, _timer, mut endpoint, peer, _a) =
+                    selection_fixture(&Cx::current().unwrap()).await;
+                let peer = peer.local_addr().unwrap();
+                let local = ConnectionId::new(&[0xc1; 8]).unwrap();
+                let initial = ConnectionId::new(&[0xc2; 8]).unwrap();
+                let client_cid = ConnectionId::new(&[0xc3; 8]).unwrap();
+                enable_admission_mechanics(&mut endpoint);
+                let server = QuicHandshakeDriver::server(
+                    server_config(
+                        vec![parse_one_cert(LEAF_CERT_PEM)],
+                        leaf_key(),
+                        vec![b"atp/1".to_vec()],
+                    )
+                    .unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+                endpoint
+                    .begin_authenticated_accept(&cx, server, peer, initial, local, b"atp/1")
+                    .unwrap();
+                let mut client = QuicHandshakeDriver::client(
+                    client_config(vec![parse_one_cert(CA_CERT_PEM)], vec![b"atp/1".to_vec()])
+                        .unwrap(),
+                    rustls::pki_types::ServerName::try_from("localhost").unwrap(),
+                    Vec::new(),
+                )
+                .unwrap();
+                client.install_initial_keys(initial.as_bytes()).unwrap();
+                let hello = client.pump_outbound().unwrap();
+                assert_eq!(hello.len(), 1, "one ClientHello segment");
+                let first_initial = client
+                    .assemble_handshake_packet(&hello[0], initial, client_cid, 0)
+                    .unwrap();
+                // The same CRYPTO bytes again under a new packet number, to
+                // lead the datagram that carries the Finished.
+                let second_initial = client
+                    .assemble_handshake_packet_at(&hello[0], 0, local, client_cid, 1)
+                    .unwrap();
+                let mut skipped = Vec::new();
+                PacketHeader::Long(crate::net::quic_core::LongHeader {
+                    packet_type: LongPacketType::Handshake,
+                    version: 1,
+                    dst_cid: local,
+                    src_cid: client_cid,
+                    token: Vec::new(),
+                    payload_length: 4 + 32 + 16,
+                    packet_number: 0,
+                    packet_number_len: 4,
+                })
+                .encode(&mut skipped)
+                .unwrap();
+                skipped.extend_from_slice(&[0x5a; 48]);
+                let now = endpoint.timer_scheduler.now(&cx).unwrap();
+                let datagram = |data: Vec<u8>| ReceivedPacket {
+                    src_addr: peer,
+                    data,
+                    receive_time: now,
+                    transmit_time: None,
+                };
+
+                let pending = endpoint.pending_authenticated_accept.front_mut().unwrap();
+                pending
+                    .receive(datagram([skipped, first_initial].concat()), 16_384, now)
+                    .expect("the coalesced Initial authenticates");
+                assert_eq!(pending.received_packets, 1, "the ClientHello was processed");
+                assert!(!pending.last_flight.is_empty(), "the server answered it");
+                assert!(
+                    !pending.address_validated,
+                    "a Handshake packet that was skipped validates nothing"
+                );
+
+                let mut finished = Vec::new();
+                for packet in &pending.last_flight {
+                    client.recv_handshake_packet(&packet.data).unwrap();
+                    finished.extend(
+                        client
+                            .pump_outbound()
+                            .unwrap()
+                            .into_iter()
+                            .filter(|segment| segment.level == HandshakeLevel::Handshake),
+                    );
+                }
+                assert!(client.is_complete());
+                assert_eq!(finished.len(), 1, "the client's Finished");
+                let finished = client
+                    .assemble_handshake_packet(&finished[0], local, client_cid, 0)
+                    .unwrap();
+                pending
+                    .receive(datagram([second_initial, finished].concat()), 16_384, now)
+                    .expect("the coalesced Finished authenticates");
+                assert!(
+                    pending.address_validated,
+                    "an authenticated Handshake packet after an Initial validates the address"
+                );
                 endpoint.shutdown(&cx).await.unwrap();
             }));
         }
