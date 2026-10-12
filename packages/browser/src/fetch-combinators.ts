@@ -18,6 +18,19 @@ export interface FetchResponseRace {
   cancel(reason?: string): Promise<Outcome<void>>;
 }
 
+export interface FetchResponseJoin {
+  /** All response headers in input order, or failure after every member drains. */
+  readonly result: Promise<Outcome<readonly FetchResponseWinner[]>>;
+  /** Before transfer, cancels every member and joins cleanup. After transfer, no effect. */
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+type Selection = FetchResponseWinner | readonly FetchResponseWinner[];
+interface ResponseGroup {
+  readonly result: Promise<Outcome<Selection>>;
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
 const STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const LOCKED = STREAM && Object.getOwnPropertyDescriptor(STREAM.prototype, "locked")?.get;
@@ -36,7 +49,7 @@ const internal = (message: string): Failure => Object.freeze({ outcome: "err", f
 
 function checked<T>(value: unknown): Outcome<T> {
   try {
-    if (!value || typeof value !== "object") return internal("invalid fetch race outcome");
+    if (!value || typeof value !== "object") return internal("invalid fetch group outcome");
     const outcome = value as Outcome<T>;
     switch (outcome.outcome) {
       case "ok": return ok(outcome.value);
@@ -61,13 +74,14 @@ function checked<T>(value: unknown): Outcome<T> {
       }
     }
   } catch { /* Reject presentation hooks and malformed envelopes without echoing them. */ }
-  return internal("invalid fetch race outcome");
+  return internal("invalid fetch group outcome");
 }
 
-function cancellation(reason: string): Failure {
+function cancellation(reason: string, join: boolean): Failure {
   // A composite outcome, not a new task or a claim about a member's ABI receipt.
   return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
-    kind: "fetch_race_cancel", phase: "completed", origin_region: "browser-fetch-race",
+    kind: join ? "fetch_join_cancel" : "fetch_race_cancel", phase: "completed",
+    origin_region: join ? "browser-fetch-join" : "browser-fetch-race",
     origin_task: null, timestamp_nanos: 0, message: reason, truncated: false,
   }) });
 }
@@ -108,25 +122,48 @@ interface Member {
  * breaks ties between responses already ready at registration, not network races.
  */
 export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outcome<FetchResponseRace> {
-  if (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !READER_CLOSED) {
-    return fail("fetch races require native ReadableStream readers");
-  }
+  return responseGroup(fetches, false);
+}
+
+/**
+ * Join the headers of 0..64 existing owned fetches without reading their bodies.
+ * Success transfers all remaining bodies in input order, independently of
+ * response completion order. Any member failure (including an already-ready
+ * body's failure while another header is pending) cancels and drains all work.
+ * HTTP error statuses are responses, not automatic failures. Empty input is an
+ * immediate successful identity, even on hosts without native stream readers.
+ *
+ * Shares raceFetchResponses' exclusive reader ownership, refusal/cleanup rules,
+ * original scope authority and no-read-ahead bounds. Does not buffer responses,
+ * start requests, or join body EOF: callers must consume/cancel every returned
+ * body and await each original fetch.closed after successful transfer.
+ */
+export function joinFetchResponses(fetches: readonly FetchStreamHandle[]): Outcome<FetchResponseJoin> {
+  return responseGroup(fetches, true);
+}
+
+function responseGroup(fetches: readonly FetchStreamHandle[], join: false): Outcome<FetchResponseRace>;
+function responseGroup(fetches: readonly FetchStreamHandle[], join: true): Outcome<FetchResponseJoin>;
+function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Outcome<ResponseGroup> {
   const members: Member[] = [];
   try {
-    if (!Array.isArray(fetches)) return fail("fetch race members must be an array");
+    if (!Array.isArray(fetches)) return fail("fetch group members must be an array");
     const count = fetches.length;
-    if (!Number.isInteger(count) || count < 1 || count > BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) {
-      return fail(`fetch races require 1..${BROWSER_FETCH_LIMITS.maxRequestsPerRuntime} members`);
+    if (!Number.isInteger(count) || count < (join ? 0 : 1) || count > BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) {
+      return fail(`fetch groups require ${join ? 0 : 1}..${BROWSER_FETCH_LIMITS.maxRequestsPerRuntime} members`);
+    }
+    if (count && (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !READER_CLOSED)) {
+      return fail("fetch groups require native ReadableStream readers");
     }
     const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"] }[] = [];
     const seen = new Set<FetchStreamHandle>();
     // Read all caller properties before taking a native reader lock.
     for (let index = 0; index < count; index += 1) {
       const fetch = fetches[index];
-      if (!fetch || seen.has(fetch)) return fail("fetch race members must be distinct owned fetch handles");
+      if (!fetch || seen.has(fetch)) return fail("fetch group members must be distinct owned fetch handles");
       seen.add(fetch);
       const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream;
-      if (typeof response !== "function" || typeof convert !== "function" || !closed) return fail("invalid fetch race member");
+      if (typeof response !== "function" || typeof convert !== "function" || !closed) return fail("invalid fetch group member");
       inputs.push({ fetch, response, closed, convert });
     }
     const bodies = new Set<ReadableStream<Uint8Array>>();
@@ -134,27 +171,35 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
       const converted = Reflect.apply(input.convert, input.fetch, []);
       if (converted.outcome !== "ok") throw converted;
       const body = converted.value as ReadableStream<Uint8Array>;
-      if (bodies.has(body) || Reflect.apply(LOCKED, body, [])) throw new Error("body already owned");
+      if (bodies.has(body) || Reflect.apply(LOCKED!, body, [])) throw new Error("body already owned");
       bodies.add(body);
-      const reader = Reflect.apply(GET_READER, body, []) as ReadableStreamDefaultReader<Uint8Array>;
+      const reader = Reflect.apply(GET_READER!, body, []) as ReadableStreamDefaultReader<Uint8Array>;
       // Releasing an unfinished lock rejects this promise, including on rollback.
-      void Promise.resolve(Reflect.apply(READER_CLOSED, reader, [])).catch(() => {});
+      void Promise.resolve(Reflect.apply(READER_CLOSED!, reader, [])).catch(() => {});
       members.push({ fetch: input.fetch, body, reader, response: () => Reflect.apply(input.response, input.fetch, []),
-        closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch race member completion rejected")) });
+        closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch group member completion rejected")) });
     }
   } catch {
-    for (const member of members) { try { Reflect.apply(RELEASE, member.reader, []); } catch { /* Already released. */ } }
-    return fail("fetch race setup refused: invalid, duplicate, or already consumed body");
+    for (const member of members) { try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ } }
+    return fail("fetch group setup refused: invalid, duplicate, or already consumed body");
   }
 
-  let resolveResult!: (outcome: Outcome<FetchResponseWinner>) => void;
-  const result = new Promise<Outcome<FetchResponseWinner>>((resolve) => { resolveResult = resolve; });
+  if (!members.length) {
+    const result = Promise.resolve(ok(Object.freeze([]) as readonly FetchResponseWinner[]));
+    const settlement = Promise.resolve(ok(undefined));
+    return ok(Object.freeze({ result, cancel(reason = "fetch join cancelled by caller") {
+      return typeof reason === "string" ? settlement : Promise.resolve(fail("fetch group cancellation reason must be a string"));
+    } }));
+  }
+  let resolveResult!: (outcome: Outcome<Selection>) => void;
+  const result = new Promise<Outcome<Selection>>((resolve) => { resolveResult = resolve; });
   const settlement = result.then((outcome): Outcome<void> => outcome.outcome === "ok" ? ok(undefined) : outcome);
   let decide!: () => void;
   const decided = new Promise<void>((resolve) => { decide = resolve; });
   let selected: { index: number; outcome: Outcome<BrowserFetchResponse> } | undefined;
   let stopped: Failure | undefined;
   let finished = false;
+  let readyCount = 0;
   const cleanupErrors = new Map<number, Failure>();
 
   function drain(index: number): Promise<Outcome<void>> {
@@ -165,14 +210,14 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
     member.draining = new Promise<Outcome<void>>((done) => { resolve = done; });
     void (async () => {
       let rejected = false;
-      try { await Reflect.apply(CANCEL!, member.reader, ["fetch race member retired"]); }
+      try { await Reflect.apply(CANCEL!, member.reader, ["fetch group member retired"]); }
       catch { rejected = true; }
       let terminal: Outcome<void>;
       try { terminal = await member.closed; }
-      catch { terminal = internal("fetch race member cleanup rejected"); }
+      catch { terminal = internal("fetch group member cleanup rejected"); }
       member.terminal = terminal;
       const outcome = rejected
-        ? terminal.outcome !== "ok" ? terminal : internal("fetch race cancellation or terminal publication refused")
+        ? terminal.outcome !== "ok" ? terminal : internal("fetch group cancellation or terminal publication refused")
         : terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal : ok(undefined);
       if (outcome.outcome !== "ok") {
         cleanupErrors.set(index, outcome);
@@ -190,10 +235,15 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
     for (let index = 0; index < members.length; index += 1) void drain(index);
   }
   function observe(index: number, outcome: Outcome<BrowserFetchResponse>) {
-    if (finished || stopped || selected) return;
-    selected = { index, outcome };
-    decide();
-    if (outcome.outcome !== "ok") stop(outcome);
+    if (finished || stopped || (!join && selected)) return;
+    if (outcome.outcome !== "ok") { stop(outcome); return; }
+    if (join) {
+      readyCount += 1;
+      if (readyCount === members.length) decide();
+    } else {
+      selected = { index, outcome };
+      decide();
+    }
   }
   function release() {
     for (const member of members) { try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ } }
@@ -203,8 +253,8 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
     const member = members[index];
     void member.closed.then((terminal) => {
       member.terminal = terminal;
-      if (terminal.outcome !== "ok" && !member.draining && (!selected || selected.index === index)) stop(terminal);
-    }, () => stop(internal("fetch race member completion rejected")));
+      if (terminal.outcome !== "ok" && !member.draining && (join || !selected || selected.index === index)) stop(terminal);
+    }, () => stop(internal("fetch group member completion rejected")));
   }
   for (let index = 0; index < members.length; index += 1) {
     const member = members[index];
@@ -213,33 +263,44 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
         const head = checked<BrowserFetchResponse>(outcome);
         member.head = head;
         observe(index, head);
-      }, () => observe(index, internal("fetch race response rejected")));
-    } catch { observe(index, internal("fetch race response threw")); }
+      }, () => observe(index, internal("fetch group response rejected")));
+    } catch { observe(index, internal("fetch group response threw")); }
   }
   void (async () => {
     await decided;
     const candidate = selected;
-    await Promise.all(members.map((_, index) => !stopped && candidate?.outcome.outcome === "ok" && index === candidate.index
+    const selectedIndexes = join ? members.map((_, index) => index)
+      : candidate?.outcome.outcome === "ok" ? [candidate.index] : [];
+    const keep = new Set(selectedIndexes);
+    await Promise.all(members.map((_, index) => !stopped && keep.has(index)
       ? Promise.resolve(ok(undefined)) : drain(index)));
-    const selectedFailure = candidate && members[candidate.index].terminal;
-    if (selectedFailure && selectedFailure.outcome !== "ok") stopped ??= selectedFailure;
-    if (stopped || cleanupErrors.size || !candidate || candidate.outcome.outcome !== "ok") {
+    for (const index of selectedIndexes) {
+      const terminal = members[index].terminal;
+      if (terminal && terminal.outcome !== "ok") stopped ??= terminal;
+    }
+    if (stopped || cleanupErrors.size || (!join && !selectedIndexes.length)) {
       await Promise.all(members.map((_, index) => drain(index)));
-      // Input-order precedence for multiple cleanup failures, never resolution order.
-      const cleanupFailure = [...cleanupErrors].sort(([a], [b]) => a - b)[0]?.[1];
+      // Never hide a cleanup panic behind an ordinary error or cancellation.
+      // Input order breaks same-severity ties, not completion timing.
+      const severity = (outcome: Failure) => outcome.outcome === "panicked" ? 3 : outcome.outcome === "err" ? 2 : 1;
+      const cleanupFailure = [...cleanupErrors].sort(([a, x], [b, y]) => severity(y) - severity(x) || a - b)[0]?.[1];
       finished = true;
       release();
-      resolveResult(cleanupFailure ?? stopped ?? internal("fetch race ended without a response"));
+      resolveResult(cleanupFailure ?? stopped ?? internal("fetch group ended without a response"));
     } else {
-      const winner = members[candidate.index];
+      const winners = selectedIndexes.map((index): FetchResponseWinner => {
+        const member = members[index];
+        const head = member.head as Extract<Outcome<BrowserFetchResponse>, { outcome: "ok" }>;
+        return Object.freeze({ index, response: head.value, fetch: member.fetch, body: member.body });
+      });
       finished = true;
       release();
-      resolveResult(ok(Object.freeze({ index: candidate.index, response: candidate.outcome.value, fetch: winner.fetch, body: winner.body })));
+      resolveResult(ok(join ? Object.freeze(winners) : winners[0]));
     }
   })();
-  return ok(Object.freeze({ result, cancel(reason = "fetch race cancelled by caller") {
-    if (typeof reason !== "string") return Promise.resolve(fail("fetch race cancellation reason must be a string"));
-    stop(cancellation(reason));
+  return ok(Object.freeze({ result, cancel(reason = join ? "fetch join cancelled by caller" : "fetch race cancelled by caller") {
+    if (typeof reason !== "string") return Promise.resolve(fail("fetch group cancellation reason must be a string"));
+    stop(cancellation(reason, join));
     return settlement;
   } }));
 }

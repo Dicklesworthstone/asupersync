@@ -54,6 +54,7 @@ async function fixture(t, options = {}) {
   const start = (extra = {}) => { const admitted = manager.start(scope, { url: `${origin}/${handles.length}`, ...extra }, null); assert.equal(admitted.outcome, "ok"); handles.push(admitted.value); return admitted.value; };
   t.after(async () => { for (const release of cleanup) release(); manager.closeScopes(new Set([scopeKey]), "test_cleanup"); await Promise.all(handles.map((handle) => handle.closed)); });
   return { start, calls, cleanup, manager, scopeKey, ...modules["fetch-combinators"].namespace,
+    join(list) { const admitted = modules["fetch-combinators"].namespace.joinFetchResponses(list); assert.equal(admitted.outcome, "ok"); return admitted.value; },
     race(list) { const admitted = modules["fetch-combinators"].namespace.raceFetchResponses(list); assert.equal(admitted.outcome, "ok"); return admitted.value; } };
 }
 function body(bytes = [1], counters = {}) {
@@ -200,7 +201,7 @@ for (const invalid of [null, 1, { outcome: "bogus" }, { outcome: "err", failure:
     const f = await fixture(t); const handle = f.start();
     const wrapped = { ...handle, response: () => Promise.resolve(invalid) };
     const result = await f.race([wrapped]).result;
-    assert.equal(result.outcome, "err"); assert.match(result.failure.message, /invalid fetch race outcome/);
+    assert.equal(result.outcome, "err"); assert.match(result.failure.message, /invalid fetch group outcome/);
     assert.equal((await handle.closed).outcome, "cancelled");
   });
 }
@@ -209,4 +210,117 @@ test("throwing response method is contained after ownership transfer", { timeout
   const result = await f.race([{ ...handle, response() { throw new Error("private payload"); } }]).result;
   assert.equal(result.outcome, "err"); assert.match(result.failure.message, /response threw/);
   assert.equal(result.failure.message.includes("private payload"), false); assert.equal(f.calls.join.length, 1);
+});
+
+test("join returns all headers in input order without reading any body", { timeout: 3000 }, async (t) => {
+  const delivered = [deferred(), deferred(), deferred()], counts = [{}, {}, {}];
+  const responses = counts.map((count, index) => new Response(body([index], count), { status: 200 + index }));
+  const f = await fixture(t, { fetch: (_url, _init, index) => delivered[index].promise });
+  f.cleanup.push(...delivered.map((item, index) => () => item.resolve(responses[index])));
+  const handles = [f.start(), f.start(), f.start()]; const joined = f.join(handles);
+  delivered[2].resolve(responses[2]); delivered[0].resolve(responses[0]); await pending(joined.result);
+  assert.equal(handles[0].toReadableStream().value.locked, true); delivered[1].resolve(responses[1]);
+  const result = await joined.result; assert.equal(result.outcome, "ok"); assert.equal(Object.isFrozen(result.value), true);
+  assert.deepEqual(Array.from(result.value, (item) => item.index), [0, 1, 2]); assert.deepEqual(counts.map((count) => count.pulls ?? 0), [0, 0, 0]);
+  assert.equal(f.calls.cancel.length, 0); assert.equal(f.calls.join.length, 0);
+  for (const item of result.value) { assert.equal(item.fetch, handles[item.index]); assert.equal(item.response.status, 200 + item.index); assert.deepEqual(Array.from(await new Response(item.body).bytes()), [item.index]); }
+  assert.equal(f.calls.join.length, 3);
+});
+test("join of no requests is a successful identity without native reader support", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, { globals: { ReadableStreamDefaultReader: undefined } }); const joined = f.join([]);
+  assert.equal((await joined.cancel()).outcome, "ok"); const result = await joined.result;
+  assert.equal(result.outcome, "ok"); assert.equal(result.value.length, 0); assert.equal(f.calls.fetch.length, 0);
+  assert.equal((await joined.cancel(null)).outcome, "err");
+});
+test("join cancellation before headers joins all owned tasks", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t); const joined = f.join([f.start(), f.start(), f.start()]);
+  const cancel = joined.cancel("cancel batch"); assert.equal(joined.cancel("ignored"), cancel);
+  const result = await joined.result; assert.equal(result.outcome, "cancelled"); assert.equal(result.cancellation.kind, "fetch_join_cancel");
+  assert.equal(result.cancellation.message, "cancel batch"); await cancel; assert.equal(f.calls.join.length, 3);
+});
+test("join fails fast on one request but waits for sibling cleanup", { timeout: 3000 }, async (t) => {
+  const gate = deferred(); let cancelled = 0;
+  const f = await fixture(t, { fetch: (_url, _init, index) => index === 1 ? Promise.reject(new Error("join-network-error"))
+    : new Response(new ReadableStream({ cancel() { cancelled += 1; return gate.promise; } })) }); f.cleanup.push(gate.resolve);
+  const joined = f.join([f.start(), f.start(), f.start()]); await pending(joined.result); assert.equal(cancelled, 2);
+  gate.resolve(); const result = await joined.result; assert.equal(result.outcome, "err"); assert.match(result.failure.message, /join-network-error/);
+  assert.equal(f.calls.join.length, 3);
+});
+test("join watches an already-ready body for failure while another header is parked", { timeout: 3000 }, async (t) => {
+  let control; const f = await fixture(t, { fetch: (_url, _init, index) => index ? undefined
+    : new Response(new ReadableStream({ start(controller) { control = controller; } })) });
+  const a = f.start(), b = f.start(); await a.response(); const joined = f.join([a, b]); await pending(joined.result);
+  control.error(new Error("ready-body-reset")); const result = await joined.result;
+  assert.equal(result.outcome, "err"); assert.match(result.failure.message, /ready-body-reset/); assert.equal(f.calls.fetch[1].init.signal.aborted, true);
+});
+test("join disposes a late response body before reporting another member's failure", { timeout: 3000 }, async (t) => {
+  const late = deferred(), gate = deferred(); let cancels = 0;
+  const response = new Response(new ReadableStream({ cancel() { cancels += 1; return gate.promise; } }));
+  const f = await fixture(t, { fetch: (_url, _init, index) => index ? late.promise : Promise.reject(new Error("early-error")) });
+  f.cleanup.push(() => late.resolve(response), gate.resolve); const joined = f.join([f.start(), f.start()]); await pending(joined.result);
+  late.resolve(response); await pending(joined.result); assert.equal(cancels, 1); gate.resolve(); assert.equal((await joined.result).outcome, "err");
+});
+test("join retains all bodies until every header is ready", { timeout: 3000 }, async (t) => {
+  const delivered = deferred(), count = {}; const last = new Response(null);
+  const f = await fixture(t, { fetch: (_url, _init, index) => index ? delivered.promise : new Response(body([5], count)) });
+  f.cleanup.push(() => delivered.resolve(last)); const a = f.start(), b = f.start(); const joined = f.join([a, b]);
+  await a.response(); await pending(joined.result); assert.equal(count.pulls ?? 0, 0); assert.equal(a.toReadableStream().value.locked, true);
+  delivered.resolve(last); const result = await joined.result; assert.equal(result.outcome, "ok");
+  assert.equal((await joined.cancel()).outcome, "ok"); assert.equal(count.cancels ?? 0, 0);
+  await result.value[0].body.cancel(); assert.equal((await a.closed).outcome, "cancelled");
+});
+test("join member deadline cancels another parked request", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t); const joined = f.join([f.start({ timeoutMs: 1 }), f.start()]); const result = await joined.result;
+  assert.equal(result.outcome, "cancelled"); assert.equal(result.cancellation.kind, "deadline"); assert.equal(f.calls.join.length, 2);
+});
+test("join scope teardown never leaves ready or pending requests behind", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, { fetch: (_url, _init, index) => index ? undefined : new Response(body()) });
+  const joined = f.join([f.start(), f.start()]); f.manager.closeScopes(new Set([f.scopeKey]), "scope_close");
+  assert.equal((await joined.result).outcome, "cancelled"); assert.equal(f.calls.fetch.every(({ init }) => init.signal.aborted), true);
+});
+test("joined bodies compose into a new race without new tasks or requests", { timeout: 3000 }, async (t) => {
+  const counts = [{}, {}]; const f = await fixture(t, { fetch: (_url, _init, index) => new Response(body([index], counts[index])) });
+  const joined = await f.join([f.start(), f.start()]).result; assert.equal(joined.outcome, "ok");
+  const won = await f.race(Array.from(joined.value, (item) => item.fetch)).result; assert.equal(won.outcome, "ok");
+  assert.equal(won.value.index, 0); assert.equal(counts[1].cancels, 1); assert.equal(f.calls.fetch.length, 2);
+  await new Response(won.value.body).bytes(); assert.equal(f.calls.join.length, 2);
+});
+test("join with one already-consumed prefix returns only the remaining bytes", { timeout: 3000 }, async (t) => {
+  let index = 0; const f = await fixture(t, { fetch: () => new Response(new ReadableStream({ pull(c) {
+    if (index < 2) c.enqueue(Uint8Array.of(++index)); else c.close();
+  } }, { highWaterMark: 0 })) }); const handle = f.start(); assert.deepEqual(Array.from((await handle.read()).value.value), [1]);
+  const joined = await f.join([handle]).result; assert.equal(joined.outcome, "ok");
+  assert.deepEqual(Array.from(await new Response(joined.value[0].body).bytes()), [2]);
+});
+test("join preserves HTTP error statuses as successfully joined headers", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, { fetch: (_url, _init, index) => new Response(null, { status: index ? 500 : 404 }) });
+  const joined = await f.join([f.start(), f.start()]).result; assert.equal(joined.outcome, "ok");
+  assert.deepEqual(Array.from(joined.value, (item) => item.response.status), [404, 500]);
+});
+test("join never hides a cleanup panic behind an earlier error", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, { join: (task) => task.toJSON().slot === 1 ? error("first error") : { outcome: "panicked", message: "cleanup panic" } });
+  const joined = f.join([f.start(), f.start()]); const result = await joined.cancel();
+  assert.equal(result.outcome, "panicked"); assert.equal(result.message, "cleanup panic");
+});
+test("join cancellation/publication refusal cannot publish a partial result", { timeout: 3000 }, async (t) => {
+  const f = await fixture(t, { fetch: (_url, _init, index) => index ? undefined : new Response(body()),
+    cancel: (request) => request.task.toJSON().slot === 2 ? error("join cancellation refused") : undefined });
+  const joined = f.join([f.start(), f.start()]); const result = await joined.cancel();
+  assert.equal(result.outcome, "err"); assert.match(result.failure.message, /join cancellation refused/); assert.equal(f.calls.join.length, 2);
+});
+test("join live HTTP headers overlap and both bodies remain independently consumable", { timeout: 5000 }, async (t) => {
+  const arrivals = []; let requests = 0;
+  const server = createServer((request, response) => {
+    requests += 1; arrivals.push({ request, response });
+    if (arrivals.length === 2) for (const { request: req, response: res } of arrivals) {
+      res.writeHead(200, { "content-type": "text/plain" }); res.flushHeaders();
+      setImmediate(() => res.end(`body:${req.url}`));
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(async () => { server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); });
+  const f = await fixture(t, { origin: `http://127.0.0.1:${server.address().port}`, fetch: (url, init) => fetch(url, init) });
+  const result = await f.join([f.start(), f.start()]).result; assert.equal(result.outcome, "ok");
+  assert.deepEqual(await Promise.all(Array.from(result.value, (item) => new Response(item.body).text())), ["body:/0", "body:/1"]);
+  assert.equal(requests, 2); assert.equal(f.calls.cancel.length, 0); assert.equal(f.calls.join.length, 2);
 });

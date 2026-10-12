@@ -1,4 +1,4 @@
-# Owned browser fetch response races
+# Owned browser fetch response races and joins
 
 `@asupersync/browser/concurrency` exposes `raceFetchResponses` over existing
 `FetchStreamHandle`s. It implements the design bible's select/cancel/drain rule
@@ -49,7 +49,8 @@ Losers are cancelled in parallel. Their initiating native cancellation promises
 and original fetch completion promises must settle before the winner transfers.
 A cancellation/publication refusal fails the whole group and retires the
 proposed winner. Failure of that winner during slow loser cleanup also prevents
-successful transfer. Multiple cleanup failures use input-order precedence.
+successful transfer. Cleanup failure precedence is panicked, error, then
+cancelled, with input order breaking ties at the same severity.
 
 `race.cancel(reason)` before transfer cancels every member, including a selected
 winner still waiting for loser cleanup. Repeated calls share one settlement
@@ -82,3 +83,46 @@ with Node 22.13 or later. Tests use the actual fetch manager and combinator with
 native streams, including a real loopback HTTP race and peer disconnection.
 The task ABI is explicitly doubled; these tests do not establish Rust/WASM
 integration, complete workspace health, or cross-browser network compatibility.
+
+## All-response joins
+
+`joinFetchResponses(handles)` waits for every response header, not the complete
+response bodies. It transfers an immutable array of `{ index, response, fetch,
+body }` entries in **input order** regardless of completion order. HTTP error
+statuses remain ordinary responses. It does not return a partially successful
+array: one network failure, cancellation, or ready-body error while another
+header is pending causes every member to be cancelled and drained first.
+
+```ts
+import { joinFetchResponses } from "@asupersync/browser/concurrency";
+
+// Both handles were already admitted through their explicit owning scopes.
+const admitted = joinFetchResponses([userRequest, permissionsRequest]);
+if (admitted.outcome !== "ok") {
+  await Promise.all([userRequest.cancel(), permissionsRequest.cancel()]);
+  throw new Error("join setup refused");
+}
+const joined = await admitted.value.result;
+if (joined.outcome === "ok") {
+  // Headers have joined. Consume or cancel EVERY returned body afterwards.
+  try {
+    const data = await Promise.all(joined.value.map(item => new Response(item.body).json()));
+    console.log(data);
+  } finally {
+    await Promise.all(joined.value.map(item => item.fetch.cancel()));
+    await Promise.all(joined.value.map(item => item.fetch.closed));
+  }
+}
+```
+
+An empty join succeeds immediately with a frozen empty array, requires no
+native reader support, and has inert cancellation. Nonempty joins share the
+race's 64-member cap, exclusive-reader transfer, setup-refusal responsibilities,
+no-read-ahead behavior, cleanup/publication refusal handling, and inability to
+force nonsettling hosts. Join cancellation uses the composite label
+`fetch_join_cancel`, not a new task. After a successful join, its cancellation
+method is inert; original scopes and each returned fetch still own cleanup.
+
+A joined handle can subsequently participate in a race, or a race winner can
+be joined with another handle, provided no consumer currently holds its native
+reader lock. These compositions do not issue another request or duplicate bytes.
