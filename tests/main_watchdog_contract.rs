@@ -878,6 +878,28 @@ fn a_quick_rch_transport_failure_is_retried_and_nothing_else_is() {
     );
 }
 
+/// A worker fault where only third-party crates failed is retried like a transport
+/// failure (rch_run); on 10-12 hz2 could not execute rustc for any dependency. A fault
+/// beside a failing crate of this repository is a real red and is not retried.
+#[test]
+fn a_worker_fault_is_recognised_only_when_no_crate_of_this_repository_failed() {
+    let no_rustc = "error: could not compile `tinystr` (lib)\n\nCaused by:\n  could not execute process `rustc --crate-name tinystr --edition=2021 /data/tmp/rch-cargo-cache-hz2/registry/src/x/tinystr-0.8.4/src/lib.rs` (never executed)\n\nCaused by:\n  No such file or directory (os error 2)\n  Remote command finished: exit=101 in 60000ms\n";
+    let ours = format!(
+        "   Compiling asupersync v0.6.0 (/data/tmp/rch/asupersync/x)\n{no_rustc}error[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib)\n"
+    );
+    let user = "   Compiling asupersync v0.6.0 (/data/tmp/rch/asupersync/x)\nerror[E0599]: no method named `frob` found\nerror: could not compile `asupersync` (lib)\n  Remote command finished: exit=101 in 60000ms\n";
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"is_worker_fault": [no_rustc, ours, user]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["is_worker_fault"],
+        json!([true, false, false]),
+        "{probed:#}"
+    );
+}
+
 /// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
 /// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
 /// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's

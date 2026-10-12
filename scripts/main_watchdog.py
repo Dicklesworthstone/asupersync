@@ -189,6 +189,15 @@ WORKER_FAULT_RE = re.compile(
 # A crate built from a local path ("Checking franken-kernel v0.1.0 (/…/franken_kernel)")
 # belongs to this repository; registry and git dependencies carry no absolute path.
 LOCAL_CRATE_RE = re.compile(r"^\s*(?:Compiling|Checking) (\S+) v\S+ \(/", re.MULTILINE)
+
+
+def is_worker_fault(clean: str) -> bool:
+    """A worker fault while only third-party crates failed: nothing of this repository ran."""
+    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
+    local_crates = set(LOCAL_CRATE_RE.findall(clean))
+    return bool(WORKER_FAULT_RE.search(clean)) and not any(
+        name.startswith("asupersync") or name in local_crates for name in failing_crates
+    )
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # The browser SDK's Node suites read the TypeScript sources through Node's own type
@@ -685,11 +694,7 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # dep-info fault can also stop cargo before any crate reports `could not compile`
     # (a syn build script on hz4, 2026-09-29, filed as false P0 bi2462.147.66): with no
     # failing crate at all, nothing of this repository ran either.
-    failing_crates = [match.group(1) for match in COULD_NOT_COMPILE_RE.finditer(clean)]
-    local_crates = set(LOCAL_CRATE_RE.findall(clean))
-    worker_fault = bool(WORKER_FAULT_RE.search(clean)) and not any(
-        name.startswith("asupersync") or name in local_crates for name in failing_crates
-    )
+    worker_fault = is_worker_fault(clean)
     fault_reason = (
         "the worker could not build a third-party dependency (missing registry files, "
         "an unexecutable rustc, a failed download, or a missing rustup target): "
@@ -1853,16 +1858,21 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
             proc = subprocess.run(argv, capture_output=True, text=True, env=env, check=False)
             text, code = proc.stdout + proc.stderr, proc.returncode
             admission = code == 103 and not REMOTE_EXIT_RE.search(text) and not DEPENDENCY_PREFLIGHT_RE.search(text)
+            clean = ANSI_RE.sub("", text)
+            # A worker fault (only third-party crates failed, e.g. an unexecutable rustc
+            # on hz2, 2026-10-12) is no evidence either: another try may land elsewhere.
+            fault = code != 0 and is_worker_fault(clean)
             transport = (
                 not admission
                 and transport_retries < TRANSPORT_RETRIES
-                and rch_transport_retryable(ANSI_RE.sub("", text), code, time.monotonic() - started)
+                and (rch_transport_retryable(clean, code, time.monotonic() - started) or fault)
             )
             if not (admission or transport):
                 break
             if transport:
                 transport_retries += 1
-                retried.append(f"[main-watchdog] rch transport failure before any remote result (exit {code}); retried\n")
+                kind = "worker fault" if fault else "rch transport failure before any remote result"
+                retried.append(f"[main-watchdog] {kind} (exit {code}); retried\n")
             subprocess.run(["sleep", str(admission_sleep)], check=False)
         text = "".join(retried) + text
         return text, code
@@ -3078,6 +3088,7 @@ def main(argv: list[str]) -> int:
                 rch_transport_retryable(case["text"], case["code"], case["elapsed"])
                 for case in probes.get("rch_transport_retryable", [])
             ],
+            "is_worker_fault": [is_worker_fault(text) for text in probes.get("is_worker_fault", [])],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
