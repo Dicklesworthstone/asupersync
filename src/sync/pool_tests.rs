@@ -5335,5 +5335,49 @@ mod tests {
             "drop_after_pool_close_destroys_resource_immediately_without_later_pool_call"
         );
     }
-}
 
+    /// Review r27-e8 of 8f90ca2f3 (myvrjv B-L1): a checked resource returned or
+    /// dropped after `close` is destroyed at once, as a plain `PooledResource`
+    /// is. `CheckedPooledResource::finish` bypassed that path and parked a
+    /// healthy return in the channel, still counted active, until a later pool
+    /// call. The lease outcome is unchanged: the explicit return commits and the
+    /// drop aborts.
+    #[test]
+    fn checked_resource_after_pool_close_is_destroyed_at_once_with_its_lease_settled() {
+        struct TrackDrop(Arc<std::sync::atomic::AtomicUsize>);
+        impl Drop for TrackDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::AcqRel);
+            }
+        }
+
+        let (lab, cx, handle) = checked_pool_fixture(2);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let factory_dropped = Arc::clone(&dropped);
+        let factory = move || {
+            let dropped = Arc::clone(&factory_dropped);
+            async move { Ok::<_, PoolError>(TrackDrop(dropped)) }
+        };
+        let pool = GenericPool::with_time_getter(
+            factory,
+            PoolConfig::with_max_size(2),
+            test_pool_time_now,
+        );
+        let returned = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        let dropped_later = futures_lite::future::block_on(pool.acquire_checked(&cx)).unwrap();
+        futures_lite::future::block_on(pool.close());
+        assert_eq!(dropped.load(Ordering::Acquire), 0, "both still held");
+
+        returned.return_to_pool();
+        assert_eq!(
+            dropped.load(Ordering::Acquire),
+            1,
+            "a checked return after close is destroyed without a later pool call"
+        );
+        drop(dropped_later);
+        assert_eq!(dropped.load(Ordering::Acquire), 2, "so is a checked drop");
+        let stats = pool.stats();
+        assert_eq!((stats.active, stats.idle), (0, 0));
+        finish_checked_pool_fixture(lab, &cx, handle, 1, 1);
+    }
+}

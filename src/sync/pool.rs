@@ -835,12 +835,19 @@ impl<R> CheckedPooledResource<R> {
         pooled.return_obligation.discharge();
         let mut resource = pooled.resource.take();
         let discard = discard || pooled.is_broken;
+        // After close a healthy return is destroyed here too, not parked in the
+        // return channel until some later pool call (br-asupersync-myvrjv L1, as
+        // PooledResource::return_inner does). The lease outcome is unchanged.
+        let pool_closed = pooled
+            .closed
+            .as_ref()
+            .is_some_and(|closed| closed.load(Ordering::Acquire));
         let mut panics = CheckedPoolCleanupPanics::new();
         let mut hold_duration = Duration::ZERO;
         panics.run(|| hold_duration = pooled.held_duration());
         // ZERO is used only if the injected clock panicked; that same panic
         // is propagated after cleanup. It is not a successful duration sample.
-        let message = if discard {
+        let message = if discard || pool_closed {
             PoolReturn::Discard { hold_duration }
         } else {
             PoolReturn::Return {
