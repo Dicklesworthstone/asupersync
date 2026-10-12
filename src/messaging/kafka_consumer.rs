@@ -2918,7 +2918,7 @@ mod tests {
             Some(&b"tail"[..]),
         ] {
             let mut record: BaseRecord<'_, [u8], [u8]> = BaseRecord::to(topic)
-                .key(b"key")
+                .key(&b"key"[..])
                 .partition(0)
                 .timestamp(1700000000000)
                 .headers(nullable_native_headers());
