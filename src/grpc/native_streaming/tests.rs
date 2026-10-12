@@ -283,6 +283,35 @@ fn malformed_and_unnegotiated_response_headers_fail_closed() {
     }
 }
 
+/// Review r27-e8 (br-asupersync-grpc-client-server-audit-jq0c7j): a
+/// trailers-only error that names an encoding this client never negotiated
+/// keeps its grpc-status; it used to fail INTERNAL "unnegotiated gRPC response
+/// compression" before grpc-status was read, losing the code retries key on.
+#[test]
+fn trailers_only_status_wins_over_an_unnegotiated_response_encoding() {
+    let headers = [
+        (":status", "200"),
+        ("content-type", "application/grpc"),
+        ("grpc-encoding", "gzip"),
+        ("grpc-status", "16"),
+    ];
+    let mut bytes = frame(4, 0, 0, &[]);
+    bytes.extend(header_block(&headers, true));
+    let wire = Wire::new(bytes);
+    let cx = context(&Arc::new(VirtualClock::new()));
+    let code = match complete(channel().server_streaming_on(
+        &cx,
+        ScriptIo(Arc::clone(&wire)),
+        "/s/M",
+        Request::new(Bytes::new()),
+        IdentityCodec,
+    )) {
+        Ok(mut client) => complete(client.message()).unwrap_err().code(),
+        Err(status) => status.code(),
+    };
+    assert_eq!(code, Code::Unauthenticated);
+}
+
 #[test]
 fn unnegotiated_response_compression_maps_to_internal_error() {
     let headers = vec![(":status", "200"), ("content-type", "application/grpc"), ("grpc-encoding", "gzip")];

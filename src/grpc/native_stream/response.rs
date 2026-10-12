@@ -142,7 +142,9 @@ impl ResponseHead {
             } else if !content_type.as_deref().is_some_and(valid_content_type) {
                 return Err(Status::internal("response is not application/grpc"));
             }
-            if let Some(value) = &encoding {
+            // A trailers-only response carries no message, so an encoding this
+            // client cannot decode is moot: its grpc-status is the result.
+            if let Some(value) = encoding.as_ref().filter(|_| !end_stream) {
                 if value != "identity" && !(value == "gzip" && self.accept_gzip) {
                     return Err(Status::internal("unsupported gRPC response compression"));
                 }
@@ -302,5 +304,19 @@ mod tests {
         let err = state.headers(headers, false).unwrap_err();
         assert_eq!(err.code(), Code::Internal);
         assert_eq!(err.message(), "unsupported gRPC response compression");
+    }
+
+    /// Review r27-e8 (br-asupersync-grpc-client-server-audit-jq0c7j): a
+    /// trailers-only error that names an encoding this client does not accept
+    /// keeps its grpc-status (UNAUTHENTICATED here); it used to fail INTERNAL
+    /// "unsupported gRPC response compression" before grpc-status was read.
+    #[test]
+    fn trailers_only_status_wins_over_an_unaccepted_response_encoding() {
+        let mut state = ResponseHead::new(1024, false);
+        let mut headers = head();
+        headers.push(Header::new("grpc-encoding", "deflate"));
+        headers.push(Header::new("grpc-status", "16"));
+        state.headers(headers, true).unwrap();
+        assert_eq!(state.terminal.unwrap().code(), Code::Unauthenticated);
     }
 }

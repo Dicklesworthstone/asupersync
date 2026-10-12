@@ -505,7 +505,9 @@ impl ResponseState {
             if media != "application/grpc" && media.strip_prefix("application/grpc+").is_none_or(|suffix| suffix.is_empty()) {
                 return Err(Status::internal("response is not native gRPC"));
             }
-            if let Some(encoding) = unique(&headers, "grpc-encoding")? {
+            // A trailers-only response carries no message, so an encoding this
+            // client cannot decode is moot: its grpc-status is the result.
+            if let Some(encoding) = unique(&headers, "grpc-encoding")?.filter(|_| !end_stream) {
                 let selected = CompressionEncoding::from_header_value(encoding)
                     .ok_or_else(|| Status::internal("unsupported gRPC response compression"))?;
                 if selected != CompressionEncoding::Identity && !self.accepted.contains(&selected) {
