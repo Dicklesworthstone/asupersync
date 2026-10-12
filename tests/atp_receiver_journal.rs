@@ -40,12 +40,22 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker, ready};
 use std::thread;
 use std::time::{Duration, Instant};
 
 const WAIT: Duration = Duration::from_secs(60);
+
+// The journal and data locks are flock(2), which belongs to the open file
+// description. A sibling test's Command::spawn copies every open lock fd into
+// its child until the child executes, so a lock this test just released could
+// still look held (WouldBlock on reopen). Tests run one at a time so each exact
+// lock oracle sees only its own owners (the jfnj30 class).
+fn exclusive() -> MutexGuard<'static, ()> {
+    static SERIAL: Mutex<()> = Mutex::new(());
+    SERIAL.lock().unwrap_or_else(PoisonError::into_inner)
+}
 const DATA: &[u8] = b"abcdefghijklmnop";
 fn fixture() -> Value {
     serde_json::from_str(include_str!("fixtures/atp_native_auth_identities.json")).unwrap()
@@ -571,6 +581,7 @@ fn report_json(report: &ResumeReport) -> Value {
 
 #[test]
 fn receiver_journal_process_worker() {
+    let _exclusive = exclusive();
     let Ok(mode) = std::env::var("ASUPERSYNC_RECEIVER_JOURNAL_CASE") else {
         return;
     };
@@ -711,6 +722,7 @@ fn receiver_journal_process_worker() {
 
 #[test]
 fn killed_receivers_restore_acknowledged_and_partially_written_epochs_without_duplicate_bytes() {
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         for partial in [false, true] {
             let root = directory();
@@ -793,6 +805,7 @@ fn killed_receivers_restore_acknowledged_and_partially_written_epochs_without_du
 
 #[test]
 fn explicitly_resolved_file_commit_recovers_only_proof_in_a_new_receiver_process() {
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         let root = directory();
         let journal = root.join("receiver.wal");
@@ -861,6 +874,7 @@ fn explicitly_resolved_file_commit_recovers_only_proof_in_a_new_receiver_process
 
 #[test]
 fn corrupt_data_wrong_client_and_uncertain_commit_are_refused_before_restored_listening() {
+    let _exclusive = exclusive();
     for case in ["prefix", "extra", "client", "unresolved"] {
         let root = directory();
         let journal = root.join("receiver.wal");
@@ -918,6 +932,7 @@ fn corrupt_data_wrong_client_and_uncertain_commit_are_refused_before_restored_li
 
 #[test]
 fn persistent_snapshot_exhaustion_withholds_epoch_write_and_cannot_reset_on_reopen() {
+    let _exclusive = exclusive();
     let root = directory();
     let journal = root.join("receiver.wal");
     let data = root.join("receiver.data");
@@ -948,6 +963,7 @@ fn persistent_snapshot_exhaustion_withholds_epoch_write_and_cannot_reset_on_reop
 
 #[test]
 fn public_native_sender_and_journaled_receiver_finish_nonempty_and_empty_files() {
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         for content in [DATA, b"".as_slice()] {
             let root = directory();
@@ -1013,6 +1029,7 @@ fn public_native_sender_and_journaled_receiver_finish_nonempty_and_empty_files()
 #[test]
 #[allow(clippy::too_many_lines)]
 fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         for compact in [false, true] {
             for snapshots in [4, 5] {
@@ -1116,6 +1133,7 @@ fn native_finalization_requires_capacity_for_the_durable_terminal_record() {
 #[test]
 fn compact_journal_reuses_slots_across_native_partial_kill_and_proof_only_restart() {
     const CONTENT: &[u8] = b"abcdefghijklmnopqrstuvwxyz012345";
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         let root = directory();
         let journal = root.join("receiver.wal");
@@ -1203,6 +1221,7 @@ fn compact_journal_reuses_slots_across_native_partial_kill_and_proof_only_restar
 
 #[test]
 fn compact_native_file_transfer_exceeds_its_wal_budget_and_reopens_exact_content() {
+    let _exclusive = exclusive();
     for workers in [1, 2] {
         let root = directory();
         let journal = root.join("receiver.wal");
