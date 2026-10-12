@@ -191,6 +191,31 @@ test("a late response and slow host cleanup cannot be left behind by cancellatio
   assert.equal((await stop).outcome, "cancelled"); assert.equal(f.calls.fetch.length, 4);
 });
 
+test("a promise-returning scope is refused and whatever it admits is retired before the result", { timeout: 3000 }, async t => {
+  const f = await fixture(t); const scope = { async fetch(request) { return f.scope.fetch(request); } };
+  const result = await f.mapFetches(scope, f.requests(3), () => assert.fail("no consumer runs"), { concurrency: 2 }).value.result;
+  assert.equal(result.outcome, "err"); assert.match(result.failure.message, /synchronously/); assert.equal(Object.isFrozen(result), true);
+  assert.equal(f.handles.length, 1); assert.equal(f.calls.join.length, 1);
+});
+test("a rejecting scope promise settles result and cancel with Outcomes", { timeout: 3000 }, async t => {
+  const f = await fixture(t); const batch = f.mapFetches({ fetch() { return Promise.reject(new Error("scope down")); } }, f.requests(2), () => assert.fail("no consumer runs")).value;
+  const result = await batch.result; assert.equal(result.outcome, "err"); assert.equal((await batch.cancel("after")).outcome, "err"); assert.equal(f.calls.fetch.length, 0);
+});
+test("a non-Outcome admission fails closed with a frozen internal failure", { timeout: 3000 }, async t => {
+  const f = await fixture(t); const result = await f.mapFetches({ fetch() { return 42; } }, f.requests(2), () => assert.fail("no consumer runs")).value.result;
+  assert.equal(result.outcome, "err"); assert.equal(result.failure.code, "internal_failure"); assert.equal(Object.isFrozen(result), true);
+});
+test("a malformed terminal receipt is not a successful member", { timeout: 3000 }, async t => {
+  const f = await fixture(t);
+  const scope = { fetch(request) {
+    const admitted = f.scope.fetch(request); if (admitted.outcome !== "ok") return admitted; const handle = admitted.value;
+    return { outcome: "ok", value: { response: () => handle.response(), toReadableStream: () => handle.toReadableStream(), cancel: reason => handle.cancel(reason),
+      closed: handle.closed.then(() => ({ outcome: "unknown" })) } };
+  } };
+  const result = await f.mapFetches(scope, f.requests(2), async item => Array.from(await new Response(item.body).bytes()), { concurrency: 1 }).value.result;
+  assert.equal(result.outcome, "err"); assert.equal(result.failure.code, "internal_failure"); assert.equal(f.calls.join.length, f.handles.length);
+});
+
 async function serverFixture(t, listener) {
   const server = createServer(listener); await new Promise((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
   t.after(async () => { server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); });

@@ -43,6 +43,49 @@ const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 
 function streamError(outcome: Failure): Error {
   return Object.defineProperty(new Error("owned fetch batch stopped"), "cause", { value: outcome });
 }
+/** Copy a scope- or handle-supplied Outcome; a malformed envelope fails closed. */
+function checked<T>(value: unknown): Outcome<T> {
+  try {
+    if (!value || typeof value !== "object") return failure("invalid fetch batch outcome", "internal_failure");
+    const outcome = value as Outcome<T>;
+    switch (outcome.outcome) {
+      case "ok": return ok(outcome.value);
+      case "err": {
+        const { code, recoverability, message } = outcome.failure;
+        if (["capability_denied", "invalid_handle", "decode_failure", "compatibility_rejected", "internal_failure"].includes(code)
+            && ["transient", "permanent", "unknown"].includes(recoverability) && typeof message === "string") {
+          return Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability, message }) });
+        }
+        break;
+      }
+      case "panicked":
+        if (typeof outcome.message === "string") return Object.freeze({ outcome: "panicked", message: outcome.message });
+        break;
+      case "cancelled": {
+        const { kind, phase, origin_region, origin_task, timestamp_nanos, message, truncated } = outcome.cancellation;
+        if (typeof kind === "string" && ["requested", "cancelling", "finalizing", "completed"].includes(phase)
+            && typeof origin_region === "string" && (origin_task === null || typeof origin_task === "string")
+            && (typeof timestamp_nanos === "bigint" || typeof timestamp_nanos === "number" && Number.isFinite(timestamp_nanos))
+            && (message === null || typeof message === "string") && typeof truncated === "boolean") {
+          return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
+            kind, phase, origin_region, origin_task, timestamp_nanos, message, truncated,
+          }) });
+        }
+        break;
+      }
+    }
+  } catch { /* Malformed envelopes fail closed. */ }
+  return failure("invalid fetch batch outcome", "internal_failure");
+}
+function thenable(value: unknown): boolean {
+  return (typeof value === "object" && value !== null || typeof value === "function")
+    && typeof (value as { then?: unknown }).then === "function";
+}
+/** A handle's terminal Outcome, checked; a rejected or malformed publication is a failure. */
+function closedOf(fetch: FetchStreamHandle): Promise<Outcome<void>> {
+  return Promise.resolve(fetch.closed).then((value) => checked<void>(value),
+    () => failure("fetch batch terminal publication rejected", "internal_failure"));
+}
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });
@@ -60,6 +103,8 @@ const ABORT = CONTROLLER?.prototype.abort;
 interface Member {
   index: number;
   ready: ReturnType<typeof deferred<void>>;
+  /** What a refused promise-returning scope admits, retired by drain. */
+  adopted?: Promise<Outcome<FetchStreamHandle>>;
   fetch?: FetchStreamHandle;
   closed?: Promise<Outcome<void>>;
   reader?: ReadableStreamDefaultReader<Uint8Array>;
@@ -140,11 +185,15 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
     // admission synchronously reenters cancel before returning its fetch.
     void (async () => {
       await member.ready.promise;
+      if (member.adopted) {
+        const adopted = await member.adopted;
+        if (adopted.outcome === "ok") { member.fetch = adopted.value; member.closed = closedOf(adopted.value); }
+      }
       let refused = false;
       try {
         if (member.reader) await Reflect.apply(CANCEL!, member.reader, ["fetch batch member retired"]);
         else if (member.fetch) {
-          const receipt = await member.fetch.cancel("fetch batch member retired");
+          const receipt = checked<void>(await member.fetch.cancel("fetch batch member retired"));
           refused = receipt.outcome === "err" || receipt.outcome === "panicked";
         }
       } catch { refused = true; }
@@ -211,21 +260,30 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
       let value!: T, consumed = false;
       try {
         try {
-          const admitted = Reflect.apply(start, scope, [inputs[index]]) as Outcome<FetchStreamHandle>;
+          const raw: unknown = Reflect.apply(start, scope, [inputs[index]]);
           inputs[index] = undefined as unknown as BrowserFetchOptions;
+          if (thenable(raw)) {
+            // A later handle would bypass the admission fence. Refuse it, but
+            // keep ownership: drain retires whatever the promise admits.
+            member.adopted = Promise.resolve(raw).then((value) => checked<FetchStreamHandle>(value),
+              () => failure("fetch batch scope admission rejected", "internal_failure"));
+            stop(failure("fetch batch scope must return its admission Outcome synchronously"));
+            continue;
+          }
+          const admitted = checked<FetchStreamHandle>(raw);
           if (admitted.outcome !== "ok") { stop(admitted); continue; }
           member.fetch = admitted.value;
-          member.closed = Promise.resolve(member.fetch.closed);
+          member.closed = closedOf(member.fetch);
           void member.closed.then((terminal) => {
             if (!member.retiring && terminal.outcome !== "ok") stop(terminal);
-          }, () => stop(failure("fetch batch terminal publication rejected", "internal_failure")));
-          const converted = member.fetch.toReadableStream();
+          });
+          const converted = checked<ReadableStream<Uint8Array>>(member.fetch.toReadableStream());
           if (converted.outcome !== "ok") { stop(converted); continue; }
           member.reader = Reflect.apply(GET_READER!, converted.value, []) as ReadableStreamDefaultReader<Uint8Array>;
           void Promise.resolve(Reflect.apply(READER_CLOSED!, member.reader, [])).catch(() => {});
         } finally { member.ready.resolve(); }
         if (stopped) continue;
-        const head = await member.fetch!.response();
+        const head = checked<BrowserFetchResponse>(await member.fetch!.response());
         if (stopped) continue;
         if (head.outcome !== "ok") { stop(head); continue; }
         const item = Object.freeze({ index, response: head.value, body: body(member), signal: member.controller.signal });

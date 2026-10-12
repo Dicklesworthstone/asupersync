@@ -69,6 +69,14 @@ cancellation; the first selected consumer panic is retained over non-panic
 cleanup failures. Same-severity cleanup ties use input order. This composite
 Outcome does not rewrite the existing fetch tasks' own terminal outcomes.
 
+The scope's `fetch` must return its admission Outcome synchronously, as the
+SDK Scope does. A promise, such as an `async` adapter's, is refused and fails
+the batch; whatever that promise later admits is still cancelled and joined
+before `result` settles. A malformed Outcome from the scope or from a fetch
+handle (response, stream conversion, cancellation receipt or terminal
+publication) fails closed as `internal_failure`. `result` and `cancel()` never
+reject.
+
 ## Resource and ownership boundaries
 
 The array is bounded to 100,000 requests and is snapshotted during setup.
