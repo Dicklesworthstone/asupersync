@@ -505,7 +505,14 @@ pub(crate) fn parse_http_retry_after_at(
     }
 
     let target_seconds = parse_http_date_unix_seconds(value)?;
-    let now_seconds = system_time_unix_seconds(now);
+    // An HTTP-date Retry-After names an instant on the server's clock. When
+    // the response carries that clock's Date, measure against it: under a Cx
+    // the local `now` is runtime time, not UTC, and a local clock may be skewed.
+    let now_seconds = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("date"))
+        .and_then(|(_, date)| parse_http_date_unix_seconds(date.trim()))
+        .unwrap_or_else(|| system_time_unix_seconds(now));
     if target_seconds <= now_seconds {
         return Some(std::time::Duration::ZERO);
     }
@@ -1100,6 +1107,44 @@ mod tests {
         assert_eq!(
             parse_http_retry_after_at(&malformed_headers, std::time::UNIX_EPOCH),
             None
+        );
+    }
+
+    /// Under a Cx the local "now" is runtime time (1970 plus uptime), which
+    /// turned every HTTP-date Retry-After into decades and so into the
+    /// exporter's maximum backoff. The response's own Date is the server's
+    /// clock, the one the Retry-After instant is on.
+    #[test]
+    fn retry_after_http_date_is_measured_against_the_response_date() {
+        let runtime_now = std::time::UNIX_EPOCH + std::time::Duration::from_secs(300);
+        let with_date = |date: &str| {
+            vec![
+                ("Date".to_string(), date.to_string()),
+                (
+                    "Retry-After".to_string(),
+                    "Wed, 21 Oct 2015 07:28:00 GMT".to_string(),
+                ),
+            ]
+        };
+        assert_eq!(
+            parse_http_retry_after_at(&with_date("Wed, 21 Oct 2015 07:27:58 GMT"), runtime_now),
+            Some(std::time::Duration::from_secs(2))
+        );
+        assert_eq!(
+            parse_http_retry_after_at(&with_date("Wed, 21 Oct 2015 07:29:00 GMT"), runtime_now),
+            Some(std::time::Duration::ZERO)
+        );
+        // An unparseable Date falls back to the caller's clock.
+        let one_minute_before = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs(
+                u64::try_from(
+                    unix_seconds_from_utc(2015, 10, 21, 7, 27, 0).expect("valid fixed test time"),
+                )
+                .expect("post-epoch time"),
+            );
+        assert_eq!(
+            parse_http_retry_after_at(&with_date("yesterday"), one_minute_before),
+            Some(std::time::Duration::from_secs(60))
         );
     }
 
