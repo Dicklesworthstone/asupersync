@@ -95,6 +95,8 @@ const MAX_TOKEN_CAVEATS: usize = 64;
 const PROTECTED_VID_KEY_DOMAIN: &[u8] = b"asupersync-macaroon-protected-vid-key-v1\0";
 #[cfg(not(target_arch = "wasm32"))]
 const PROTECTED_VID_AAD_DOMAIN: &[u8] = b"asupersync-macaroon-protected-vid-aad-v1\0";
+#[cfg(not(target_arch = "wasm32"))]
+const PROTECTED_VID_NONCE_DOMAIN: &[u8] = b"asupersync-macaroon-protected-vid-nonce-v1\0";
 
 // ---------------------------------------------------------------------------
 // CaveatPredicate
@@ -868,11 +870,16 @@ impl MacaroonToken {
     /// Discharges are still minted with [`Self::mint`] and bound to the final
     /// authorizing token with [`Self::bind_for_request`].
     ///
-    /// `nonce` must be unique for this prefix signature, including across
-    /// clones, processes, and restarts. Use 24 fresh CSPRNG bytes, supplied by
-    /// the caller's explicit entropy capability. Deterministic test entropy,
-    /// clocks, task IDs, and reusing a nonce after cloning are not production
-    /// nonce sources. This method performs no ambient entropy or I/O.
+    /// `nonce` should be 24 fresh CSPRNG bytes from the caller's explicit
+    /// entropy capability; deterministic test entropy, clocks and task IDs are
+    /// not production nonce sources. It is not used as the cipher nonce
+    /// directly: the cipher nonce is an HMAC, under a key derived from the
+    /// chain signature, of `nonce`, the caveat key and the authenticated
+    /// identifier, and the VID carries it. A repeated `nonce` (a cloned
+    /// prefix, a restarted counter) therefore never repeats the keystream for
+    /// a different caveat key or identifier, so one discharge authority cannot
+    /// recover another's caveat key from the two VIDs; repeating all three
+    /// yields an identical VID. This method performs no ambient entropy or I/O.
     ///
     /// Use `verify_with_protected_discharges_for_identifier` at the native
     /// authorization boundary to reject legacy envelopes at every depth.
@@ -1891,7 +1898,20 @@ fn seal_protected_caveat_key(
     let cipher = XChaCha20Poly1305::new_from_slice(key.as_bytes())
         .expect("derived wrapping key has the fixed 32-byte size");
     let associated = protected_vid_aad(identifier).ok_or(ProtectedCaveatError::WireLimit)?;
-    let cipher_nonce = XNonce::try_from(nonce.as_slice()).expect("fixed 24-byte nonce");
+    // Synthetic nonce (SIV style): the caller's nonce alone would repeat the
+    // keystream whenever two caveat keys were sealed under one prefix with
+    // the same nonce, and XORing the two VIDs with one known key reveals the
+    // other. Binding the key and identifier in removes that.
+    let nonce_key = hmac_compute(signature_key, PROTECTED_VID_NONCE_DOMAIN);
+    let mut nonce_input = Zeroizing::new(Vec::with_capacity(
+        PROTECTED_VID_NONCE_SIZE + AUTH_KEY_SIZE + associated.len(),
+    ));
+    nonce_input.extend_from_slice(nonce);
+    nonce_input.extend_from_slice(caveat_key.as_bytes());
+    nonce_input.extend_from_slice(&associated);
+    let synthetic = hmac_compute(&nonce_key, &nonce_input);
+    let sealed_nonce = &synthetic.as_bytes()[..PROTECTED_VID_NONCE_SIZE];
+    let cipher_nonce = XNonce::try_from(sealed_nonce).expect("fixed 24-byte nonce");
     let mut ciphertext = Zeroizing::new(*caveat_key.as_bytes());
     let tag = cipher
         .encrypt_inout_detached(&cipher_nonce, &associated, ciphertext.as_mut_slice().into())
@@ -1899,7 +1919,7 @@ fn seal_protected_caveat_key(
 
     let mut vid = Vec::with_capacity(PROTECTED_VID_SIZE);
     vid.push(PROTECTED_VID_MARKER);
-    vid.extend_from_slice(nonce);
+    vid.extend_from_slice(sealed_nonce);
     vid.extend_from_slice(ciphertext.as_slice());
     vid.extend_from_slice(&tag);
     Ok(vid)
@@ -2805,6 +2825,9 @@ mod tests {
     fn protected_third_party_matches_independent_libsodium_fixture_and_round_trips() {
         // asupersync-s45073 H2: fixture computed independently with Python's
         // hmac/hashlib and libsodium crypto_aead_xchacha20poly1305_ietf_encrypt.
+        // The cipher nonce is HMAC(HMAC(prefix_sig, nonce domain), caller
+        // nonce || caveat key || AAD)[..24] (su3b6m B3 M1); the same model
+        // reproduces the earlier caller-nonce bytes exactly.
         // Fixed keys/nonces are test data, never a production entropy recipe.
         let root_key = AuthKey::from_bytes(std::array::from_fn(|i| u8::try_from(i).unwrap()))
             .expect("fixture root key");
@@ -2825,20 +2848,20 @@ mod tests {
         assert_eq!(
             vid.as_slice(),
             &[
-                0xa1, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c,
-                0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x3a, 0x58, 0x7b,
-                0x8b, 0x2c, 0x1b, 0x34, 0x1f, 0xc2, 0x16, 0x2c, 0x8d, 0xf0, 0xe5, 0x97, 0xf0, 0xad,
-                0xff, 0xf9, 0x34, 0x47, 0xc1, 0xfe, 0x32, 0xd9, 0x9b, 0x25, 0x16, 0x69, 0xa7, 0x7e,
-                0x2f, 0x7d, 0xe4, 0xb3, 0x31, 0x44, 0x21, 0x3e, 0x5a, 0xb0, 0x20, 0xb6, 0x39, 0x0e,
-                0xc4, 0xde, 0x67,
+                0xa1, 0xd8, 0xcb, 0x45, 0x1b, 0xd4, 0x60, 0xe1, 0xb6, 0xf7, 0x5d, 0x13, 0x08, 0x5b,
+                0x5a, 0xd8, 0x68, 0x48, 0x4b, 0x08, 0xaa, 0xd2, 0x56, 0x63, 0x3f, 0x98, 0xf1, 0x7a,
+                0x94, 0x49, 0x97, 0xd4, 0x5f, 0xa7, 0x80, 0xef, 0x37, 0x7d, 0x26, 0x4f, 0xa2, 0xee,
+                0x37, 0xe5, 0x3a, 0x56, 0x99, 0x2a, 0xa0, 0x05, 0xc3, 0x4f, 0xe2, 0x20, 0x6d, 0x20,
+                0x5c, 0x0b, 0xda, 0xd3, 0xb8, 0x6b, 0xa0, 0xba, 0xcf, 0xbd, 0xc5, 0x16, 0xe9, 0x8b,
+                0x07, 0x89, 0xa3,
             ]
         );
         assert_eq!(
             token.signature().as_bytes(),
             &[
-                0xed, 0x28, 0x1d, 0x06, 0x78, 0x3a, 0x48, 0x8f, 0x18, 0xc7, 0x5e, 0x60, 0x12, 0x4b,
-                0x0c, 0xf0, 0x58, 0x88, 0xd1, 0x04, 0xc6, 0x6d, 0x86, 0x00, 0x71, 0x19, 0xf4, 0x1e,
-                0xa3, 0xbe, 0x7a, 0x24,
+                0x11, 0x85, 0xb2, 0x0e, 0xf3, 0x8b, 0x37, 0xd2, 0x91, 0xd6, 0xb1, 0x49, 0x9d, 0xe2,
+                0x5d, 0xad, 0xe8, 0x1b, 0x10, 0xe8, 0x7a, 0x64, 0xee, 0x74, 0xfa, 0xcd, 0xa1, 0x7a,
+                0x52, 0xc4, 0x35, 0x86,
             ]
         );
 
@@ -2904,6 +2927,39 @@ mod tests {
                 Err(VerificationError::CaveatFailed { .. })
             ));
         }
+    }
+
+    /// su3b6m B3 M1: one caller nonce reused for two discharge authorities on
+    /// clones of one prefix (or a counter reset by a restart) must not repeat
+    /// the keystream, or authority A recovers B's caveat key from the VIDs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn protected_third_party_repeated_caller_nonce_never_repeats_the_keystream() {
+        let prefix = MacaroonToken::mint(&test_root_key(), "cap", "service");
+        let key_a = AuthKey::from_seed(930);
+        let key_b = AuthKey::from_seed(931);
+        let seal = |key: &AuthKey, identifier: &str| {
+            let token = prefix
+                .clone()
+                .add_protected_third_party_caveat("authority", identifier, key, [7; 24])
+                .expect("protected issuance");
+            let Caveat::ThirdParty { vid, .. } = &token.caveats[0] else {
+                panic!("expected protected caveat");
+            };
+            vid.clone()
+        };
+        let vid_a = seal(&key_a, "approved");
+        let vid_b = seal(&key_b, "approved");
+        let vid_a_other = seal(&key_a, "audited");
+
+        // Authority A knows key_a and sees both VIDs.
+        let recovered = xor_pad(&xor_pad(&vid_a[25..57], &vid_b[25..57]), key_a.as_bytes());
+        assert_ne!(recovered.as_slice(), key_b.as_bytes());
+        assert_ne!(vid_a[1..25], vid_b[1..25]);
+        assert_ne!(vid_a[1..25], vid_a_other[1..25]);
+        assert_ne!(vid_a[1..25], [7_u8; 24]);
+        // Sealing is deterministic: the same inputs give the same VID.
+        assert_eq!(seal(&key_a, "approved"), vid_a);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
