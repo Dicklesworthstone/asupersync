@@ -3755,9 +3755,9 @@ impl<Caps> Cx<Caps> {
         };
 
         // Both an unused prepared clone and the previous slot owner can invoke
-        // arbitrary destruction callbacks. Retire them only after unlock.
-        drop(retired_waker);
-        drop(incoming);
+        // arbitrary destruction callbacks: recycling retires them after unlock.
+        self.recycle_cancel_waker(retired_waker);
+        self.recycle_cancel_waker(incoming);
         token
     }
 
@@ -9315,6 +9315,60 @@ mod tests {
             "a target another owner still holds is not pooled"
         );
         drop(held);
+    }
+
+    /// asupersync-445rt7 follow-up: a repoll with a different Waker hands the
+    /// target it replaces back to the pool, so the next observer reuses that
+    /// allocation, and the repolled observer is woken through its new Waker.
+    #[test]
+    fn a_waker_change_returns_the_replaced_wake_target_to_the_pool() {
+        struct CountWake(AtomicUsize);
+        impl std::task::Wake for CountWake {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let target_at = |cx: &Cx<cap::None>, index: usize| {
+            Arc::as_ptr(&cx.inner.read().cancel_waker_registrations[index].target)
+        };
+
+        let cx = Cx::detached_cancel_context();
+        let mut noop = std::task::Context::from_waker(Waker::noop());
+        let counter = Arc::new(CountWake(AtomicUsize::new(0)));
+        let counting = Waker::from(Arc::clone(&counter));
+        let mut task = std::task::Context::from_waker(&counting);
+
+        let mut first = std::pin::pin!(cx.cancelled());
+        assert!(first.as_mut().poll(&mut noop).is_pending());
+        let replaced = target_at(&cx, 0);
+        assert!(first.as_mut().poll(&mut task).is_pending());
+        assert_ne!(
+            target_at(&cx, 0),
+            replaced,
+            "a new Waker gets its own target"
+        );
+        assert_eq!(
+            cx.inner.read().cancel_waker_pool.len(),
+            1,
+            "the replaced target is pooled"
+        );
+
+        let mut second = std::pin::pin!(cx.cancelled());
+        assert!(second.as_mut().poll(&mut noop).is_pending());
+        assert_eq!(target_at(&cx, 1), replaced, "the next observer reuses it");
+        assert!(cx.inner.read().cancel_waker_pool.is_empty());
+
+        cx.cancel_fast(CancelKind::User);
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            1,
+            "the repolled observer is woken through its new Waker"
+        );
+        assert!(first.as_mut().poll(&mut task).is_ready());
+        assert!(second.as_mut().poll(&mut noop).is_ready());
     }
 
     /// br-asupersync-93zkbz: inside a spawned task, `Cx::current()` is the
