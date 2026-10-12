@@ -124,6 +124,7 @@ pub mod select;
 pub mod stream_collect;
 pub mod stream_control;
 pub mod stream_send;
+mod task_quorum;
 pub mod timeout;
 #[cfg(test)]
 pub mod timeout_metamorphic;
