@@ -1,8 +1,8 @@
 //! Incremental frame parsing with bounded block and sliding-history storage.
 
+use crate::frame::decode_compressed_block;
 use crate::huffman::HuffmanTable;
-use crate::literals::decode_literals;
-use crate::sequences::{BlockBounds, MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
+use crate::sequences::{BlockBounds, MAX_BLOCK_OUTPUT, SequenceState};
 use crate::{DecodeError, DecodeLimits, StreamProgress, StreamStatus, Xxh64};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,41 +103,41 @@ impl FrameState {
         }
         let start = self.history.len();
         self.emitted = start;
-        let allowance = remaining.min(self.window.min(MAX_BLOCK_OUTPUT));
-        let cap = start
-            .checked_add(allowance)
-            .ok_or(DecodeError::OutputTooLarge)?;
+        // The same bound and error as decode_frame: a frame that declares its
+        // size may not produce more, and Block_Maximum_Size is the block
+        // decoders' to enforce (it is malformed input, not a limit).
+        let (allowance, overflow) =
+            self.content_size
+                .map_or((remaining, DecodeError::OutputTooLarge), |declared| {
+                    let unproduced = declared.saturating_sub(self.produced);
+                    (remaining.min(unproduced), DecodeError::ContentSizeMismatch)
+                });
         match kind {
-            0 => {
-                if size > allowance {
-                    return Err(DecodeError::OutputTooLarge);
-                }
-                self.history.extend_from_slice(block);
-            }
-            1 => {
-                if size > allowance {
-                    return Err(DecodeError::OutputTooLarge);
-                }
-                self.history.resize(start + size, block[0]);
-            }
+            0 | 1 if size > allowance => return Err(overflow),
+            0 => self.history.extend_from_slice(block),
+            1 => self.history.resize(start + size, block[0]),
             2 => {
-                let block_maximum = self.window.min(MAX_BLOCK_OUTPUT);
-                let used =
-                    decode_literals(block, block_maximum, &mut self.huffman, &mut self.literals)?;
-                let section = block.get(used..).ok_or(DecodeError::Truncated)?;
                 let bounds = BlockBounds {
                     frame_start: 0,
                     window: self.window,
-                    block_maximum,
-                    limit: cap,
+                    block_maximum: self.window.min(MAX_BLOCK_OUTPUT),
+                    limit: start.saturating_add(allowance),
                 };
-                decode_sequences(
-                    section,
-                    &self.literals,
+                decode_compressed_block(
+                    block,
+                    &mut self.huffman,
+                    &mut self.literals,
                     &mut self.sequences,
                     &mut self.history,
                     bounds,
-                )?;
+                )
+                .map_err(|error| {
+                    if error == DecodeError::OutputTooLarge {
+                        overflow
+                    } else {
+                        error
+                    }
+                })?;
             }
             _ => return Err(DecodeError::Malformed("reserved block type")),
         }
@@ -787,5 +787,124 @@ mod tests {
             decode_chunks(&wire, DecodeLimits::new(2048), 7, 19),
             Err(DecodeError::Malformed("offset beyond the available history"))
         );
+    }
+
+    /// Both decoders refuse each frame with the same error: the declared
+    /// size bounds a frame before `max_output` does, Block_Maximum_Size is
+    /// malformed input rather than a limit, sections that run past their
+    /// complete block are malformed rather than truncated, and a header cut
+    /// short is truncated whatever its fields say.
+    #[test]
+    fn both_decoders_refuse_bad_frames_with_the_same_error() {
+        // 1 KiB window. One compressed block: 1 literal and a 1000-byte
+        // match, then 100 literals that pass Block_Maximum_Size.
+        let mut past_block_maximum = vec![0x28, 0xb5, 0x2f, 0xfd, 0, 0];
+        let mut body = Vec::new();
+        encode_literals(&[b'a'; 101], &mut body);
+        encode_sequences(
+            &[
+                EncodedSequence {
+                    literals_length: 1,
+                    offset_value: 4,
+                    match_length: 1000,
+                },
+                EncodedSequence {
+                    literals_length: 100,
+                    offset_value: 1,
+                    match_length: 3,
+                },
+            ],
+            &mut body,
+        )
+        .unwrap();
+        block_header(body.len(), 2, true, &mut past_block_maximum);
+        past_block_maximum.extend_from_slice(&body);
+        let cases: [(&[u8], usize, DecodeError); 4] = [
+            // Declares 10 bytes: a raw block of 5, then an RLE block of 10.
+            (
+                &[
+                    0x28, 0xb5, 0x2f, 0xfd, 0x20, 10, 0x28, 0, 0, 1, 2, 3, 4, 5, 0x53, 0, 0, b'x',
+                ],
+                10,
+                DecodeError::ContentSizeMismatch,
+            ),
+            (
+                past_block_maximum.as_slice(),
+                1 << 20,
+                DecodeError::Malformed("block output exceeds Block_Maximum_Size"),
+            ),
+            // A complete one-byte compressed block: empty raw literals and no
+            // sequences section.
+            (
+                &[0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x0d, 0, 0, 0],
+                1024,
+                DecodeError::Malformed("block sections run past Block_Size"),
+            ),
+            // A 14-byte header (dictionary ID 1, 8-byte content size) cut
+            // after its first 6 bytes.
+            (
+                &[0x28, 0xb5, 0x2f, 0xfd, 0xc3, 0, 1, 0, 0, 0],
+                1024,
+                DecodeError::Truncated,
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (wire, limit, expected) in cases {
+            let limits = DecodeLimits::new(limit);
+            let mut verdicts = vec![decode_all(wire, &limits)];
+            verdicts.extend([1, wire.len()].map(|chunk| decode_chunks(wire, limits, chunk, 7)));
+            if verdicts.iter().any(|verdict| *verdict != Err(expected)) {
+                wrong.push(format!("{wire:02x?}: {verdicts:?}, expected {expected:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// Over damaged and cut reference frames, StreamDecoder returns exactly
+    /// what decode_all returns: the same bytes or the same error.
+    #[test]
+    fn damaged_frames_get_the_same_verdict_from_both_decoders() {
+        let vectors = include_str!("../tests/vectors/frames_zstd_cli.txt");
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut refused = 0;
+        for line in vectors
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .take(120)
+        {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            let length: usize = fields[1].parse().unwrap();
+            let frame: Vec<u8> = (0..fields[3].len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&fields[3][i..i + 2], 16).unwrap())
+                .collect();
+            let mut damaged = Vec::new();
+            for _ in 0..6 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let mut wire = frame.clone();
+                let at = usize::try_from(state >> 33).unwrap() % wire.len();
+                wire[at] ^= u8::try_from((state >> 8) & 0xff).unwrap() | 1;
+                damaged.push((format!("byte {at}"), wire));
+            }
+            for cut in [5, frame.len() / 2, frame.len() - 1] {
+                damaged.push((format!("cut at {cut}"), frame[..cut].to_vec()));
+            }
+            for (damage, wire) in &damaged {
+                for limit in [length.saturating_sub(1), length + 4096] {
+                    let limits = DecodeLimits::new(limit);
+                    let expected = decode_all(wire, &limits);
+                    refused += usize::from(expected.is_err());
+                    assert_eq!(
+                        decode_chunks(wire, limits, 17, 257),
+                        expected,
+                        "{}: {damage}, limit {limit}",
+                        fields[0]
+                    );
+                }
+            }
+        }
+        assert!(refused > 1000, "most damage must be refused: {refused}");
     }
 }

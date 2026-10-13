@@ -76,7 +76,6 @@ impl std::error::Error for StreamEncodeError {}
 /// the last frame, emits a valid empty frame for empty input, and must be
 /// called until it reports [`StreamStatus::Finished`]. Neither dropping the
 /// encoder nor an empty input slice implicitly flushes or finishes it.
-#[derive(Debug)]
 pub struct StreamEncoder {
     params: EncodeParams,
     frame_size: usize,
@@ -85,6 +84,19 @@ pub struct StreamEncoder {
     position: usize,
     emitted_frame: bool,
     finishing: bool,
+}
+
+/// Shows buffer lengths, never the buffered plaintext or frame.
+impl core::fmt::Debug for StreamEncoder {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StreamEncoder")
+            .field("params", &self.params)
+            .field("frame_size", &self.frame_size)
+            .field("buffered", &self.plain.len())
+            .field("pending", &self.encoded.len().saturating_sub(self.position))
+            .field("finishing", &self.finishing)
+            .finish_non_exhaustive()
+    }
 }
 
 impl StreamEncoder {

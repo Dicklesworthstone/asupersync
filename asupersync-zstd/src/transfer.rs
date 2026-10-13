@@ -3,7 +3,7 @@
 //! The caller supplies the source, sink, and their nonblocking poll functions.
 //! The codec therefore remains std-only and creates no I/O authority or tasks.
 
-use crate::{EncodeParams, StreamEncoder, StreamProgress, StreamStatus};
+use crate::{DecodeError, EncodeParams, StreamEncoder, StreamProgress, StreamStatus};
 use std::future::poll_fn;
 use std::io;
 use std::task::{Context, Poll};
@@ -41,19 +41,24 @@ impl Transform for StreamEncoder {
     }
 }
 
+/// A terminal error, returned again on every later poll. A decoder error is
+/// kept as itself, so the returned error's source still downcasts to it.
 #[derive(Debug)]
 struct Failed {
     kind: io::ErrorKind,
     message: String,
+    decode: Option<DecodeError>,
 }
 
 impl Failed {
     fn error(&self) -> io::Error {
-        io::Error::new(self.kind, self.message.clone())
+        self.decode.map_or_else(
+            || io::Error::new(self.kind, self.message.clone()),
+            |error| io::Error::new(self.kind, error),
+        )
     }
 }
 
-#[derive(Debug)]
 struct Transfer<C> {
     codec: C,
     input: Box<[u8; BUFFER_SIZE]>,
@@ -67,6 +72,28 @@ struct Transfer<C> {
     complete: bool,
     progress: TransferProgress,
     failed: Option<Failed>,
+}
+
+/// Shows positions and state, never the bytes in the two I/O buffers.
+impl<C: core::fmt::Debug> core::fmt::Debug for Transfer<C> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Transfer")
+            .field("codec", &self.codec)
+            .field(
+                "input_buffered",
+                &self.input_length.saturating_sub(self.input_position),
+            )
+            .field(
+                "output_pending",
+                &self.output_length.saturating_sub(self.output_position),
+            )
+            .field("eof", &self.eof)
+            .field("codec_finished", &self.codec_finished)
+            .field("complete", &self.complete)
+            .field("progress", &self.progress)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
 }
 
 impl<C: Transform> Transfer<C> {
@@ -95,6 +122,10 @@ impl<C: Transform> Transfer<C> {
             self.failed = Some(Failed {
                 kind: error.kind(),
                 message: error.to_string(),
+                decode: error
+                    .get_ref()
+                    .and_then(|source| source.downcast_ref::<DecodeError>())
+                    .copied(),
             });
         }
         Poll::Ready(Err(error))
@@ -317,7 +348,9 @@ impl EncodeTransfer {
 #[cfg(test)]
 mod tests {
     use super::{DecodeTransfer, EncodeTransfer, TransferProgress};
-    use crate::{DecodeLimits, EncodeParams, Level, decode_all, encode_all};
+    use crate::{
+        DecodeError, DecodeLimits, EncodeParams, Level, StreamEncoder, decode_all, encode_all,
+    };
     use std::future::Future;
     use std::io;
     use std::pin::pin;
@@ -747,6 +780,44 @@ mod tests {
         assert_eq!(again.kind(), error.kind());
         assert_eq!(again.to_string(), error.to_string());
         assert_eq!((source.calls, sink.calls, sink.flushes), counts);
+        for returned in [&error, &again] {
+            let cause = returned
+                .get_ref()
+                .and_then(|inner| inner.downcast_ref::<DecodeError>());
+            assert_eq!(cause, Some(&DecodeError::ChecksumMismatch), "{returned:?}");
+        }
+    }
+
+    #[test]
+    fn decoding_corrupt_block_content_is_invalid_data_not_eof() {
+        // A complete stream: one compressed block of one byte, holding empty
+        // literals and no sequences section.
+        let wire = [0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x0d, 0, 0, 0];
+        let mut session = DecodeTransfer::new(DecodeLimits::new(1024));
+        let mut source = Source::new(&wire, 3);
+        let mut sink = Sink::new(3);
+        let error = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{error}");
+        assert!(!session.is_finished());
+        assert_eq!(sink.flushes, 0);
+    }
+
+    #[test]
+    fn debug_output_never_shows_buffered_bytes() {
+        let params = EncodeParams::new(Level::Store);
+        let mut encoder = StreamEncoder::new(params, 1 << 20).unwrap();
+        let accepted = encoder.encode(&vec![0x5a; 1 << 16], &mut []).unwrap();
+        assert_eq!(accepted.input_read, 1 << 16);
+        let shown = format!("{encoder:?}");
+        assert!(
+            shown.len() < 300 && shown.contains("buffered: 65536"),
+            "{shown}"
+        );
+        let encoding = EncodeTransfer::new(params, 64).unwrap();
+        let decoding = DecodeTransfer::new(DecodeLimits::new(64));
+        for debug in [format!("{encoding:?}"), format!("{decoding:?}")] {
+            assert!(debug.len() < 1000, "{debug}");
+        }
     }
 
     #[test]

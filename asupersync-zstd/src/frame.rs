@@ -194,6 +194,17 @@ fn decode_frame(
     }
     let has_checksum = descriptor & 0x04 != 0;
     let dictionary_id_size = [0, 1, 2, 4][usize::from(descriptor & 3)];
+    let content_size_width = match content_size_flag {
+        0 => usize::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    // A header cut short is truncated input, whatever its fields say. The
+    // stream decoder buffers the whole header before reading any field.
+    if input.len() < 5 + usize::from(!single_segment) + dictionary_id_size + content_size_width {
+        return Err(DecodeError::Truncated);
+    }
     let mut pos = 5;
     let descriptor_window = if single_segment {
         None
@@ -209,12 +220,6 @@ fn decode_frame(
         return Err(DecodeError::DictionaryUnsupported);
     }
     pos += dictionary_id_size;
-    let content_size_width = match content_size_flag {
-        0 => usize::from(single_segment),
-        1 => 2,
-        2 => 4,
-        _ => 8,
-    };
     let content_size = if content_size_width == 0 {
         None
     } else {
@@ -304,11 +309,15 @@ fn decode_frame(
                 // so the block never reallocates the output.
                 let most = bounds.block_maximum.min(limit.saturating_sub(out.len()));
                 reserve(out, most, limit).map_err(overflowed)?;
-                let used =
-                    decode_literals(block, bounds.block_maximum, &mut huffman, &mut literals)?;
-                let section = block.get(used..).ok_or(DecodeError::Truncated)?;
-                decode_sequences(section, &literals, &mut sequences, out, bounds)
-                    .map_err(overflowed)?;
+                decode_compressed_block(
+                    block,
+                    &mut huffman,
+                    &mut literals,
+                    &mut sequences,
+                    out,
+                    bounds,
+                )
+                .map_err(overflowed)?;
                 pos += block_size;
             }
             _ => return Err(DecodeError::Malformed("reserved block type")),
@@ -333,6 +342,33 @@ fn decode_frame(
         }
     }
     Ok(pos)
+}
+
+/// Decodes one compressed block, all `Block_Size` bytes of it, appending its
+/// output to `out` within `bounds`. Since the whole block is at hand, a
+/// literals or sequences section that runs past its end is malformed, not
+/// truncated input.
+pub fn decode_compressed_block(
+    block: &[u8],
+    huffman: &mut Option<HuffmanTable>,
+    literals: &mut Vec<u8>,
+    sequences: &mut SequenceState,
+    out: &mut Vec<u8>,
+    bounds: BlockBounds,
+) -> Result<(), DecodeError> {
+    let used = decode_literals(block, bounds.block_maximum, huffman, literals).map_err(overrun)?;
+    let section = block.get(used..).ok_or(OVERRUN)?;
+    decode_sequences(section, literals, sequences, out, bounds).map_err(overrun)
+}
+
+const OVERRUN: DecodeError = DecodeError::Malformed("block sections run past Block_Size");
+
+fn overrun(error: DecodeError) -> DecodeError {
+    if error == DecodeError::Truncated {
+        OVERRUN
+    } else {
+        error
+    }
 }
 
 #[cfg(test)]
