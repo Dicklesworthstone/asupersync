@@ -44,6 +44,31 @@ sender                                   receiver
 - `Proof` (0x0402): `ReceiveReceipt { committed, bytes_received, files, sha_ok, merkle_ok, reason?, committed_paths[] }`
 - `Close` (0x0302) / `Error` (0x0301): orderly / error teardown
 
+### Negotiated compression (optional)
+
+Compression rides in frame-header extensions, which peers that predate it
+never read (`src/net/atp/transport_common/codec.rs`, br-asupersync-t1fblr.16).
+
+- A sender built with the `zstd` feature and called with
+  `SendOptions::with_compression(CompressionMode::Zstd)` adds a `CodecOffer`
+  (extension `0x0101`) to its `Handshake`.
+- A receiver built with the `zstd` feature answers with a `CodecAccept`
+  (extension `0x0102`) on its `HandshakeAck`. It names one codec and the
+  largest raw chunk (≤ 1 MiB) and window it will decode.
+- Only after that accept may an `ObjectData` frame carry a compressed chunk.
+  The frame then has a `ChunkCodec` extension (`0x0103`) with the codec and
+  the raw length. Its payload is the usual `index` ++ `offset` header followed
+  by one zstd frame. A chunk is sent raw unless compressing it saves at
+  least `CHUNK_CODEC_OVERHEAD` (16) bytes, so a compressed frame is never
+  larger than the raw frame for the same chunk.
+- The receiver refuses a compressed chunk when no codec was negotiated, or
+  when its declared raw length exceeds the accepted limit or the bytes the
+  entry still lacks. Both checks happen before any decoding. It then decodes
+  to exactly the declared length, and runs the size, SHA-256 and merkle
+  checks on the raw bytes.
+- With no offer, no accept, or an older peer on either side, the wire stays
+  exactly as described above.
+
 ## Integrity (fail-closed)
 
 The receiver buffers each declared entry in memory, validates the completed
