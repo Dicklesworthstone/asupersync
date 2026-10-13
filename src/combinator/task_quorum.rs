@@ -44,9 +44,17 @@ impl<T, E> Selection<T, E> {
         let panicked = matches!(&outcome, Outcome::Panicked(_));
         match &outcome {
             Outcome::Ok(_) => self.successes += 1,
-            Outcome::Cancelled(reason) if self.spontaneous_cancel.is_none() => {
-                self.spontaneous_cancel = Some(reason.clone());
-            }
+            // Report the strongest spontaneous cancellation, not the first: a
+            // member's own poll-quota stop must not hide a shutdown that
+            // cancelled its siblings (as quorum and join_all, br-asupersync-1sngsf).
+            // Induced loser cancellations never reach record(), so no kind is
+            // excluded here.
+            Outcome::Cancelled(reason) => match &mut self.spontaneous_cancel {
+                Some(strongest) => {
+                    strongest.strengthen(reason);
+                }
+                None => self.spontaneous_cancel = Some(reason.clone()),
+            },
             _ => {}
         }
         self.outcomes.push(outcome);
@@ -310,6 +318,30 @@ mod tests {
         assert!(selection.record(Outcome::Cancelled(CancelReason::shutdown())).is_none());
         let decision = selection.record(Outcome::Ok(6)).unwrap();
         assert_eq!(selection.finish(decision, None).unwrap(), [6]);
+    }
+
+    /// Review r32-e8 of 915d1ff53 (M2): when member cancellations make the
+    /// quorum impossible, the strongest reason is reported, not the first
+    /// (br-asupersync-1sngsf). Cleanup cancellations of the losers do not vote.
+    #[test]
+    fn impossible_quorum_reports_the_strongest_spontaneous_cancellation() {
+        let mut selection = Selection::<u8, &str>::new(2, 3);
+        assert!(
+            selection
+                .record(Outcome::Cancelled(CancelReason::user("member's own stop")))
+                .is_none()
+        );
+        let decision = selection
+            .record(Outcome::Cancelled(CancelReason::shutdown()))
+            .unwrap();
+        assert!(matches!(decision, Decision::Impossible));
+        selection
+            .outcomes
+            .push(Outcome::Cancelled(CancelReason::fail_fast()));
+        let Err(QuorumError::Cancelled(reason)) = selection.finish(decision, None) else {
+            panic!("an impossible quorum after member cancellations reports Cancelled");
+        };
+        assert_eq!(reason.kind(), CancelReason::shutdown().kind());
     }
 }
 
