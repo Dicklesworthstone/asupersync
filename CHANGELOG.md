@@ -266,6 +266,46 @@ well-formed `Host` outside the allow-list gets `421`. Clients or monitors that
 match `421` for malformed requests will see `400`. Owner decision 2026-10-13
 (`asupersync-su3b6m`).
 
+### Behavior change — TLS servers reject 0-RTT early data at the TLS layer
+
+`TlsAcceptor::accept` now rejects TLS 1.3 early data on every connection. An
+acceptor built with `EarlyDataReplayProtection::UnprotectedForTesting` and a
+non-zero cap used to accept 0-RTT data that never reached the application,
+because `TlsStream` reads only 1-RTT data, so those requests were silently lost.
+Rejected early data makes the client resend over 1-RTT, so nothing is lost or
+replayed. Tickets still advertise the configured cap.
+
+The deprecated `TlsAcceptorBuilder::enable_early_data` no longer switches a
+builder without a replay strategy to `UnprotectedForTesting`. Without a
+strategy it leaves 0-RTT off and `build()` still succeeds. Owner decision
+2026-10-13 (`asupersync-0n1dvh`).
+
+### Negotiated zstd compression of ATP TCP bulk data (feature `zstd`)
+
+The new `zstd` cargo feature compiles `asupersync-zstd`, an in-house Zstandard
+(RFC 8878) codec with `#![forbid(unsafe_code)]`. With it, an ATP TCP transfer
+can compress its bulk data per chunk:
+- `send_path_with_options` takes a `SendOptions` built with
+  `with_compression(CompressionMode::Zstd)`.
+- The sender offers zstd in its handshake, and a receiver built with the
+  feature accepts.
+- Each chunk then travels as one zstd frame whenever that saves at least the
+  16 bytes the frame-header record can cost, and raw otherwise. So a
+  compressed frame is never larger than the raw one.
+- The receiver bounds every decode by the bytes the entry still lacks, then
+  verifies SHA-256 and the merkle root on the raw bytes as before.
+
+The negotiation rides in frame-header extensions that older peers never read.
+Against an older receiver, a sender stays raw, and an older sender never
+offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
+(`br-asupersync-t1fblr.14`, `.16`.)
+
+The `asupersync-zstd` crate is not published yet. It decodes every RFC 8878
+frame without dictionaries, and encodes stored or `Level::Fast` frames, which
+compress slightly better than libzstd level 1. It has streaming encoder and
+decoder types, resumable async transfers, and differential tests against
+libzstd 1.5.7.
+
 ### Behavior change — the production runtime enforces explicit poll quotas
 
 `Budget::with_poll_quota` bounds how many times a task is polled. The
