@@ -372,4 +372,223 @@ mod selection_tests {
             if reason.kind == CancelReason::fail_fast().kind));
         assert!(!published_cx.is_cancel_requested());
     }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native {
+        use super::*;
+        use crate::combinator::QuorumError;
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder, yield_now};
+        use std::pin::pin;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        fn run<F, Fut>(test: F)
+        where
+            F: Fn(Cx) -> Fut + Send + Sync + 'static,
+            Fut: Future<Output = ()> + Send + 'static,
+        {
+            let (send, receive) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let test = Arc::new(test);
+                    for workers in [1, 2] {
+                        let builder = if workers == 1 {
+                            RuntimeBuilder::current_thread()
+                        } else {
+                            RuntimeBuilder::new().worker_threads(workers)
+                        };
+                        let runtime = builder.build().unwrap();
+                        let test = Arc::clone(&test);
+                        runtime.block_on(runtime.handle().spawn(async move {
+                            test(Cx::current().expect("native parent context")).await;
+                        }));
+                        let report = runtime.shutdown_drained(Duration::from_secs(5));
+                        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+                        assert_eq!(report.live_tasks, 0);
+                        assert_eq!(report.pending_spawns, 0);
+                        assert_eq!(report.pending_obligations, 0);
+                    }
+                }));
+                let _ = send.send(result);
+            });
+            let result = receive
+                .recv_timeout(Duration::from_secs(45))
+                .expect("native bounded quorum exceeded watchdog");
+            worker.join().unwrap();
+            if let Err(payload) = result {
+                std::panic::resume_unwind(payload);
+            }
+        }
+
+        async fn park(child: &Cx, started: oneshot::Sender<Cx>) -> CancelReason {
+            let mut started = Some(started);
+            let mut cancellation = pin!(child.cancelled());
+            poll_fn(|task| match cancellation.as_mut().poll(task) {
+                Poll::Ready(()) => Poll::Ready(()),
+                Poll::Pending => {
+                    if let Some(started) = started.take() {
+                        // The native cancellation registration exists before
+                        // the parent receives this parked-state witness.
+                        started.send_blocking(child.clone()).unwrap();
+                    }
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(child.checkpoint().is_err());
+            child.cancel_reason().expect("acknowledged cancellation")
+        }
+
+        #[test]
+        fn native_quorum_bounds_parked_scan_then_collects_a_woken_suffix() {
+            run(|cx| async move {
+                let mut set = JoinSet::<u16, &'static str, _>::in_cx(&cx);
+                let cleaned = Arc::new(AtomicUsize::new(0));
+                for _ in 0..129 {
+                    let (started, mut witness) = oneshot::channel();
+                    let cleaned = Arc::clone(&cleaned);
+                    set.spawn(&cx, move |child| async move {
+                        let reason = park(&child, started).await;
+                        assert_eq!(reason.kind, CancelKind::RaceLost);
+                        cleaned.fetch_add(1, Ordering::SeqCst);
+                        Ok(0)
+                    }).unwrap();
+                    witness.recv(&cx).await.unwrap();
+                }
+                let (release, mut gate) = oneshot::channel();
+                let (started, mut witness) = oneshot::channel();
+                set.spawn(&cx, move |child| async move {
+                    let mut started = Some(started);
+                    let mut waiting = pin!(gate.recv(&child));
+                    poll_fn(|task| {
+                        let result = waiting.as_mut().poll(task);
+                        if result.is_pending() && let Some(started) = started.take() {
+                            started.send_blocking(()).unwrap();
+                        }
+                        result
+                    }).await.unwrap();
+                    Ok(42)
+                }).unwrap();
+                witness.recv(&cx).await.unwrap();
+                let ready = Arc::clone(&set.ready);
+                assert_eq!(ready.candidates.lock().len(), 130);
+                let mut joining = Box::pin(set.join_first_ok(&cx));
+                poll_fn(|task| {
+                    assert!(joining.as_mut().poll(task).is_pending());
+                    Poll::Ready(())
+                }).await;
+                let unexamined = ready.candidates.lock().len();
+                assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+                release.send_blocking(()).unwrap();
+                assert_eq!(joining.await.unwrap(), 42);
+                assert_eq!(cleaned.load(Ordering::SeqCst), 129);
+                // Release/drain first so the old-code control fails here,
+                // not because a test assertion stranded the parked suffix.
+                assert_eq!(unexamined, 66, "one native poll must examine only 64 candidates");
+                assert!(!cx.is_cancel_requested());
+            });
+        }
+
+        #[test]
+        fn native_owner_abort_reaches_unscanned_members_and_waits_for_cleanup() {
+            run(|cx| async move {
+                let mut set = JoinSet::<u16, &'static str, _>::in_cx(&cx);
+                let cleaned = Arc::new(AtomicUsize::new(0));
+                let mut releases = Vec::new();
+                let mut cleanup_witnesses = Vec::new();
+                for _ in 0..130 {
+                    let (started, mut witness) = oneshot::channel();
+                    let (release, mut cleanup) = oneshot::channel::<()>();
+                    let (cleanup_ready, cleanup_witness) = oneshot::channel();
+                    let cleaned = Arc::clone(&cleaned);
+                    set.spawn(&cx, move |child| async move {
+                        let reason = park(&child, started).await;
+                        let mut cleanup_ready = Some(cleanup_ready);
+                        poll_fn(|task| {
+                            let result = cleanup.poll_recv_uninterruptible(task);
+                            if result.is_pending() && let Some(ready) = cleanup_ready.take() {
+                                ready.send_blocking(reason.clone()).unwrap();
+                            }
+                            result
+                        }).await.unwrap();
+                        cleaned.fetch_add(1, Ordering::SeqCst);
+                        Ok(0)
+                    }).unwrap();
+                    witness.recv(&cx).await.unwrap();
+                    releases.push(release);
+                    cleanup_witnesses.push(cleanup_witness);
+                }
+                let ready = Arc::clone(&set.ready);
+                let (first_poll, mut witness) = oneshot::channel();
+                let (resume, mut pause) = oneshot::channel::<()>();
+                let mut owner = cx.spawn(move |owner| async move {
+                    let mut joining = Box::pin(set.join_quorum(&owner, 1));
+                    poll_fn(|task| {
+                        assert!(joining.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    first_poll.send_blocking(()).unwrap();
+                    // Keep the scan frozen while the parent injects owner
+                    // cancellation. This is a real registered wait, not sleep.
+                    poll_fn(|task| pause.poll_recv_uninterruptible(task)).await.unwrap();
+                    joining.await
+                }).unwrap();
+                witness.recv(&cx).await.unwrap();
+                let unexamined_at_abort = ready.candidates.lock().len();
+                owner.abort_with_reason(CancelReason::shutdown());
+                resume.send_blocking(()).unwrap();
+                for mut witness in cleanup_witnesses {
+                    let reason = witness.recv(&cx).await.unwrap();
+                    assert_eq!(reason.kind, CancelKind::Shutdown);
+                }
+                assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+                assert!(matches!(owner.try_join(), Ok(None)), "all cleanup gates are still closed");
+                for release in releases {
+                    release.send_blocking(()).unwrap();
+                }
+                assert!(matches!(owner.join(&cx).await.unwrap(),
+                    Err(QuorumError::Cancelled(reason)) if reason.kind == CancelKind::Shutdown));
+                assert_eq!(cleaned.load(Ordering::SeqCst), 130);
+                assert_eq!(unexamined_at_abort, 66);
+                assert!(!cx.is_cancel_requested());
+            });
+        }
+
+        #[test]
+        fn native_invalid_quorum_yields_drain_without_cancelling_retired_members() {
+            run(|cx| async move {
+                let mut set = JoinSet::<u16, &'static str, _>::in_cx(&cx);
+                let mut children = Vec::new();
+                for index in 0..130_u16 {
+                    let (published, mut witness) = oneshot::channel();
+                    set.spawn(&cx, move |child| async move {
+                        published.send_blocking(child.clone()).unwrap();
+                        Ok(index)
+                    }).unwrap();
+                    children.push(witness.recv(&cx).await.unwrap());
+                }
+                // A factory sending its context is not a completion receipt.
+                // Wait for the actual native handles to witness retirement.
+                while set.members.values().any(|member| !member.handle.is_finished()) {
+                    yield_now().await;
+                }
+                assert!(children.iter().all(|child| !child.is_cancel_requested()));
+                let ready = Arc::clone(&set.ready);
+                let mut joining = Box::pin(set.join_quorum(&cx, 0));
+                let first = poll_fn(|task| Poll::Ready(joining.as_mut().poll(task))).await;
+                let yielded = first.is_pending();
+                let remaining = ready.candidates.lock().len();
+                let result = match first {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => joining.await,
+                };
+                assert!(matches!(result, Err(QuorumError::InvalidQuorum { required: 0, total: 130 })));
+                assert!(yielded, "ready cleanup must yield after 64 retirements");
+                assert_eq!(remaining, 66);
+                assert!(children.iter().all(|child| !child.is_cancel_requested()),
+                    "invalid parameters must not rewrite already-published native task state");
+                assert!(!cx.is_cancel_requested());
+            });
+        }
+    }
 }
