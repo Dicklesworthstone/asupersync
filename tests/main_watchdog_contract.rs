@@ -929,6 +929,37 @@ fn only_a_lane_the_worker_left_undecided_is_retried_on_other_workers() {
     );
 }
 
+/// A full worker disk proves nothing, whichever crate it hit, and is retried like the
+/// other worker faults. On 10-13 hz4 ran out of space while compiling the conformance
+/// test at 7816ce34f; that compile error was read as a red and bisected for hours.
+/// The new zstd workspace crate's name is not a bead id.
+#[test]
+fn a_full_worker_disk_is_undecided_and_retried() {
+    let enospc = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\nerror: couldn't create a temp dir: No space left on device (os error 28) at path \"/data/tmp/rch/asupersync/x/.rch-target/debug/build/asupersync/f77/rustcXYZ\"\nerror: could not compile `asupersync` (test \"conformance\") due to 1 previous error\n  Remote command finished: exit=101 in 60000ms\n";
+    let lanes = lanes();
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {
+            "worker_side_no_evidence": [
+                {"text": enospc, "code": 101, "lane": &lanes[1]},
+                {"text": enospc, "code": 101, "lane": &lanes[0]},
+            ],
+            "bead_ids": ["feat(zstd): new workspace crate asupersync-zstd (br-asupersync-t1fblr.3)"],
+        },
+    }));
+    assert_eq!(
+        probed["probe_results"]["worker_side_no_evidence"],
+        json!([true, true]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        probed["probe_results"]["bead_ids"],
+        json!([["asupersync-t1fblr.3"]]),
+        "{probed:#}"
+    );
+}
+
 /// A run posts its receipt only on beads cited by commits no earlier run receipted. While
 /// a batch stayed open each run posted again on every bead it cited: 77 beads per run,
 /// 1395 receipt comments on 396 beads by 10-13.
