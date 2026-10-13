@@ -222,7 +222,7 @@ mod tests {
         level: Level,
     ) -> Vec<u8> {
         let mut encoder = StreamEncoder::new(EncodeParams::new(level), frame).unwrap();
-        let mut encoded = Vec::new();
+        let mut wire = Vec::new();
         let mut output = vec![0_u8; output_chunk];
         for chunk in data.chunks(input_chunk) {
             let mut offset = 0;
@@ -231,19 +231,19 @@ mod tests {
                 assert!(progress.input_read != 0 || progress.output_written != 0);
                 assert!(progress.input_read <= chunk.len() - offset);
                 offset += progress.input_read;
-                encoded.extend_from_slice(&output[..progress.output_written]);
+                wire.extend_from_slice(&output[..progress.output_written]);
             }
         }
         loop {
             let progress = encoder.finish(&mut output);
-            encoded.extend_from_slice(&output[..progress.output_written]);
+            wire.extend_from_slice(&output[..progress.output_written]);
             if progress.status == StreamStatus::Finished {
                 break;
             }
             assert!(progress.output_written != 0);
         }
         assert_eq!(encoder.finish(&mut output).output_written, 0);
-        encoded
+        wire
     }
 
     #[test]
@@ -276,7 +276,10 @@ mod tests {
         for level in [Level::Store, Level::Fast] {
             let actual = encode_chunks(&[], 1024, 1, 1, level);
             assert_eq!(actual, encode_all(&[], &EncodeParams::new(level)));
-            assert!(decode_all(&actual, &DecodeLimits::new(0)).unwrap().is_empty());
+            assert_eq!(
+                decode_all(&actual, &DecodeLimits::new(0)).unwrap(),
+                Vec::<u8>::new()
+            );
         }
     }
 
