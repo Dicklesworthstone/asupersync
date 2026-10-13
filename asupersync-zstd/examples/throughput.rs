@@ -4,10 +4,11 @@
 //!
 //! Run with `cargo run --release -p asupersync-zstd --example throughput`.
 //! Each comparison times this crate and libzstd in alternating passes for
-//! about a second, so load on the machine affects both alike, and reports the
-//! best pass of each in MB/s (10^6 bytes of input per second) and their
-//! ratio. The whole table is measured twice, to show how much it moves.
-//! Neither side writes a content checksum.
+//! about a second and reports the best pass of each in MB/s (10^6 bytes of
+//! input per second). The ratio is the median, over adjacent pairs of passes,
+//! of this crate's speed over libzstd's: load that changes during the second
+//! affects both passes of a pair alike. The whole table is measured twice, to
+//! show how much it moves. Neither side writes a content checksum.
 
 #![allow(
     clippy::cast_precision_loss,
@@ -82,21 +83,25 @@ fn literals(len: usize) -> Vec<u8> {
 
 /// The best rates of `ours` and `theirs` on `bytes` input bytes, timed in
 /// alternating passes so that load on the machine affects both alike.
-fn best_pair(bytes: usize, mut ours: impl FnMut(), mut theirs: impl FnMut()) -> (f64, f64) {
+fn best_pair(bytes: usize, mut ours: impl FnMut(), mut theirs: impl FnMut()) -> (f64, f64, f64) {
     let mut best = (Duration::MAX, Duration::MAX);
+    // Each pass of ours against the pass of theirs right after it: load
+    // that drifts over the second cancels out of the pair's ratio.
+    let mut ratios = Vec::new();
     let started = Instant::now();
-    let mut passes = 0;
-    while passes < 5 || started.elapsed() < Duration::from_secs(1) {
+    while ratios.len() < 7 || started.elapsed() < Duration::from_secs(1) {
         let pass = Instant::now();
         ours();
-        best.0 = best.0.min(pass.elapsed());
+        let mine = pass.elapsed();
         let pass = Instant::now();
         theirs();
-        best.1 = best.1.min(pass.elapsed());
-        passes += 1;
+        let other = pass.elapsed();
+        best = (best.0.min(mine), best.1.min(other));
+        ratios.push(other.as_secs_f64() / mine.as_secs_f64());
     }
+    ratios.sort_by(f64::total_cmp);
     let rate = |time: Duration| bytes as f64 / time.as_secs_f64() / 1e6;
-    (rate(best.0), rate(best.1))
+    (rate(best.0), rate(best.1), ratios[ratios.len() / 2])
 }
 
 fn main() {
@@ -110,7 +115,10 @@ fn main() {
         ("random", random(LEN)),
         ("7-bit", literals(LEN)),
     ];
-    println!("MB/s of input; x = this crate / libzstd -1, timed in alternating passes.");
+    println!(
+        "MB/s of input (best pass); x = median over adjacent pass pairs of this crate's speed \
+         / libzstd -1's."
+    );
     println!(
         "round input   ratio ours/lib | encode ours     lib     x | decode ours     lib     x \
          | lib frames ours     lib     x"
@@ -167,13 +175,13 @@ fn main() {
                 size / theirs.len() as f64,
                 encode.0,
                 encode.1,
-                encode.0 / encode.1,
+                encode.2,
                 decode.0,
                 decode.1,
-                decode.0 / decode.1,
+                decode.2,
                 cross.0,
                 cross.1,
-                cross.0 / cross.1,
+                cross.2,
             );
         }
     }
