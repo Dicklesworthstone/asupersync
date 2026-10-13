@@ -1657,9 +1657,18 @@ mod tests {
             Some(AtpCancelReason::ParentCancel)
         );
 
-        // 4. Round trip for all AtpCancelReason variants
+        // 4. Round trip for all AtpCancelReason variants. CancelReason carries
+        // only &'static str messages, so to_base_reason maps every payload
+        // to its variant's canonical text: the variant survives the round
+        // trip, a caller's free-text payload does not.
+        assert_eq!(
+            TransferTranscript::parse_atp_cancel_reason(
+                &AtpCancelReason::UserCancel("custom user cancel".to_string()).to_base_reason()
+            ),
+            Some(AtpCancelReason::UserCancel("user cancel".to_string()))
+        );
         let variants = [
-            AtpCancelReason::UserCancel("custom user cancel".to_string()),
+            AtpCancelReason::UserCancel("user cancel".to_string()),
             AtpCancelReason::Timeout,
             AtpCancelReason::Shutdown,
             AtpCancelReason::FailFast("fail-fast".to_string()),
