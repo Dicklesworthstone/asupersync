@@ -493,8 +493,15 @@ impl TlsAcceptor {
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let conn = ServerConnection::new(Arc::clone(&self.config))
+        let mut conn = ServerConnection::new(Arc::clone(&self.config))
             .map_err(|e| TlsError::Configuration(e.to_string()))?;
+        // br-asupersync-0n1dvh (owner decision 2026-10-13): reject 0-RTT here,
+        // at the TLS layer, on every connection. TlsStream reads only 1-RTT
+        // data, so accepted early data would be lost, and no replay strategy
+        // is enforced per request (snv902), so delivering it would expose
+        // replays. Rejected, the client is told in the handshake and resends
+        // over 1-RTT: nothing is lost or replayed.
+        conn.reject_early_data();
         let mut stream = TlsStream::new_server(io, conn);
         let handshake = if let Some(timeout) = self.handshake_timeout {
             match crate::time::timeout(
@@ -1095,17 +1102,29 @@ impl TlsAcceptorBuilder {
     ///
     /// `max_bytes` caps early data per connection. Typical: 16384 (16 KiB)
     /// for request headers. `0` disables 0-RTT.
+    ///
+    /// # Early data is rejected
+    ///
+    /// The cap reaches the tickets, so clients may offer 0-RTT, but
+    /// `TlsAcceptor::accept` rejects early data at the TLS layer on every
+    /// connection (br-asupersync-0n1dvh): the client resends over 1-RTT, so no
+    /// request is lost or replayed. Delivering early data waits for
+    /// per-request replay enforcement (br-asupersync-snv902).
     #[must_use]
     pub fn enable_early_data_with_protection(mut self, max_bytes: u32) -> Self {
         self.early_data_max_bytes = max_bytes;
         self
     }
 
-    /// **DEPRECATED**: Legacy 0-RTT enable without replay protection.
+    /// **DEPRECATED**: Legacy 0-RTT enable.
     ///
-    /// **SECURITY WARNING**: This method is deprecated because it allows
-    /// enabling 0-RTT without explicit replay protection. Use
-    /// `enable_early_data_with_protection()` instead.
+    /// br-asupersync-0n1dvh (owner decision 2026-10-13): this used to switch
+    /// a builder without a replay strategy to
+    /// [`EarlyDataReplayProtection::UnprotectedForTesting`], so `build()`
+    /// succeeded with replayable 0-RTT on the wire. It no longer selects a
+    /// strategy. With one already chosen, it sets the cap like
+    /// [`Self::enable_early_data_with_protection`]; without one, it changes
+    /// nothing and `build()` succeeds with 0-RTT off.
     ///
     /// This method will be removed in a future version. Migration:
     /// ```ignore
@@ -1123,14 +1142,11 @@ impl TlsAcceptorBuilder {
     )]
     #[must_use]
     pub fn enable_early_data(mut self, max_bytes: u32) -> Self {
-        self.early_data_max_bytes = max_bytes;
-        // Set to testing mode to allow legacy builds to succeed
-        // but log security warnings
-        if matches!(
+        if !matches!(
             self.early_data_replay_protection,
             EarlyDataReplayProtection::None
         ) {
-            self.early_data_replay_protection = EarlyDataReplayProtection::UnprotectedForTesting;
+            self.early_data_max_bytes = max_bytes;
         }
         self
     }
@@ -3334,24 +3350,35 @@ dEUXP8/OsohM4vU=
         ));
     }
 
+    /// br-asupersync-0n1dvh: the deprecated `enable_early_data` used to
+    /// select UnprotectedForTesting, so `build()` succeeded with replayable
+    /// 0-RTT on the wire. It now never selects a strategy: without one it
+    /// leaves 0-RTT off (and `build()` still succeeds), and with one it sets
+    /// the cap like `enable_early_data_with_protection`.
     #[cfg(feature = "tls")]
     #[test]
-    fn test_deprecated_enable_early_data_sets_testing_mode() {
+    fn test_deprecated_enable_early_data_never_selects_a_strategy() {
         let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
         let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
 
-        // The deprecated method should automatically set UnprotectedForTesting
         #[allow(deprecated)]
-        let result = TlsAcceptorBuilder::new(chain, key)
+        let acceptor = TlsAcceptorBuilder::new(chain.clone(), key.clone())
             .enable_early_data(16384)
-            .build();
+            .build()
+            .expect("the deprecated call alone still builds");
+        assert_eq!(acceptor.config.max_early_data_size, 0, "0-RTT stays off");
+        assert!(matches!(
+            acceptor.early_data_replay_protection(),
+            EarlyDataReplayProtection::None
+        ));
 
-        assert!(
-            result.is_ok(),
-            "deprecated enable_early_data should succeed in testing mode"
-        );
-
-        let acceptor = result.unwrap();
+        #[allow(deprecated)]
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .with_early_data_replay_protection(EarlyDataReplayProtection::UnprotectedForTesting)
+            .enable_early_data(16384)
+            .build()
+            .expect("an explicit testing strategy builds");
+        assert_eq!(acceptor.config.max_early_data_size, 16384);
         assert!(matches!(
             acceptor.early_data_replay_protection(),
             EarlyDataReplayProtection::UnprotectedForTesting
