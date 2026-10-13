@@ -1665,6 +1665,16 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
             "src/combinator/join_set/candidate_tests.rs|TaskHandle::new_pending(".to_owned(),
             1,
         ),
+        // Classified (cf53c191e, br-asupersync-v8rp1h L4/L5): `#[cfg(test)]`
+        // fixtures in the bounded selection tests (collector.rs
+        // `selection_tests`). Each builds a handle over a hand-held oneshot so
+        // the test decides when a candidate publishes. They are not spawn
+        // adapters; production members spawn through `Cx` spawn paths, whose
+        // pair factories are counted under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/collector.rs|TaskHandle::new(".to_owned(),
+            2,
+        ),
         (
             "src/combinator/join_set/waker_tests.rs|TaskHandle::new(".to_owned(),
             1,
