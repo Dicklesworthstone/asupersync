@@ -2,8 +2,8 @@
 
 #![allow(clippy::pedantic, clippy::nursery)]
 
-use super::TlsError;
 use super::super::{TlsConnection, TlsStream};
+use super::TlsError;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::tls::{CertificateChain, PrivateKey};
 use rustls::pki_types::ServerName;
@@ -24,14 +24,17 @@ struct MemoryIo {
     incoming: Rc<RefCell<VecDeque<u8>>>,
     outgoing: Rc<RefCell<VecDeque<u8>>>,
     block_flush: bool,
+    flush_error: Option<io::ErrorKind>,
+    io_calls: usize,
 }
 
 impl AsyncRead for MemoryIo {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        self.io_calls += 1;
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
         }
@@ -51,15 +54,20 @@ impl AsyncRead for MemoryIo {
 
 impl AsyncWrite for MemoryIo {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        self.io_calls += 1;
         self.outgoing.borrow_mut().extend(buf.iter().copied());
         Poll::Ready(Ok(buf.len()))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.io_calls += 1;
+        if let Some(kind) = self.flush_error {
+            return Poll::Ready(Err(kind.into()));
+        }
         if self.block_flush {
             Poll::Pending
         } else {
@@ -67,7 +75,8 @@ impl AsyncWrite for MemoryIo {
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.io_calls += 1;
         Poll::Ready(Ok(()))
     }
 }
@@ -114,7 +123,7 @@ fn streams(
     let server_io = MemoryIo {
         incoming: Rc::clone(&client_io.outgoing),
         outgoing: Rc::clone(&client_io.incoming),
-        block_flush: false,
+        ..MemoryIo::default()
     };
     let client = ClientConnection::new(
         Arc::clone(client_config),
@@ -310,6 +319,8 @@ fn failed_certificate_verification_does_not_expose_a_binding() {
     assert!(client.is_closed() && server.is_closed());
     assert_disconnected(&client);
     assert_disconnected(&server);
+    assert_terminal_handshake(&mut client);
+    assert_terminal_handshake(&mut server);
 }
 
 #[test]
@@ -393,4 +404,181 @@ fn tls13_traffic_key_updates_preserve_the_channel_binding() {
     assert_eq!(binding, server.tls_exporter_channel_binding().unwrap());
     assert_eq!(binding, reference_binding(&client));
     assert_eq!(binding, reference_binding(&server));
+}
+
+/// Exercise the public retry and write paths, not an assignment to TlsState.
+/// Terminal handshake polls must neither reopen the stream nor touch its IO.
+fn assert_terminal_handshake(stream: &mut TlsStream<MemoryIo>) {
+    let mut cx = Context::from_waker(Waker::noop());
+    let state = stream.state;
+    let io_calls = stream.io.io_calls;
+    for _ in 0..3 {
+        assert!(matches!(
+            stream.poll_handshake(&mut cx),
+            Poll::Ready(Err(TlsError::Io(err))) if err.kind() == io::ErrorKind::NotConnected
+        ));
+        assert_eq!(stream.state, state);
+        assert!(!stream.is_ready());
+        assert_disconnected(stream);
+        assert!(matches!(
+            Pin::new(&mut *stream).poll_write(&mut cx, b"must not send"),
+            Poll::Ready(Err(err)) if err.kind() == io::ErrorKind::BrokenPipe
+        ));
+        assert_eq!(stream.io.io_calls, io_calls, "terminal polls performed IO");
+    }
+}
+
+#[test]
+fn completed_handshake_repoll_is_io_free_on_both_endpoints() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        let (cc, sc) = configs(&[version], None, true);
+        let (mut client, mut server) = streams(&cc, &sc);
+        establish(&mut client, &mut server);
+        let mut cx = Context::from_waker(Waker::noop());
+        for stream in [&mut client, &mut server] {
+            let binding = stream.tls_exporter_channel_binding().ok();
+            let io_calls = stream.io.io_calls;
+            // This would fail and close the already-established stream if a
+            // redundant handshake poll tried to flush the transport again.
+            stream.io.flush_error = Some(io::ErrorKind::ConnectionReset);
+            for _ in 0..3 {
+                assert!(matches!(
+                    stream.poll_handshake(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(stream.is_ready());
+                assert_eq!(stream.io.io_calls, io_calls);
+                assert_eq!(stream.tls_exporter_channel_binding().ok(), binding);
+            }
+            stream.io.flush_error = None;
+        }
+        send_and_read(&mut client, &mut server);
+        send_and_read(&mut server, &mut client);
+    }
+}
+
+/// Drive real handshake records until the chosen endpoint's rustls handshake
+/// is done but the stream still owes its final flush. No sleeps or guessed
+/// flight counts: the test observes both sides of that boundary explicitly.
+fn hold_final_flush(
+    client: &mut TlsStream<MemoryIo>,
+    server: &mut TlsStream<MemoryIo>,
+    client_side: bool,
+) {
+    if client_side {
+        client.io.block_flush = true;
+    } else {
+        server.io.block_flush = true;
+    }
+    let mut cx = Context::from_waker(Waker::noop());
+    for _ in 0..128 {
+        for stream in [&mut *client, &mut *server] {
+            if !stream.is_ready()
+                && let Poll::Ready(result) = stream.poll_handshake(&mut cx)
+            {
+                result.expect("handshake before the injected flush failure");
+            }
+        }
+        let stream = if client_side { &*client } else { &*server };
+        if !stream.conn.is_handshaking() {
+            assert!(!stream.is_ready(), "the final flush must still be pending");
+            assert!(stream.state.requires_handshake());
+            assert_incomplete(stream);
+            // Prove the underlying exporter is already usable: a later
+            // erroneous transition back to Ready would expose these bytes.
+            let _ = reference_binding(stream);
+            return;
+        }
+    }
+    panic!("did not reach the final-flush boundary");
+}
+
+#[test]
+fn failed_final_flush_cannot_be_retried_into_a_successful_handshake() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            let (cc, sc) = configs(&[version], None, true);
+            let (mut client, mut server) = streams(&cc, &sc);
+            hold_final_flush(&mut client, &mut server, client_side);
+            let stream = if client_side { &mut client } else { &mut server };
+            stream.io.block_flush = false;
+            stream.io.flush_error = Some(io::ErrorKind::BrokenPipe);
+            let mut cx = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                stream.poll_handshake(&mut cx),
+                Poll::Ready(Err(TlsError::Io(err))) if err.kind() == io::ErrorKind::BrokenPipe
+            ));
+            assert!(stream.is_closed());
+            assert_disconnected(stream);
+            // A recovered transport must not revive a failed TLS stream.
+            stream.io.flush_error = None;
+            assert_terminal_handshake(stream);
+        }
+    }
+}
+
+#[test]
+fn handshake_repoll_cannot_undo_either_shutdown_api() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for async_shutdown in [true, false] {
+                let (cc, sc) = configs(&[version], None, true);
+                let (mut client, mut server) = streams(&cc, &sc);
+                establish(&mut client, &mut server);
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                let mut cx = Context::from_waker(Waker::noop());
+                if async_shutdown {
+                    assert!(matches!(
+                        Pin::new(&mut *stream).poll_shutdown(&mut cx),
+                        Poll::Ready(Ok(()))
+                    ));
+                } else {
+                    assert!(matches!(
+                        stream.poll_shutdown_tls(&mut cx),
+                        Poll::Ready(Ok(()))
+                    ));
+                }
+                assert!(stream.state.shutdown_pending());
+                assert_terminal_handshake(stream);
+                // Refusing a new handshake must not break the documented
+                // half-close: the peer can still send application data.
+                send_and_read(peer, stream);
+                assert!(matches!(
+                    peer.poll_shutdown_tls(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+                let mut bytes = [0; 1];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_read(&mut cx, &mut buf),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(buf.filled().is_empty());
+                assert!(stream.is_closed());
+                assert_terminal_handshake(stream);
+            }
+        }
+    }
+}
+
+#[test]
+fn shutdown_before_handshake_cannot_restart_negotiation() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        let (cc, sc) = configs(&[version], None, true);
+        let (mut client, mut server) = streams(&cc, &sc);
+        let mut cx = Context::from_waker(Waker::noop());
+        for stream in [&mut client, &mut server] {
+            assert!(stream.conn.is_handshaking());
+            assert!(matches!(
+                stream.poll_shutdown_tls(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(stream.state.shutdown_pending());
+            assert_terminal_handshake(stream);
+        }
+    }
 }

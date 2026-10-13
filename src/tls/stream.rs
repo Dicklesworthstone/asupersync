@@ -348,8 +348,30 @@ impl<IO> TlsStream<IO> {
 impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// Poll the TLS handshake to completion.
     ///
-    /// Returns `Poll::Ready(Ok(()))` when handshake is complete.
+    /// Returns `Poll::Ready(Ok(()))` when the handshake is complete. Polling
+    /// again after success performs no I/O and does not start a new handshake.
+    ///
+    /// # Errors
+    ///
+    /// A failed handshake or a stream whose local shutdown has started cannot
+    /// be restarted. Subsequent polls return [`TlsError::Io`] with
+    /// [`io::ErrorKind::NotConnected`]; create a new connection instead.
     pub fn poll_handshake(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
+        // rustls may have completed its part before our final transport flush
+        // fails. Its is_handshaking() flag alone cannot authorize a retry: that
+        // would resurrect a Closed stream, or undo ShuttingDown, and make
+        // application writes and tls-exporter bindings available again.
+        match self.state {
+            TlsState::Ready => return Poll::Ready(Ok(())),
+            TlsState::ShuttingDown | TlsState::Closed => {
+                return Poll::Ready(Err(TlsError::Io(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "cannot handshake a closed or shutting-down TLS stream",
+                ))));
+            }
+            TlsState::Handshaking => {}
+        }
+
         let mut steps = 0;
         loop {
             steps += 1;
