@@ -124,7 +124,6 @@ impl MatchFinder {
         let mut anchor = start;
         let mut ip = start;
         let mut last_offset = 0_usize;
-        let mut misses = 0_usize;
         while ip + width <= end {
             // The last offset first (only after some literals, where it is
             // repeat offset 1), then the hash table.
@@ -142,12 +141,13 @@ impl MatchFinder {
                     .then_some(previous)
             };
             let Some(mut source) = candidate else {
-                // Step faster through data that keeps missing.
-                misses += 1;
-                ip += 1 + (misses >> 8);
+                // Step faster through data that keeps missing: one more byte
+                // every 128 since the last match, as libzstd's fast strategy
+                // does (kStepIncr). Incompressible input costs a few
+                // thousand lookups per block instead of tens of thousands.
+                ip += 1 + ((ip - anchor) >> 7);
                 continue;
             };
-            misses = 0;
             let mut length =
                 width + common_prefix(&src[source + width..end], &src[ip + width..end]);
             while ip > anchor && source > window_start && src[ip - 1] == src[source - 1] {
