@@ -2953,10 +2953,15 @@ mod tests {
         let topic = "nullable-records";
         cluster.create_topic(topic, 1, 1).unwrap();
         nullable_native_fixture(&cluster.bootstrap_servers(), topic);
+        // librdkafka's mock coordinator does not empty a group when its last
+        // member leaves. It holds a JoinGroup for session.timeout.ms - 1 s
+        // (44 s at the default 45 s) before it elects the next member, so the
+        // resumed consumer below needs a short session to be assigned in time.
         let config =
             ConsumerConfig::new(vec![cluster.bootstrap_servers()], "nullable-records-group")
                 .force_real_kafka(true)
                 .auto_offset_reset(AutoOffsetReset::Earliest)
+                .session_timeout(Duration::from_secs(10))
                 .with_property("group.protocol", "classic");
         let builder = if multithread {
             RuntimeBuilder::new().worker_threads(2)
@@ -3116,8 +3121,10 @@ mod tests {
                     move |cx, consumer| -> BracketUseFuture<'_, (), KafkaError> {
                         Box::pin(async move {
                             consumer.subscribe(&cx, &[topic]).await.unwrap();
+                            // Covers the mock's 9 s join hold after the first
+                            // consumer left (see the config above).
                             let tail = consumer
-                                .poll_nullable(&cx, Duration::from_secs(10))
+                                .poll_nullable(&cx, Duration::from_secs(30))
                                 .await
                                 .unwrap()
                                 .expect("resume from the committed next offset");

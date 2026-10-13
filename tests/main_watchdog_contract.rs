@@ -900,6 +900,66 @@ fn a_worker_fault_is_recognised_only_when_no_crate_of_this_repository_failed() {
     );
 }
 
+/// A lane the worker left undecided is retried once on other workers (rch_run): rustc
+/// killed for memory, or a run whose completion rch could not confirm. One such lane per
+/// run kept `last_covered` at 8f72be32a from 10-10 to 10-13. A real red, an admission
+/// refusal, a dependency preflight refusal or a green is not retried this way.
+#[test]
+fn only_a_lane_the_worker_left_undecided_is_retried_on_other_workers() {
+    let oom = "  INFO rch::hook: Selected worker: vmi1152480 at ubuntu@host\nerror: could not compile `asupersync` (lib)\n\nCaused by:\n  process didn't exit successfully: `/home/u/.rustup/toolchains/x/bin/rustc --crate-name asupersync --edition=2024 src/lib.rs` (signal: 9, SIGKILL: kill)\n  Remote command finished: exit=101 in 60000ms\n";
+    let unconfirmed = "  INFO rch::hook: Selected worker: hz4 at ubuntu@host\n     Running tests/alpha_native.rs (target/debug/deps/alpha_native-abc)\nrunning 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s\n  WARN rch::hook: Remote completion unconfirmed; retaining build 1 ownership\n[RCH] remote hz4 completion unconfirmed; ownership retained for recovery (no local fallback)\n";
+    let lanes = lanes();
+    let (build, test) = (&lanes[0], &lanes[1]);
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"worker_side_no_evidence": [
+            {"text": oom, "code": 101, "lane": build},
+            {"text": unconfirmed, "code": 1, "lane": test},
+            {"text": build_red(&["alpha_native"]), "code": 101, "lane": build},
+            {"text": "[RCH] no admissible workers [RCH-I001]\n", "code": 103, "lane": build},
+            {"text": "[RCH] dependency preflight refused [RCH-E413]\n", "code": 1, "lane": build},
+            {"text": build_green(), "code": 0, "lane": build},
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["worker_side_no_evidence"],
+        json!([true, true, false, false, false, false]),
+        "{probed:#}"
+    );
+}
+
+/// A run posts its receipt only on beads cited by commits no earlier run receipted. While
+/// a batch stayed open each run posted again on every bead it cited: 77 beads per run,
+/// 1395 receipt comments on 396 beads by 10-13.
+#[test]
+fn a_receipt_goes_only_on_beads_of_commits_no_earlier_run_receipted() {
+    let mut commits: Vec<Value> = (1..=4).map(|n| commit(n, "dev@example.com", "x")).collect();
+    commits[0]["beads"] = json!(["asupersync-a"]);
+    commits[1]["beads"] = json!(["asupersync-b"]);
+    commits[3]["beads"] = json!(["asupersync-b", "asupersync-c"]);
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"receipt_beads": [
+            {"commits": commits, "posted_through": null},
+            {"commits": commits, "posted_through": sha(2)},
+            {"commits": commits, "posted_through": sha(4)},
+            {"commits": commits, "posted_through": sha(9)},
+        ]},
+    }));
+    assert_eq!(
+        probed["probe_results"]["receipt_beads"],
+        json!([
+            ["asupersync-a", "asupersync-b", "asupersync-c"],
+            ["asupersync-b", "asupersync-c"],
+            [],
+            ["asupersync-a", "asupersync-b", "asupersync-c"],
+        ]),
+        "{probed:#}"
+    );
+}
+
 /// Touched feature-gated code gets an all-targets check, and a clippy lane that also
 /// builds the required features of touched test targets: a lint in
 /// tests/quic_h3_listener_streaming.rs (http3,tls) stayed red unseen for two days

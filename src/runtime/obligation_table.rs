@@ -6,7 +6,9 @@
 
 use crate::error::{Error, ErrorKind};
 use crate::obligation::ledger::{ObligationAuditRecord, ObligationCounts};
-use crate::record::{ObligationAbortReason, ObligationKind, ObligationRecord, SourceLocation};
+use crate::record::{
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution, SourceLocation,
+};
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::{Arena, ArenaIndex};
 use smallvec::SmallVec;
@@ -579,7 +581,7 @@ impl ObligationTable {
 
         let kind = record.kind;
         let reserved_at = record.reserved_at;
-        let duration = record.commit(now);
+        let duration = record.resolve(now, ObligationResolution::Commit);
         let info = ObligationCommitInfo {
             id: record.id,
             holder: record.holder,
@@ -632,7 +634,7 @@ impl ObligationTable {
 
         let kind = record.kind;
         let reserved_at = record.reserved_at;
-        let duration = record.abort(now, reason);
+        let duration = record.resolve(now, ObligationResolution::Abort(reason));
         let info = ObligationAbortInfo {
             id: record.id,
             holder: record.holder,
@@ -690,7 +692,7 @@ impl ObligationTable {
 
         let kind = record.kind;
         let reserved_at = record.reserved_at;
-        let duration = record.mark_leaked(now);
+        let duration = record.resolve(now, ObligationResolution::Leak);
         let info = ObligationLeakInfo {
             id: record.id,
             holder: record.holder,

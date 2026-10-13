@@ -387,7 +387,17 @@ impl ObligationRecord {
         matches!(self.state, ObligationState::Reserved)
     }
 
-    fn resolve(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
+    /// Applies a terminal lifecycle transition without emitting a trace.
+    ///
+    /// The runtime's `ObligationTable` settles records through this while the
+    /// runtime lock is held and returns the facts to its caller, which emits
+    /// the lifecycle events after the lock is released (br-asupersync-8texo0).
+    /// An event emitted here would reach a tracing subscriber under that lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub(crate) fn resolve(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
         assert!(self.is_pending(), "obligation already resolved");
         self.state = resolution.state();
         self.resolved_at = Some(now);
