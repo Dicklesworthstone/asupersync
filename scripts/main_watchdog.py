@@ -1672,6 +1672,24 @@ def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
 # test's rustc was OOM-killed on the smaller workers (2026-09-25), and linking every
 # test binary with it costs time on each bisect probe. What is tested does not change.
 LEAN_TEST_ENV = ["env", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0"]
+ZSTD_FUZZ_PREFIXES = ("asupersync-zstd/", "fuzz/zstd/")
+
+
+def zstd_fuzz_lanes(paths: list[str], jobs: int) -> list[dict[str, Any]]:
+    """A check of the zstd fuzz workspace when the codec or its fuzz targets change.
+
+    fuzz/zstd is a workspace of its own (fuzz/Cargo.toml is whole-file hash-pinned), so
+    check-fuzz never builds it (br-asupersync-t1fblr.11).
+    """
+    if not any(path.startswith(ZSTD_FUZZ_PREFIXES) for path in paths):
+        return []
+    return [
+        {
+            "id": "check-fuzz-zstd",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "--manifest-path", "fuzz/zstd/Cargo.toml", "--bins", "--keep-going", "--message-format=short"],
+        }
+    ]
 
 
 def feature_lanes(src_features: list[str], test_features: list[str], jobs: int) -> list[dict[str, Any]]:
@@ -1749,6 +1767,7 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             "kind": "build",
             "argv": ["cargo", "check", "-j", str(jobs), "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going", "--message-format=short"],
         },
+        *zstd_fuzz_lanes(paths, jobs),
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
@@ -3213,6 +3232,9 @@ def main(argv: list[str]) -> int:
             "feature_lanes": [
                 feature_lanes(case["src_features"], case["test_features"], case["jobs"])
                 for case in probes.get("feature_lanes", [])
+            ],
+            "zstd_fuzz_lanes": [
+                zstd_fuzz_lanes(case["paths"], case["jobs"]) for case in probes.get("zstd_fuzz_lanes", [])
             ],
             "receipt_ledger": [
                 {

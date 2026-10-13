@@ -1,0 +1,38 @@
+# cargo-fuzz targets for the in-house Zstandard codec (br-asupersync-t1fblr.11).
+#
+# A workspace of its own. fuzz/Cargo.toml is whole-file hash-pinned by
+# artifacts/x509_adversarial_corpus_v1.json, so a target added there would turn
+# that contract red. Run from the repository root:
+#
+#   cargo fuzz run --fuzz-dir fuzz/zstd zstd_decode_untrusted
+#   cargo fuzz run --fuzz-dir fuzz/zstd zstd_roundtrip
+
+[package]
+name = "asupersync-zstd-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+asupersync-zstd = { path = "../../asupersync-zstd" }
+libfuzzer-sys = "0.4"
+
+[workspace]
+
+[[bin]]
+name = "zstd_decode_untrusted"
+path = "fuzz_targets/zstd_decode_untrusted.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zstd_roundtrip"
+path = "fuzz_targets/zstd_roundtrip.rs"
+test = false
+doc = false
+bench = false

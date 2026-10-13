@@ -960,6 +960,45 @@ fn a_full_worker_disk_is_undecided_and_retried() {
     );
 }
 
+/// A change to the zstd codec or its fuzz targets checks the fuzz/zstd workspace, which
+/// is a workspace of its own that check-fuzz never builds (br-asupersync-t1fblr.11).
+#[test]
+fn a_zstd_change_checks_its_fuzz_workspace() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"zstd_fuzz_lanes": [
+            {"paths": ["asupersync-zstd/src/frame.rs"], "jobs": 1},
+            {"paths": ["src/lib.rs", "fuzz/zstd/fuzz_targets/zstd_roundtrip.rs"], "jobs": 2},
+            {"paths": ["src/lib.rs", "fuzz/fuzz_targets/x509_der_residue.rs"], "jobs": 1},
+        ]},
+    }));
+    let cases = probed["probe_results"]["zstd_fuzz_lanes"]
+        .as_array()
+        .expect("zstd_fuzz_lanes probe");
+    assert_eq!(
+        cases[0],
+        json!([{
+            "id": "check-fuzz-zstd",
+            "kind": "build",
+            "argv": [
+                "cargo",
+                "check",
+                "-j",
+                "1",
+                "--manifest-path",
+                "fuzz/zstd/Cargo.toml",
+                "--bins",
+                "--keep-going",
+                "--message-format=short"
+            ],
+        }]),
+        "{probed:#}"
+    );
+    assert_eq!(cases[1][0]["argv"][3], "2", "{probed:#}");
+    assert_eq!(cases[2], json!([]), "{probed:#}");
+}
+
 /// A run posts its receipt only on beads cited by commits no earlier run receipted. While
 /// a batch stayed open each run posted again on every bead it cited: 77 beads per run,
 /// 1395 receipt comments on 396 beads by 10-13.
