@@ -57,6 +57,9 @@ pub const H3_REQUEST_REJECTED: u64 = 0x010b;
 /// RFC 9114 application error code `H3_MESSAGE_ERROR`.
 const H3_MESSAGE_ERROR: u64 = 0x010e;
 
+/// RFC 9114 application error code for excessive peer load.
+const H3_EXCESSIVE_LOAD: u64 = 0x0107;
+
 /// RFC 9114 application error code `H3_REQUEST_INCOMPLETE`.
 const H3_REQUEST_INCOMPLETE: u64 = 0x010d;
 
@@ -184,9 +187,11 @@ pub enum NativeH3Event {
     },
     /// Peer reset one request/response stream.
     ///
-    /// A server session also reports a request it rejected as malformed this
-    /// way, with `error_code` H3_MESSAGE_ERROR (0x10e) and `final_size` 0,
-    /// after resetting that stream itself. Other requests are unaffected.
+    /// A session also reports local message refusals this way, with
+    /// `final_size` 0: malformed messages use H3_MESSAGE_ERROR (0x10e),
+    /// incomplete requests use H3_REQUEST_INCOMPLETE (0x10d), and sections
+    /// exceeding the locally advertised size use H3_EXCESSIVE_LOAD (0x107).
+    /// Other requests are unaffected.
     StreamReset {
         /// Reset QUIC stream.
         stream_id: StreamId,
@@ -655,6 +660,8 @@ pub struct NativeH3Session {
     config: H3ConnectionConfig,
     state: H3ConnectionState,
     local_control: H3ControlState,
+    // Our advertised receive limit, not a limit learned from peer SETTINGS.
+    max_field_section_size: Option<u64>,
     local_control_stream: Option<StreamId>,
     incoming: BTreeMap<StreamId, IncomingStream>,
     terminal_streams: TerminalStreamTracker,
@@ -703,6 +710,7 @@ impl NativeH3Session {
             config,
             state,
             local_control: H3ControlState::new(),
+            max_field_section_size: None,
             local_control_stream: None,
             incoming: BTreeMap::new(),
             terminal_streams: TerminalStreamTracker::default(),
@@ -804,6 +812,18 @@ impl NativeH3Session {
     }
 
     /// Open the mandatory local control stream and queue SETTINGS first.
+    ///
+    /// A supplied `max_field_section_size` also limits each received initial
+    /// request, informational/final response, and trailer section independently.
+    /// The uncompressed size counts every name and value byte plus 32 bytes
+    /// per occurrence, including pseudo-headers and duplicate fields.
+    /// Oversized sections reset only their stream with `H3_EXCESSIVE_LOAD`
+    /// before a header event is published; no peer FIN is required. `None`
+    /// keeps the existing decoder/frame limits without this additional cap.
+    ///
+    /// This is an application-admission limit, not a decoder-memory bound:
+    /// QPACK plans and expanded fields are allocated before this check. Encoded
+    /// frames, Huffman workspace and QUIC reassembly retain their own limits.
     pub fn initialize(
         &mut self,
         cx: &Cx,
@@ -816,6 +836,16 @@ impl NativeH3Session {
             return Err(NativeH3SessionError::InvalidState(
                 "session is already initialized",
             ));
+        }
+
+        let max_field_section_size = settings.max_field_section_size;
+        if max_field_section_size.is_some_and(|limit| limit > QUIC_VARINT_MAX) {
+            // Refuse an unencodable local limit before consuming a control
+            // stream or sealing local SETTINGS, so the caller can correct it.
+            return Err(H3NativeError::InvalidSettingValue(
+                super::h3_native::H3_SETTING_MAX_FIELD_SECTION_SIZE,
+            )
+            .into());
         }
 
         // These are local decoder limits. This adapter has no dynamic-table
@@ -833,6 +863,7 @@ impl NativeH3Session {
         settings_frame.encode(&mut wire)?;
         connection.write_stream(cx, control_stream, Bytes::from(wire), false)?;
         self.local_control_stream = Some(control_stream);
+        self.max_field_section_size = max_field_section_size;
         self.initialized = true;
         Ok(control_stream)
     }
@@ -1610,8 +1641,8 @@ impl NativeH3Session {
     }
 
     /// Queue RESET_STREAM and STOP_SENDING for every request rejected as
-    /// malformed or incomplete. Returns true when any was rejected, so the
-    /// caller stops processing a stream it may no longer own.
+    /// malformed, incomplete or over the field limit. Returns true when any
+    /// was rejected, so the caller stops processing a stream it no longer owns.
     fn reset_rejected_requests(
         &mut self,
         cx: &Cx,
@@ -1855,6 +1886,29 @@ impl NativeH3Session {
         }
     }
 
+    /// Preserve QPACK corruption as a protocol error. A decoded section
+    /// exceeding our local policy ends only its request/response stream.
+    fn decode_received_fields(
+        &mut self,
+        stream_id: StreamId,
+        field_section: &[u8],
+    ) -> Result<Option<Vec<(String, String)>>, NativeH3SessionError> {
+        let plan = qpack_decode_field_section_with_context(
+            field_section,
+            H3QpackMode::StaticOnly,
+            None,
+        )?;
+        let fields = qpack_plan_to_header_fields(&plan, None)?;
+        if self
+            .max_field_section_size
+            .is_some_and(|limit| !received_field_section_fits(&fields, limit))
+        {
+            self.reject_request_stream(stream_id, H3_EXCESSIVE_LOAD)?;
+            return Ok(None);
+        }
+        Ok(Some(fields))
+    }
+
     fn on_frame(
         &mut self,
         stream_id: StreamId,
@@ -1888,12 +1942,10 @@ impl NativeH3Session {
                         // valid request is malformed, a stream error (RFC 9114
                         // section 4.1.2): reject it without ending the other
                         // requests on this connection.
-                        let plan = qpack_decode_field_section_with_context(
-                            &field_section,
-                            H3QpackMode::StaticOnly,
-                            None,
-                        )?;
-                        let fields = qpack_plan_to_header_fields(&plan, None)?;
+                        let Some(fields) = self.decode_received_fields(stream_id, &field_section)?
+                        else {
+                            return Ok(());
+                        };
                         let Ok(head) = header_fields_to_request_head(&fields) else {
                             return self.reject_malformed_request(stream_id);
                         };
@@ -1913,12 +1965,10 @@ impl NativeH3Session {
                     // forbids (an uppercase or connection-specific name, a
                     // control character, a pseudo-header) makes only this
                     // request malformed. It used to end the whole connection.
-                    let plan = qpack_decode_field_section_with_context(
-                        &field_section,
-                        H3QpackMode::StaticOnly,
-                        None,
-                    )?;
-                    let fields = qpack_plan_to_header_fields(&plan, None)?;
+                    let Some(fields) = self.decode_received_fields(stream_id, &field_section)?
+                    else {
+                        return Ok(());
+                    };
                     if validate_trailer_fields(&fields).is_err() {
                         return self.reject_malformed_request(stream_id);
                     }
@@ -1941,12 +1991,10 @@ impl NativeH3Session {
                     // HTTP/3 forbids makes only this response malformed, a
                     // stream error (RFC 9114 section 4.1.2). It used to close
                     // the connection and every other request on it.
-                    let plan = qpack_decode_field_section_with_context(
-                        &field_section,
-                        H3QpackMode::StaticOnly,
-                        None,
-                    )?;
-                    let fields = qpack_plan_to_header_fields(&plan, None)?;
+                    let Some(fields) = self.decode_received_fields(stream_id, &field_section)?
+                    else {
+                        return Ok(());
+                    };
                     if final_response_headers_seen {
                         if validate_trailer_fields(&fields).is_err() {
                             return self.reject_malformed_request(stream_id);
@@ -2123,6 +2171,21 @@ impl NativeH3Session {
     }
 }
 
+/// RFC 9114 section 4.2.2 counts occurrences, not unique header names.
+/// Subtract from the remaining budget rather than summing potentially
+/// overflowing lengths. This does not allocate another header representation.
+fn received_field_section_fits(fields: &[(String, String)], limit: u64) -> bool {
+    fields
+        .iter()
+        .try_fold(limit, |remaining, (name, value)| {
+            remaining
+                .checked_sub(u64::try_from(name.len()).ok()?)?
+                .checked_sub(u64::try_from(value.len()).ok()?)?
+                .checked_sub(32)
+        })
+        .is_some()
+}
+
 fn decode_prefix(input: &[u8]) -> Result<Option<(u64, usize)>, NativeH3SessionError> {
     match decode_varint(input) {
         Ok(decoded) => Ok(Some(decoded)),
@@ -2174,6 +2237,313 @@ mod tests {
     use super::*;
     use crate::http::h3_native::H3PseudoHeaders;
     use crate::net::quic_native::NativeQuicConnectionConfig;
+
+    fn field_limit_fixture(
+        cx: &Cx,
+        server: bool,
+        streaming: bool,
+        limit: Option<u64>,
+    ) -> (NativeH3Session, QuicConnection) {
+        let mut connection = if server {
+            QuicConnection::server(NativeQuicConnectionConfig::default())
+        } else {
+            QuicConnection::client(NativeQuicConnectionConfig::default())
+        };
+        connection.begin_handshake(cx).unwrap();
+        connection.mark_handshake_keys_available(cx).unwrap();
+        connection.mark_app_keys_available(cx).unwrap();
+        connection.confirm_handshake(cx).unwrap();
+        let mut session = if server { NativeH3Session::server() } else { NativeH3Session::client() };
+        if streaming {
+            session.enable_streaming_receive(NonZeroUsize::new(8).unwrap()).unwrap();
+        }
+        session.initialize(cx, &mut connection, H3Settings {
+            max_field_section_size: limit,
+            ..H3Settings::default()
+        }).unwrap();
+        (session, connection)
+    }
+
+    fn field_limit_request() -> H3RequestHead {
+        H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("GET".to_owned()),
+                scheme: Some("https".to_owned()),
+                authority: Some("example.test".to_owned()),
+                path: Some("/".to_owned()),
+                ..H3PseudoHeaders::default()
+            },
+            Vec::new(),
+        ).unwrap()
+    }
+
+    fn inject_field_frame(
+        cx: &Cx,
+        connection: &mut QuicConnection,
+        stream: StreamId,
+        offset: u64,
+        section: Vec<u8>,
+        fin: bool,
+    ) -> u64 {
+        let wire = encode_frame(H3Frame::Headers(section)).unwrap();
+        let next = offset + u64::try_from(wire.len()).unwrap();
+        connection.inner_mut().receive_stream_bytes(cx, stream, offset, wire, fin).unwrap();
+        next
+    }
+
+    fn next_field_limit_event(
+        cx: &Cx,
+        session: &mut NativeH3Session,
+        connection: &mut QuicConnection,
+    ) -> NativeH3Event {
+        // All transport bytes have already been injected; repeated calls only
+        // drive the production session's bounded parser steps. This is not a
+        // timing-based witness or a native TLS/UDP integration test.
+        for _ in 0..512 {
+            if let Some(event) = session.next_event(cx, connection).unwrap() {
+                return event;
+            }
+        }
+        panic!("buffered wire bytes did not produce the expected field event");
+    }
+
+    #[test]
+    fn request_field_limit_refuses_before_fin_and_preserves_same_connection_recovery() {
+        for streaming in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, streaming, Some(178));
+            let mut oversized = field_limit_request();
+            oversized.headers.push(("x-padding".to_owned(), "x".to_owned()));
+            let rejected = StreamId(0);
+            connection.inner_mut().accept_remote_stream(&cx, rejected).unwrap();
+            inject_field_frame(&cx, &mut connection, rejected, 0,
+                qpack_encode_request_field_section(&oversized).unwrap(), false);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset { stream_id: rejected, error_code: H3_EXCESSIVE_LOAD, final_size: 0 });
+            let state = connection.inner().streams().stream(rejected).unwrap();
+            assert_eq!(state.send_reset, Some((H3_EXCESSIVE_LOAD, 0)));
+            assert_eq!(state.receive_stopped_error_code, Some(H3_EXCESSIVE_LOAD));
+            assert!(state.final_size.is_none(), "peer never sent FIN");
+            assert_eq!(session.state.active_request_stream_count(), 0);
+            assert!(!session.incoming.contains_key(&rejected));
+            assert!(session.terminal_streams.contains(rejected));
+            assert!(connection.can_send_app_data());
+
+            let accepted = StreamId(4);
+            connection.inner_mut().accept_remote_stream(&cx, accepted).unwrap();
+            let head = field_limit_request();
+            inject_field_frame(&cx, &mut connection, accepted, 0,
+                qpack_encode_request_field_section(&head).unwrap(), true);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::RequestHeaders { stream_id: accepted, head });
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::Finished { stream_id: accepted });
+            assert_eq!(session.state.active_request_stream_count(), 0);
+            assert!(session.incoming.is_empty());
+        }
+    }
+
+    #[test]
+    fn request_trailer_field_limit_refuses_before_fin() {
+        for streaming in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, streaming, Some(178));
+            let stream = StreamId(0);
+            connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+            let head = field_limit_request();
+            let offset = inject_field_frame(&cx, &mut connection, stream, 0,
+                qpack_encode_request_field_section(&head).unwrap(), false);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::RequestHeaders { stream_id: stream, head });
+            let trailer = qpack_encode_trailer_field_section(&[
+                ("x-trailer".to_owned(), "x".repeat(140)),
+            ]).unwrap();
+            // 9 + 140 + 32 = 181, independently larger than the 178-byte cap.
+            inject_field_frame(&cx, &mut connection, stream, offset, trailer, false);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset { stream_id: stream, error_code: H3_EXCESSIVE_LOAD, final_size: 0 });
+            assert_eq!(session.state.active_request_stream_count(), 0);
+            assert!(!session.incoming.contains_key(&stream));
+            assert!(connection.can_send_app_data());
+        }
+    }
+
+    #[test]
+    fn request_field_limit_default_none_and_zero_have_distinct_behavior() {
+        for limit in [None, Some(0)] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, true, false, limit);
+            let stream = StreamId(0);
+            connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+            let mut head = field_limit_request();
+            head.headers.push(("x-padding".to_owned(), "x".repeat(1024)));
+            inject_field_frame(&cx, &mut connection, stream, 0,
+                qpack_encode_request_field_section(&head).unwrap(), false);
+            let event = next_field_limit_event(&cx, &mut session, &mut connection);
+            if limit.is_none() {
+                assert_eq!(event, NativeH3Event::RequestHeaders { stream_id: stream, head });
+            } else {
+                assert_eq!(event, NativeH3Event::StreamReset {
+                    stream_id: stream, error_code: H3_EXCESSIVE_LOAD, final_size: 0,
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn client_field_limit_applies_separately_to_informational_final_and_trailer_sections() {
+        use crate::http::h3_native::{QpackFieldPlan, qpack_encode_field_section};
+        for streaming in [false, true] {
+            let cx = Cx::for_testing();
+            let (mut session, mut connection) = field_limit_fixture(&cx, false, streaming, Some(42));
+            let rejected = session.send_request(&cx, &mut connection, &field_limit_request(), Bytes::new()).unwrap();
+            let oversized = qpack_encode_field_section(&[
+                QpackFieldPlan::Literal { name: ":status".to_owned(), value: "200".to_owned() },
+                QpackFieldPlan::Literal { name: "x-note".to_owned(), value: "value".to_owned() },
+            ]).unwrap();
+            inject_field_frame(&cx, &mut connection, rejected, 0, oversized, false);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset { stream_id: rejected, error_code: H3_EXCESSIVE_LOAD, final_size: 0 });
+            let stream = session.send_request(&cx, &mut connection, &field_limit_request(), Bytes::new()).unwrap();
+            let mut offset = 0;
+            for status in [103, 200] {
+                let fields = qpack_encode_field_section(&[
+                    QpackFieldPlan::Literal { name: ":status".to_owned(), value: status.to_string() },
+                ]).unwrap();
+                offset = inject_field_frame(&cx, &mut connection, stream, offset, fields, false);
+                assert!(matches!(next_field_limit_event(&cx, &mut session, &mut connection),
+                    NativeH3Event::ResponseHeaders { stream_id, head }
+                    if stream_id == stream && head.status == status));
+            }
+            // Each preceding section fits exactly. A legal but oversized
+            // trailer must still be refused; it is not exempt after final HEADERS.
+            let trailer = qpack_encode_trailer_field_section(&[
+                ("x-trailer".to_owned(), "too large".to_owned()),
+            ]).unwrap();
+            inject_field_frame(&cx, &mut connection, stream, offset, trailer, false);
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::StreamReset { stream_id: stream, error_code: H3_EXCESSIVE_LOAD, final_size: 0 });
+            assert!(connection.can_send_app_data());
+            assert!(!session.incoming.contains_key(&stream));
+
+            let survivor = session.send_request(&cx, &mut connection, &field_limit_request(), Bytes::new()).unwrap();
+            let fields = qpack_encode_field_section(&[
+                QpackFieldPlan::Literal { name: ":status".to_owned(), value: "200".to_owned() },
+            ]).unwrap();
+            inject_field_frame(&cx, &mut connection, survivor, 0, fields, true);
+            assert!(matches!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::ResponseHeaders { stream_id, head }
+                if stream_id == survivor && head.status == 200));
+            assert_eq!(next_field_limit_event(&cx, &mut session, &mut connection),
+                NativeH3Event::Finished { stream_id: survivor });
+        }
+    }
+
+    #[test]
+    fn field_limit_does_not_turn_invalid_qpack_into_an_application_refusal() {
+        let cx = Cx::for_testing();
+        let (mut session, mut connection) = field_limit_fixture(&cx, true, false, Some(0));
+        let stream = StreamId(0);
+        connection.inner_mut().accept_remote_stream(&cx, stream).unwrap();
+        // RIC=0, Base=0, static index 63+127=190 (outside the static table).
+        inject_field_frame(&cx, &mut connection, stream, 0, vec![0, 0, 0xff, 0x7f], false);
+        assert_eq!(session.next_event(&cx, &mut connection),
+            Err(NativeH3SessionError::Protocol(H3NativeError::InvalidFrame("unknown static qpack index"))));
+        assert!(session.rejected_requests.is_empty());
+    }
+
+    #[test]
+    fn field_limit_counts_duplicate_utf8_bytes_and_field_overhead() {
+        let fields = vec![
+            (":status".to_owned(), "200".to_owned()),
+            ("x-note".to_owned(), "é".to_owned()),
+            ("x-note".to_owned(), "é".to_owned()),
+        ];
+        // 42 for :status, then 6 + 2 + 32 for EACH occurrence of x-note.
+        assert!(received_field_section_fits(&fields, 122));
+        assert!(!received_field_section_fits(&fields, 121));
+        assert!(!received_field_section_fits(&fields, 82));
+        assert!(received_field_section_fits(&fields, u64::MAX));
+        assert!(received_field_section_fits(&[], 0));
+        assert!(!received_field_section_fits(&fields, 0));
+    }
+
+    #[test]
+    fn field_limit_invalid_setting_does_not_consume_control_stream_or_seal_settings() {
+        use crate::http::h3_native::H3_SETTING_MAX_FIELD_SECTION_SIZE;
+        use crate::net::atp::protocol::quic_frames::QuicFrame;
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::PacketNumberSpace;
+
+        let cx = Cx::for_testing();
+        let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
+        connection.begin_handshake(&cx).unwrap();
+        connection.mark_handshake_keys_available(&cx).unwrap();
+        connection.mark_app_keys_available(&cx).unwrap();
+        connection.confirm_handshake(&cx).unwrap();
+        let mut session = NativeH3Session::server();
+        for limit in [QUIC_VARINT_MAX + 1, u64::MAX] {
+            assert_eq!(
+                session.initialize(
+                    &cx,
+                    &mut connection,
+                    H3Settings {
+                        max_field_section_size: Some(limit),
+                        ..H3Settings::default()
+                    },
+                ),
+                Err(NativeH3SessionError::Protocol(
+                    H3NativeError::InvalidSettingValue(H3_SETTING_MAX_FIELD_SECTION_SIZE),
+                )),
+            );
+            assert!(!session.initialized);
+            assert!(session.local_control_stream.is_none());
+            assert!(session.max_field_section_size.is_none());
+        }
+        let control = session
+            .initialize(
+                &cx,
+                &mut connection,
+                H3Settings {
+                    max_field_section_size: Some(178),
+                    ..H3Settings::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(control, StreamId(3), "failed calls must not spend stream IDs");
+        assert_eq!(session.max_field_section_size, Some(178));
+        let mut wire = Vec::new();
+        for frame in connection
+            .inner_mut()
+            .generate_stream_frames_for(&cx, PacketNumberSpace::ApplicationData, control, 65_536)
+            .unwrap()
+        {
+            if let QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } = frame
+            {
+                assert_eq!(stream_id.value(), control.0);
+                assert_eq!(offset.map_or(0, VarInt::value), u64::try_from(wire.len()).unwrap());
+                assert!(!fin);
+                wire.extend_from_slice(&data);
+            }
+        }
+        let (kind, prefix) = decode_varint(&wire).unwrap();
+        assert_eq!(kind, H3_CONTROL_STREAM_TYPE);
+        let (frame, consumed) = H3Frame::decode(&wire[prefix..], &session.config).unwrap();
+        assert_eq!(prefix + consumed, wire.len());
+        let H3Frame::Settings(settings) = frame else {
+            panic!("the first control frame must advertise SETTINGS");
+        };
+        assert_eq!(settings.max_field_section_size, session.max_field_section_size);
+        assert!(session
+            .initialize(&cx, &mut connection, H3Settings::default())
+            .is_err());
+        assert_eq!(session.max_field_section_size, Some(178));
+    }
 
     fn server_with_request_limit(cx: &Cx, limit: u64) -> (NativeH3Session, QuicConnection) {
         let mut connection = QuicConnection::server(NativeQuicConnectionConfig::default());
