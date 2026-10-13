@@ -21,7 +21,7 @@ impl Transform for StreamDecoder {
     }
 
     fn finish(&mut self, output: &mut [u8]) -> io::Result<StreamProgress> {
-        StreamDecoder::finish(self, output).map_err(decode_error)
+        Self::finish(self, output).map_err(decode_error)
     }
 }
 

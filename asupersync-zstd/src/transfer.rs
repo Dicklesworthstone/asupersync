@@ -693,7 +693,7 @@ mod tests {
         let mut sink = Sink::new(64);
         assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
         assert_eq!(session.progress().bytes_read, 3);
-        assert!(sink.bytes.is_empty());
+        assert_eq!(sink.bytes, Vec::<u8>::new());
         decode_run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(sink.bytes, plain);
     }
@@ -799,7 +799,7 @@ mod tests {
             let mut source = Source::new(wire, 1);
             let mut sink = Sink::new(1);
             decode_run(&mut session, &mut source, &mut sink).unwrap();
-            assert!(sink.bytes.is_empty());
+            assert_eq!(sink.bytes, Vec::<u8>::new());
             assert!(session.is_finished());
             assert_eq!(sink.flushes, 1);
         }
@@ -823,7 +823,7 @@ mod tests {
             let mut source = Source::new(&wire, 1);
             let mut sink = Sink::new(2);
             assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::InvalidData);
-            assert!(sink.bytes.is_empty());
+            assert_eq!(sink.bytes, Vec::<u8>::new());
             assert_eq!(sink.flushes, 0);
         }
         let mut session = DecodeTransfer::new(DecodeLimits::new(2));
@@ -842,13 +842,13 @@ mod tests {
         let mut session = DecodeTransfer::new(DecodeLimits::new(3));
         let mut source = Source::new(&wire, 8192);
         let mut sink = Sink::new(8192);
-        let wakes = Arc::new(WakeCount::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let wake_count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
         {
             let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
             assert!(future.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
         }
-        assert!(wakes.0.load(Ordering::Relaxed) > 0);
+        assert!(wake_count.0.load(Ordering::Relaxed) > 0);
         assert!(!session.is_finished());
         decode_run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(sink.bytes, b"end");
