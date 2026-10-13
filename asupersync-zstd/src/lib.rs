@@ -36,7 +36,7 @@ mod transfer;
 pub mod xxhash64;
 
 pub use encode::{EncodeParams, Level, encode_all, encode_into};
-pub use frame::{DecodeError, DecodeLimits, decode_all, decode_into};
+pub use frame::{DecodeError, DecodeLimits, decode_all, decode_append, decode_into};
 pub use stream::{StreamEncodeError, StreamEncoder, StreamProgress, StreamStatus};
 pub use stream_decode::StreamDecoder;
 pub use transfer::{EncodeTransfer, TransferProgress};

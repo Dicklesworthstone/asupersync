@@ -99,14 +99,49 @@ fn read_le(input: &[u8], pos: usize, width: usize) -> Result<u64, DecodeError> {
 /// `limits`.
 pub fn decode_all(input: &[u8], limits: &DecodeLimits) -> Result<Vec<u8>, DecodeError> {
     let mut out = Vec::new();
-    let mut pos = 0;
+    decode_frames(input, limits, &mut out)?;
+    Ok(out)
+}
+
+/// Decodes every frame in `input` and appends the output to `out`.
+///
+/// It reuses `out`'s capacity, so a buffer kept across calls stops
+/// allocating once it is large enough. `limits.max_output` bounds the bytes
+/// appended, and no frame reaches back into what `out` held before. Returns
+/// the bytes appended; on error, `out` is truncated back to its previous
+/// length.
+pub fn decode_append(
+    input: &[u8],
+    out: &mut Vec<u8>,
+    limits: &DecodeLimits,
+) -> Result<usize, DecodeError> {
+    let start = out.len();
+    let absolute = DecodeLimits {
+        max_output: start.saturating_add(limits.max_output),
+        ..*limits
+    };
+    let decoded = decode_frames(input, &absolute, out);
+    if decoded.is_err() {
+        out.truncate(start);
+    }
+    decoded.map(|()| out.len() - start)
+}
+
+/// Decodes every frame in `input`, appending to `out`, whose final length
+/// `limits.max_output` bounds.
+fn decode_frames(
+    input: &[u8],
+    limits: &DecodeLimits,
+    out: &mut Vec<u8>,
+) -> Result<(), DecodeError> {
     if input.is_empty() {
         return Err(DecodeError::Truncated);
     }
+    let mut pos = 0;
     while pos < input.len() {
-        pos += decode_frame(&input[pos..], limits, &mut out)?;
+        pos += decode_frame(&input[pos..], limits, out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Decodes every frame in `input` into `out`, which also bounds the output:
@@ -302,7 +337,7 @@ fn decode_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, DecodeLimits, decode_all, decode_into};
+    use super::{DecodeError, DecodeLimits, decode_all, decode_append, decode_into};
     use crate::xxhash64::xxh64;
 
     const FRAMES: &str = include_str!("../tests/vectors/frames_zstd_cli.txt");
@@ -464,6 +499,44 @@ mod tests {
                 Ok(vec![b'a'; expected])
             );
         }
+    }
+
+    /// decode_append adds after what the buffer holds, bounds only the bytes
+    /// it appends, reuses the buffer's capacity, and leaves the buffer as it
+    /// was on error.
+    #[test]
+    fn decode_append_reuses_the_buffer_and_restores_it_on_error() {
+        let (label, length, _, frame) = vectors().into_iter().find(|v| v.1 > 10_000).unwrap();
+        let expected = decode_all(&frame, &DecodeLimits::new(length)).unwrap();
+        let mut out = b"prefix".to_vec();
+        out.reserve(length);
+        let buffer = out.as_ptr();
+        assert_eq!(
+            decode_append(&frame, &mut out, &DecodeLimits::new(length)),
+            Ok(length),
+            "{label}"
+        );
+        assert_eq!(&out[..6], b"prefix");
+        assert!(out[6..] == expected[..], "{label}");
+        assert_eq!(out.as_ptr(), buffer, "{label}: no reallocation");
+
+        out.truncate(6);
+        assert_eq!(
+            decode_append(&frame, &mut out, &DecodeLimits::new(length - 1)),
+            Err(DecodeError::OutputTooLarge),
+            "{label}: the limit counts appended bytes only"
+        );
+        assert_eq!(out, b"prefix");
+        assert!(
+            decode_append(
+                &frame[..frame.len() / 2],
+                &mut out,
+                &DecodeLimits::new(length)
+            )
+            .is_err(),
+            "{label}: truncated"
+        );
+        assert_eq!(out, b"prefix", "{label}: restored after an error");
     }
 
     /// A 3-byte block header.
