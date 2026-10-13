@@ -5,8 +5,8 @@
 //! ([`Level::Store`]) or compresses with a greedy hash match finder,
 //! Huffman literals and FSE-coded sequences ([`Level::Fast`]).
 //! [`StreamEncoder`] and [`StreamDecoder`] accept fragmented input and output
-//! with bounded buffering. [`EncodeTransfer`] drives nonblocking I/O callbacks
-//! while retaining transfer progress across cancelled waits.
+//! with bounded buffering. [`EncodeTransfer`] and [`DecodeTransfer`] drive
+//! nonblocking I/O callbacks while retaining progress across cancelled waits.
 //!
 //! Every decode takes [`DecodeLimits`]: a cap on total output and on the frame
 //! window. Malformed input is refused with a [`DecodeError`], never a panic,
@@ -39,5 +39,5 @@ pub use encode::{EncodeParams, Level, encode_all, encode_into};
 pub use frame::{DecodeError, DecodeLimits, decode_all, decode_into};
 pub use stream::{StreamEncodeError, StreamEncoder, StreamProgress, StreamStatus};
 pub use stream_decode::StreamDecoder;
-pub use transfer::{EncodeTransfer, TransferProgress};
+pub use transfer::{DecodeTransfer, EncodeTransfer, TransferProgress};
 pub use xxhash64::{Xxh64, xxh64};

@@ -8,6 +8,9 @@ use std::future::poll_fn;
 use std::io;
 use std::task::{Context, Poll};
 
+mod decode;
+pub use decode::DecodeTransfer;
+
 const BUFFER_SIZE: usize = 8192;
 const POLL_STEPS: usize = 32;
 
@@ -313,7 +316,7 @@ impl EncodeTransfer {
 
 #[cfg(test)]
 mod tests {
-    use super::{EncodeTransfer, TransferProgress};
+    use super::{DecodeTransfer, EncodeTransfer, TransferProgress};
     use crate::{DecodeLimits, EncodeParams, Level, decode_all, encode_all};
     use std::future::Future;
     use std::io;
@@ -612,5 +615,267 @@ mod tests {
         assert!(session.progress().bytes_read < input.len() as u64);
         run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(), input);
+    }
+
+    fn decode_run(session: &mut DecodeTransfer, source: &mut Source, sink: &mut Sink)
+        -> io::Result<TransferProgress>
+    {
+        complete(session.run(source, sink, Source::read, Sink::write, Sink::flush))
+    }
+
+    #[test]
+    fn decoding_transfer_runs_every_existing_cli_reference_frame() {
+        let fixtures = include_str!("../tests/vectors/frames_zstd_cli.txt");
+        let mut seen = 0;
+        for line in fixtures.lines().filter(|line| !line.starts_with('#') && !line.trim().is_empty()) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let length: usize = fields[1].parse().unwrap();
+            let digest = u64::from_str_radix(fields[2], 16).unwrap();
+            let wire: Vec<u8> = (0..fields[3].len()).step_by(2)
+                .map(|at| u8::from_str_radix(&fields[3][at..at + 2], 16).unwrap()).collect();
+            let mut session = DecodeTransfer::new(DecodeLimits::new(length));
+            let mut source = Source::new(&wire, 73);
+            source.alternate_pending = Some(false);
+            let mut sink = Sink::new(97);
+            sink.alternate_pending = Some(false);
+            let result = decode_run(&mut session, &mut source, &mut sink)
+                .unwrap_or_else(|error| panic!("{}: {error}", fields[0]));
+            assert_eq!(sink.bytes.len(), length, "{}", fields[0]);
+            assert_eq!(crate::xxh64(&sink.bytes, 0), digest, "{}", fields[0]);
+            assert_eq!(result.bytes_read, wire.len() as u64);
+            assert_eq!(result.bytes_written, length as u64);
+            assert_eq!(sink.flushes, 1);
+            assert!(session.is_finished());
+            seen += 1;
+        }
+        assert_eq!(seen, 264, "keep the complete independent reference corpus");
+    }
+
+    #[test]
+    fn decoding_drop_preserves_pending_output_and_cross_poll_history() {
+        let plain: Vec<u8> = (0..50_000).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let wire = encode_all(&plain, &EncodeParams::new(Level::Store));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
+        let mut source = Source::new(&wire, 1000);
+        let mut sink = Sink::new(2);
+        sink.blocked = true;
+        // Drop and recreate the borrowing future at every budget yield until
+        // the decoded block reaches the blocked sink.
+        for _ in 0..100 {
+            {
+                let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
+                assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+            }
+            if sink.calls != 0 { break; }
+        }
+        assert!(sink.calls > 0, "reach real output backpressure, not just a budget yield");
+        assert_eq!(session.progress().bytes_written, 0);
+        let reads = source.calls;
+        {
+            let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
+            assert!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());
+        }
+        assert_eq!(source.calls, reads, "a blocked sink must stop further source reads");
+        sink.blocked = false;
+        let result = decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, plain);
+        assert_eq!(result.bytes_read, wire.len() as u64);
+        assert_eq!(result.bytes_written, plain.len() as u64);
+    }
+
+    #[test]
+    fn decoding_interrupted_read_preserves_a_partial_header() {
+        let plain = b"resume after partial magic";
+        let wire = encode_all(plain, &EncodeParams::new(Level::Fast));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
+        let mut source = Source::new(&wire, 3);
+        source.interrupt_at = Some(3);
+        let mut sink = Sink::new(64);
+        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(session.progress().bytes_read, 3);
+        assert!(sink.bytes.is_empty());
+        decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, plain);
+    }
+
+    #[test]
+    fn decoding_interrupted_partial_write_does_not_duplicate_plaintext() {
+        let plain = b"already delivered plaintext must not be delivered again";
+        let wire = encode_all(plain, &EncodeParams::new(Level::Fast));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
+        let mut source = Source::new(&wire, 7);
+        let mut sink = Sink::new(2);
+        sink.interrupt_at = Some(2);
+        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert_eq!(sink.bytes, &plain[..2]);
+        assert_eq!(session.progress().bytes_written, 2);
+        decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, plain);
+        assert_eq!(session.progress().bytes_written, plain.len() as u64);
+    }
+
+    #[test]
+    fn decoding_rejects_every_truncated_prefix_without_a_success_flush() {
+        let wire = encode_all(b"not complete", &EncodeParams::new(Level::Store));
+        for cut in 0..wire.len() {
+            let mut session = DecodeTransfer::new(DecodeLimits::new(1024));
+            let mut source = Source::new(&wire[..cut], 3);
+            let mut sink = Sink::new(2);
+            let error = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof, "prefix {cut}");
+            assert!(!session.is_finished(), "prefix {cut}");
+            assert_eq!(sink.flushes, 0, "prefix {cut}");
+        }
+    }
+
+    #[test]
+    fn decoding_checksum_failure_keeps_earlier_output_explicitly_provisional() {
+        let plain = b"checksum validation follows body delivery";
+        let mut wire = encode_all(plain, &EncodeParams::new(Level::Store));
+        *wire.last_mut().unwrap() ^= 1;
+        let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
+        let mut source = Source::new(&wire, wire.len());
+        let mut sink = Sink::new(8192);
+        let error = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("checksum"));
+        assert_eq!(sink.bytes, plain, "late failure cannot roll back already written bytes");
+        assert_eq!(sink.flushes, 0);
+        assert!(!session.is_finished());
+        let counts = (source.calls, sink.calls, sink.flushes);
+        let again = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
+        assert_eq!(again.kind(), error.kind());
+        assert_eq!(again.to_string(), error.to_string());
+        assert_eq!((source.calls, sink.calls, sink.flushes), counts);
+    }
+
+    #[test]
+    fn decoding_output_limit_spans_concatenated_frames() {
+        let params = EncodeParams::new(Level::Store);
+        let mut wire = encode_all(b"first", &params);
+        wire.extend_from_slice(&encode_all(b"second", &params));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(10));
+        let mut source = Source::new(&wire, 8192);
+        let mut sink = Sink::new(8192);
+        let error = decode_run(&mut session, &mut source, &mut sink).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("output exceeds"));
+        assert_eq!(sink.bytes, b"first");
+        assert_eq!(session.progress().bytes_written, 5);
+        assert_eq!(sink.flushes, 0);
+
+        let mut session = DecodeTransfer::new(DecodeLimits::new(11));
+        let mut source = Source::new(&wire, 1);
+        let mut sink = Sink::new(1);
+        decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, b"firstsecond");
+    }
+
+    #[test]
+    fn decoding_rejects_trailing_garbage_and_trailing_partial_magic() {
+        let params = EncodeParams::new(Level::Store);
+        for (suffix, kind) in [
+            (b"garbage!".as_slice(), io::ErrorKind::InvalidData),
+            (b"\x28".as_slice(), io::ErrorKind::UnexpectedEof),
+        ] {
+            let mut wire = encode_all(b"hi", &params);
+            wire.extend_from_slice(suffix);
+            let mut session = DecodeTransfer::new(DecodeLimits::new(2));
+            let mut source = Source::new(&wire, 3);
+            let mut sink = Sink::new(3);
+            assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), kind);
+            assert_eq!(sink.bytes, b"hi");
+            assert!(!session.is_finished());
+            assert_eq!(sink.flushes, 0);
+        }
+    }
+
+    #[test]
+    fn decoding_empty_frames_and_skippable_frames_respect_policy() {
+        let empty = encode_all(&[], &EncodeParams::new(Level::Store));
+        let skip = [0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0, 9, 8, 7];
+        for wire in [empty.as_slice(), skip.as_slice()] {
+            let mut session = DecodeTransfer::new(DecodeLimits::new(0));
+            let mut source = Source::new(wire, 1);
+            let mut sink = Sink::new(1);
+            decode_run(&mut session, &mut source, &mut sink).unwrap();
+            assert!(sink.bytes.is_empty());
+            assert!(session.is_finished());
+            assert_eq!(sink.flushes, 1);
+        }
+        let limits = DecodeLimits { allow_skippable_frames: false, ..DecodeLimits::new(0) };
+        let mut session = DecodeTransfer::new(limits);
+        let mut source = Source::new(&skip, 1);
+        let mut sink = Sink::new(1);
+        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(sink.flushes, 0);
+    }
+
+    #[test]
+    fn decoding_requires_content_size_and_enforces_window_before_output() {
+        // A raw "hi" frame without a declared content size, window = 1024.
+        let wire = [0x28, 0xb5, 0x2f, 0xfd, 0, 0, 0x11, 0, 0, b'h', b'i'];
+        for limits in [
+            DecodeLimits { require_content_size: true, ..DecodeLimits::new(2) },
+            DecodeLimits { max_window: 1023, ..DecodeLimits::new(2) },
+        ] {
+            let mut session = DecodeTransfer::new(limits);
+            let mut source = Source::new(&wire, 1);
+            let mut sink = Sink::new(2);
+            assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert!(sink.bytes.is_empty());
+            assert_eq!(sink.flushes, 0);
+        }
+        let mut session = DecodeTransfer::new(DecodeLimits::new(2));
+        let mut source = Source::new(&wire, 1);
+        let mut sink = Sink::new(1);
+        decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, b"hi");
+    }
+
+    #[test]
+    fn decoding_many_empty_frames_yields_and_continues_past_boundaries() {
+        let params = EncodeParams::new(Level::Store);
+        let empty = encode_all(&[], &params);
+        let mut wire = empty.repeat(2000);
+        wire.extend_from_slice(&encode_all(b"end", &params));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(3));
+        let mut source = Source::new(&wire, 8192);
+        let mut sink = Sink::new(8192);
+        let wakes = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wakes));
+        {
+            let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
+            assert!(future.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+        }
+        assert!(wakes.0.load(Ordering::Relaxed) > 0);
+        assert!(!session.is_finished());
+        decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!(sink.bytes, b"end");
+        assert_eq!(session.progress().bytes_read, wire.len() as u64);
+    }
+
+    #[test]
+    fn decoding_interrupted_final_flush_resumes_without_reading_or_writing_again() {
+        let plain = b"flush is part of successful completion";
+        let wire = encode_all(plain, &EncodeParams::new(Level::Store));
+        let mut session = DecodeTransfer::new(DecodeLimits::new(plain.len()));
+        let mut source = Source::new(&wire, 8192);
+        let mut sink = Sink::new(8192);
+        let error = complete(session.run(&mut source, &mut sink, Source::read, Sink::write,
+            |sink: &mut Sink, _: &mut Context<'_>| {
+                sink.flushes += 1;
+                Poll::Ready(Err(io::ErrorKind::Interrupted.into()))
+            })).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert!(!session.is_finished());
+        assert_eq!(sink.bytes, plain);
+        let counts = (source.calls, sink.calls);
+        let result = decode_run(&mut session, &mut source, &mut sink).unwrap();
+        assert_eq!((source.calls, sink.calls), counts);
+        assert_eq!(sink.flushes, 2);
+        let counts = (source.calls, sink.calls, sink.flushes);
+        assert_eq!(decode_run(&mut session, &mut source, &mut sink).unwrap(), result);
+        assert_eq!((source.calls, sink.calls, sink.flushes), counts);
     }
 }
