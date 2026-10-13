@@ -279,6 +279,7 @@ This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `t
 | `asupersync-macros` | Proc macros for structured concurrency (`scope!`, `spawn!`, `join!`, `join_all!`, `race!`, `select!`, plus entry attributes) |
 | `asupersync-browser-core` | Browser Edition Rust boundary crate for wasm-facing runtime/package surfaces |
 | `asupersync-tokio-compat` | Legacy Tokio-boundary compatibility crate kept outside the core runtime feature graph |
+| `asupersync-zstd` | Memory-safe Zstandard (RFC 8878) codec with no unsafe code, built in-house for ATP compression (in progress, `br-asupersync-t1fblr`) |
 | `conformance` | Conformance test suite for async runtime specifications |
 | `franken_kernel` | FrankenSuite type substrate (`TraceId`, `DecisionId`, `PolicyId`, `SchemaVersion`) |
 | `franken_evidence` | Canonical `EvidenceLedger` schema for FrankenSuite decision tracing |
