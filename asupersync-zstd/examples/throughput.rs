@@ -1,14 +1,20 @@
-//! Encode and decode throughput of `Level::Fast` on deterministic inputs.
+//! Encode and decode throughput of `Level::Fast` on deterministic inputs,
+//! against libzstd at level 1 in the same process (libzstd is a
+//! dev-dependency, the differential oracle of br-asupersync-t1fblr.11).
 //!
 //! Run with `cargo run --release -p asupersync-zstd --example throughput`.
-//! Each input is encoded and decoded repeatedly for about half a second, and
-//! the best pass is reported in MB/s (10^6 bytes per second of input).
+//! Each comparison times this crate and libzstd in alternating passes for
+//! about a second, so load on the machine affects both alike, and reports the
+//! best pass of each in MB/s (10^6 bytes of input per second) and their
+//! ratio. The whole table is measured twice, to show how much it moves.
+//! Neither side writes a content checksum.
 
 #![allow(
     clippy::cast_precision_loss,
     reason = "byte counts become f64 only to print rates"
 )]
 
+use std::hint::black_box;
 use std::time::{Duration, Instant};
 
 use asupersync_zstd::{DecodeLimits, EncodeParams, Level, decode_all, encode_all};
@@ -38,6 +44,7 @@ fn text(len: usize) -> Vec<u8> {
 }
 
 /// Binary-like data: random runs copied from earlier positions with noise.
+/// Short matches with a literal between them: mostly sequence work.
 fn mixed(len: usize) -> Vec<u8> {
     let mut state = 2;
     let mut out: Vec<u8> = (0..4096)
@@ -64,18 +71,32 @@ fn random(len: usize) -> Vec<u8> {
     (0..len).map(|_| lcg(&mut state).to_le_bytes()[0]).collect()
 }
 
-/// The best rate over repeated runs of `work` on `bytes` input bytes.
-fn best_rate(bytes: usize, mut work: impl FnMut()) -> f64 {
-    let mut best = Duration::MAX;
+/// Random 7-bit bytes: no repeats worth a match, so a frame is almost all
+/// Huffman-coded literals, and its timing is literal coding alone.
+fn literals(len: usize) -> Vec<u8> {
+    let mut state = 4;
+    (0..len)
+        .map(|_| lcg(&mut state).to_le_bytes()[0] & 0x7F)
+        .collect()
+}
+
+/// The best rates of `ours` and `theirs` on `bytes` input bytes, timed in
+/// alternating passes so that load on the machine affects both alike.
+fn best_pair(bytes: usize, mut ours: impl FnMut(), mut theirs: impl FnMut()) -> (f64, f64) {
+    let mut best = (Duration::MAX, Duration::MAX);
     let started = Instant::now();
     let mut passes = 0;
-    while passes < 3 || started.elapsed() < Duration::from_millis(500) {
+    while passes < 5 || started.elapsed() < Duration::from_secs(1) {
         let pass = Instant::now();
-        work();
-        best = best.min(pass.elapsed());
+        ours();
+        best.0 = best.0.min(pass.elapsed());
+        let pass = Instant::now();
+        theirs();
+        best.1 = best.1.min(pass.elapsed());
         passes += 1;
     }
-    bytes as f64 / best.as_secs_f64() / 1e6
+    let rate = |time: Duration| bytes as f64 / time.as_secs_f64() / 1e6;
+    (rate(best.0), rate(best.1))
 }
 
 fn main() {
@@ -83,30 +104,77 @@ fn main() {
         checksum: false,
         ..EncodeParams::new(Level::Fast)
     };
-    println!("input   bytes      compressed  ratio   encode MB/s  decode MB/s");
-    for (name, data) in [
+    let inputs = [
         ("text", text(LEN)),
         ("mixed", mixed(LEN)),
         ("random", random(LEN)),
-    ] {
-        let frame = encode_all(&data, &params);
-        let limits = DecodeLimits::new(data.len());
-        assert_eq!(
-            decode_all(&frame, &limits).as_deref(),
-            Ok(&data[..]),
-            "{name} round trip"
-        );
-        let encode = best_rate(data.len(), || {
-            std::hint::black_box(encode_all(std::hint::black_box(&data), &params));
-        });
-        let decode = best_rate(data.len(), || {
-            std::hint::black_box(decode_all(std::hint::black_box(&frame), &limits).ok());
-        });
-        println!(
-            "{name:7} {:9}  {:10}  {:5.2}  {encode:11.1}  {decode:11.1}",
-            data.len(),
-            frame.len(),
-            data.len() as f64 / frame.len() as f64,
-        );
+        ("7-bit", literals(LEN)),
+    ];
+    println!("MB/s of input; x = this crate / libzstd -1, timed in alternating passes.");
+    println!(
+        "round input   ratio ours/lib | encode ours     lib     x | decode ours     lib     x \
+         | lib frames ours     lib     x"
+    );
+    for round in 1..=2 {
+        for (name, data) in &inputs {
+            let limits = DecodeLimits::new(data.len());
+            let ours = encode_all(data, &params);
+            let theirs = zstd::bulk::compress(data, 1).expect("libzstd compress");
+            for frame in [&ours, &theirs] {
+                assert_eq!(
+                    decode_all(frame, &limits).as_deref(),
+                    Ok(&data[..]),
+                    "{name} round trip"
+                );
+            }
+            assert_eq!(
+                &zstd::bulk::decompress(&ours, data.len()).expect("libzstd decodes ours"),
+                data,
+                "{name}: libzstd decodes this crate's frame"
+            );
+            let encode = best_pair(
+                data.len(),
+                || {
+                    black_box(encode_all(black_box(data), &params));
+                },
+                || {
+                    black_box(zstd::bulk::compress(black_box(data), 1).ok());
+                },
+            );
+            let decode = best_pair(
+                data.len(),
+                || {
+                    black_box(decode_all(black_box(&ours), &limits).ok());
+                },
+                || {
+                    black_box(zstd::bulk::decompress(black_box(&theirs), data.len()).ok());
+                },
+            );
+            let cross = best_pair(
+                data.len(),
+                || {
+                    black_box(decode_all(black_box(&theirs), &limits).ok());
+                },
+                || {
+                    black_box(zstd::bulk::decompress(black_box(&theirs), data.len()).ok());
+                },
+            );
+            let size = data.len() as f64;
+            println!(
+                "{round:5} {name:7} {:5.2} {:5.2} | {:7.1} {:7.1} {:5.2} | {:7.1} {:7.1} {:5.2} \
+                 | {:7.1} {:7.1} {:5.2}",
+                size / ours.len() as f64,
+                size / theirs.len() as f64,
+                encode.0,
+                encode.1,
+                encode.0 / encode.1,
+                decode.0,
+                decode.1,
+                decode.0 / decode.1,
+                cross.0,
+                cross.1,
+                cross.0 / cross.1,
+            );
+        }
     }
 }
