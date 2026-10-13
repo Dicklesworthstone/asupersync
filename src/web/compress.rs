@@ -30,7 +30,7 @@ use std::pin::Pin;
 
 use crate::Cx;
 use crate::http::compress::{
-    ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
+    ContentCoding, ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, compress_body, negotiate_coding,
     negotiate_encoding,
 };
 
@@ -132,13 +132,30 @@ impl CompressionPolicy {
 pub struct CompressionMiddleware<H> {
     inner: H,
     policy: CompressionPolicy,
+    /// Offer zstd ahead of the policy's encodings (see `with_zstd`).
+    zstd: bool,
 }
 
 impl<H: Handler> CompressionMiddleware<H> {
     /// Wrap a handler with response compression.
     #[must_use]
     pub fn new(inner: H, policy: CompressionPolicy) -> Self {
-        Self { inner, policy }
+        Self {
+            inner,
+            policy,
+            zstd: false,
+        }
+    }
+
+    /// Also offer `zstd` (RFC 8878 §7.2), ahead of the policy's encodings, so
+    /// it wins a tie in client quality. Bodies go out as frames of at most
+    /// 1 MiB, far below the 8 MiB window RFC 9659 lets decoders require,
+    /// within the policy's `max_compressed_size`.
+    #[cfg(feature = "zstd")]
+    #[must_use]
+    pub fn with_zstd(mut self) -> Self {
+        self.zstd = true;
+        self
     }
 }
 
@@ -197,11 +214,16 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
 
             // Only negotiate encodings we can actually serve in this build.
             let available_encodings: Vec<_> = self
-                .policy
-                .supported_encodings
-                .iter()
-                .copied()
-                .filter(|encoding| content_encoding_available(*encoding))
+                .zstd
+                .then_some(ContentCoding::Zstd)
+                .into_iter()
+                .chain(
+                    self.policy
+                        .supported_encodings
+                        .iter()
+                        .map(|&encoding| ContentCoding::from(encoding)),
+                )
+                .filter(|coding| content_coding_available(*coding))
                 .collect();
 
             let body_below_minimum = resp.body.len() < self.policy.min_body_size;
@@ -213,15 +235,14 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 available_encodings
                     .iter()
                     .copied()
-                    .filter(|encoding| *encoding != ContentEncoding::Identity)
+                    .filter(|coding| *coding != ContentCoding::Identity)
                     .collect::<Vec<_>>()
             } else {
                 available_encodings
             };
 
             // Negotiate encoding.
-            let Some(encoding) =
-                negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
+            let Some(encoding) = negotiate_coding(accept_encoding.as_deref(), &candidate_encodings)
             else {
                 if accept_encoding.is_some() {
                     return Response::new(
@@ -233,14 +254,14 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             };
 
             // Identity means no compression needed.
-            if encoding == ContentEncoding::Identity {
+            if encoding == ContentCoding::Identity {
                 append_vary_token(&mut resp, "accept-encoding");
                 return resp;
             }
 
-            // Get a compressor for the negotiated encoding.
-            let Some(mut compressor) =
-                make_compressor_with_output_limit(encoding, Some(self.policy.max_compressed_size))
+            // Compress the body with the negotiated encoding.
+            let Some(compressed) =
+                compress_body(encoding, &resp.body, self.policy.max_compressed_size)
             else {
                 if !identity_acceptable {
                     return Response::new(
@@ -250,10 +271,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 }
                 return resp;
             };
-
-            // Compress the body.
-            let mut compressed = Vec::new();
-            if compressor.compress(&resp.body, &mut compressed).is_err() {
+            let Ok(compressed) = compressed else {
                 if !identity_acceptable {
                     return Response::new(
                         StatusCode::from_u16(406),
@@ -262,17 +280,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 }
                 append_vary_token(&mut resp, "accept-encoding");
                 return resp;
-            }
-            if compressor.finish(&mut compressed).is_err() {
-                if !identity_acceptable {
-                    return Response::new(
-                        StatusCode::from_u16(406),
-                        b"No acceptable response encoding".to_vec(),
-                    );
-                }
-                append_vary_token(&mut resp, "accept-encoding");
-                return resp;
-            }
+            };
 
             // Only use compressed version if it's actually smaller.
             if compressed.len() >= resp.body.len() && identity_acceptable {
@@ -292,13 +300,13 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
     }
 }
 
-fn content_encoding_available(encoding: ContentEncoding) -> bool {
-    match encoding {
-        ContentEncoding::Identity => true,
-        #[cfg(feature = "compression")]
-        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => true,
-        #[cfg(not(feature = "compression"))]
-        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => false,
+fn content_coding_available(coding: ContentCoding) -> bool {
+    match coding {
+        ContentCoding::Identity => true,
+        ContentCoding::Brotli | ContentCoding::Gzip | ContentCoding::Deflate => {
+            cfg!(feature = "compression")
+        }
+        ContentCoding::Zstd => cfg!(feature = "zstd"),
     }
 }
 
@@ -1017,5 +1025,74 @@ mod tests {
             vary.contains("accept-encoding"),
             "accept-encoding must be appended to Vary, got: {vary}"
         );
+    }
+
+    // --- zstd (br-asupersync-t1fblr.32) ---
+
+    fn content_encoding(resp: &Response) -> Option<&str> {
+        resp.headers.get("content-encoding").map(String::as_str)
+    }
+
+    /// With `with_zstd`, a client that accepts zstd gets it, ahead of the
+    /// policy's encodings when the qualities tie, and the body decodes to the
+    /// handler's bytes.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn with_zstd_serves_zstd_to_a_client_that_accepts_it() {
+        let plain = large_body_handler().body.to_vec();
+        let mw = CompressionMiddleware::new(
+            FnHandler::new(large_body_handler),
+            CompressionPolicy::default(),
+        )
+        .with_zstd();
+        for accept in [
+            "zstd",
+            "gzip, deflate, br, zstd",
+            "zstd;q=0.9, br;q=0.8, identity;q=0.1",
+        ] {
+            let resp = mw.call(make_request_with_encoding(accept));
+            assert_eq!(content_encoding(&resp), Some("zstd"), "{accept}");
+            assert!(!resp.headers.contains_key("content-length"), "{accept}");
+            let vary = resp.headers.get("vary").map(String::as_str);
+            assert_eq!(vary, Some("accept-encoding"), "{accept}");
+            let limits = asupersync_zstd::DecodeLimits::new(plain.len());
+            let decoded = asupersync_zstd::decode_all(&resp.body, &limits).expect(accept);
+            assert_eq!(decoded, plain, "{accept}");
+        }
+    }
+
+    /// The client's qualities still decide; and a server that did not opt in,
+    /// or a build without zstd, never sends it.
+    #[test]
+    fn zstd_is_sent_only_when_offered_and_preferred() {
+        let opted_in = CompressionMiddleware::new(
+            FnHandler::new(large_body_handler),
+            CompressionPolicy::default(),
+        );
+        #[cfg(feature = "zstd")]
+        let opted_in = opted_in.with_zstd();
+        let preferred_br = opted_in.call(make_request_with_encoding("br;q=1, zstd;q=0.5"));
+        let expected = cfg!(feature = "compression").then_some("br");
+        assert_eq!(content_encoding(&preferred_br), expected);
+
+        let not_offered = CompressionMiddleware::new(
+            FnHandler::new(large_body_handler),
+            CompressionPolicy::default(),
+        );
+        let resp = not_offered.call(make_request_with_encoding("zstd, identity;q=0.5"));
+        assert_eq!(content_encoding(&resp), None);
+        assert_eq!(resp.body, large_body_handler().body);
+    }
+
+    /// A zstd body that would pass `max_compressed_size` is not sent: the
+    /// response goes out as identity, as for the other codings.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_respects_the_compressed_size_limit() {
+        let policy = CompressionPolicy::default().with_max_compressed_size(8);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy).with_zstd();
+        let resp = mw.call(make_request_with_encoding("zstd"));
+        assert_eq!(content_encoding(&resp), None);
+        assert_eq!(resp.body, large_body_handler().body);
     }
 }
