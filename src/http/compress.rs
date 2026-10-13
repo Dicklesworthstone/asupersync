@@ -3,6 +3,8 @@
 //! Provides [`ContentEncoding`] for representing transfer encodings,
 //! [`negotiate_encoding`] for Accept-Encoding negotiation, and a
 //! [`Compressor`] trait for pluggable compression algorithms.
+//! [`ContentCoding`] and [`negotiate_coding`] also name `zstd`, which the
+//! exhaustive [`ContentEncoding`] cannot.
 //!
 //! # Design
 //!
@@ -105,6 +107,82 @@ impl fmt::Display for ContentEncoding {
     }
 }
 
+/// A content coding, including ones [`ContentEncoding`] cannot name.
+///
+/// [`ContentEncoding`] is exhaustive, so it cannot gain a variant without
+/// breaking exhaustive matches downstream; new codings are added here
+/// instead. Every [`ContentEncoding`] converts into one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ContentCoding {
+    /// No encoding (pass-through).
+    Identity,
+    /// gzip (RFC 1952).
+    Gzip,
+    /// deflate (RFC 1951 wrapped in zlib).
+    Deflate,
+    /// Brotli (RFC 7932).
+    Brotli,
+    /// Zstandard (RFC 8878 §7.2), with windows of at most 8 MiB (RFC 9659).
+    Zstd,
+}
+
+impl ContentCoding {
+    /// Parse from the coding token used in HTTP headers.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        ContentEncoding::from_token(token)
+            .map(Self::from)
+            .or_else(|| {
+                token
+                    .trim()
+                    .eq_ignore_ascii_case("zstd")
+                    .then_some(Self::Zstd)
+            })
+    }
+
+    /// Returns the HTTP header token for this coding.
+    #[must_use]
+    pub const fn as_token(&self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Gzip => "gzip",
+            Self::Deflate => "deflate",
+            Self::Brotli => "br",
+            Self::Zstd => "zstd",
+        }
+    }
+
+    /// The same coding as a [`ContentEncoding`], when that enum names it.
+    #[must_use]
+    pub const fn standard(self) -> Option<ContentEncoding> {
+        match self {
+            Self::Identity => Some(ContentEncoding::Identity),
+            Self::Gzip => Some(ContentEncoding::Gzip),
+            Self::Deflate => Some(ContentEncoding::Deflate),
+            Self::Brotli => Some(ContentEncoding::Brotli),
+            Self::Zstd => None,
+        }
+    }
+}
+
+impl From<ContentEncoding> for ContentCoding {
+    fn from(encoding: ContentEncoding) -> Self {
+        match encoding {
+            ContentEncoding::Identity => Self::Identity,
+            ContentEncoding::Gzip => Self::Gzip,
+            ContentEncoding::Deflate => Self::Deflate,
+            ContentEncoding::Brotli => Self::Brotli,
+        }
+    }
+}
+
+impl fmt::Display for ContentCoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_token())
+    }
+}
+
 /// A parsed quality value from Accept-Encoding.
 #[derive(Debug, Clone, PartialEq)]
 struct QualityValue {
@@ -183,20 +261,60 @@ pub fn negotiate_encoding(
     accept_encoding: Option<&str>,
     supported: &[ContentEncoding],
 ) -> Option<ContentEncoding> {
+    negotiate(
+        accept_encoding,
+        supported,
+        ContentEncoding::Identity,
+        ContentEncoding::from_token,
+    )
+}
+
+/// [`negotiate_encoding`] over [`ContentCoding`]s, which can name `zstd`.
+///
+/// The algorithm, including the handling of `identity`, `*` and a missing
+/// or empty header, is exactly that of [`negotiate_encoding`].
+///
+/// # Examples
+///
+/// ```
+/// # use asupersync::http::compress::{ContentCoding, negotiate_coding};
+/// let supported = &[ContentCoding::Zstd, ContentCoding::Gzip, ContentCoding::Identity];
+/// let best = negotiate_coding(Some("gzip, deflate, br, zstd"), supported);
+/// assert_eq!(best, Some(ContentCoding::Zstd));
+/// ```
+#[must_use]
+pub fn negotiate_coding(
+    accept_encoding: Option<&str>,
+    supported: &[ContentCoding],
+) -> Option<ContentCoding> {
+    negotiate(
+        accept_encoding,
+        supported,
+        ContentCoding::Identity,
+        ContentCoding::from_token,
+    )
+}
+
+/// The negotiation behind [`negotiate_encoding`] and [`negotiate_coding`],
+/// for any coding type with an `identity` value and a token parser.
+fn negotiate<T: Copy + PartialEq>(
+    accept_encoding: Option<&str>,
+    supported: &[T],
+    identity: T,
+    from_token: fn(&str) -> Option<T>,
+) -> Option<T> {
     let Some(accept_encoding) = accept_encoding else {
         // No Accept-Encoding header: keep the existing server-preference
         // behavior and prefer identity when available.
-        return if supported.contains(&ContentEncoding::Identity) {
-            Some(ContentEncoding::Identity)
+        return if supported.contains(&identity) {
+            Some(identity)
         } else {
             supported.first().copied()
         };
     };
 
     if accept_encoding.trim().is_empty() {
-        return supported
-            .contains(&ContentEncoding::Identity)
-            .then_some(ContentEncoding::Identity);
+        return supported.contains(&identity).then_some(identity);
     }
 
     let preferences = parse_accept_encoding(accept_encoding);
@@ -207,7 +325,7 @@ pub fn negotiate_encoding(
         .find(|q| q.encoding == "*")
         .map(|q| q.quality);
 
-    let mut best: Option<(ContentEncoding, f32)> = None;
+    let mut best: Option<(T, f32)> = None;
 
     for &encoding in supported {
         // br-asupersync-ipsu2a: match Accept-Encoding tokens against the
@@ -217,19 +335,20 @@ pub fn negotiate_encoding(
         // their target ContentEncoding and silently fall through to wildcard.
         let explicit_quality = preferences
             .iter()
-            .find(|q| ContentEncoding::from_token(&q.encoding) == Some(encoding))
+            .find(|q| from_token(&q.encoding) == Some(encoding))
             .map(|q| q.quality);
 
-        let quality = match encoding {
-            // RFC 9110 §12.5.3: identity is acceptable by default (q=1.0)
-            // unless explicitly excluded by `identity;q=0` or `*;q=0`
-            // (without a more specific identity entry). A non-zero wildcard
-            // like `*;q=0.5` does NOT lower identity from its default.
-            ContentEncoding::Identity => explicit_quality.unwrap_or(match wildcard_quality {
+        // RFC 9110 §12.5.3: identity is acceptable by default (q=1.0)
+        // unless explicitly excluded by `identity;q=0` or `*;q=0`
+        // (without a more specific identity entry). A non-zero wildcard
+        // like `*;q=0.5` does NOT lower identity from its default.
+        let quality = if encoding == identity {
+            explicit_quality.unwrap_or(match wildcard_quality {
                 Some(q) if q <= 0.0 => 0.0,
                 _ => 1.0,
-            }),
-            _ => explicit_quality.or(wildcard_quality).unwrap_or(0.0),
+            })
+        } else {
+            explicit_quality.or(wildcard_quality).unwrap_or(0.0)
         };
 
         // q=0 means explicitly rejected
@@ -1198,6 +1317,62 @@ pub fn accept_encoding_from_headers(headers: &[(String, String)]) -> Option<&str
         .iter()
         .find(|(name, _)| name.eq_ignore_ascii_case("accept-encoding"))
         .map(|(_, value)| value.as_str())
+}
+
+/// Compresses a whole response body for `coding`, refusing once the result
+/// would pass `max_size` bytes. `None` means this build cannot produce
+/// `coding`. The standard codings run through
+/// [`make_compressor_with_output_limit`].
+pub(crate) fn compress_body(
+    coding: ContentCoding,
+    body: &[u8],
+    max_size: usize,
+) -> Option<io::Result<Vec<u8>>> {
+    if let Some(encoding) = coding.standard() {
+        let mut compressor = make_compressor_with_output_limit(encoding, Some(max_size))?;
+        let mut compressed = Vec::new();
+        let written = compressor
+            .compress(body, &mut compressed)
+            .and_then(|()| compressor.finish(&mut compressed));
+        return Some(written.map(|()| compressed));
+    }
+    #[cfg(feature = "zstd")]
+    {
+        Some(zstd_body(body, max_size))
+    }
+    #[cfg(not(feature = "zstd"))]
+    {
+        None
+    }
+}
+
+/// The body as a sequence of zstd frames (RFC 8878 §7.2) of at most 1 MiB
+/// each, so every window stays far below the 8 MiB that RFC 9659 allows. The
+/// output never grows past `max_size`.
+#[cfg(feature = "zstd")]
+fn zstd_body(body: &[u8], max_size: usize) -> io::Result<Vec<u8>> {
+    const FRAME: usize = 1 << 20;
+    let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
+    let mut compressed = Vec::new();
+    let mut frame = Vec::new();
+    let mut start = 0;
+    // One frame even for an empty body: a zstd coding holds at least one.
+    loop {
+        let end = body.len().min(start + FRAME);
+        frame.clear();
+        asupersync_zstd::encode_into(&body[start..end], &params, &mut frame);
+        if compressed.len() + frame.len() > max_size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "compressed size exceeds limit",
+            ));
+        }
+        compressed.extend_from_slice(&frame);
+        start = end;
+        if start == body.len() {
+            return Ok(compressed);
+        }
+    }
 }
 
 fn update_decompressed_total(
@@ -2692,5 +2867,128 @@ mod tests {
             len_after_first,
             "second finish must not append extra bytes"
         );
+    }
+
+    // --- ContentCoding and zstd (br-asupersync-t1fblr.32) ---
+
+    #[test]
+    fn content_codings_name_every_encoding_and_zstd() {
+        for encoding in [
+            ContentEncoding::Identity,
+            ContentEncoding::Gzip,
+            ContentEncoding::Deflate,
+            ContentEncoding::Brotli,
+        ] {
+            let coding = ContentCoding::from(encoding);
+            assert_eq!(coding.standard(), Some(encoding));
+            assert_eq!(coding.as_token(), encoding.as_token());
+            assert_eq!(ContentCoding::from_token(encoding.as_token()), Some(coding));
+        }
+        assert_eq!(
+            ContentCoding::from_token(" ZSTD "),
+            Some(ContentCoding::Zstd)
+        );
+        assert_eq!(
+            ContentCoding::from_token("x-gzip"),
+            Some(ContentCoding::Gzip)
+        );
+        assert_eq!(ContentCoding::from_token("zst"), None);
+        assert_eq!(ContentCoding::Zstd.standard(), None);
+        assert_eq!(ContentCoding::Zstd.to_string(), "zstd");
+    }
+
+    /// negotiate_coding gives negotiate_encoding's answers over the same
+    /// encodings, and zstd takes part like any other coding.
+    #[test]
+    fn negotiate_coding_matches_negotiate_encoding_and_handles_zstd() {
+        let encodings = [
+            ContentEncoding::Gzip,
+            ContentEncoding::Deflate,
+            ContentEncoding::Brotli,
+            ContentEncoding::Identity,
+        ];
+        let codings = encodings.map(ContentCoding::from);
+        for accept in [
+            None,
+            Some(""),
+            Some("gzip;q=0.5, deflate"),
+            Some("*"),
+            Some("gzip;q=0, *;q=0.5"),
+            Some("identity;q=0, *;q=0"),
+            Some("x-gzip, identity;q=0"),
+        ] {
+            assert_eq!(
+                negotiate_coding(accept, &codings),
+                negotiate_encoding(accept, &encodings).map(ContentCoding::from),
+                "{accept:?}"
+            );
+        }
+        let with_zstd = [
+            ContentCoding::Zstd,
+            ContentCoding::Gzip,
+            ContentCoding::Identity,
+        ];
+        let best = |accept: &str| negotiate_coding(Some(accept), &with_zstd);
+        assert_eq!(best("gzip, zstd"), Some(ContentCoding::Zstd));
+        assert_eq!(best("gzip, zstd;q=0.5"), Some(ContentCoding::Gzip));
+        assert_eq!(best("*;q=0.5, identity;q=0"), Some(ContentCoding::Zstd));
+        assert_eq!(best("zstd;q=0, gzip;q=0, identity;q=0"), None);
+    }
+
+    #[cfg(feature = "zstd")]
+    fn three_mib_body() -> Vec<u8> {
+        (0..3_u32 << 20).map(|i| (i % 251) as u8).collect()
+    }
+
+    /// A zstd body is a run of frames of at most 1 MiB, so a decoder limited
+    /// to 1 MiB windows reads it.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_bodies_are_frames_of_at_most_one_mib() {
+        let body = three_mib_body();
+        let compressed = compress_body(ContentCoding::Zstd, &body, usize::MAX)
+            .unwrap()
+            .unwrap();
+        let limits = asupersync_zstd::DecodeLimits {
+            max_window: 1 << 20,
+            ..asupersync_zstd::DecodeLimits::new(body.len())
+        };
+        assert_eq!(
+            asupersync_zstd::decode_all(&compressed, &limits).unwrap(),
+            body
+        );
+    }
+
+    /// A zstd body one byte over the limit is refused.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_bodies_stay_within_the_limit() {
+        let body = three_mib_body();
+        let compressed = compress_body(ContentCoding::Zstd, &body, usize::MAX)
+            .unwrap()
+            .unwrap();
+        let short = compress_body(ContentCoding::Zstd, &body, compressed.len() - 1).unwrap();
+        assert!(short.is_err());
+    }
+
+    /// An empty body is still one zstd frame: a zstd coding holds at least
+    /// one.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn an_empty_zstd_body_is_one_frame() {
+        let empty = compress_body(ContentCoding::Zstd, &[], 64)
+            .unwrap()
+            .unwrap();
+        let limits = asupersync_zstd::DecodeLimits::new(0);
+        assert_eq!(
+            asupersync_zstd::decode_all(&empty, &limits).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn zstd_bodies_need_the_zstd_feature() {
+        assert!(compress_body(ContentCoding::Zstd, b"body", 64).is_none());
     }
 }

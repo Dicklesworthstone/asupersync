@@ -88,7 +88,7 @@ use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
 use crate::cx::Cx;
 use crate::http::compress::{
-    ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
+    ContentCoding, ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, compress_body, negotiate_coding,
     negotiate_encoding,
 };
 /// The unified composition trait shared with the `service` stack.
@@ -995,6 +995,8 @@ pub struct CompressionMiddleware<H> {
     inner: H,
     config: CompressionConfig,
     compress_sensitive: bool,
+    /// Offer zstd ahead of the configured encodings (see `with_zstd`).
+    zstd: bool,
 }
 
 impl<H: Handler> CompressionMiddleware<H> {
@@ -1005,7 +1007,19 @@ impl<H: Handler> CompressionMiddleware<H> {
             inner,
             config,
             compress_sensitive: false,
+            zstd: false,
         }
+    }
+
+    /// Also offer `zstd` (RFC 8878 §7.2), ahead of the configured encodings,
+    /// so it wins a tie in client quality. Bodies go out as frames of at most
+    /// 1 MiB, far below the 8 MiB window RFC 9659 lets decoders require,
+    /// within `max_compressed_size`.
+    #[cfg(feature = "zstd")]
+    #[must_use]
+    pub fn with_zstd(mut self) -> Self {
+        self.zstd = true;
+        self
     }
 
     /// Also compress the responses the BREACH guard leaves uncompressed.
@@ -1055,11 +1069,16 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             }
 
             let available_encodings: Vec<_> = self
-                .config
-                .supported
-                .iter()
-                .copied()
-                .filter(|encoding| compression_encoding_available(*encoding))
+                .zstd
+                .then_some(ContentCoding::Zstd)
+                .into_iter()
+                .chain(
+                    self.config
+                        .supported
+                        .iter()
+                        .map(|&encoding| ContentCoding::from(encoding)),
+                )
+                .filter(|coding| compression_coding_available(*coding))
                 .collect();
 
             let identity_acceptable =
@@ -1087,14 +1106,13 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 available_encodings
                     .iter()
                     .copied()
-                    .filter(|encoding| *encoding != ContentEncoding::Identity)
+                    .filter(|coding| *coding != ContentCoding::Identity)
                     .collect::<Vec<_>>()
             } else {
                 available_encodings
             };
 
-            let Some(encoding) =
-                negotiate_encoding(accept_encoding.as_deref(), &candidate_encodings)
+            let Some(encoding) = negotiate_coding(accept_encoding.as_deref(), &candidate_encodings)
             else {
                 if accept_encoding.is_some() {
                     return Response::new(
@@ -1106,13 +1124,13 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             };
 
             // Identity means no transformation needed.
-            if encoding == ContentEncoding::Identity {
+            if encoding == ContentCoding::Identity {
                 append_vary_header(&mut resp, "accept-encoding");
                 return resp;
             }
 
-            let Some(mut compressor) =
-                make_compressor_with_output_limit(encoding, Some(self.config.max_compressed_size))
+            let Some(compressed) =
+                compress_body(encoding, &resp.body, self.config.max_compressed_size)
             else {
                 if !identity_acceptable {
                     return Response::new(
@@ -1122,9 +1140,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 }
                 return resp;
             };
-
-            let mut compressed = Vec::new();
-            if compressor.compress(&resp.body, &mut compressed).is_err() {
+            let Ok(compressed) = compressed else {
                 if !identity_acceptable {
                     return Response::new(
                         StatusCode::from_u16(406),
@@ -1133,17 +1149,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                 }
                 append_vary_header(&mut resp, "accept-encoding");
                 return resp;
-            }
-            if compressor.finish(&mut compressed).is_err() {
-                if !identity_acceptable {
-                    return Response::new(
-                        StatusCode::from_u16(406),
-                        b"No acceptable response encoding".to_vec(),
-                    );
-                }
-                append_vary_header(&mut resp, "accept-encoding");
-                return resp;
-            }
+            };
 
             if compressed.len() >= resp.body.len() && identity_acceptable {
                 append_vary_header(&mut resp, "accept-encoding");
@@ -1160,13 +1166,13 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
     }
 }
 
-fn compression_encoding_available(encoding: ContentEncoding) -> bool {
-    match encoding {
-        ContentEncoding::Identity => true,
-        #[cfg(feature = "compression")]
-        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => true,
-        #[cfg(not(feature = "compression"))]
-        ContentEncoding::Brotli | ContentEncoding::Gzip | ContentEncoding::Deflate => false,
+fn compression_coding_available(coding: ContentCoding) -> bool {
+    match coding {
+        ContentCoding::Identity => true,
+        ContentCoding::Brotli | ContentCoding::Gzip | ContentCoding::Deflate => {
+            cfg!(feature = "compression")
+        }
+        ContentCoding::Zstd => cfg!(feature = "zstd"),
     }
 }
 
@@ -2769,6 +2775,7 @@ impl<H: Handler> Layer<H> for RetryLayer {
 pub struct CompressionLayer {
     config: CompressionConfig,
     compress_sensitive: bool,
+    zstd: bool,
 }
 
 impl CompressionLayer {
@@ -2778,6 +2785,7 @@ impl CompressionLayer {
         Self {
             config,
             compress_sensitive: false,
+            zstd: false,
         }
     }
 
@@ -2785,6 +2793,14 @@ impl CompressionLayer {
     #[must_use]
     pub fn compress_sensitive_responses(mut self, enabled: bool) -> Self {
         self.compress_sensitive = enabled;
+        self
+    }
+
+    /// See [`CompressionMiddleware::with_zstd`].
+    #[cfg(feature = "zstd")]
+    #[must_use]
+    pub fn with_zstd(mut self) -> Self {
+        self.zstd = true;
         self
     }
 }
@@ -2799,8 +2815,10 @@ impl<H: Handler> Layer<H> for CompressionLayer {
     type Service = CompressionMiddleware<H>;
 
     fn layer(&self, inner: H) -> Self::Service {
-        CompressionMiddleware::new(inner, self.config.clone())
-            .compress_sensitive_responses(self.compress_sensitive)
+        let mut middleware = CompressionMiddleware::new(inner, self.config.clone())
+            .compress_sensitive_responses(self.compress_sensitive);
+        middleware.zstd = self.zstd;
+        middleware
     }
 }
 
@@ -5273,6 +5291,38 @@ mod tests {
             !resp.headers.contains_key("content-length"),
             "compressed responses must not retain stale content-length after body rewrite"
         );
+    }
+
+    /// zstd through both front ends, the middleware and the layer, wins a tie
+    /// in client quality once offered, and is never sent when not offered
+    /// (br-asupersync-t1fblr.32).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn compression_serves_zstd_when_offered() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, b"zstd middleware ".repeat(256))
+        }
+        let from_middleware =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default())
+                .with_zstd();
+        let from_layer = CompressionLayer::default()
+            .with_zstd()
+            .layer(FnHandler::new(large_handler));
+        for mw in [&from_middleware, &from_layer] {
+            let resp = mw.call(make_request().with_header("Accept-Encoding", "br, zstd, gzip"));
+            assert_eq!(
+                resp.headers.get("content-encoding"),
+                Some(&"zstd".to_string())
+            );
+            let limits = asupersync_zstd::DecodeLimits::new(4096);
+            let decoded = asupersync_zstd::decode_all(&resp.body, &limits).unwrap();
+            assert_eq!(decoded, b"zstd middleware ".repeat(256));
+        }
+        let not_offered =
+            CompressionMiddleware::new(FnHandler::new(large_handler), CompressionConfig::default());
+        let resp =
+            not_offered.call(make_request().with_header("Accept-Encoding", "zstd, identity;q=0.5"));
+        assert!(!resp.headers.contains_key("content-encoding"));
     }
 
     #[cfg(feature = "compression")]
