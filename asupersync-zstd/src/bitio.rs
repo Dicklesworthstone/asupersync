@@ -88,7 +88,6 @@ impl<'a> BackwardBitReader<'a> {
     }
 
     /// Bits not yet read.
-    #[cfg(test)]
     pub const fn remaining(&self) -> usize {
         self.remaining
     }

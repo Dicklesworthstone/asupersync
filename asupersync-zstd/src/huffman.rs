@@ -1,7 +1,7 @@
 //! Huffman literal coding, RFC 8878 §4.2: tree descriptions and streams,
 //! decoded and encoded.
 
-use crate::bitio::{BackwardBitReader, BitWriter};
+use crate::bitio::{BackwardBitReader, BitWriter, MAX_READ_BITS};
 use crate::fse::{
     DecodeTable, EncodeTable, FseError, normalize, read_table_description, write_table_description,
 };
@@ -153,26 +153,19 @@ impl HuffmanTable {
     ) -> Result<(), HuffmanError> {
         let mut reader =
             BackwardBitReader::new(stream).map_err(|_| HuffmanError::StreamMismatch)?;
-        let width = u32::from(self.max_bits);
-        out.reserve(count);
-        for _ in 0..count {
-            let index = usize::try_from(reader.peek_bits(width)).unwrap_or(usize::MAX);
-            let &(symbol, bits) = self
-                .entries
-                .get(index)
-                .ok_or(HuffmanError::StreamMismatch)?;
-            out.push(symbol);
-            reader.consume(u32::from(bits));
-        }
-        if reader.is_exhausted() {
-            Ok(())
-        } else {
-            Err(HuffmanError::StreamMismatch)
-        }
+        let start = out.len();
+        out.resize(start + count, 0);
+        self.decode_symbols(&mut reader, &mut out[start..])?;
+        exhausted(&reader)
     }
 
     /// Decodes `regenerated` symbols from four streams behind a 6-byte jump
     /// table (RFC 8878 §3.1.1.3.1.6).
+    ///
+    /// The streams are decoded in lockstep, a window of codes from each in
+    /// turn. Each stream's next code depends on how many bits its previous
+    /// code used, so one stream is a chain of dependent table lookups; four
+    /// independent chains keep the processor busy while each lookup waits.
     pub fn decode_four_streams(
         &self,
         data: &[u8],
@@ -191,16 +184,123 @@ impl HuffmanTable {
         let last = regenerated
             .checked_sub(3 * segment)
             .ok_or(HuffmanError::BadJumpTable)?;
-        for (range, count) in [
-            (6..first_end, segment),
-            (first_end..second_end, segment),
-            (second_end..third_end, segment),
-            (third_end..data.len(), last),
-        ] {
-            let stream = data.get(range).ok_or(HuffmanError::BadJumpTable)?;
-            self.decode_stream(stream, count, out)?;
+        let [first, second, third, fourth] = [
+            6..first_end,
+            first_end..second_end,
+            second_end..third_end,
+            third_end..data.len(),
+        ]
+        .map(|range| {
+            data.get(range)
+                .ok_or(HuffmanError::BadJumpTable)
+                .and_then(|stream| {
+                    BackwardBitReader::new(stream).map_err(|_| HuffmanError::StreamMismatch)
+                })
+        });
+        let mut streams = [first?, second?, third?, fourth?];
+        let start = out.len();
+        out.resize(start + regenerated, 0);
+        let (first, rest) = out[start..].split_at_mut(segment);
+        let (second, rest) = rest.split_at_mut(segment);
+        let (third, fourth) = rest.split_at_mut(segment);
+        let mut targets = [first, second, third, fourth];
+
+        // Lockstep fast path, while every stream has a full window of bits
+        // and of symbols left (`last` is the smallest count).
+        let (width, per_window, window_bits, mask) = self.window();
+        let mut done = 0;
+        while done + per_window <= last
+            && streams
+                .iter()
+                .all(|reader| reader.remaining() >= window_bits)
+        {
+            let windows = streams
+                .each_ref()
+                .map(|reader| reader.peek_bits(MAX_READ_BITS));
+            let mut used = [0_u32; 4];
+            let [a, b, c, d] = targets
+                .each_mut()
+                .map(|target| &mut target[done..done + per_window]);
+            for (((a, b), c), d) in a.iter_mut().zip(b).zip(c).zip(d) {
+                for (slot, (window, used)) in [a, b, c, d]
+                    .into_iter()
+                    .zip(windows.iter().zip(used.iter_mut()))
+                {
+                    // Every code is at most `width` bits, so before each
+                    // symbol `used + width <= per_window * width <= 56`.
+                    let index = (window >> (MAX_READ_BITS - *used - width)) & mask;
+                    let (symbol, bits) = self.entries[usize::try_from(index).unwrap_or(0)];
+                    *slot = symbol;
+                    *used += u32::from(bits);
+                }
+            }
+            for (reader, bits) in streams.iter_mut().zip(used) {
+                reader.consume(bits);
+            }
+            done += per_window;
+        }
+        for (reader, target) in streams.iter_mut().zip(&mut targets) {
+            self.decode_symbols(reader, &mut target[done..])?;
+            exhausted(reader)?;
         }
         Ok(())
+    }
+
+    /// The decoding window: the code width, how many codes one
+    /// [`MAX_READ_BITS`] read always holds whole, that read in bits, and the
+    /// mask of one code.
+    fn window(&self) -> (u32, usize, usize, u64) {
+        let width = u32::from(self.max_bits);
+        (
+            width,
+            usize::try_from(MAX_READ_BITS / width.max(1)).unwrap_or(1),
+            usize::try_from(MAX_READ_BITS).unwrap_or(usize::MAX),
+            (1_u64 << width) - 1,
+        )
+    }
+
+    /// Fills `target` with symbols read from one stream: a window of codes
+    /// per read while a full window remains, then one code per read.
+    fn decode_symbols(
+        &self,
+        reader: &mut BackwardBitReader<'_>,
+        target: &mut [u8],
+    ) -> Result<(), HuffmanError> {
+        let (width, per_window, window_bits, mask) = self.window();
+        let mut written = 0;
+        while target.len() - written >= per_window && reader.remaining() >= window_bits {
+            let window = reader.peek_bits(MAX_READ_BITS);
+            let mut used = 0_u32;
+            for slot in &mut target[written..written + per_window] {
+                // Every code is at most `width` bits, so before each symbol
+                // `used + width <= per_window * width <= MAX_READ_BITS`.
+                let index = (window >> (MAX_READ_BITS - used - width)) & mask;
+                let (symbol, bits) = self.entries[usize::try_from(index).unwrap_or(0)];
+                *slot = symbol;
+                used += u32::from(bits);
+            }
+            reader.consume(used);
+            written += per_window;
+        }
+        for slot in &mut target[written..] {
+            let index = usize::try_from(reader.peek_bits(width)).unwrap_or(usize::MAX);
+            let &(symbol, bits) = self
+                .entries
+                .get(index)
+                .ok_or(HuffmanError::StreamMismatch)?;
+            *slot = symbol;
+            reader.consume(u32::from(bits));
+        }
+        Ok(())
+    }
+}
+
+/// A stream must end exactly where its last symbol ends.
+fn exhausted(reader: &BackwardBitReader<'_>) -> Result<(), HuffmanError> {
+    if reader.is_exhausted() {
+        Ok(())
+    } else {
+        Err(HuffmanError::StreamMismatch)
     }
 }
 
@@ -584,6 +684,33 @@ mod tests {
                 assert_eq!(out, data, "{name}, four streams: {four}");
             }
         }
+    }
+
+    /// Four-stream decoding runs the streams in lockstep while each has a
+    /// full window of symbols and bits, then finishes each alone: lengths
+    /// around those boundaries, with short and long codes, all round-trip.
+    #[test]
+    fn four_streams_round_trip_at_every_lockstep_boundary() {
+        let skewed = every_byte_skewed();
+        let two: Vec<u8> = b"ab".repeat(600);
+        let mut tested = 0;
+        for data in [&skewed[..], &two[..]] {
+            for len in (4..=260).chain([555, 1_000, 1_201]) {
+                let part = &data[..len.min(data.len())];
+                // Four streams need a non-empty fourth segment, and the code
+                // a writable tree description.
+                let describable = HuffmanCode::build(part)
+                    .and_then(|code| code.description())
+                    .is_some();
+                if !describable || part.len().div_ceil(4) * 3 >= part.len() {
+                    continue;
+                }
+                let (out, _) = encode_then_decode(part, true);
+                assert_eq!(out, part, "length {len}");
+                tested += 1;
+            }
+        }
+        assert!(tested > 300, "{tested} lengths tested");
     }
 
     /// Every byte value, byte `b` repeated `1 + b % 13` times: code lengths
