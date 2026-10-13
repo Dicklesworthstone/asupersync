@@ -1510,6 +1510,72 @@ fn a_bisect_probe_builds_only_the_targets_that_own_the_red() {
     );
 }
 
+fn lib_log(results: &[(&str, bool)], filtered: usize) -> String {
+    let failed = results.iter().filter(|(_, ok)| !ok).count();
+    let mut log = format!(
+        "     Running unittests src/lib.rs (target/debug/deps/asupersync-abc)\nrunning {} tests\n",
+        results.len()
+    );
+    for (name, ok) in results {
+        log.push_str(&format!(
+            "test {name} ... {}\n",
+            if *ok { "ok" } else { "FAILED" }
+        ));
+    }
+    let exit = if failed == 0 { 0 } else { 101 };
+    log.push_str(&format!(
+        "test result: {}. {} passed; {failed} failed; 0 ignored; 0 measured; {filtered} filtered out; finished in 0.01s\n  Remote command finished: exit={exit} in 1000ms\n",
+        if failed == 0 { "ok" } else { "FAILED" },
+        results.len() - failed
+    ));
+    log
+}
+
+/// A lib red is bisected with only its own unit tests, by exact name: each probe of the
+/// whole targeted-lib lane ran every touched unit test, and on 10-12 one probe took 8 h.
+/// A probe where the red test does not exist yet (zero tests matched, the binary ran) is
+/// clear, not undecided.
+#[test]
+fn a_lib_red_is_bisected_with_only_its_own_unit_tests() {
+    let lane = json!({
+        "id": "targeted-lib", "kind": "test",
+        "argv": ["cargo", "test", "--features", "tls", "--lib", "--", "net", "runtime"],
+        "expected_targets": [], "lib_filters": ["net", "runtime"],
+    });
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=5u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-lib": {
+            sha(2): {"log": lib_log(&[], 900)},
+            sha(3): {"log": lib_log(&[("net::x::tests::new_red", false)], 900)},
+            sha(5): {"log": lib_log(&[("net::x::tests::old", true), ("net::x::tests::new_red", false)], 900)},
+        }},
+    }));
+    let lib = receipt(&result, "targeted-lib");
+    assert_eq!(
+        lib["new_red"],
+        json!(["lib::net::x::tests::new_red"]),
+        "{result:#}"
+    );
+    assert_eq!(lib["culprit"], sha(3), "{result:#}");
+    assert_eq!(lib["culprit_exact"], true, "{result:#}");
+    let probes = lib["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes.len(), 2, "{result:#}");
+    for probe in probes {
+        assert_eq!(
+            probe["command"], "cargo test --features tls --lib -- net::x::tests::new_red --exact",
+            "a lib probe keeps the lane's flags and runs only the red unit test: {result:#}"
+        );
+    }
+    assert_eq!(
+        lib["command"], "cargo test --features tls --lib -- net runtime",
+        "the head run still covers every touched module"
+    );
+}
+
 /// A red only the head run saw is probed once more at the head before a commit is
 /// named. A test that fails once on a loaded worker lands on the head with every probe
 /// clear (147.139 blamed a beads-only commit); it is filed as flaky, P1, with no culprit.

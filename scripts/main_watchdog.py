@@ -904,14 +904,24 @@ def lane_for_red(lane: dict[str, Any], new_targets: set[str]) -> dict[str, Any]:
     Each `--test X` is its own binary, so the red tests run exactly as in the full lane,
     while a probe builds one or two test binaries instead of every target the batch
     touched. On 10-11, each full-lane probe of a ~30-target lane took about 45 min, and
-    one red stalled coverage for hours. A red key no target owns, a lib red, or a lane
-    with no matching `--test` keeps the whole lane.
+    one red stalled coverage for hours. A lib red runs only its own unit tests, by exact
+    name. A red key no target owns, or a lane with no matching `--test`, keeps the
+    whole lane.
     """
     if lane["kind"] != "test":
         return lane
     owners = {target_of(t) for t in new_targets}
     if None in owners:
         return lane
+    # A crashed binary is keyed `lib::(test binary failed)`: no unit test has that name.
+    named = all("(" not in t.split("::", 1)[1] for t in new_targets)
+    if owners == {"lib"} and named and "--lib" in lane["argv"] and "--" in lane["argv"]:
+        # Each probe of a full targeted-lib lane ran every unit test the batch touched
+        # (25k tests); on 10-12 one probe took 8 h and the run held the lock for 16 h.
+        cut = lane["argv"].index("--")
+        names = sorted(t.split("::", 1)[1] for t in new_targets)
+        argv = [*lane["argv"][: cut + 1], *names, "--exact"]
+        return {**lane, "argv": argv, "lib_filters": names, "exact_lib_tests": True, "display_command": " ".join(argv)}
     argv: list[str] = []
     kept: list[str] = []
     source = lane["argv"]
@@ -954,6 +964,14 @@ def probe(
     outcome["command"] = probe_lane["display_command"]
     if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
         return "red", outcome
+    if (
+        probe_lane.get("exact_lib_tests")
+        and outcome["verdict"] != VERDICT_RED
+        and outcome.get("remote_exit") == 0
+        and "lib" in outcome.get("targets_seen", [])
+        and set(outcome.get("unexercised_filters", [])) >= set(probe_lane["lib_filters"])
+    ):
+        return "clear", outcome  # the unit tests ran and none of the red ones exist yet
     if outcome["verdict"] == VERDICT_RED and uncompiled_owners(outcome) & owners_of(new_targets):
         # The red test's own binary did not compile here, so its tests never ran.
         # Reading that as clear would blame whichever commit made it compile
@@ -1303,6 +1321,10 @@ def run_engine(
                     elif not exact:
                         payload["title"] = payload["title"].replace(
                             f"at {culprit['sha'][:9]}", f"in {batch[group['start']][:9]}..{culprit['sha'][:9]}"
+                        )
+                        payload["description"] = payload["description"].replace(
+                            f"first red commit found by bisect: `{culprit['sha'][:9]}`",
+                            f"no single commit found (a bisect probe was undecided); earliest known red: `{culprit['sha'][:9]}`",
                         )
                     payloads.append(payload)
                     group["culprit"] = culprit["sha"] if not (pre_existing or not_reproduced) else None
