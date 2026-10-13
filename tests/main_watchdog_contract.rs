@@ -900,6 +900,81 @@ fn a_worker_fault_is_recognised_only_when_no_crate_of_this_repository_failed() {
     );
 }
 
+/// Touched feature-gated code gets an all-targets check, and a clippy lane that also
+/// builds the required features of touched test targets: a lint in
+/// tests/quic_h3_listener_streaming.rs (http3,tls) stayed red unseen for two days
+/// because no lane ran clippy with those features (asupersync-bi2462.147).
+#[test]
+fn feature_gated_changes_are_linted_with_their_features_and_their_test_targets_features() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"feature_lanes": [
+            {"src_features": ["http3"], "test_features": ["", "http3,tls"], "jobs": 1},
+            {"src_features": [], "test_features": ["", "kafka"], "jobs": 2},
+            {"src_features": [], "test_features": [""], "jobs": 1},
+        ]},
+    }));
+    let cases = probed["probe_results"]["feature_lanes"]
+        .as_array()
+        .expect("feature_lanes probe");
+    let ids = |case: &Value| -> Vec<String> {
+        case.as_array()
+            .expect("lanes")
+            .iter()
+            .map(|lane| lane["id"].as_str().expect("lane id").to_owned())
+            .collect()
+    };
+    assert_eq!(
+        ids(&cases[0]),
+        ["check-features", "clippy-features"],
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][0]["argv"],
+        json!([
+            "cargo",
+            "check",
+            "-j",
+            "1",
+            "--all-targets",
+            "--features",
+            "http3",
+            "--keep-going",
+            "--message-format=short"
+        ]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][1]["argv"],
+        json!([
+            "cargo",
+            "clippy",
+            "-j",
+            "1",
+            "--all-targets",
+            "--features",
+            "http3,tls",
+            "--keep-going",
+            "--message-format=short",
+            "--",
+            "-D",
+            "warnings"
+        ]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][1]["needs_clippy_component"],
+        json!(true),
+        "{probed:#}"
+    );
+    // A touched feature-gated test target alone is still linted with its features.
+    assert_eq!(ids(&cases[1]), ["clippy-features"], "{probed:#}");
+    assert_eq!(cases[1][0]["argv"][6], json!("kafka"), "{probed:#}");
+    // Default-feature changes add neither lane.
+    assert_eq!(ids(&cases[2]), Vec::<String>::new(), "{probed:#}");
+}
+
 /// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
 /// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
 /// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's
@@ -1432,6 +1507,72 @@ fn a_bisect_probe_builds_only_the_targets_that_own_the_red() {
         lane["command"],
         "cargo test --features tls --test alpha_native --test beta_native --test gamma_native",
         "the head run still covers every target"
+    );
+}
+
+fn lib_log(results: &[(&str, bool)], filtered: usize) -> String {
+    let failed = results.iter().filter(|(_, ok)| !ok).count();
+    let mut log = format!(
+        "     Running unittests src/lib.rs (target/debug/deps/asupersync-abc)\nrunning {} tests\n",
+        results.len()
+    );
+    for (name, ok) in results {
+        log.push_str(&format!(
+            "test {name} ... {}\n",
+            if *ok { "ok" } else { "FAILED" }
+        ));
+    }
+    let exit = if failed == 0 { 0 } else { 101 };
+    log.push_str(&format!(
+        "test result: {}. {} passed; {failed} failed; 0 ignored; 0 measured; {filtered} filtered out; finished in 0.01s\n  Remote command finished: exit={exit} in 1000ms\n",
+        if failed == 0 { "ok" } else { "FAILED" },
+        results.len() - failed
+    ));
+    log
+}
+
+/// A lib red is bisected with only its own unit tests, by exact name: each probe of the
+/// whole targeted-lib lane ran every touched unit test, and on 10-12 one probe took 8 h.
+/// A probe where the red test does not exist yet (zero tests matched, the binary ran) is
+/// clear, not undecided.
+#[test]
+fn a_lib_red_is_bisected_with_only_its_own_unit_tests() {
+    let lane = json!({
+        "id": "targeted-lib", "kind": "test",
+        "argv": ["cargo", "test", "--features", "tls", "--lib", "--", "net", "runtime"],
+        "expected_targets": [], "lib_filters": ["net", "runtime"],
+    });
+    let result = evaluate(&json!({
+        "plan": {
+            "commits": (1..=5u8).map(|n| commit(n, "dev@example.com", "c")).collect::<Vec<_>>(),
+            "lanes": [lane],
+        },
+        "state": {"known_reds": {}},
+        "lane_logs": {"targeted-lib": {
+            sha(2): {"log": lib_log(&[], 900)},
+            sha(3): {"log": lib_log(&[("net::x::tests::new_red", false)], 900)},
+            sha(5): {"log": lib_log(&[("net::x::tests::old", true), ("net::x::tests::new_red", false)], 900)},
+        }},
+    }));
+    let lib = receipt(&result, "targeted-lib");
+    assert_eq!(
+        lib["new_red"],
+        json!(["lib::net::x::tests::new_red"]),
+        "{result:#}"
+    );
+    assert_eq!(lib["culprit"], sha(3), "{result:#}");
+    assert_eq!(lib["culprit_exact"], true, "{result:#}");
+    let probes = lib["bisect_probes"].as_array().expect("probes");
+    assert_eq!(probes.len(), 2, "{result:#}");
+    for probe in probes {
+        assert_eq!(
+            probe["command"], "cargo test --features tls --lib -- net::x::tests::new_red --exact",
+            "a lib probe keeps the lane's flags and runs only the red unit test: {result:#}"
+        );
+    }
+    assert_eq!(
+        lib["command"], "cargo test --features tls --lib -- net runtime",
+        "the head run still covers every touched module"
     );
 }
 

@@ -36,6 +36,8 @@ Changed `src/` files are mapped through the module tree (`mod` declarations,
 chain. Touched feature-gated modules add a `check-features` all-targets check and
 run the lib lane with those features, as one union: a break that shows only under
 a subset of them is not detected (`--with-all-features` checks the full set). A
+`clippy-features` lane lints every target under that union plus the required
+features of touched test targets, which no default lane builds. A
 changed file no crate root reaches is reported as unmapped: nothing compiles it.
 A touched workspace member crate (for example asupersync-macros) gets its own
 `cargo test -p <crate>` lane; its clippy is not run. Head lanes run `--parallel`
@@ -902,14 +904,24 @@ def lane_for_red(lane: dict[str, Any], new_targets: set[str]) -> dict[str, Any]:
     Each `--test X` is its own binary, so the red tests run exactly as in the full lane,
     while a probe builds one or two test binaries instead of every target the batch
     touched. On 10-11, each full-lane probe of a ~30-target lane took about 45 min, and
-    one red stalled coverage for hours. A red key no target owns, a lib red, or a lane
-    with no matching `--test` keeps the whole lane.
+    one red stalled coverage for hours. A lib red runs only its own unit tests, by exact
+    name. A red key no target owns, or a lane with no matching `--test`, keeps the
+    whole lane.
     """
     if lane["kind"] != "test":
         return lane
     owners = {target_of(t) for t in new_targets}
     if None in owners:
         return lane
+    # A crashed binary is keyed `lib::(test binary failed)`: no unit test has that name.
+    named = all("(" not in t.split("::", 1)[1] for t in new_targets)
+    if owners == {"lib"} and named and "--lib" in lane["argv"] and "--" in lane["argv"]:
+        # Each probe of a full targeted-lib lane ran every unit test the batch touched
+        # (25k tests); on 10-12 one probe took 8 h and the run held the lock for 16 h.
+        cut = lane["argv"].index("--")
+        names = sorted(t.split("::", 1)[1] for t in new_targets)
+        argv = [*lane["argv"][: cut + 1], *names, "--exact"]
+        return {**lane, "argv": argv, "lib_filters": names, "exact_lib_tests": True, "display_command": " ".join(argv)}
     argv: list[str] = []
     kept: list[str] = []
     source = lane["argv"]
@@ -952,6 +964,14 @@ def probe(
     outcome["command"] = probe_lane["display_command"]
     if outcome["verdict"] == VERDICT_RED and red_targets(outcome) & new_targets:
         return "red", outcome
+    if (
+        probe_lane.get("exact_lib_tests")
+        and outcome["verdict"] != VERDICT_RED
+        and outcome.get("remote_exit") == 0
+        and "lib" in outcome.get("targets_seen", [])
+        and set(outcome.get("unexercised_filters", [])) >= set(probe_lane["lib_filters"])
+    ):
+        return "clear", outcome  # the unit tests ran and none of the red ones exist yet
     if outcome["verdict"] == VERDICT_RED and uncompiled_owners(outcome) & owners_of(new_targets):
         # The red test's own binary did not compile here, so its tests never ran.
         # Reading that as clear would blame whichever commit made it compile
@@ -1302,6 +1322,10 @@ def run_engine(
                         payload["title"] = payload["title"].replace(
                             f"at {culprit['sha'][:9]}", f"in {batch[group['start']][:9]}..{culprit['sha'][:9]}"
                         )
+                        payload["description"] = payload["description"].replace(
+                            f"first red commit found by bisect: `{culprit['sha'][:9]}`",
+                            f"no single commit found (a bisect probe was undecided); earliest known red: `{culprit['sha'][:9]}`",
+                        )
                     payloads.append(payload)
                     group["culprit"] = culprit["sha"] if not (pre_existing or not_reproduced) else None
                     for target in group["targets"]:
@@ -1615,6 +1639,38 @@ def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
 LEAN_TEST_ENV = ["env", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0"]
 
 
+def feature_lanes(src_features: list[str], test_features: list[str], jobs: int) -> list[dict[str, Any]]:
+    """Lanes for what the default lanes never build. `check-features` compiles every
+    target with the touched modules' features. `clippy-features` lints every target
+    with those features and the required features of touched test targets (their
+    group keys). A lint in a required-features test target otherwise stays red
+    unseen: tests/quic_h3_listener_streaming.rs:534 (http3,tls) failed -D warnings
+    from 7091e0415 until e22d652a3 (asupersync-bi2462.147)."""
+    lanes: list[dict[str, Any]] = []
+    if src_features:
+        lanes.append(
+            {
+                "id": "check-features",
+                "kind": "build",
+                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--features", ",".join(src_features), "--keep-going", "--message-format=short"],
+            }
+        )
+    lint_features = sorted(set(src_features) | {f for key in test_features for f in key.split(",") if f})
+    if lint_features:
+        lanes.append(
+            {
+                "id": "clippy-features",
+                "kind": "build",
+                "argv": [
+                    "cargo", "clippy", "-j", str(jobs), "--all-targets", "--features", ",".join(lint_features),
+                    "--keep-going", "--message-format=short", "--", "-D", "warnings",
+                ],
+                "needs_clippy_component": True,
+            }
+        )
+    return lanes
+
+
 def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool) -> tuple[list[dict[str, Any]], list[str]]:
     lanes: list[dict[str, Any]] = [
         {"id": "check-default", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--keep-going", "--message-format=short"]},
@@ -1664,17 +1720,10 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
     mapped = targeted_tests(head, paths)
     groups, lib_filters, unmapped, src_features = mapped["groups"], mapped["lib_filters"], mapped["unmapped"], mapped["src_features"]
     feature_args = ["--features", ",".join(src_features)] if src_features else []
-    if src_features:
-        # Touched feature-gated modules are invisible to check-default: check every target
-        # with the union of their features (a subset-only break needs --with-all-features).
-        lanes.insert(
-            1,
-            {
-                "id": "check-features",
-                "kind": "build",
-                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", *feature_args, "--keep-going", "--message-format=short"],
-            },
-        )
+    # Touched feature-gated modules are invisible to check-default: check every target
+    # with the union of their features (a subset-only break needs --with-all-features),
+    # and lint every target that union or a touched test target's features build.
+    lanes[1:1] = feature_lanes(src_features, list(groups), jobs)
     for features, names in sorted(groups.items()):
         argv = [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
         if features:
@@ -3089,6 +3138,10 @@ def main(argv: list[str]) -> int:
                 for case in probes.get("rch_transport_retryable", [])
             ],
             "is_worker_fault": [is_worker_fault(text) for text in probes.get("is_worker_fault", [])],
+            "feature_lanes": [
+                feature_lanes(case["src_features"], case["test_features"], case["jobs"])
+                for case in probes.get("feature_lanes", [])
+            ],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),
