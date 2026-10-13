@@ -24,10 +24,11 @@ use std::io::BufReader;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
+const ACK_POLL: Duration = Duration::from_millis(20);
 const WINDOW: u64 = 64;
 const BODY_BYTES: usize = 512;
 
@@ -221,6 +222,26 @@ async fn acknowledge_goaway(
     }
 }
 
+/// Keep both clients reading and acknowledging until the listener has drained.
+///
+/// A connection drains only after its peer acknowledges the final packets;
+/// `drain_timeout` bounds a peer that went away. A client that stopped reading
+/// at GOAWAY left its acknowledgement unsent: 320 bytes stayed in flight on the
+/// held peer and the buffered ingress drain timed out (br-asupersync-psoqxr).
+async fn acknowledge_until_drained(
+    cx: &Cx,
+    first: &mut NativeQuicUdpConnection,
+    second: &mut NativeQuicUdpConnection,
+    drained: &AtomicBool,
+) {
+    while !drained.load(Ordering::SeqCst) {
+        for owner in [&mut *first, &mut *second] {
+            owner.drive_io_once(cx, ACK_POLL).await.unwrap();
+            owner.flush(cx).await.unwrap();
+        }
+    }
+}
+
 #[test]
 fn native_buffered_listener_isolates_response_retention_and_reuses_cancelled_credit() {
     run_isolation(false);
@@ -300,9 +321,16 @@ fn run_isolation(streaming: bool) {
         .unwrap();
         let address = listener.local_addr();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        let serving = listener.serve_with_shutdown(&cx, async {
-            shutdown_rx.recv(&cx).await.unwrap();
-        });
+        let drained = AtomicBool::new(false);
+        let serving = async {
+            let report = listener
+                .serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                })
+                .await;
+            drained.store(true, Ordering::SeqCst);
+            report
+        };
         let clients = async {
             let slow_config = NativeQuicConnectionConfig {
                 recv_window: WINDOW,
@@ -377,6 +405,7 @@ fn run_isolation(streaming: bool) {
                 acknowledge_goaway(&cx, &mut survivor, &mut survivor_h3, 4),
             )
             .await;
+            acknowledge_until_drained(&cx, &mut slow, &mut survivor, &drained).await;
         };
         let (report, ()) = crate::time::timeout(
             cx.now(),
@@ -541,9 +570,16 @@ fn run_ingress_budget(streaming: bool) {
         .unwrap();
         let address = listener.local_addr();
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
-        let serving = listener.serve_with_shutdown(&cx, async {
-            shutdown_rx.recv(&cx).await.unwrap();
-        });
+        let drained = AtomicBool::new(false);
+        let serving = async {
+            let report = listener
+                .serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                })
+                .await;
+            drained.store(true, Ordering::SeqCst);
+            report
+        };
         let clients = async {
             let (mut held, mut held_h3) = connect(&cx, address, 11, transport, ca.clone()).await;
             let survivor_config = NativeQuicConnectionConfig {
@@ -677,6 +713,7 @@ fn run_ingress_budget(streaming: bool) {
                 acknowledge_goaway(&cx, &mut held, &mut held_h3, 4),
                 acknowledge_goaway(&cx, &mut survivor, &mut survivor_h3, 12),
             ).await;
+            acknowledge_until_drained(&cx, &mut held, &mut survivor, &drained).await;
         };
         let (report, ()) = crate::time::timeout(
             cx.now(), Duration::from_secs(20), zip(serving, clients),
