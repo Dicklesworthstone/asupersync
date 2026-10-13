@@ -5,7 +5,10 @@
 use super::super::{TlsConnection, TlsStream};
 use super::TlsError;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
-use crate::tls::{CertificateChain, PrivateKey};
+use crate::tls::{
+    Certificate, CertificateChain, CertificatePin, CertificatePinSet, PrivateKey, TlsAcceptor,
+    TlsConnector,
+};
 use rustls::pki_types::ServerName;
 use rustls::{CipherSuite, ClientConfig, ClientConnection, ServerConfig, ServerConnection};
 use std::cell::RefCell;
@@ -31,6 +34,7 @@ struct MemoryIo {
     buffer_writes: bool,
     buffered: Vec<u8>,
     shutdown_calls: usize,
+    transport_eof: bool,
 }
 
 impl AsyncRead for MemoryIo {
@@ -45,6 +49,9 @@ impl AsyncRead for MemoryIo {
         }
         let mut incoming = self.incoming.borrow_mut();
         if incoming.is_empty() {
+            if self.transport_eof {
+                return Poll::Ready(Ok(()));
+            }
             // The test driver polls both endpoints explicitly with a step
             // limit; this transport is not used with an executor.
             return Poll::Pending;
@@ -132,16 +139,21 @@ fn configs(
     (Arc::new(client), Arc::new(server))
 }
 
-fn streams(
-    client_config: &Arc<ClientConfig>,
-    server_config: &Arc<ServerConfig>,
-) -> (TlsStream<MemoryIo>, TlsStream<MemoryIo>) {
+fn memory_pair() -> (MemoryIo, MemoryIo) {
     let client_io = MemoryIo::default();
     let server_io = MemoryIo {
         incoming: Rc::clone(&client_io.outgoing),
         outgoing: Rc::clone(&client_io.incoming),
         ..MemoryIo::default()
     };
+    (client_io, server_io)
+}
+
+fn streams(
+    client_config: &Arc<ClientConfig>,
+    server_config: &Arc<ServerConfig>,
+) -> (TlsStream<MemoryIo>, TlsStream<MemoryIo>) {
+    let (client_io, server_io) = memory_pair();
     let client = ClientConnection::new(
         Arc::clone(client_config),
         ServerName::try_from("localhost").unwrap(),
@@ -678,7 +690,7 @@ fn both_shutdown_apis_flush_buffered_records_before_closing_transport() {
                 assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
                 assert_plaintext_read(peer, message);
                 // This EOF comes from a real authenticated close_notify;
-                // MemoryIo itself returns Pending, never a transport EOF.
+                // This transport has no simulated EOF configured.
                 assert_plaintext_read(peer, b"");
                 assert_disconnected(stream);
                 assert_disconnected(peer);
@@ -831,6 +843,284 @@ fn tls_flush_does_not_report_success_with_unsent_application_records() {
             assert!(stream.io.buffered.is_empty());
             assert_plaintext_read(peer, message);
             send_and_read(peer, stream);
+        }
+    }
+}
+
+/// Poll both public handshake futures without an executor, timer, or sleeps.
+/// Keep successful streams alive until both sides finish so a server can
+/// still deliver its post-handshake tickets. The transport has no waker;
+/// this bounded driver deliberately polls both futures on every step.
+fn public_handshakes(
+    client: impl std::future::Future<Output = Result<TlsStream<MemoryIo>, TlsError>>,
+    server: impl std::future::Future<Output = Result<TlsStream<MemoryIo>, TlsError>>,
+) -> (
+    Result<TlsStream<MemoryIo>, TlsError>,
+    Result<TlsStream<MemoryIo>, TlsError>,
+) {
+    use std::future::Future;
+
+    let mut client = std::pin::pin!(client);
+    let mut server = std::pin::pin!(server);
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut client_result = None;
+    let mut server_result = None;
+    for _ in 0..128 {
+        if client_result.is_none()
+            && let Poll::Ready(result) = client.as_mut().poll(&mut cx)
+        {
+            client_result = Some(result);
+        }
+        if server_result.is_none()
+            && let Poll::Ready(result) = server.as_mut().poll(&mut cx)
+        {
+            server_result = Some(result);
+        }
+        if client_result.is_some() && server_result.is_some() {
+            break;
+        }
+    }
+    match (client_result, server_result) {
+        (Some(client), Some(server)) => (client, server),
+        _ => panic!("public TLS handshakes exceeded the bounded poll limit"),
+    }
+}
+
+#[test]
+fn public_connect_accept_export_according_to_the_negotiated_version() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        // The client offers both versions. Restrict only the server so the
+        // assertion tests the negotiated version, not the configured maximum.
+        let (mut cc, _) = configs(&[&rustls::version::TLS13, &rustls::version::TLS12], None, true);
+        let (_, mut sc) = configs(&[version], None, true);
+        Arc::get_mut(&mut cc).unwrap().alpn_protocols = vec![b"xmpp-client".to_vec()];
+        Arc::get_mut(&mut sc).unwrap().alpn_protocols = vec![b"xmpp-client".to_vec()];
+        let connector = TlsConnector::new((*cc).clone());
+        let acceptor = TlsAcceptor::new((*sc).clone());
+        let (client_io, server_io) = memory_pair();
+        let (client, server) = public_handshakes(
+            connector.connect("localhost", client_io),
+            acceptor.accept(server_io),
+        );
+        let mut client = client.expect("public client handshake");
+        let mut server = server.expect("public server handshake");
+        let expected_version = version.version;
+        for stream in [&client, &server] {
+            assert!(stream.is_ready());
+            assert_eq!(stream.protocol_version(), Some(expected_version));
+            assert_eq!(stream.alpn_protocol(), Some(b"xmpp-client".as_slice()));
+            if expected_version == rustls::ProtocolVersion::TLSv1_3 {
+                assert_eq!(
+                    stream.tls_exporter_channel_binding().unwrap(),
+                    reference_binding(stream)
+                );
+            } else {
+                assert!(matches!(
+                    stream.tls_exporter_channel_binding(),
+                    Err(TlsError::Configuration(_))
+                ));
+            }
+        }
+        if expected_version == rustls::ProtocolVersion::TLSv1_3 {
+            assert_eq!(
+                client.tls_exporter_channel_binding().unwrap(),
+                server.tls_exporter_channel_binding().unwrap()
+            );
+        }
+        send_and_read(&mut client, &mut server);
+        send_and_read(&mut server, &mut client);
+    }
+}
+
+#[test]
+fn public_connector_enforces_pins_before_returning_an_exporter_capable_stream() {
+    let certificates = Certificate::from_pem(CERT_PEM).unwrap();
+    let correct_pin = CertificatePin::compute_cert_sha256(&certificates[0]).unwrap();
+    let mut incorrect_hash = correct_pin.hash_bytes().to_vec();
+    incorrect_hash[0] ^= 1;
+    let incorrect_pin = CertificatePin::CertSha256(incorrect_hash);
+
+    for pin_matches in [true, false] {
+        let (cc, sc) = configs(&[&rustls::version::TLS13], None, true);
+        let pin = if pin_matches {
+            correct_pin.clone()
+        } else {
+            incorrect_pin.clone()
+        };
+        let pins = CertificatePinSet::new().with_pin(pin);
+        assert!(pins.is_enforcing());
+        let connector = TlsConnector::new((*cc).clone()).with_pin_set(pins);
+        let acceptor = TlsAcceptor::new((*sc).clone());
+        let (client_io, server_io) = memory_pair();
+        let (client, server) = public_handshakes(
+            connector.connect("localhost", client_io),
+            acceptor.accept(server_io),
+        );
+        let server = server.expect("the peer must have received the client's Finished");
+        assert!(server.is_ready());
+        if pin_matches {
+            let client = client.expect("a trusted and correctly pinned server is accepted");
+            assert_eq!(
+                client.tls_exporter_channel_binding().unwrap(),
+                server.tls_exporter_channel_binding().unwrap()
+            );
+        } else {
+            // Certificate-chain verification and TLS have succeeded. The
+            // higher-level pin gate must still return an error, not a stream
+            // whose newly exposed exporter a caller could use for binding.
+            assert!(matches!(client, Err(TlsError::PinMismatch { .. })));
+        }
+    }
+}
+
+#[test]
+fn public_acceptor_rejects_actual_early_data_but_exports_after_resumption() {
+    use std::io::Write;
+
+    let (mut cc, mut sc) = configs(&[&rustls::version::TLS13], None, true);
+    Arc::get_mut(&mut cc).unwrap().enable_early_data = true;
+    Arc::get_mut(&mut sc).unwrap().max_early_data_size = 1024;
+    let connector = TlsConnector::new((*cc).clone());
+    let acceptor = TlsAcceptor::new((*sc).clone());
+    let (client_io, server_io) = memory_pair();
+    let (first, first_peer) = public_handshakes(
+        connector.connect("localhost", client_io),
+        acceptor.accept(server_io),
+    );
+    let mut first = first.expect("initial public client handshake");
+    let first_peer = first_peer.expect("initial public server handshake");
+    let first_binding = first.tls_exporter_channel_binding().unwrap();
+    assert_eq!(
+        first_binding,
+        first_peer.tls_exporter_channel_binding().unwrap()
+    );
+
+    // Store genuine NewSessionTickets, not fabricated resumption state.
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut bytes = [0; 64];
+    let mut buf = ReadBuf::new(&mut bytes);
+    assert!(Pin::new(&mut first).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(buf.filled().is_empty());
+
+    let (client_io, server_io) = memory_pair();
+    let mut conn = ClientConnection::new(
+        Arc::clone(connector.config()),
+        ServerName::try_from("localhost").unwrap(),
+    )
+    .unwrap();
+    // The public connector has no early-write surface; use raw rustls only
+    // to create a peer that actually sends 0-RTT to the public acceptor.
+    conn.early_data()
+        .expect("the cached ticket must advertise early data")
+        .write_all(b"must not be delivered as application data")
+        .unwrap();
+    let mut resumed = TlsStream::new_client(client_io, conn);
+    assert_incomplete(&resumed);
+    let client = async move {
+        std::future::poll_fn(|cx| resumed.poll_handshake(cx)).await?;
+        Ok(resumed)
+    };
+    let (resumed, resumed_peer) = public_handshakes(client, acceptor.accept(server_io));
+    let mut resumed = resumed.expect("resumed client handshake");
+    let mut resumed_peer = resumed_peer.expect("resumed public server handshake");
+    let TlsConnection::Client(conn) = &resumed.conn else {
+        unreachable!();
+    };
+    assert_eq!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
+    assert!(
+        !conn.is_early_data_accepted(),
+        "public accept must reject 0-RTT"
+    );
+    let TlsConnection::Server(conn) = &resumed_peer.conn else {
+        unreachable!();
+    };
+    assert_eq!(conn.handshake_kind(), Some(rustls::HandshakeKind::Resumed));
+    let binding = resumed.tls_exporter_channel_binding().unwrap();
+    assert_ne!(binding, first_binding);
+    assert_eq!(binding, resumed_peer.tls_exporter_channel_binding().unwrap());
+    assert_eq!(binding, reference_binding(&resumed));
+    assert_eq!(binding, reference_binding(&resumed_peer));
+    let mut buf = ReadBuf::new(&mut bytes);
+    assert!(Pin::new(&mut resumed_peer).poll_read(&mut cx, &mut buf).is_pending());
+    assert!(
+        buf.filled().is_empty(),
+        "rejected early bytes reached the application"
+    );
+    send_and_read(&mut resumed, &mut resumed_peer);
+    send_and_read(&mut resumed_peer, &mut resumed);
+}
+
+#[test]
+fn corrupt_or_truncated_records_permanently_revoke_exporter_access() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_receives in [true, false] {
+            for truncate in [true, false] {
+                let (cc, sc) = configs(&[version], None, true);
+                let (mut client, mut server) = streams(&cc, &sc);
+                establish(&mut client, &mut server);
+                let (receiver, sender) = if client_receives {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                if version.version == rustls::ProtocolVersion::TLSv1_3 {
+                    // Prove the exporter was usable before the read failure.
+                    assert_eq!(
+                        receiver.tls_exporter_channel_binding().unwrap(),
+                        sender.tls_exporter_channel_binding().unwrap()
+                    );
+                }
+                let mut cx = Context::from_waker(Waker::noop());
+                let message = b"authenticated record to corrupt or truncate";
+                assert!(matches!(
+                    Pin::new(&mut *sender).poll_write(&mut cx, message),
+                    Poll::Ready(Ok(len)) if len == message.len()
+                ));
+                assert!(matches!(
+                    Pin::new(&mut *sender).poll_flush(&mut cx),
+                    Poll::Ready(Ok(()))
+                ));
+                // Mutate the last byte of a real encrypted application record,
+                // never rustls state or an already-decrypted plaintext buffer.
+                let expected = {
+                    let mut wire = sender.io.outgoing.borrow_mut();
+                    assert!(wire.len() > message.len());
+                    if truncate {
+                        assert!(wire.pop_back().is_some());
+                        receiver.io.transport_eof = true;
+                        io::ErrorKind::UnexpectedEof
+                    } else {
+                        *wire.back_mut().unwrap() ^= 1;
+                        io::ErrorKind::InvalidData
+                    }
+                };
+                let mut bytes = [0; 64];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(matches!(
+                    Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
+                    Poll::Ready(Err(error)) if error.kind() == expected
+                ));
+                assert!(
+                    buf.filled().is_empty(),
+                    "unauthenticated plaintext escaped"
+                );
+                assert!(receiver.is_closed());
+                assert_disconnected(receiver);
+                let io_calls = receiver.io.io_calls;
+                // Even a transport that subsequently recovers must not turn a
+                // truncated/authentication-failed TLS session into clean EOF.
+                receiver.io.transport_eof = false;
+                for _ in 0..3 {
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(matches!(
+                        Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
+                        Poll::Ready(Err(error)) if error.kind() == expected
+                    ));
+                    assert!(buf.filled().is_empty());
+                    assert_eq!(receiver.io.io_calls, io_calls);
+                    assert_terminal_handshake(receiver);
+                }
+            }
         }
     }
 }
