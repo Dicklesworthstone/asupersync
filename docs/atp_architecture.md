@@ -292,6 +292,11 @@ emit stable downgrade reasons during session negotiation.
 | `masque_connect_udp` | encryption policy, proof bundles, resume, repair, datagrams, relay, MASQUE adapter | H3, WebTransport, mailbox, swarm | `masque_connect_udp_proxy` |
 | `tcp_tls_443_fallback` | encryption policy, proof bundles, resume, repair, compression, relay | datagrams, H3, WebTransport, MASQUE, mailbox, swarm | `tcp_tls_443_fallback_relay` |
 
+The `compression` entries name a planned adapter capability: no ATP transport
+compresses yet, and the SDK no longer offers the feature in negotiation (owner
+decision 2026-10-13). Real compression, an in-house zstd codec negotiated as
+its own capability, is tracked by `br-asupersync-t1fblr`.
+
 `tests/atp_session_negotiation.rs` verifies that this matrix covers native
 QUIC, H3, WebTransport, MASQUE/CONNECT-UDP, and TCP/TLS 443 fallback, and that
 offered-but-unselected adapter features produce stable downgrade reason codes

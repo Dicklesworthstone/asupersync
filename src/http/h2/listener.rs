@@ -3064,12 +3064,13 @@ where
         // br-asupersync-mfqfst M8: enforce the host allow-list BEFORE the
         // handler runs (h1 parity). h2 carries the effective authority in the
         // synthesized `host` header (see `request_from_h2_headers`); a request
-        // whose host isn't allow-listed (or is missing) gets a per-stream 421
-        // Misdirected Request (RFC 9113 §9.1.2) instead of reaching the
+        // whose well-formed host isn't allow-listed gets a per-stream 421
+        // Misdirected Request (RFC 9113 §9.1.2), and a missing, duplicate or
+        // unparseable host gets 400 Bad Request, instead of reaching the
         // handler, eliminating the host-injection attack surface for
         // absolute-URL emission / OAuth redirect_uri / cache-key computation.
         // Unlike h1 (one request per connection -> connection close), h2 is
-        // multiplexed, so only the offending stream is answered with 421; the
+        // multiplexed, so only the offending stream is answered; the
         // rest of the connection keeps serving.
         if let Err(rejection) =
             validate_host_header(&request.headers, request.version, &host_policy)
@@ -4797,7 +4798,8 @@ pub struct Http2ListenerConfig {
     /// injection. The effective h2 authority (`:authority`) is checked through
     /// the synthesized `host` header. Secure by default (`RejectUnknown`);
     /// set `AllowList`/`AllowAll` explicitly. Rejected requests get a
-    /// per-stream 421 Misdirected Request (the connection keeps serving).
+    /// per-stream 421 Misdirected Request, or 400 Bad Request for a missing,
+    /// duplicate or unparseable host (the connection keeps serving).
     pub allowed_hosts: HostPolicy,
     /// br-asupersync-mfqfst M8: server-default per-request timeout (h1 parity
     /// with `Http1Config::request_timeout`). When set, every request budget is

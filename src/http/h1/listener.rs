@@ -352,7 +352,9 @@ impl Http1ListenerConfig {
 ///
 /// The default [`Http1Config`] uses
 /// [`HostPolicy::RejectUnknown`](crate::http::h1::server::HostPolicy::RejectUnknown),
-/// which answers every request `421 Misdirected Request`. A server built with [`Http1Listener::bind`]
+/// which refuses every request: `421 Misdirected Request` for a well-formed
+/// `Host`, and `400 Bad Request` for a missing, duplicate or unparseable one
+/// (RFC 9112 §3.2). A server built with [`Http1Listener::bind`]
 /// and no further configuration therefore serves nothing. Name the hosts it
 /// answers for with [`Http1Config::host_policy`] and
 /// [`Http1Listener::bind_with_config`], as below.
@@ -407,7 +409,8 @@ where
     /// type. The exact output preserves inference for existing handlers.
     ///
     /// It uses the default configuration, whose host policy rejects every
-    /// request with `421` (see "Host policy" on [`Http1Listener`]). Use
+    /// request with `421`, or `400` for a malformed `Host` (see "Host policy"
+    /// on [`Http1Listener`]). Use
     /// [`Self::bind_with_config`] to name the allowed hosts.
     pub async fn bind<A: ToSocketAddrs + Send + 'static>(addr: A, handler: F) -> io::Result<Self> {
         Self::bind_upgradeable(addr, handler).await

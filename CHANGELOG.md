@@ -247,6 +247,25 @@ lacked "empty" failed even when the hash matched. Its methods now report a
 cancelled `Cx` as `Cancelled` rather than as
 `PlatformError::OperatingSystemError`.
 
+### Behavior change — the ATP SDK no longer claims compression
+
+`asupersync::net::atp::sdk` sessions used to offer and select
+`AtpFeature::Compression` whenever `SessionConfig::enable_compression` was set
+(the default), although no transport compresses anything. They no longer offer
+it, so `AtpSession::has_feature(AtpFeature::Compression)` is `false`. The field
+and its default are unchanged and currently have no effect. Real compression
+(an in-house zstd codec negotiated as its own capability) is tracked by
+`br-asupersync-t1fblr`. Owner decision 2026-10-13.
+
+### Behavior change — a malformed `Host` is answered `400`, an unallowed one `421`
+
+The HTTP/1 servers and the HTTP/2 listener answered every `Host` rejection with
+`421 Misdirected Request`. They now follow RFC 9112 §3.2: a missing (on
+HTTP/1.1), duplicate or unparseable `Host` gets `400 Bad Request`, and only a
+well-formed `Host` outside the allow-list gets `421`. Clients or monitors that
+match `421` for malformed requests will see `400`. Owner decision 2026-10-13
+(`asupersync-su3b6m`).
+
 ### Behavior change — the production runtime enforces explicit poll quotas
 
 `Budget::with_poll_quota` bounds how many times a task is polled. The
