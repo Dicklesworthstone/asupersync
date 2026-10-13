@@ -26,6 +26,11 @@ struct MemoryIo {
     block_flush: bool,
     flush_error: Option<io::ErrorKind>,
     io_calls: usize,
+    block_write: bool,
+    write_limit: Option<usize>,
+    buffer_writes: bool,
+    buffered: Vec<u8>,
+    shutdown_calls: usize,
 }
 
 impl AsyncRead for MemoryIo {
@@ -59,8 +64,16 @@ impl AsyncWrite for MemoryIo {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.io_calls += 1;
-        self.outgoing.borrow_mut().extend(buf.iter().copied());
-        Poll::Ready(Ok(buf.len()))
+        if self.block_write {
+            return Poll::Pending;
+        }
+        let len = self.write_limit.unwrap_or(buf.len()).min(buf.len());
+        if self.buffer_writes {
+            self.buffered.extend_from_slice(&buf[..len]);
+        } else {
+            self.outgoing.borrow_mut().extend(buf[..len].iter().copied());
+        }
+        Poll::Ready(Ok(len))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -69,14 +82,18 @@ impl AsyncWrite for MemoryIo {
             return Poll::Ready(Err(kind.into()));
         }
         if self.block_flush {
-            Poll::Pending
-        } else {
-            Poll::Ready(Ok(()))
+            return Poll::Pending;
         }
+        let this = &mut *self;
+        this.outgoing.borrow_mut().extend(this.buffered.drain(..));
+        Poll::Ready(Ok(()))
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         self.io_calls += 1;
+        self.shutdown_calls += 1;
+        // Deliberately does not flush: the TLS wrapper must do that before
+        // shutting down a transport that can hold accepted writes.
         Poll::Ready(Ok(()))
     }
 }
@@ -579,6 +596,241 @@ fn shutdown_before_handshake_cannot_restart_negotiation() {
             ));
             assert!(stream.state.shutdown_pending());
             assert_terminal_handshake(stream);
+        }
+    }
+}
+
+fn poll_shutdown_api(
+    stream: &mut TlsStream<MemoryIo>,
+    cx: &mut Context<'_>,
+    async_shutdown: bool,
+) -> Poll<io::Result<()>> {
+    if async_shutdown {
+        Pin::new(stream).poll_shutdown(cx)
+    } else {
+        stream.poll_shutdown_tls(cx).map(|result| {
+            result.map_err(|error| match error {
+                TlsError::Io(error) => error,
+                other => io::Error::other(other),
+            })
+        })
+    }
+}
+
+fn assert_plaintext_read(stream: &mut TlsStream<MemoryIo>, expected: &[u8]) {
+    let mut cx = Context::from_waker(Waker::noop());
+    let mut bytes = [0; 64];
+    let mut buf = ReadBuf::new(&mut bytes);
+    assert!(matches!(
+        Pin::new(stream).poll_read(&mut cx, &mut buf),
+        Poll::Ready(Ok(()))
+    ));
+    assert_eq!(buf.filled(), expected);
+}
+
+#[test]
+fn both_shutdown_apis_flush_buffered_records_before_closing_transport() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for async_shutdown in [true, false] {
+                let (cc, sc) = configs(&[version], None, true);
+                let (mut client, mut server) = streams(&cc, &sc);
+                establish(&mut client, &mut server);
+                let (stream, peer) = if client_side {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                stream.io.buffer_writes = true;
+                stream.io.write_limit = Some(3); // real partial TLS-record writes
+                stream.io.block_flush = true;
+                let mut cx = Context::from_waker(Waker::noop());
+                let message = b"payload queued before shutdown";
+                assert!(matches!(
+                    Pin::new(&mut *stream).poll_write(&mut cx, message),
+                    Poll::Ready(Ok(len)) if len == message.len()
+                ));
+
+                for _ in 0..2 {
+                    assert!(poll_shutdown_api(stream, &mut cx, async_shutdown).is_pending());
+                    assert!(stream.state.shutdown_pending());
+                    assert!(!stream.shutdown_flushed);
+                    assert!(!stream.conn.wants_write());
+                    assert!(!stream.io.buffered.is_empty());
+                    assert_eq!(stream.io.shutdown_calls, 0);
+                    assert_terminal_handshake(stream);
+                }
+                let mut bytes = [0; 64];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(buf.filled().is_empty(), "the transport has not flushed");
+                // A pending local shutdown must still permit inbound traffic.
+                send_and_read(peer, stream);
+
+                stream.io.block_flush = false;
+                assert!(matches!(
+                    poll_shutdown_api(stream, &mut cx, async_shutdown),
+                    Poll::Ready(Ok(()))
+                ));
+                assert!(stream.shutdown_flushed);
+                assert!(stream.io.buffered.is_empty());
+                assert!(!stream.conn.wants_write());
+                assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
+                assert_plaintext_read(peer, message);
+                // This EOF comes from a real authenticated close_notify;
+                // MemoryIo itself returns Pending, never a transport EOF.
+                assert_plaintext_read(peer, b"");
+                assert_disconnected(stream);
+                assert_disconnected(peer);
+            }
+        }
+    }
+}
+
+#[test]
+fn peer_eof_does_not_drop_a_pending_local_close_notify() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for async_shutdown in [true, false] {
+                for stall_write in [true, false] {
+                    let (cc, sc) = configs(&[version], None, true);
+                    let (mut client, mut server) = streams(&cc, &sc);
+                    establish(&mut client, &mut server);
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    stream.io.buffer_writes = true;
+                    stream.io.block_write = stall_write;
+                    stream.io.block_flush = !stall_write;
+                    let mut cx = Context::from_waker(Waker::noop());
+                    assert!(poll_shutdown_api(stream, &mut cx, async_shutdown).is_pending());
+                    assert!(!stream.shutdown_flushed);
+                    assert!(stream.conn.wants_write() || !stream.io.buffered.is_empty());
+                    assert!(matches!(
+                        peer.poll_shutdown_tls(&mut cx),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert_plaintext_read(stream, b"");
+                    assert!(stream.read_closed);
+                    assert!(stream.state.shutdown_pending());
+                    assert!(!stream.is_closed(), "local close_notify is still pending");
+                    assert_eq!(stream.io.shutdown_calls, 0);
+                    assert_terminal_handshake(stream);
+
+                    stream.io.block_write = false;
+                    stream.io.block_flush = false;
+                    assert!(matches!(
+                        poll_shutdown_api(stream, &mut cx, async_shutdown),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(stream.shutdown_flushed && stream.is_closed());
+                    assert!(stream.io.buffered.is_empty());
+                    assert!(!stream.conn.wants_write());
+                    assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
+                    assert_plaintext_read(peer, b"");
+                    assert!(peer.is_closed());
+                    assert_terminal_handshake(stream);
+                    assert_terminal_handshake(peer);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn shutdown_reports_write_zero_and_preserves_transport_flush_errors() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            for async_shutdown in [true, false] {
+                for zero_write in [true, false] {
+                    let (cc, sc) = configs(&[version], None, true);
+                    let (mut client, mut server) = streams(&cc, &sc);
+                    establish(&mut client, &mut server);
+                    let (stream, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    stream.io.buffer_writes = true;
+                    let expected = if zero_write {
+                        stream.io.write_limit = Some(0);
+                        io::ErrorKind::WriteZero
+                    } else {
+                        stream.io.flush_error = Some(io::ErrorKind::ConnectionReset);
+                        io::ErrorKind::ConnectionReset
+                    };
+                    let mut cx = Context::from_waker(Waker::noop());
+                    for _ in 0..2 {
+                        assert!(matches!(
+                            poll_shutdown_api(stream, &mut cx, async_shutdown),
+                            Poll::Ready(Err(error)) if error.kind() == expected
+                        ));
+                        assert!(!stream.shutdown_flushed);
+                        assert_eq!(stream.io.shutdown_calls, 0);
+                        assert!(stream.conn.wants_write() || !stream.io.buffered.is_empty());
+                        assert_terminal_handshake(stream);
+                    }
+                    // Retrying the shutdown may drain retained records, but
+                    // must never reopen application writes or channel binding.
+                    stream.io.write_limit = Some(3);
+                    stream.io.flush_error = None;
+                    assert!(matches!(
+                        poll_shutdown_api(stream, &mut cx, async_shutdown),
+                        Poll::Ready(Ok(()))
+                    ));
+                    assert!(stream.shutdown_flushed);
+                    assert_eq!(stream.io.shutdown_calls, usize::from(async_shutdown));
+                    assert_plaintext_read(peer, b"");
+                    assert_terminal_handshake(stream);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tls_flush_does_not_report_success_with_unsent_application_records() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_side in [true, false] {
+            let (cc, sc) = configs(&[version], None, true);
+            let (mut client, mut server) = streams(&cc, &sc);
+            establish(&mut client, &mut server);
+            let (stream, peer) = if client_side {
+                (&mut client, &mut server)
+            } else {
+                (&mut server, &mut client)
+            };
+            let mut cx = Context::from_waker(Waker::noop());
+            let message = b"accepted but not yet flushed";
+            stream.io.block_write = true;
+            assert!(matches!(
+                Pin::new(&mut *stream).poll_write(&mut cx, message),
+                Poll::Ready(Ok(len)) if len == message.len()
+            ));
+            assert!(stream.conn.wants_write());
+            stream.io.block_write = false;
+            stream.io.write_limit = Some(0);
+            assert!(matches!(
+                Pin::new(&mut *stream).poll_flush(&mut cx),
+                Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::WriteZero
+            ));
+            assert!(stream.conn.wants_write());
+            stream.io.write_limit = Some(3);
+            stream.io.buffer_writes = true;
+            stream.io.block_flush = true;
+            assert!(Pin::new(&mut *stream).poll_flush(&mut cx).is_pending());
+            assert!(!stream.conn.wants_write());
+            assert!(!stream.io.buffered.is_empty());
+            stream.io.block_flush = false;
+            assert!(matches!(
+                Pin::new(&mut *stream).poll_flush(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+            assert!(stream.io.buffered.is_empty());
+            assert_plaintext_read(peer, message);
+            send_and_read(peer, stream);
         }
     }
 }
