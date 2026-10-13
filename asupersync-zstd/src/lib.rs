@@ -1,8 +1,9 @@
 //! Memory-safe Zstandard (RFC 8878) codec for asupersync.
 //!
 //! Work in progress, tracked by `br-asupersync-t1fblr`. The decoder is
-//! complete for frames without dictionaries. The encoder currently stores
-//! (raw and RLE blocks, [`Level::Store`]); compressing levels follow.
+//! complete for frames without dictionaries. The encoder stores
+//! ([`Level::Store`]) or compresses with a greedy hash match finder,
+//! Huffman literals and FSE-coded sequences ([`Level::Fast`]).
 //!
 //! Every decode takes [`DecodeLimits`]: a cap on total output and on the frame
 //! window. Malformed input is refused with a [`DecodeError`], never a panic,
@@ -24,6 +25,7 @@ mod frame;
 mod fse;
 mod huffman;
 mod literals;
+mod matcher;
 mod sequences;
 pub mod xxhash64;
 

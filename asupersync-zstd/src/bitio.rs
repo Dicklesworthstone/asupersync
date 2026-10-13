@@ -138,6 +138,78 @@ pub fn extract(data: &[u8], start: usize, count: usize) -> u64 {
     }
 }
 
+/// The low `count` bits set.
+const fn low_mask(count: u32) -> u64 {
+    if count >= u64::BITS {
+        u64::MAX
+    } else {
+        (1 << count) - 1
+    }
+}
+
+/// Packs bit fields from bit 0 upward, the order [`BackwardBitReader`]
+/// reads in reverse: the field written last is read first.
+#[derive(Debug, Default)]
+pub struct BitWriter {
+    out: Vec<u8>,
+    container: u64,
+    bits: u32,
+}
+
+impl BitWriter {
+    /// An empty writer.
+    pub const fn new() -> Self {
+        Self {
+            out: Vec::new(),
+            container: 0,
+            bits: 0,
+        }
+    }
+
+    /// Appends the low `count` (at most [`MAX_READ_BITS`]) bits of `value`.
+    pub fn add(&mut self, value: u64, count: u32) {
+        debug_assert!(count <= MAX_READ_BITS, "write of {count} bits");
+        debug_assert!(
+            value & !low_mask(count) == 0,
+            "{value} wider than {count} bits"
+        );
+        if count == 0 {
+            return;
+        }
+        if self.bits + count > u64::BITS {
+            self.flush_bytes();
+        }
+        self.container |= (value & low_mask(count)) << self.bits;
+        self.bits += count;
+    }
+
+    /// Moves every complete byte of the container to the output.
+    fn flush_bytes(&mut self) {
+        let whole = self.bits / 8;
+        let bytes = self.container.to_le_bytes();
+        self.out
+            .extend_from_slice(&bytes[..usize::try_from(whole).unwrap_or(0)]);
+        self.container = self.container.checked_shr(whole * 8).unwrap_or(0);
+        self.bits -= whole * 8;
+    }
+
+    /// The packed bytes, the last one zero-padded at the top.
+    pub fn into_bytes(mut self) -> Vec<u8> {
+        self.flush_bytes();
+        if self.bits > 0 {
+            self.out.push(self.container.to_le_bytes()[0]);
+        }
+        self.out
+    }
+
+    /// Adds the end mark (one set bit above the last field) and returns a
+    /// stream that [`BackwardBitReader::new`] accepts.
+    pub fn finish(mut self) -> Vec<u8> {
+        self.add(1, 1);
+        self.into_bytes()
+    }
+}
+
 /// Reads little-endian header fields front to back.
 pub struct ForwardReader<'a> {
     data: &'a [u8],
@@ -190,7 +262,7 @@ impl<'a> ForwardReader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackwardBitReader, BitError, ForwardReader, MAX_READ_BITS};
+    use super::{BackwardBitReader, BitError, BitWriter, ForwardReader, MAX_READ_BITS};
 
     fn lcg(seed: u64) -> impl FnMut() -> u64 {
         let mut state = seed;
@@ -287,6 +359,46 @@ mod tests {
         assert_eq!(reader.read_bits(8), 0b1111_1000);
         assert!(reader.overflowed());
         assert!(!reader.is_exhausted());
+    }
+
+    #[test]
+    fn writer_fields_read_back_in_reverse_order() {
+        let mut next = lcg(7);
+        for case in 0..300 {
+            let fields: Vec<(u64, u32)> = (0..=next() % 60)
+                .map(|_| {
+                    let count = u32::try_from(next() % u64::from(MAX_READ_BITS + 1)).unwrap();
+                    let value = next() & ((1_u64 << count) - 1);
+                    (value, count)
+                })
+                .collect();
+            let mut writer = BitWriter::new();
+            for &(value, count) in &fields {
+                writer.add(value, count);
+            }
+            let total: u32 = fields.iter().map(|&(_, count)| count).sum();
+            let stream = writer.finish();
+            assert_eq!(
+                stream.len(),
+                usize::try_from(total / 8 + 1).unwrap(),
+                "case {case}"
+            );
+            let mut reader = BackwardBitReader::new(&stream).unwrap();
+            for &(value, count) in fields.iter().rev() {
+                assert_eq!(reader.read_bits(count), value, "case {case}");
+            }
+            assert!(reader.is_exhausted(), "case {case}");
+        }
+    }
+
+    #[test]
+    fn writer_packs_low_bits_first() {
+        let mut writer = BitWriter::new();
+        writer.add(0b101, 3);
+        writer.add(0b1_1110, 5);
+        writer.add(0x3FF, 10);
+        assert_eq!(writer.into_bytes(), [0b1111_0101, 0xFF, 0b11]);
+        assert_eq!(BitWriter::new().finish(), [1]);
     }
 
     #[test]

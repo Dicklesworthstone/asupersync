@@ -1,11 +1,12 @@
 //! The sequences section of a compressed block and its execution,
 //! RFC 8878 §3.1.1.3.2 and §3.1.1.4-3.1.1.5.
 
-use crate::bitio::BackwardBitReader;
+use crate::bitio::{BackwardBitReader, BitWriter};
 use crate::frame::DecodeError;
 use crate::fse::{
-    DecodeTable, LITERALS_LENGTH_DEFAULT, LITERALS_LENGTH_DEFAULT_LOG, MATCH_LENGTH_DEFAULT,
-    MATCH_LENGTH_DEFAULT_LOG, OFFSET_DEFAULT, OFFSET_DEFAULT_LOG, read_table_description,
+    DecodeTable, EncodeTable, LITERALS_LENGTH_DEFAULT, LITERALS_LENGTH_DEFAULT_LOG,
+    MATCH_LENGTH_DEFAULT, MATCH_LENGTH_DEFAULT_LOG, OFFSET_DEFAULT, OFFSET_DEFAULT_LOG, normalize,
+    read_table_description, write_table_description,
 };
 
 /// The largest output one block may produce (Block_Maximum_Size).
@@ -353,4 +354,411 @@ pub fn decode_sequences(
         return Err(DecodeError::Malformed("block output exceeds 128 KiB"));
     }
     Ok(())
+}
+
+/// One sequence as the encoder writes it: `literals_length` literals, then a
+/// match of `match_length` bytes. `offset_value` is the RFC 8878 offset value
+/// (1-3 name a repeat offset, a new offset `d` is `d + 3`; see
+/// [`offset_value`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodedSequence {
+    /// Literals copied before the match.
+    pub literals_length: u32,
+    /// The offset value, at least 1.
+    pub offset_value: u32,
+    /// Bytes the match copies, at least 3.
+    pub match_length: u32,
+}
+
+/// The offset value that makes the decoder resolve `offset`, given the
+/// repeat-offset history `rep`, and the history after the sequence: the
+/// inverse of the decoder's repeat-offset rules (RFC 8878 §3.1.1.5).
+pub fn offset_value(offset: usize, literals_length: usize, rep: [usize; 3]) -> (usize, [usize; 3]) {
+    let candidates = if literals_length > 0 {
+        rep
+    } else {
+        [rep[1], rep[2], rep[0].saturating_sub(1)]
+    };
+    for (index, &candidate) in candidates.iter().enumerate() {
+        if candidate == offset && candidate > 0 {
+            let slot = index + usize::from(literals_length == 0);
+            let next = match slot {
+                0 => rep,
+                1 => [offset, rep[0], rep[2]],
+                _ => [offset, rep[0], rep[1]],
+            };
+            return (index + 1, next);
+        }
+    }
+    (offset + 3, [offset, rep[0], rep[1]])
+}
+
+/// Writes `value` minus the baseline of `code` in the code's extra bits.
+fn add_extra_bits(writer: &mut BitWriter, codes: &[(u32, u8)], code: u8, value: u32) -> Option<()> {
+    let &(baseline, bits) = codes.get(usize::from(code))?;
+    writer.add(u64::from(value.checked_sub(baseline)?), u32::from(bits));
+    Some(())
+}
+
+/// The code whose baseline is the largest one not above `value`.
+fn code_for(codes: &[(u32, u8)], value: u32) -> u8 {
+    let index = codes
+        .partition_point(|&(baseline, _)| baseline <= value)
+        .saturating_sub(1);
+    u8::try_from(index).unwrap_or(u8::MAX)
+}
+
+/// The coding limits of one symbol type.
+struct SymbolKind {
+    alphabet: usize,
+    max_log: u8,
+    predefined: &'static [i16],
+    predefined_log: u8,
+}
+
+const LITERALS_LENGTH_KIND: SymbolKind = SymbolKind {
+    alphabet: LITERALS_LENGTH_CODES.len(),
+    max_log: 9,
+    predefined: &LITERALS_LENGTH_DEFAULT,
+    predefined_log: LITERALS_LENGTH_DEFAULT_LOG,
+};
+
+const OFFSET_KIND: SymbolKind = SymbolKind {
+    // Offset codes 0..=MAX_OFFSET_CODE.
+    alphabet: 32,
+    max_log: 8,
+    predefined: &OFFSET_DEFAULT,
+    predefined_log: OFFSET_DEFAULT_LOG,
+};
+
+const MATCH_LENGTH_KIND: SymbolKind = SymbolKind {
+    alphabet: MATCH_LENGTH_CODES.len(),
+    max_log: 9,
+    predefined: &MATCH_LENGTH_DEFAULT,
+    predefined_log: MATCH_LENGTH_DEFAULT_LOG,
+};
+
+/// How one symbol type is coded in a block.
+enum SymbolTable {
+    /// RLE mode: one symbol, no state and no bits.
+    Rle,
+    /// Predefined or FSE_Compressed mode.
+    Fse(EncodeTable),
+}
+
+impl SymbolTable {
+    fn initial_state(&self, symbol: u8) -> usize {
+        match self {
+            Self::Rle => 0,
+            Self::Fse(table) => table.initial_state(symbol),
+        }
+    }
+
+    fn encode(&self, state: usize, symbol: u8, writer: &mut BitWriter) -> usize {
+        match self {
+            Self::Rle => 0,
+            Self::Fse(table) => table.encode(state, symbol, writer),
+        }
+    }
+
+    fn flush(&self, state: usize, writer: &mut BitWriter) {
+        if let Self::Fse(table) = self {
+            table.flush(state, writer);
+        }
+    }
+}
+
+/// The accuracy log for a table of `distinct` symbols coding `count` codes.
+fn pick_log(distinct: usize, count: usize, max_log: u8) -> u8 {
+    let bits = u8::try_from(count.max(1).bit_width()).unwrap_or(u8::MAX);
+    let mut log = bits.saturating_add(1).min(max_log).max(5);
+    while (1_usize << log) < distinct && log < max_log {
+        log += 1;
+    }
+    log
+}
+
+/// Chooses the compression mode for one symbol type: RLE for a single
+/// symbol, otherwise the predefined table unless a described table costs
+/// fewer bits (description included). Costs are whole bits per symbol, an
+/// integer estimate that keeps the choice deterministic. Returns the mode,
+/// the table description to write, and the table.
+fn choose_table(kind: &SymbolKind, codes: &[u8]) -> Option<(u8, Vec<u8>, SymbolTable)> {
+    let &first = codes.first()?;
+    if codes.iter().all(|&code| code == first) {
+        return Some((1, vec![first], SymbolTable::Rle));
+    }
+    let mut counts = vec![0_u32; kind.alphabet];
+    for &code in codes {
+        *counts.get_mut(usize::from(code))? += 1;
+    }
+    let present = || counts.iter().enumerate().filter(|&(_, &count)| count > 0);
+    // Bits a state of a symbol with `cells` of `1 << log` cells costs.
+    let cost = |count: u32, log: u8, cells: i16| {
+        i64::from(count) * (i64::from(log) - i64::from(cells.unsigned_abs().max(1).ilog2()))
+    };
+    let predefined_cost: Option<i64> = present()
+        .map(|(symbol, &count)| {
+            let cells = *kind.predefined.get(symbol)?;
+            (cells != 0).then(|| cost(count, kind.predefined_log, cells))
+        })
+        .sum();
+    let log = pick_log(present().count(), codes.len(), kind.max_log);
+    let norm = normalize(&counts, log)?;
+    let description = write_table_description(&norm, log);
+    let described_cost = 8 * i64::try_from(description.len()).ok()?
+        + present()
+            .map(|(symbol, &count)| cost(count, log, norm[symbol]))
+            .sum::<i64>();
+    if predefined_cost.is_some_and(|predefined| predefined <= described_cost) {
+        let table = EncodeTable::new(kind.predefined, kind.predefined_log);
+        return Some((0, Vec::new(), SymbolTable::Fse(table)));
+    }
+    Some((
+        2,
+        description,
+        SymbolTable::Fse(EncodeTable::new(&norm, log)),
+    ))
+}
+
+/// Appends the sequences section (RFC 8878 §3.1.1.3.2) for `sequences`.
+/// `None` only when a sequence is outside what the format can express.
+pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Option<()> {
+    let count = sequences.len();
+    match count {
+        0..128 => out.push(u8::try_from(count).ok()?),
+        128..0x7F00 => out.extend_from_slice(&[
+            u8::try_from((count >> 8) + 128).ok()?,
+            u8::try_from(count & 0xFF).ok()?,
+        ]),
+        _ => {
+            out.push(255);
+            out.extend_from_slice(&u16::try_from(count - 0x7F00).ok()?.to_le_bytes());
+        }
+    }
+    let Some(last) = count.checked_sub(1) else {
+        return Some(());
+    };
+    let literal_codes: Vec<u8> = sequences
+        .iter()
+        .map(|sequence| code_for(&LITERALS_LENGTH_CODES, sequence.literals_length))
+        .collect();
+    let match_codes: Vec<u8> = sequences
+        .iter()
+        .map(|sequence| code_for(&MATCH_LENGTH_CODES, sequence.match_length))
+        .collect();
+    let offset_codes = sequences
+        .iter()
+        .map(|sequence| u8::try_from(sequence.offset_value.checked_ilog2()?).ok())
+        .collect::<Option<Vec<u8>>>()?;
+    let (literal_mode, literal_description, literal_table) =
+        choose_table(&LITERALS_LENGTH_KIND, &literal_codes)?;
+    let (offset_mode, offset_description, offset_table) =
+        choose_table(&OFFSET_KIND, &offset_codes)?;
+    let (match_mode, match_description, match_table) =
+        choose_table(&MATCH_LENGTH_KIND, &match_codes)?;
+    out.push((literal_mode << 6) | (offset_mode << 4) | (match_mode << 2));
+    out.extend_from_slice(&literal_description);
+    out.extend_from_slice(&offset_description);
+    out.extend_from_slice(&match_description);
+
+    let mut writer = BitWriter::new();
+    // Extra bits go literals length, match length, offset: the reverse of
+    // the order the decoder reads them in.
+    let write_extras = |writer: &mut BitWriter, index: usize| -> Option<()> {
+        let sequence = sequences.get(index)?;
+        add_extra_bits(
+            writer,
+            &LITERALS_LENGTH_CODES,
+            literal_codes[index],
+            sequence.literals_length,
+        )?;
+        add_extra_bits(
+            writer,
+            &MATCH_LENGTH_CODES,
+            match_codes[index],
+            sequence.match_length,
+        )?;
+        // An offset code is its value's bit count: the extra bits are the
+        // value below its top bit.
+        let bits = offset_codes[index];
+        writer.add(
+            u64::from(sequence.offset_value - (1 << bits)),
+            u32::from(bits),
+        );
+        Some(())
+    };
+    let mut match_state = match_table.initial_state(match_codes[last]);
+    let mut offset_state = offset_table.initial_state(offset_codes[last]);
+    let mut literal_state = literal_table.initial_state(literal_codes[last]);
+    write_extras(&mut writer, last)?;
+    for index in (0..last).rev() {
+        offset_state = offset_table.encode(offset_state, offset_codes[index], &mut writer);
+        match_state = match_table.encode(match_state, match_codes[index], &mut writer);
+        literal_state = literal_table.encode(literal_state, literal_codes[index], &mut writer);
+        write_extras(&mut writer, index)?;
+    }
+    match_table.flush(match_state, &mut writer);
+    offset_table.flush(offset_state, &mut writer);
+    literal_table.flush(literal_state, &mut writer);
+    out.extend_from_slice(&writer.finish());
+    Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EncodedSequence, LITERALS_LENGTH_CODES, MATCH_LENGTH_CODES, SequenceState, code_for,
+        copy_match, decode_sequences, encode_sequences, offset_value,
+    };
+    use std::collections::BTreeSet;
+
+    fn lcg(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state >> 17
+        }
+    }
+
+    #[test]
+    fn length_codes_cover_their_ranges() {
+        for codes in [&LITERALS_LENGTH_CODES[..], &MATCH_LENGTH_CODES[..]] {
+            for (code, &(baseline, bits)) in codes.iter().enumerate() {
+                let code = u8::try_from(code).unwrap();
+                assert_eq!(code_for(codes, baseline), code);
+                assert_eq!(code_for(codes, baseline + (1 << bits) - 1), code);
+            }
+        }
+    }
+
+    /// Every offset the encoder names resolves, through the decoder's own
+    /// repeat-offset rules, to that offset with the same history afterwards.
+    #[test]
+    fn offset_values_invert_the_decoder_rules() {
+        let mut next = lcg(3);
+        let mut state = SequenceState::new().unwrap();
+        let mut rep: [usize; 3] = [1, 4, 8];
+        let mut kinds = BTreeSet::new();
+        for step in 0..20_000 {
+            let literals_length = usize::try_from(next() % 3).unwrap();
+            let offset = match next() % 6 {
+                0 => rep[0],
+                1 => rep[1],
+                2 => rep[2],
+                3 => rep[0].saturating_sub(1).max(1),
+                _ => 1 + usize::try_from(next() % 5_000).unwrap(),
+            };
+            let (value, next_rep) = offset_value(offset, literals_length, rep);
+            kinds.insert(value.min(4));
+            let resolved = state
+                .resolve_offset(
+                    u64::try_from(value).unwrap(),
+                    u64::try_from(literals_length).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(resolved, offset, "step {step}");
+            assert_eq!(state.repeat_offsets, next_rep, "step {step}");
+            rep = next_rep;
+        }
+        assert_eq!(
+            kinds,
+            BTreeSet::from([1, 2, 3, 4]),
+            "every offset value kind"
+        );
+    }
+
+    /// Encodes random sequences over a history, decodes them with the
+    /// decoder, and compares with executing the sequences directly.
+    fn round_trip(sequences: &[(usize, usize, usize)], seed: u64) -> u8 {
+        let mut next = lcg(seed);
+        let history: Vec<u8> = (0..70_000).map(|_| next().to_le_bytes()[0]).collect();
+        let total_literals: usize = sequences.iter().map(|&(literals, _, _)| literals).sum();
+        let literals: Vec<u8> = (0..total_literals + 9)
+            .map(|_| next().to_le_bytes()[0])
+            .collect();
+        let mut expected = history.clone();
+        let mut encoded = Vec::new();
+        let mut rep = [1, 4, 8];
+        let mut literal_pos = 0;
+        for &(literals_length, offset, match_length) in sequences {
+            expected.extend_from_slice(&literals[literal_pos..literal_pos + literals_length]);
+            literal_pos += literals_length;
+            copy_match(&mut expected, offset, match_length);
+            let (value, next_rep) = offset_value(offset, literals_length, rep);
+            rep = next_rep;
+            encoded.push(EncodedSequence {
+                literals_length: u32::try_from(literals_length).unwrap(),
+                offset_value: u32::try_from(value).unwrap(),
+                match_length: u32::try_from(match_length).unwrap(),
+            });
+        }
+        expected.extend_from_slice(&literals[literal_pos..]);
+        let mut section = Vec::new();
+        encode_sequences(&encoded, &mut section).unwrap();
+        let mut state = SequenceState::new().unwrap();
+        let mut out = history;
+        decode_sequences(
+            &section,
+            &literals,
+            &mut state,
+            &mut out,
+            0,
+            usize::MAX,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(out, expected);
+        // The modes byte follows the 1- or 2-byte sequence count.
+        section[if sequences.len() < 128 { 1 } else { 2 }]
+    }
+
+    #[test]
+    fn encoded_sequences_decode_in_every_mode() {
+        let mut next = lcg(11);
+        let mut modes = [BTreeSet::new(), BTreeSet::new(), BTreeSet::new()];
+        let mut record = |byte: u8| {
+            for (slot, shift) in modes.iter_mut().zip([6, 4, 2]) {
+                slot.insert((byte >> shift) & 3);
+            }
+        };
+        // One repeated shape: RLE for all three types (offset 1 is repeat
+        // offset 1 from the start, so every offset value is 1).
+        record(round_trip(&[(4, 1, 20); 50], 1));
+        // A few varied sequences: the predefined tables are cheapest.
+        let few: Vec<(usize, usize, usize)> =
+            (0..6).map(|i| (i + 1, 100 + 37 * i, 3 + i)).collect();
+        record(round_trip(&few, 2));
+        // Many sequences, skewed lengths and long offsets: described tables.
+        for case in 0..20_u64 {
+            let count = 50 + usize::try_from(next() % 900).unwrap();
+            let sequences: Vec<(usize, usize, usize)> = (0..count)
+                .map(|_| {
+                    let literals = usize::try_from(next() % 8).unwrap()
+                        * usize::from(next().is_multiple_of(3));
+                    let offset = 1 + usize::try_from(next() % 60_000).unwrap();
+                    let length = 3
+                        + usize::try_from(next().trailing_zeros()).unwrap()
+                        + usize::try_from(next() % 4).unwrap();
+                    (literals, offset, length)
+                })
+                .collect();
+            record(round_trip(&sequences, 100 + case));
+        }
+        for (name, seen) in ["literals length", "offset", "match length"]
+            .iter()
+            .zip(&modes)
+        {
+            assert_eq!(seen, &BTreeSet::from([0, 1, 2]), "{name} modes");
+        }
+    }
+
+    #[test]
+    fn an_empty_section_is_one_zero_byte() {
+        let mut section = Vec::new();
+        encode_sequences(&[], &mut section).unwrap();
+        assert_eq!(section, [0]);
+    }
 }
