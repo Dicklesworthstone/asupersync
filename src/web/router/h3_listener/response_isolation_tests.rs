@@ -75,6 +75,17 @@ async fn connect(
     config: NativeQuicConnectionConfig,
     ca: CertificateDer<'static>,
 ) -> (NativeQuicUdpConnection, NativeH3Session) {
+    connect_with_settings(cx, address, peer, config, ca, H3Settings::default()).await
+}
+
+async fn connect_with_settings(
+    cx: &Cx,
+    address: SocketAddr,
+    peer: u8,
+    config: NativeQuicConnectionConfig,
+    ca: CertificateDer<'static>,
+    expected: H3Settings,
+) -> (NativeQuicUdpConnection, NativeH3Session) {
     let socket = QuicUdpEndpoint::bind(
         cx,
         "127.0.0.1:0".parse().unwrap(),
@@ -110,7 +121,7 @@ async fn connect(
         owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
         let ready = events(cx, &mut session, &mut owner);
         if !ready.is_empty() {
-            assert_eq!(ready, vec![NativeH3Event::Settings(H3Settings::default())]);
+            assert_eq!(ready, vec![NativeH3Event::Settings(expected)]);
             break;
         }
     }
@@ -733,4 +744,317 @@ fn run_ingress_budget(streaming: bool) {
     });
     runtime.block_on(runtime.handle().spawn(parent));
     assert_eq!(runtime.draining_region_count(), 0);
+}
+
+mod field_section_limits {
+    use super::*;
+    use crate::http::h3_native::{H3Frame, qpack_encode_request_field_section};
+    use crate::net::quic_core::QUIC_VARINT_MAX;
+    use crate::net::quic_native::ManagedEndpointError;
+    use crate::runtime::{RootDrainOutcome, Runtime};
+    use crate::web::{AsyncCxFnHandler, NativeH3ListenerError};
+    use std::task::Poll;
+
+    const FIELD_LIMIT: u64 = 256;
+    const SERVER_RECEIVE_WINDOW: u64 = 4_096;
+
+    fn identity() -> (Arc<rustls::ServerConfig>, CertificateDer<'static>) {
+        let identities: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/atp_native_auth_identities.json"
+        )))
+        .unwrap();
+        let server = &identities["identities"]["server"];
+        let cert = certificate(server["certificate"].as_str().unwrap());
+        let ca = certificate(identities["ca"].as_str().unwrap());
+        let key = PrivateKeyDer::pem_reader_iter(&mut BufReader::new(
+            server["key"].as_str().unwrap().as_bytes(),
+        ))
+        .next()
+        .unwrap()
+        .unwrap();
+        (server_config(vec![cert], key, vec![b"h3".to_vec()]).unwrap(), ca)
+    }
+
+    fn field_head(extra: usize) -> Vec<u8> {
+        // RFC field sizes: :method=43, :scheme=44, :authority=51,
+        // :path=46, x-pad=37+35. The five fields total exactly 256 bytes,
+        // independent of how QPACK compresses their wire representation.
+        let head = H3RequestHead::new(
+            H3PseudoHeaders {
+                method: Some("POST".to_owned()),
+                scheme: Some("https".to_owned()),
+                authority: Some("localhost".to_owned()),
+                path: Some("/field-ok".to_owned()),
+                ..H3PseudoHeaders::default()
+            },
+            vec![("x-pad".to_owned(), "p".repeat(35 + extra))],
+        )
+        .unwrap();
+        let mut wire = Vec::new();
+        H3Frame::Headers(qpack_encode_request_field_section(&head).unwrap())
+            .encode(&mut wire)
+            .unwrap();
+        assert!(wire.len() > 1);
+        assert!(u64::try_from(wire.len()).unwrap() <= SERVER_RECEIVE_WINDOW);
+        wire
+    }
+
+    async fn partial_head(
+        cx: &Cx,
+        owner: &mut NativeQuicUdpConnection,
+        session: &mut NativeH3Session,
+        wire: &[u8],
+    ) -> StreamId {
+        // Use the raw allocator consistently on this client, including its
+        // later recovery request. Mixing it with send_request's allocator
+        // would itself be an invalid session composition.
+        let stream = owner.connection_mut().open_bidi_stream(cx).unwrap();
+        assert_eq!(
+            owner.connection().inner().streams().stream(stream).unwrap().send_credit.limit(),
+            WINDOW
+        );
+        owner.connection_mut()
+            .write_stream(cx, stream, Bytes::copy_from_slice(&wire[..1]), false)
+            .unwrap();
+        owner.flush(cx).await.unwrap();
+        loop {
+            let state = owner.connection().inner().streams().stream(stream).unwrap();
+            assert_eq!(state.send_offset, 1);
+            assert!(state.recv_reset.is_none() && state.final_size.is_none());
+            if state.send_credit.limit() >= SERVER_RECEIVE_WINDOW {
+                return stream;
+            }
+            owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+            assert!(events(cx, session, owner).is_empty());
+        }
+    }
+
+    async fn field_refusal(
+        cx: &Cx,
+        owner: &mut NativeQuicUdpConnection,
+        session: &mut NativeH3Session,
+        stream: StreamId,
+    ) {
+        loop {
+            let ready = events(cx, session, owner);
+            if !ready.is_empty() {
+                assert_eq!(ready, vec![NativeH3Event::StreamReset {
+                    stream_id: stream,
+                    error_code: 0x107,
+                    final_size: 0,
+                }]);
+                let state = owner.connection().inner().streams().stream(stream).unwrap();
+                assert_eq!(state.recv_reset, Some((0x107, 0)));
+                assert_eq!(state.recv_offset, 0, "no response bytes before field refusal");
+                owner.flush(cx).await.unwrap();
+                return;
+            }
+            owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn native_buffered_listener_enforces_advertised_field_limit_before_fin() {
+        run(false);
+    }
+
+    #[test]
+    fn native_streaming_listener_enforces_advertised_field_limit_before_fin() {
+        run(true);
+    }
+
+    #[test]
+    fn invalid_field_limit_is_rejected_before_runtime_or_transport_admission() {
+        let cx = Cx::for_testing();
+        let (tls, _) = identity();
+        for limit in [QUIC_VARINT_MAX + 1, u64::MAX] {
+            let config = NativeH3ListenerConfig {
+                max_request_field_section_size: Some(limit),
+                ..NativeH3ListenerConfig::default()
+            };
+            // No spawn/timer capability and invalid transport bytes: the
+            // precise configuration error must win before either is touched.
+            let result = futures_lite::future::block_on(NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                Router::new(),
+                Arc::clone(&tls),
+                Vec::new(),
+                config,
+            ));
+            assert!(matches!(result,
+                Err(NativeH3ListenerError::Endpoint(ManagedEndpointError::InvalidConfig(message)))
+                if message == "HTTP/3 request field-section limit exceeds the QUIC varint range"));
+        }
+    }
+
+    // Keep the partial-header, refusal, admission and drain witnesses in the
+    // same native journey. This is intentionally not a model of the listener.
+    #[allow(clippy::too_many_lines)]
+    fn run(streaming: bool) {
+        let reservation_bytes = if streaming { 128 } else { BODY_BYTES };
+        let runtime = crate::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+            .build()
+            .unwrap();
+        let parent: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+            let cx = Cx::current().unwrap();
+            let (tls, ca) = identity();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let forbidden = Arc::new(AtomicUsize::new(0));
+            let regions = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let handler_calls = Arc::clone(&calls);
+            let handler_regions = Arc::clone(&regions);
+            let denied_calls = Arc::clone(&forbidden);
+            let router = Router::new()
+                .route("/field-ok", post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                    let calls = Arc::clone(&handler_calls);
+                    let regions = Arc::clone(&handler_regions);
+                    async move {
+                        regions.lock().unwrap().push(request_cx.region_id());
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Response::new(StatusCode::OK, Bytes::from_static(b"field-ok"))
+                    }
+                })))
+                .route("/field-denied", post(FnHandler::new(move || {
+                    denied_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::OK, "must not dispatch")
+                })))
+                .without_default_trace();
+            let transport = NativeQuicConnectionConfig {
+                max_local_bidi: 8,
+                max_local_uni: 8,
+                recv_window: WINDOW,
+                connection_recv_limit: 4 << 20,
+                ..NativeQuicConnectionConfig::default()
+            };
+            let mut config = NativeH3ListenerConfig::default();
+            config.endpoint.max_connections = 2;
+            config.endpoint.connection_config = transport;
+            config.max_requests_per_connection = 8;
+            config.receive_window_bytes = SERVER_RECEIVE_WINDOW;
+            config.max_request_field_section_size = Some(FIELD_LIMIT);
+            config.router = config.router
+                .max_buffered_body_bytes(BODY_BYTES)
+                .max_total_buffered_body_bytes(BODY_BYTES * 4);
+            config.max_total_request_body_reservation_bytes = Some(reservation_bytes);
+            if streaming {
+                config.streaming_request_body_buffer_bytes = std::num::NonZeroUsize::new(64);
+            }
+            let listener = NativeH3Listener::bind(
+                &cx, "127.0.0.1:0".parse().unwrap(), router, tls, parameters(transport), config,
+            ).await.unwrap();
+            let address = listener.local_addr();
+            let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+            let drained = AtomicBool::new(false);
+            let serving = async {
+                let report = listener.serve_with_shutdown(&cx, async {
+                    shutdown_rx.recv(&cx).await.unwrap();
+                }).await;
+                drained.store(true, Ordering::SeqCst);
+                report
+            };
+            let clients = async {
+                let client_transport = NativeQuicConnectionConfig {
+                    recv_window: 4_096,
+                    ..transport
+                };
+                let settings = H3Settings {
+                    max_field_section_size: Some(FIELD_LIMIT),
+                    ..H3Settings::default()
+                };
+                let (mut first, mut first_h3) = connect_with_settings(
+                    &cx, address, 21, client_transport, ca.clone(), settings.clone(),
+                ).await;
+                let (mut second, mut second_h3) = connect_with_settings(
+                    &cx, address, 22, client_transport, ca, settings,
+                ).await;
+
+                let oversized = field_head(1);
+                let rejected = partial_head(&cx, &mut first, &mut first_h3, &oversized).await;
+                assert_eq!(rejected, StreamId(0));
+                // The real listener has expanded receive credit above the
+                // authenticated initial window, admitting one partial head.
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(regions.lock().unwrap().is_empty());
+                let denied = request(&cx, &mut second, &mut second_h3, "/field-denied").await;
+                assert_eq!(denied, StreamId(0));
+                expect_ingress_refusal(&cx, &mut second, &mut second_h3, denied).await;
+                assert_eq!(forbidden.load(Ordering::SeqCst), 0);
+
+                // Complete the 257-byte field section WITHOUT FIN. A size
+                // check delayed to message completion cannot satisfy this.
+                first.connection_mut().write_stream(
+                    &cx, rejected, Bytes::copy_from_slice(&oversized[1..]), false,
+                ).unwrap();
+                first.flush(&cx).await.unwrap();
+                field_refusal(&cx, &mut first, &mut first_h3, rejected).await;
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+                assert!(regions.lock().unwrap().is_empty());
+
+                // Reuse the sole shared reservation on the same connection,
+                // with a valid field section exactly at the inclusive limit.
+                let exact = field_head(0);
+                let recovered = partial_head(&cx, &mut first, &mut first_h3, &exact).await;
+                assert_eq!(recovered, StreamId(4));
+                first.connection_mut().write_stream(
+                    &cx, recovered, Bytes::copy_from_slice(&exact[1..]), true,
+                ).unwrap();
+                first.flush(&cx).await.unwrap();
+                response(&cx, &mut first, &mut first_h3, recovered, b"field-ok").await;
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                let region = regions.lock().unwrap()[0];
+                let mut closed_seen = false;
+                std::future::poll_fn(|task| {
+                    let closed = Runtime::current_handle().unwrap().diagnostics().unwrap()
+                        .explain_region_open(region).region_state.is_none();
+                    if closed && closed_seen {
+                        return Poll::Ready(());
+                    }
+                    closed_seen = closed;
+                    // Observe actual region retirement, then allow its owner
+                    // reap pass before testing another peer's admission.
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }).await;
+                let served = request(&cx, &mut second, &mut second_h3, "/field-ok").await;
+                assert_eq!(served, StreamId(4));
+                response(&cx, &mut second, &mut second_h3, served, b"field-ok").await;
+                assert_eq!(calls.load(Ordering::SeqCst), 2);
+                assert_eq!(forbidden.load(Ordering::SeqCst), 0);
+                assert_eq!(regions.lock().unwrap().len(), 2);
+                shutdown_tx.send(&cx, ()).unwrap();
+                zip(
+                    acknowledge_goaway(&cx, &mut first, &mut first_h3, 8),
+                    acknowledge_goaway(&cx, &mut second, &mut second_h3, 8),
+                ).await;
+                acknowledge_until_drained(&cx, &mut first, &mut second, &drained).await;
+            };
+            let (report, ()) = crate::time::timeout(
+                cx.now(), Duration::from_secs(20), zip(serving, clients),
+            ).await.expect("field-limit refusal and recovery must complete over native TLS/UDP");
+            let report = report.unwrap();
+            assert_eq!(report.accepted_connections, 2);
+            assert_eq!(report.failed_connections, 0);
+            assert_eq!(report.completed_requests, 2);
+            assert_eq!(report.cancelled_requests, 0);
+            // Session refusals are StreamReset events, not Router refusal
+            // events. The sole counted refusal is the competing body budget.
+            assert_eq!(report.refused_requests, 1);
+            assert_eq!(report.rejected_request_body_reservations, 1);
+            assert_eq!(report.peak_reserved_request_body_bytes, reservation_bytes);
+            assert_eq!(report.failed_request_cleanups, 0);
+            assert_eq!(report.rejected_buffered_responses, 0);
+            assert!(!report.drain_timed_out);
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        assert_eq!(runtime.draining_region_count(), 0);
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
 }
