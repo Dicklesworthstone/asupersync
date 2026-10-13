@@ -426,9 +426,10 @@ pub fn decompress_chunk(
         allow_skippable_frames: false,
         ..asupersync_zstd::DecodeLimits::new(raw_len)
     };
+    // Decoding appends to the cleared scratch buffer, so a receiver reuses
+    // one allocation for every chunk, with no zero fill and no copy.
     out.clear();
-    out.resize(raw_len, 0);
-    let written = asupersync_zstd::decode_into(payload, out, &limits)
+    let written = asupersync_zstd::decode_append(payload, out, &limits)
         .map_err(|error| ChunkCodecError::Corrupt(error.to_string()))?;
     if written != raw_len {
         return Err(ChunkCodecError::Corrupt(format!(
