@@ -560,13 +560,15 @@ pub enum MapReduceStopCause {
 /// Terminal report for one executing map-reduce operation.
 ///
 /// Every admitted child has been joined when this report is returned. Empty
-/// input produces `Ok(None)`. Equal-severity failures select the lowest input
-/// index. Independent child cancellation outcomes and caller requests during
+/// input produces `Ok(None)`. Equal-severity independent failures select the
+/// lowest input index. Independent child cancellation outcomes and caller requests during
 /// drain also participate in the `Err < Cancelled < Panicked` join. Cancellation
 /// issued by this execution solely to drain a sibling is cleanup, not another
 /// failure; `stopped_by` and `errors` retain the cause when a later, more severe
-/// cleanup outcome wins. A selected error is owned by `outcome`; the other
-/// indexed errors remain in `errors` (at most one stopped
+/// cleanup outcome wins. An application error returned under the execution's
+/// exact drain cancellation is retained in `errors`, not selected as the primary
+/// error. Panics still participate in the severity join. A selected error is
+/// owned by `outcome`; the other indexed errors remain in `errors` (at most one stopped
 /// admission window). Successful values are consumed by the reducer, never
 /// cloned into an additional results collection.
 #[derive(Debug)]
@@ -714,6 +716,7 @@ impl<T, E> Drop for ExecutingMapOwner<T, E> {
 struct ExecutingMapFailures<E> {
     stopped_by: Option<(usize, MapReduceStopCause)>,
     errors: Vec<(usize, MapReduceExecutionError<E>)>,
+    primary_error_index: Option<usize>,
     cancelled: Option<(usize, CancelReason)>,
     panicked: Option<(usize, PanicPayload)>,
 }
@@ -725,7 +728,38 @@ impl<E> ExecutingMapFailures<E> {
 
     fn error(&mut self, index: usize, error: MapReduceExecutionError<E>) {
         self.stop(index, MapReduceStopCause::Error);
+        self.primary_error_index = Some(self.primary_error_index.map_or(index, |old| old.min(index)));
         self.errors.push((index, error));
+    }
+
+    fn map_error(
+        &mut self,
+        index: usize,
+        error: E,
+        joined: &Result<(), JoinError>,
+        drain_reason: Option<&CancelReason>,
+    ) {
+        let error = MapReduceExecutionError::Map(error);
+        if matches!(joined, Err(JoinError::Cancelled(reason)) if Some(reason) == drain_reason) {
+            // A cancellable operation commonly maps its cancellation to Err
+            // (including through `?`). Keep that error for diagnostics, but
+            // the exact runtime terminal identifies it as our own cleanup.
+            // Merely having requested cancellation is not sufficient: a task
+            // that completed before the request still supplies a real error.
+            self.errors.push((index, error));
+        } else {
+            self.error(index, error);
+        }
+    }
+
+    fn take_primary_error(&mut self) -> Option<(usize, MapReduceExecutionError<E>)> {
+        let index = self.primary_error_index.take()?;
+        let position = self
+            .errors
+            .iter()
+            .position(|(candidate, _)| *candidate == index)
+            .expect("the selected independent error remains owned");
+        Some(self.errors.remove(position))
     }
 
     fn cancel(&mut self, index: usize, reason: CancelReason) {
@@ -860,6 +894,7 @@ where
     let mut failures = ExecutingMapFailures {
         stopped_by: None,
         errors: Vec::new(),
+        primary_error_index: None,
         cancelled: None,
         panicked: None,
     };
@@ -927,7 +962,7 @@ where
                     }
                 }
                 Some(Outcome::Err(error)) => {
-                    failures.error(slot.index, MapReduceExecutionError::Map(error))
+                    failures.map_error(slot.index, error, &joined, slot.drain_reason.as_ref());
                 }
                 Some(Outcome::Cancelled(reason)) => {
                     if slot.drain_reason.as_ref() != Some(&reason) {
@@ -1161,8 +1196,7 @@ where
         (Some(index), Outcome::Panicked(payload))
     } else if let Some((index, reason)) = failures.cancelled.take() {
         (Some(index), Outcome::Cancelled(reason))
-    } else if !failures.errors.is_empty() {
-        let (index, error) = failures.errors.remove(0);
+    } else if let Some((index, error)) = failures.take_primary_error() {
         (Some(index), Outcome::Err(error))
     } else {
         (None, Outcome::Ok(owner.accumulator.take()))
@@ -3296,5 +3330,119 @@ mod tests {
         assert!(dbg3.contains("Empty"));
         let dbg4 = format!("{empty2:?}");
         assert!(dbg4.contains("Empty"));
+    }
+
+    fn empty_executing_failures<E>() -> ExecutingMapFailures<E> {
+        ExecutingMapFailures {
+            stopped_by: None,
+            errors: Vec::new(),
+            primary_error_index: None,
+            cancelled: None,
+            panicked: None,
+        }
+    }
+
+    #[test]
+    fn executing_map_drain_error_is_retained_without_replacing_the_trigger() {
+        let drain = CancelReason::race_loser().with_message("map-reduce sibling drain");
+        let mut failures = empty_executing_failures();
+        failures.error(1, MapReduceExecutionError::Map("trigger"));
+        failures.map_error(
+            0,
+            "cancelled receive",
+            &Err(JoinError::Cancelled(drain.clone())),
+            Some(&drain),
+        );
+        failures.errors.sort_by_key(|(index, _)| *index);
+        assert!(matches!(
+            failures.take_primary_error(),
+            Some((1, MapReduceExecutionError::Map("trigger")))
+        ));
+        assert_eq!(failures.stopped_by, Some((1, MapReduceStopCause::Error)));
+        assert!(matches!(
+            failures.errors.as_slice(),
+            [(0, MapReduceExecutionError::Map("cancelled receive"))]
+        ));
+        assert!(failures.take_primary_error().is_none());
+    }
+
+    #[test]
+    fn executing_map_drain_error_requires_the_exact_runtime_terminal() {
+        let drain = CancelReason::race_loser().with_message("map-reduce sibling drain");
+        let other = CancelReason::race_loser().with_message("independent race");
+        for (joined, recorded) in [
+            (Ok(()), Some(drain.clone())),
+            (Err(JoinError::Cancelled(drain.clone())), None),
+            (Err(JoinError::Cancelled(other)), Some(drain.clone())),
+            (
+                Err(JoinError::Cancelled(CancelReason::timeout())),
+                Some(drain.clone()),
+            ),
+        ] {
+            let mut failures = empty_executing_failures();
+            failures.error(1, MapReduceExecutionError::Map("trigger"));
+            failures.map_error(0, "independent", &joined, recorded.as_ref());
+            assert!(matches!(
+                failures.take_primary_error(),
+                Some((0, MapReduceExecutionError::Map("independent")))
+            ));
+            assert_eq!(failures.stopped_by, Some((1, MapReduceStopCause::Error)));
+        }
+    }
+
+    #[test]
+    fn executing_map_independent_error_order_is_unchanged_by_drain_diagnostics() {
+        let drain = CancelReason::race_loser().with_message("map-reduce sibling drain");
+        for order in [[1, 2, 3], [1, 3, 2], [2, 1, 3], [2, 3, 1], [3, 1, 2], [3, 2, 1]] {
+            let mut failures = empty_executing_failures();
+            for index in order {
+                failures.error(index, MapReduceExecutionError::Map(index));
+            }
+            failures.map_error(
+                0,
+                0,
+                &Err(JoinError::Cancelled(drain.clone())),
+                Some(&drain),
+            );
+            failures.errors.sort_by_key(|(index, _)| *index);
+            assert!(matches!(
+                failures.take_primary_error(),
+                Some((1, MapReduceExecutionError::Map(1)))
+            ));
+            assert_eq!(
+                failures.errors.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+                vec![0, 2, 3]
+            );
+            assert_eq!(failures.stopped_by, Some((order[0], MapReduceStopCause::Error)));
+        }
+    }
+
+    #[test]
+    fn executing_map_drain_errors_remain_owned_without_clone_or_early_drop() {
+        struct MoveOnlyError(Arc<AtomicUsize>);
+        impl Drop for MoveOnlyError {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let drops = Arc::new(AtomicUsize::new(0));
+        let drain = CancelReason::race_loser().with_message("map-reduce sibling drain");
+        let mut failures = empty_executing_failures();
+        failures.error(1, MapReduceExecutionError::Map(MoveOnlyError(Arc::clone(&drops))));
+        failures.map_error(
+            0,
+            MoveOnlyError(Arc::clone(&drops)),
+            &Err(JoinError::Cancelled(drain.clone())),
+            Some(&drain),
+        );
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let selected = failures.take_primary_error().unwrap();
+        assert_eq!(selected.0, 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        drop(selected);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        drop(failures);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
     }
 }
