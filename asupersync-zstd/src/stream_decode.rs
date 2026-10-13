@@ -2,7 +2,7 @@
 
 use crate::huffman::HuffmanTable;
 use crate::literals::decode_literals;
-use crate::sequences::{MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
+use crate::sequences::{BlockBounds, MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
 use crate::{DecodeError, DecodeLimits, StreamProgress, StreamStatus, Xxh64};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,16 +121,22 @@ impl FrameState {
                 self.history.resize(start + size, block[0]);
             }
             2 => {
-                let used = decode_literals(block, &mut self.huffman, &mut self.literals)?;
+                let block_maximum = self.window.min(MAX_BLOCK_OUTPUT);
+                let used =
+                    decode_literals(block, block_maximum, &mut self.huffman, &mut self.literals)?;
                 let section = block.get(used..).ok_or(DecodeError::Truncated)?;
+                let bounds = BlockBounds {
+                    frame_start: 0,
+                    window: self.window,
+                    block_maximum,
+                    limit: cap,
+                };
                 decode_sequences(
                     section,
                     &self.literals,
                     &mut self.sequences,
                     &mut self.history,
-                    0,
-                    self.window,
-                    cap,
+                    bounds,
                 )?;
             }
             _ => return Err(DecodeError::Malformed("reserved block type")),

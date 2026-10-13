@@ -219,38 +219,81 @@ impl SequenceState {
     }
 }
 
-fn reserve(out: &[u8], extra: usize, max_output: usize) -> Result<(), DecodeError> {
+/// Refuses to let `out` grow past `limit` by `extra` more bytes. Only checks:
+/// capacity is the caller's (see [`reserve`]), because a streaming decoder
+/// passes a limit per block on a long-lived buffer.
+fn room(out: &[u8], extra: usize, limit: usize) -> Result<(), DecodeError> {
     match out.len().checked_add(extra) {
-        Some(total) if total <= max_output => Ok(()),
+        Some(total) if total <= limit => Ok(()),
         _ => Err(DecodeError::OutputTooLarge),
     }
 }
 
+/// Makes room for `extra` more bytes in `out`, refusing to grow it past
+/// `limit`. Capacity grows geometrically but never beyond `limit`, so a
+/// one-shot decode allocates at most its output limit.
+pub fn reserve(out: &mut Vec<u8>, extra: usize, limit: usize) -> Result<(), DecodeError> {
+    let needed = out
+        .len()
+        .checked_add(extra)
+        .filter(|&needed| needed <= limit)
+        .ok_or(DecodeError::OutputTooLarge)?;
+    if needed > out.capacity() {
+        let target = needed.max(out.capacity().saturating_mul(2)).min(limit);
+        out.try_reserve_exact(target - out.len())
+            .map_err(|_| DecodeError::OutputTooLarge)?;
+    }
+    Ok(())
+}
+
 /// Appends `length` bytes copied from `offset` bytes back, where source and
-/// destination may overlap (offset < length repeats a pattern).
+/// destination may overlap (offset < length repeats a pattern). The copied
+/// span doubles each round, so a long match with a short offset takes a
+/// logarithmic number of copies.
 fn copy_match(out: &mut Vec<u8>, offset: usize, length: usize) {
-    let mut source = out.len() - offset;
+    // `out[source..]` repeats with period `offset`, and every chunk but the
+    // last is a multiple of `offset`, so appending `out[source..]` again
+    // continues the pattern.
+    let source = out.len() - offset;
     let mut remaining = length;
     while remaining > 0 {
         let chunk = remaining.min(out.len() - source);
         out.extend_from_within(source..source + chunk);
-        source += chunk;
         remaining -= chunk;
     }
 }
 
+/// Bounds on one block's output.
+#[derive(Clone, Copy, Debug)]
+pub struct BlockBounds {
+    /// Where the frame's output starts in `out`: matches never reach before
+    /// it.
+    pub frame_start: usize,
+    /// The frame's window: the farthest a match may reach back.
+    pub window: usize,
+    /// Block_Maximum_Size, min(window, 128 KiB): the most bytes one block
+    /// may produce (RFC 8878 §3.1.1.2.4).
+    pub block_maximum: usize,
+    /// The length `out` may not pass. decode_sequences only checks it; the
+    /// caller makes the capacity.
+    pub limit: usize,
+}
+
 /// Decodes the sequences section `section` and executes it against
-/// `literals`, appending the block's output to `out`. History for matches is
-/// `out[frame_start..]`, limited to `window` bytes.
+/// `literals`, appending the block's output to `out` within `bounds`.
 pub fn decode_sequences(
     section: &[u8],
     literals: &[u8],
     state: &mut SequenceState,
     out: &mut Vec<u8>,
-    frame_start: usize,
-    window: usize,
-    max_output: usize,
+    bounds: BlockBounds,
 ) -> Result<(), DecodeError> {
+    let BlockBounds {
+        frame_start,
+        window,
+        block_maximum,
+        limit,
+    } = bounds;
     let block_start = out.len();
     let first = *section.first().ok_or(DecodeError::Truncated)?;
     let (count, mut pos) = match first {
@@ -272,7 +315,12 @@ pub fn decode_sequences(
                 "bytes after an empty sequences section",
             ));
         }
-        reserve(out, literals.len(), max_output)?;
+        if literals.len() > block_maximum {
+            return Err(DecodeError::Malformed(
+                "block output exceeds Block_Maximum_Size",
+            ));
+        }
+        room(out, literals.len(), limit)?;
         out.extend_from_slice(literals);
         return Ok(());
     }
@@ -316,7 +364,7 @@ pub fn decode_sequences(
             .checked_add(literals_length)
             .filter(|&end| end <= literals.len())
             .ok_or(DecodeError::Malformed("sequence reads past the literals"))?;
-        reserve(out, literals_length, max_output)?;
+        room(out, literals_length, limit)?;
         out.extend_from_slice(&literals[literal_pos..literal_end]);
         literal_pos = literal_end;
 
@@ -328,10 +376,12 @@ pub fn decode_sequences(
                 "offset beyond the available history",
             ));
         }
-        reserve(out, match_length, max_output)?;
-        if out.len() + match_length - block_start > MAX_BLOCK_OUTPUT {
-            return Err(DecodeError::Malformed("block output exceeds 128 KiB"));
+        if out.len() - block_start + match_length > block_maximum {
+            return Err(DecodeError::Malformed(
+                "block output exceeds Block_Maximum_Size",
+            ));
         }
+        room(out, match_length, limit)?;
         copy_match(out, offset, match_length);
 
         if index + 1 < count {
@@ -348,11 +398,13 @@ pub fn decode_sequences(
         ));
     }
     let rest = literals.get(literal_pos..).unwrap_or(&[]);
-    reserve(out, rest.len(), max_output)?;
-    out.extend_from_slice(rest);
-    if out.len() - block_start > MAX_BLOCK_OUTPUT {
-        return Err(DecodeError::Malformed("block output exceeds 128 KiB"));
+    if out.len() - block_start + rest.len() > block_maximum {
+        return Err(DecodeError::Malformed(
+            "block output exceeds Block_Maximum_Size",
+        ));
     }
+    room(out, rest.len(), limit)?;
+    out.extend_from_slice(rest);
     Ok(())
 }
 
@@ -608,10 +660,56 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        EncodedSequence, LITERALS_LENGTH_CODES, MATCH_LENGTH_CODES, SequenceState, code_for,
-        copy_match, decode_sequences, encode_sequences, offset_value,
+        BlockBounds, EncodedSequence, LITERALS_LENGTH_CODES, MATCH_LENGTH_CODES, SequenceState,
+        code_for, copy_match, decode_sequences, encode_sequences, offset_value, reserve,
     };
+    use crate::frame::DecodeError;
     use std::collections::BTreeSet;
+
+    /// The doubling copy equals the RFC's byte-at-a-time definition for
+    /// every overlap: offsets shorter than, equal to and longer than the
+    /// match, including offset 1 runs.
+    #[test]
+    fn copy_match_equals_a_bytewise_copy() {
+        let history: Vec<u8> = (0..300_u16)
+            .map(|i| u8::try_from(i * 7 % 251).unwrap())
+            .collect();
+        for offset in [1, 2, 3, 5, 8, 64, 255, 300] {
+            for length in [0, 1, 2, 3, 7, 64, 255, 256, 1000, 70_000] {
+                let mut expected = history.clone();
+                for _ in 0..length {
+                    expected.push(expected[expected.len() - offset]);
+                }
+                let mut out = history.clone();
+                copy_match(&mut out, offset, length);
+                assert!(out == expected, "offset {offset}, length {length}");
+            }
+        }
+    }
+
+    /// Room is made up to the limit and never beyond it, and growth past
+    /// the limit is refused without touching the output.
+    #[test]
+    fn reserve_never_allocates_past_the_limit() {
+        let mut out = vec![7_u8; 40_000];
+        reserve(&mut out, 30_000, 70_000).unwrap();
+        // Doubling would ask for 80 000; the limit caps it at 70 000.
+        assert!(
+            (70_000..80_000).contains(&out.capacity()),
+            "{}",
+            out.capacity()
+        );
+        out.resize(70_000, 7);
+        assert_eq!(
+            reserve(&mut out, 1, 70_000),
+            Err(DecodeError::OutputTooLarge)
+        );
+        assert_eq!(
+            reserve(&mut out, usize::MAX, usize::MAX),
+            Err(DecodeError::OutputTooLarge)
+        );
+        assert_eq!(out.len(), 70_000);
+    }
 
     fn lcg(seed: u64) -> impl FnMut() -> u64 {
         let mut state = seed;
@@ -700,16 +798,13 @@ mod tests {
         encode_sequences(&encoded, &mut section).unwrap();
         let mut state = SequenceState::new().unwrap();
         let mut out = history;
-        decode_sequences(
-            &section,
-            &literals,
-            &mut state,
-            &mut out,
-            0,
-            usize::MAX,
-            usize::MAX,
-        )
-        .unwrap();
+        let bounds = BlockBounds {
+            frame_start: 0,
+            window: usize::MAX,
+            block_maximum: usize::MAX,
+            limit: usize::MAX,
+        };
+        decode_sequences(&section, &literals, &mut state, &mut out, bounds).unwrap();
         assert_eq!(out, expected);
         // The modes byte follows the 1- or 2-byte sequence count.
         section[if sequences.len() < 128 { 1 } else { 2 }]

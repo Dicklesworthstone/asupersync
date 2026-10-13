@@ -1,10 +1,5 @@
-//! Huffman literal decoding, RFC 8878 §4.2.
-
-// The literals section decoder (br-asupersync-t1fblr.8) is the consumer.
-#![allow(
-    dead_code,
-    reason = "consumed by the zstd literals decoder, br-asupersync-t1fblr.8"
-)]
+//! Huffman literal coding, RFC 8878 §4.2: tree descriptions and streams,
+//! decoded and encoded.
 
 use crate::bitio::{BackwardBitReader, BitWriter};
 use crate::fse::{
@@ -143,6 +138,7 @@ fn fse_weights(data: &[u8]) -> Result<Vec<u8>, HuffmanError> {
 
 impl HuffmanTable {
     /// The table's code depth.
+    #[cfg(test)]
     pub const fn max_bits(&self) -> u8 {
         self.max_bits
     }
