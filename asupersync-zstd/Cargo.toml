@@ -11,6 +11,11 @@ publish = false
 
 [dependencies]
 
+# libzstd as a dev-only differential oracle (owner decision 2026-10-13,
+# br-asupersync-t1fblr.11). Never a normal dependency.
+[dev-dependencies]
+zstd = { version = "0.14", default-features = false }
+
 [lints.rust]
 unsafe_code = "forbid"
 missing_docs = "warn"
