@@ -75,6 +75,8 @@ pub struct TlsStream<IO> {
     conn: TlsConnection,
     state: TlsState,
     read_closed: bool,
+    /// Our close_notify and preceding records reached the flushed transport.
+    shutdown_flushed: bool,
     /// The error that ended reading, reported again by every later read.
     read_error: Option<(io::ErrorKind, String)>,
 }
@@ -225,6 +227,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Client(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            shutdown_flushed: false,
             read_error: None,
         }
     }
@@ -236,6 +239,7 @@ impl<IO> TlsStream<IO> {
             conn: TlsConnection::Server(conn),
             state: TlsState::Handshaking,
             read_closed: false,
+            shutdown_flushed: false,
             read_error: None,
         }
     }
@@ -309,7 +313,9 @@ impl<IO> TlsStream<IO> {
 
     fn note_read_eof(&mut self) {
         self.read_closed = true;
-        if self.state.shutdown_pending() {
+        // Peer EOF must not discard our own pending close_notify. A read can
+        // run between shutdown polls while a write or transport flush stalls.
+        if self.state.shutdown_pending() && self.shutdown_flushed {
             self.state = TlsState::Closed;
         }
     }
@@ -541,13 +547,27 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         }
     }
 
-    /// Poll for graceful TLS shutdown.
-    pub fn poll_shutdown_tls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
-        if self.state.is_terminal() {
-            return Poll::Ready(Ok(()));
+    /// Drain rustls's records and flush transports that buffer accepted writes.
+    fn poll_flush_tls(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        while self.conn.wants_write() {
+            match self.poll_write_tls(cx) {
+                Poll::Ready(Ok(0)) => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to flush pending TLS records",
+                    )));
+                }
+                Poll::Ready(Ok(_)) => {}
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
         }
 
-        // Send close_notify if not already done
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    /// Shared by both shutdown APIs so neither can skip buffered TLS bytes.
+    fn poll_flush_close_notify(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if !self.state.shutdown_pending() {
             #[cfg(feature = "tracing-integration")]
             debug!("Initiating TLS shutdown");
@@ -555,15 +575,29 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
             self.conn.send_close_notify();
         }
 
-        // Flush the close_notify
-        while self.conn.wants_write() {
-            match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(TlsError::Io(e))),
-                Poll::Pending => return Poll::Pending,
-            }
+        if !self.shutdown_flushed {
+            std::task::ready!(self.poll_flush_tls(cx))?;
+            self.shutdown_flushed = true;
         }
+        Poll::Ready(Ok(()))
+    }
+
+    /// Poll for graceful TLS write-side shutdown without shutting down the transport.
+    ///
+    /// Flushes all queued records and `close_notify`, including any transport
+    /// buffering. Reads may continue until the peer closes its write side.
+    ///
+    /// # Errors
+    ///
+    /// Transport write and flush errors are preserved as [`TlsError::Io`]. A
+    /// zero-byte write with TLS records still pending returns
+    /// [`io::ErrorKind::WriteZero`], not a successful shutdown.
+    pub fn poll_shutdown_tls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
+        if self.state.is_terminal() {
+            return Poll::Ready(Ok(()));
+        }
+
+        std::task::ready!(self.poll_flush_close_notify(cx)).map_err(TlsError::Io)?;
 
         if self.read_closed {
             self.state = TlsState::Closed;
@@ -735,18 +769,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        // Flush any pending TLS data
-        while self.conn.wants_write() {
-            match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-
-        // Flush underlying IO
-        Pin::new(&mut self.io).poll_flush(cx)
+        self.poll_flush_tls(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -754,21 +777,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             return Pin::new(&mut self.io).poll_shutdown(cx);
         }
 
-        // Send close_notify if not already done
-        if !self.state.shutdown_pending() {
-            self.state = TlsState::ShuttingDown;
-            self.conn.send_close_notify();
-        }
-
-        // Flush the close_notify
-        while self.conn.wants_write() {
-            match self.poll_write_tls(cx) {
-                Poll::Ready(Ok(0)) => break,
-                Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                Poll::Pending => return Poll::Pending,
-            }
-        }
+        // Never shut down the transport before its buffered close_notify has
+        // been flushed, even if the peer already sent its own close_notify.
+        std::task::ready!(self.poll_flush_close_notify(cx))?;
 
         // Shutdown underlying IO. Reads may continue until the peer closes.
         match Pin::new(&mut self.io).poll_shutdown(cx) {
