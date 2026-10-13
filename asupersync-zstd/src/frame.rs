@@ -1,0 +1,445 @@
+//! Zstandard frames and blocks, RFC 8878 §3.1, with explicit decode limits.
+
+use crate::huffman::HuffmanTable;
+use crate::literals::decode_literals;
+use crate::sequences::{MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
+use crate::xxhash64::Xxh64;
+
+const FRAME_MAGIC: u32 = 0xFD2F_B528;
+const SKIPPABLE_MAGIC_MASK: u32 = 0xFFFF_FFF0;
+const SKIPPABLE_MAGIC: u32 = 0x184D_2A50;
+
+/// Why a Zstandard input was refused. Every variant is a clean refusal; the
+/// decoder never panics on malformed input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecodeError {
+    /// The input ended inside a frame.
+    Truncated,
+    /// The input does not start with a Zstandard (or allowed skippable) frame.
+    BadMagic,
+    /// The frame needs a dictionary; dictionaries are not supported.
+    DictionaryUnsupported,
+    /// The frame's window exceeds [`DecodeLimits::max_window`].
+    WindowTooLarge,
+    /// Decoding would exceed [`DecodeLimits::max_output`].
+    OutputTooLarge,
+    /// [`DecodeLimits::require_content_size`] is set and the frame does not
+    /// declare its content size.
+    ContentSizeMissing,
+    /// The decoded size differs from the frame's declared content size.
+    ContentSizeMismatch,
+    /// The content checksum does not match the decoded bytes.
+    ChecksumMismatch,
+    /// The frame violates RFC 8878; the text names the rule.
+    Malformed(&'static str),
+}
+
+impl core::fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Truncated => f.write_str("zstd: input truncated"),
+            Self::BadMagic => f.write_str("zstd: not a Zstandard frame"),
+            Self::DictionaryUnsupported => f.write_str("zstd: dictionaries are not supported"),
+            Self::WindowTooLarge => f.write_str("zstd: window exceeds the decode limit"),
+            Self::OutputTooLarge => f.write_str("zstd: output exceeds the decode limit"),
+            Self::ContentSizeMissing => {
+                f.write_str("zstd: frame does not declare its content size")
+            }
+            Self::ContentSizeMismatch => f.write_str("zstd: content size mismatch"),
+            Self::ChecksumMismatch => f.write_str("zstd: content checksum mismatch"),
+            Self::Malformed(rule) => write!(f, "zstd: malformed input: {rule}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Resource limits for decoding untrusted input. There is no unbounded
+/// decode entry point.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodeLimits {
+    /// The most bytes decoding may produce in total.
+    pub max_output: usize,
+    /// The largest frame window accepted. Defaults to 8 MiB, which RFC 9659
+    /// requires HTTP `zstd` decoders to support and encoders not to exceed.
+    pub max_window: usize,
+    /// Refuse frames that do not declare their content size.
+    pub require_content_size: bool,
+    /// Skip skippable frames instead of refusing them.
+    pub allow_skippable_frames: bool,
+}
+
+impl DecodeLimits {
+    /// The default 8 MiB window limit.
+    pub const DEFAULT_MAX_WINDOW: usize = 8 << 20;
+
+    /// Limits allowing at most `max_output` bytes, with an 8 MiB window,
+    /// optional content size and skippable frames allowed.
+    pub const fn new(max_output: usize) -> Self {
+        Self {
+            max_output,
+            max_window: Self::DEFAULT_MAX_WINDOW,
+            require_content_size: false,
+            allow_skippable_frames: true,
+        }
+    }
+}
+
+fn read_le(input: &[u8], pos: usize, width: usize) -> Result<u64, DecodeError> {
+    let bytes = input.get(pos..pos + width).ok_or(DecodeError::Truncated)?;
+    let mut word = [0_u8; 8];
+    word.get_mut(..width)
+        .ok_or(DecodeError::Truncated)?
+        .copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(word))
+}
+
+/// Decodes every frame in `input` (concatenated frames are allowed) within
+/// `limits`.
+pub fn decode_all(input: &[u8], limits: &DecodeLimits) -> Result<Vec<u8>, DecodeError> {
+    let mut out = Vec::new();
+    let mut pos = 0;
+    if input.is_empty() {
+        return Err(DecodeError::Truncated);
+    }
+    while pos < input.len() {
+        pos += decode_frame(&input[pos..], limits, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Decodes every frame in `input` into `out`, which also bounds the output:
+/// `max_output` is `min(limits.max_output, out.len())`. Returns the bytes
+/// written.
+pub fn decode_into(
+    input: &[u8],
+    out: &mut [u8],
+    limits: &DecodeLimits,
+) -> Result<usize, DecodeError> {
+    let bounded = DecodeLimits {
+        max_output: limits.max_output.min(out.len()),
+        ..*limits
+    };
+    let decoded = decode_all(input, &bounded)?;
+    let target = out
+        .get_mut(..decoded.len())
+        .ok_or(DecodeError::OutputTooLarge)?;
+    target.copy_from_slice(&decoded);
+    Ok(decoded.len())
+}
+
+/// Decodes one frame (or skips one skippable frame) at the start of
+/// `input`, appending to `out`. Returns the bytes consumed.
+fn decode_frame(
+    input: &[u8],
+    limits: &DecodeLimits,
+    out: &mut Vec<u8>,
+) -> Result<usize, DecodeError> {
+    let magic = u32::try_from(read_le(input, 0, 4)?).map_err(|_| DecodeError::BadMagic)?;
+    if magic & SKIPPABLE_MAGIC_MASK == SKIPPABLE_MAGIC {
+        if !limits.allow_skippable_frames {
+            return Err(DecodeError::BadMagic);
+        }
+        let size = usize::try_from(read_le(input, 4, 4)?).map_err(|_| DecodeError::Truncated)?;
+        let end = 8_usize.checked_add(size).ok_or(DecodeError::Truncated)?;
+        if end > input.len() {
+            return Err(DecodeError::Truncated);
+        }
+        return Ok(end);
+    }
+    if magic != FRAME_MAGIC {
+        return Err(DecodeError::BadMagic);
+    }
+    let descriptor = *input.get(4).ok_or(DecodeError::Truncated)?;
+    let content_size_flag = descriptor >> 6;
+    let single_segment = descriptor & 0x20 != 0;
+    if descriptor & 0x08 != 0 {
+        return Err(DecodeError::Malformed("reserved frame header bit"));
+    }
+    let has_checksum = descriptor & 0x04 != 0;
+    let dictionary_id_size = [0, 1, 2, 4][usize::from(descriptor & 3)];
+    let mut pos = 5;
+    let descriptor_window = if single_segment {
+        None
+    } else {
+        let window_descriptor = *input.get(pos).ok_or(DecodeError::Truncated)?;
+        pos += 1;
+        let log = 10 + u32::from(window_descriptor >> 3);
+        let base = 1_u64 << log;
+        let size = base + (base / 8) * u64::from(window_descriptor & 7);
+        Some(usize::try_from(size).unwrap_or(usize::MAX))
+    };
+    if dictionary_id_size > 0 && read_le(input, pos, dictionary_id_size)? != 0 {
+        return Err(DecodeError::DictionaryUnsupported);
+    }
+    pos += dictionary_id_size;
+    let content_size_width = match content_size_flag {
+        0 => usize::from(single_segment),
+        1 => 2,
+        2 => 4,
+        _ => 8,
+    };
+    let content_size = if content_size_width == 0 {
+        None
+    } else {
+        let value = read_le(input, pos, content_size_width)?;
+        pos += content_size_width;
+        let value = if content_size_width == 2 {
+            value + 256
+        } else {
+            value
+        };
+        Some(usize::try_from(value).unwrap_or(usize::MAX))
+    };
+    let window = if single_segment {
+        content_size
+    } else {
+        descriptor_window
+    }
+    .ok_or(DecodeError::Malformed("frame without a window"))?;
+    if window > limits.max_window {
+        return Err(DecodeError::WindowTooLarge);
+    }
+    if limits.require_content_size && content_size.is_none() {
+        return Err(DecodeError::ContentSizeMissing);
+    }
+    if let Some(declared) = content_size
+        && out.len().saturating_add(declared) > limits.max_output
+    {
+        return Err(DecodeError::OutputTooLarge);
+    }
+
+    let frame_start = out.len();
+    let block_maximum = window.min(MAX_BLOCK_OUTPUT);
+    let mut huffman: Option<HuffmanTable> = None;
+    let mut sequences = SequenceState::new()?;
+    let mut literals = Vec::new();
+    loop {
+        let header = u32::try_from(read_le(input, pos, 3)?).map_err(|_| DecodeError::Truncated)?;
+        pos += 3;
+        let last = header & 1 != 0;
+        let block_type = (header >> 1) & 3;
+        let block_size = usize::try_from(header >> 3).map_err(|_| DecodeError::Truncated)?;
+        if block_size > block_maximum {
+            return Err(DecodeError::Malformed(
+                "block larger than Block_Maximum_Size",
+            ));
+        }
+        match block_type {
+            0 => {
+                let bytes = input
+                    .get(pos..pos + block_size)
+                    .ok_or(DecodeError::Truncated)?;
+                if out.len() + block_size > limits.max_output {
+                    return Err(DecodeError::OutputTooLarge);
+                }
+                out.extend_from_slice(bytes);
+                pos += block_size;
+            }
+            1 => {
+                let byte = *input.get(pos).ok_or(DecodeError::Truncated)?;
+                if out.len() + block_size > limits.max_output {
+                    return Err(DecodeError::OutputTooLarge);
+                }
+                out.resize(out.len() + block_size, byte);
+                pos += 1;
+            }
+            2 => {
+                let block = input
+                    .get(pos..pos + block_size)
+                    .ok_or(DecodeError::Truncated)?;
+                let used = decode_literals(block, &mut huffman, &mut literals)?;
+                let section = block.get(used..).ok_or(DecodeError::Truncated)?;
+                decode_sequences(
+                    section,
+                    &literals,
+                    &mut sequences,
+                    out,
+                    frame_start,
+                    window,
+                    limits.max_output,
+                )?;
+                pos += block_size;
+            }
+            _ => return Err(DecodeError::Malformed("reserved block type")),
+        }
+        if last {
+            break;
+        }
+    }
+    let produced = &out[frame_start..];
+    if let Some(declared) = content_size
+        && produced.len() != declared
+    {
+        return Err(DecodeError::ContentSizeMismatch);
+    }
+    if has_checksum {
+        let stored = read_le(input, pos, 4)?;
+        pos += 4;
+        let mut hasher = Xxh64::new(0);
+        hasher.update(produced);
+        if hasher.digest() & 0xFFFF_FFFF != stored {
+            return Err(DecodeError::ChecksumMismatch);
+        }
+    }
+    Ok(pos)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DecodeError, DecodeLimits, decode_all, decode_into};
+    use crate::xxhash64::xxh64;
+
+    const FRAMES: &str = include_str!("../tests/vectors/frames_zstd_cli.txt");
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn vectors() -> Vec<(String, usize, u64, Vec<u8>)> {
+        FRAMES
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let fields: Vec<&str> = line.split_whitespace().collect();
+                (
+                    fields[0].to_owned(),
+                    fields[1].parse().unwrap(),
+                    u64::from_str_radix(fields[2], 16).unwrap(),
+                    hex(fields[3]),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decodes_every_reference_frame() {
+        let all = vectors();
+        assert_eq!(all.len(), 264, "the golden file must keep all 264 frames");
+        for (label, length, digest, frame) in &all {
+            let out = decode_all(frame, &DecodeLimits::new(*length)).unwrap_or_else(|error| {
+                panic!("{label}: {error}");
+            });
+            assert_eq!(out.len(), *length, "{label}");
+            assert_eq!(xxh64(&out, 0), *digest, "{label}");
+            let mut exact = vec![0_u8; *length];
+            assert_eq!(
+                decode_into(frame, &mut exact, &DecodeLimits::new(usize::MAX)),
+                Ok(*length),
+                "{label}"
+            );
+            assert_eq!(exact, out, "{label}");
+        }
+    }
+
+    #[test]
+    fn output_limit_is_enforced() {
+        for (label, length, _, frame) in vectors().iter().filter(|v| v.1 > 1) {
+            assert_eq!(
+                decode_all(frame, &DecodeLimits::new(length - 1)),
+                Err(DecodeError::OutputTooLarge),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn window_limit_is_enforced() {
+        let (_, length, _, frame) = vectors()
+            .into_iter()
+            .find(|v| v.0.contains("--long=20") && v.1 > 30_000)
+            .unwrap();
+        let limits = DecodeLimits {
+            max_window: 1024,
+            ..DecodeLimits::new(length)
+        };
+        assert_eq!(
+            decode_all(&frame, &limits),
+            Err(DecodeError::WindowTooLarge)
+        );
+    }
+
+    #[test]
+    fn corrupted_frames_are_refused_without_panicking() {
+        let mut state = 0x6A09_E667_F3BC_C908_u64;
+        for (label, length, _, frame) in vectors().iter().take(120) {
+            for _ in 0..8 {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                let mut damaged = frame.clone();
+                let at = usize::try_from(state >> 33).unwrap() % damaged.len();
+                damaged[at] ^= u8::try_from((state >> 8) & 0xFF).unwrap() | 1;
+                let limits = DecodeLimits::new(length + 4096);
+                // Either a clean error or (rarely) a different valid decode;
+                // never a panic, never more than the limit.
+                if let Ok(out) = decode_all(&damaged, &limits) {
+                    assert!(out.len() <= limits.max_output, "{label}");
+                }
+            }
+            for cut in [1, frame.len() / 2, frame.len().saturating_sub(1)] {
+                if cut < frame.len() && cut > 0 {
+                    assert!(
+                        decode_all(&frame[..cut], &DecodeLimits::new(length + 1)).is_err(),
+                        "{label} cut at {cut}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn checksum_and_header_errors_are_reported() {
+        let (label, length, _, frame) = vectors()
+            .into_iter()
+            .find(|v| v.0.ends_with(":-1") && v.1 == 700)
+            .unwrap();
+        let mut bad_checksum = frame.clone();
+        let last = bad_checksum.len() - 1;
+        bad_checksum[last] ^= 0x01;
+        assert_eq!(
+            decode_all(&bad_checksum, &DecodeLimits::new(length)),
+            Err(DecodeError::ChecksumMismatch),
+            "{label}"
+        );
+        let mut bad_magic = frame.clone();
+        bad_magic[0] ^= 0x01;
+        assert_eq!(
+            decode_all(&bad_magic, &DecodeLimits::new(length)),
+            Err(DecodeError::BadMagic)
+        );
+        let mut reserved = frame;
+        reserved[4] |= 0x08;
+        assert_eq!(
+            decode_all(&reserved, &DecodeLimits::new(length)),
+            Err(DecodeError::Malformed("reserved frame header bit"))
+        );
+        assert_eq!(
+            decode_all(&[], &DecodeLimits::new(1)),
+            Err(DecodeError::Truncated)
+        );
+    }
+
+    #[test]
+    fn skippable_frames_follow_the_limits() {
+        let (_, length, _, frame) = vectors()
+            .into_iter()
+            .find(|v| v.0.ends_with(":-3") && v.1 == 700)
+            .unwrap();
+        let mut input = vec![0x5A, 0x2A, 0x4D, 0x18, 3, 0, 0, 0, 9, 9, 9];
+        input.extend_from_slice(&frame);
+        assert_eq!(
+            decode_all(&input, &DecodeLimits::new(length)).map(|out| out.len()),
+            Ok(length)
+        );
+        let strict = DecodeLimits {
+            allow_skippable_frames: false,
+            ..DecodeLimits::new(length)
+        };
+        assert_eq!(decode_all(&input, &strict), Err(DecodeError::BadMagic));
+    }
+}

@@ -1283,9 +1283,10 @@ where
             let _in_flight = InFlightRequestGuard::acquire(self.in_flight_requests.as_ref());
 
             // br-asupersync-t9yqht: enforce the allowed-hosts allow-list
-            // BEFORE the handler runs. A request whose Host header isn't
-            // on the list (or is missing entirely on HTTP/1.1) gets a
-            // 421 Misdirected Request and the connection closes — the
+            // BEFORE the handler runs. A request whose well-formed Host
+            // isn't on the list gets 421 Misdirected Request; a missing
+            // (HTTP/1.1), duplicate or unparseable Host gets 400 Bad
+            // Request (RFC 9112 §3.2). Either way the connection closes — the
             // handler never sees the request, eliminating the host-
             // injection attack surface for absolute-URL emission /
             // OAuth redirect_uri / cache-key computation.

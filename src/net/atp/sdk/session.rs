@@ -231,11 +231,11 @@ impl AtpSdk {
     }
 
     fn get_supported_features(&self) -> Vec<AtpFeature> {
+        // No ATP transport compresses yet, so `enable_compression` does not
+        // offer `AtpFeature::Compression` (owner decision 2026-10-13,
+        // br-asupersync-t1fblr.1). The in-house zstd codec will negotiate
+        // its own capability.
         let mut features = vec![AtpFeature::EncryptionPolicy, AtpFeature::ProofBundles];
-
-        if self.default_config.enable_compression {
-            features.push(AtpFeature::Compression);
-        }
 
         if self.default_config.enable_repair {
             features.push(AtpFeature::Repair);
@@ -527,6 +527,20 @@ mod tests {
                 assert_ne!(session.session.transcript_hash.0, [0u8; 32]);
                 assert_ne!(session.proof().transcript_hash, "0000000000000000");
             }
+        });
+    }
+
+    /// br-asupersync-t1fblr.1: no transport compresses, so the default
+    /// `enable_compression = true` must not make the session claim it.
+    #[test]
+    fn in_process_session_does_not_claim_unimplemented_compression() {
+        block_on(async {
+            assert!(SessionConfig::default().enable_compression);
+            let cx = Cx::for_testing();
+            let session = in_process_session(&cx, "no-compression-claim").await;
+            assert!(!session.has_feature(AtpFeature::Compression));
+            assert!(session.has_feature(AtpFeature::EncryptionPolicy));
+            assert!(session.has_feature(AtpFeature::ProofBundles));
         });
     }
 

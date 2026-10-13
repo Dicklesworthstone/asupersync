@@ -395,6 +395,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "asupersync-zstd"
+version = "0.6.0"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"

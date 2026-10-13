@@ -61,7 +61,9 @@ pub struct SessionConfig {
     /// Session timeout in milliseconds. Not applied yet: no session times
     /// out on this value.
     pub session_timeout_ms: u64,
-    /// Enable compression during transfers.
+    /// Reserved for ATP compression. No transport compresses yet, so this
+    /// currently has no effect, and sessions do not offer
+    /// [`AtpFeature::Compression`](crate::net::atp::protocol::AtpFeature::Compression).
     pub enable_compression: bool,
     /// Enable repair symbols for error correction.
     pub enable_repair: bool,
