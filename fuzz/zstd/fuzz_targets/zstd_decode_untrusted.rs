@@ -8,7 +8,9 @@
 //! - no entry point produces more than `max_output` bytes;
 //! - `decode_all`, `decode_into` (with a `max_output`-byte buffer) and
 //!   `StreamDecoder` (fed in the chosen input and output chunks) accept the same
-//!   inputs and produce the same bytes.
+//!   inputs and produce the same bytes;
+//! - whatever `decode_all` accepts, reference libzstd decodes to the same bytes.
+//!   Accepting a frame libzstd refuses is the leniency asupersync-3e2w1i was.
 
 mod stream;
 
@@ -45,6 +47,16 @@ fuzz_target!(|data: &[u8]| {
     let one_shot = decode_all(frame, &limits);
     if let Ok(bytes) = &one_shot {
         assert!(bytes.len() <= max_output, "decode_all exceeded max_output");
+        let reference = zstd::bulk::decompress(frame, bytes.len().max(1)).unwrap_or_else(|error| {
+            panic!(
+                "decode_all accepted {} bytes that libzstd refuses: {error}",
+                bytes.len()
+            )
+        });
+        assert_eq!(
+            &reference, bytes,
+            "decode_all and libzstd produced different bytes"
+        );
     }
 
     let mut buffer = vec![0_u8; max_output];

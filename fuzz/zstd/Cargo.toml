@@ -20,6 +20,9 @@ cargo-fuzz = true
 [dependencies]
 asupersync-zstd = { path = "../../asupersync-zstd" }
 libfuzzer-sys = "0.4"
+# Reference decoder (C libzstd through the `zstd` crate), the same dev-only oracle that
+# asupersync-zstd's tests use. Never a dependency of the codec itself.
+zstd = { version = "0.14", default-features = false }
 
 [workspace]
 
