@@ -719,7 +719,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         }
 
         // Write to the TLS session
-        let n = io::Write::write(&mut self.conn.writer(), buf)?;
+        let mut n = io::Write::write(&mut self.conn.writer(), buf)?;
         #[cfg(feature = "tracing-integration")]
         trace!(bytes = n, "TLS write");
 
@@ -746,7 +746,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
                 cx.waker().wake_by_ref();
                 return Poll::Pending;
             }
-            return Poll::Ready(Ok(retry));
+            // The retry created new records after the old queue drained.
+            // Give them the same write progress as a first-attempt success:
+            // returning here can strand a request when the caller next reads.
+            n = retry;
         }
 
         // Flush encrypted data to underlying IO
@@ -1446,5 +1449,154 @@ jg==\n\
         client.expect("the client handshake completes");
         assert!(!unsent);
         server.expect("the server handshake completes");
+    }
+
+    #[cfg(feature = "tls-ring")]
+    #[test]
+    fn backpressured_writes_drain_new_records_after_retry() {
+        use rustls::{ClientConfig, ServerConfig};
+        use std::task::Waker;
+
+        for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+            let config = TestConfig::new()
+                .with_seed(0xBAC0_0001)
+                .with_max_steps(20_000);
+            let mut runtime = LabRuntimeTarget::create_runtime(config);
+            LabRuntimeTarget::block_on(&mut runtime, async move {
+                let chain = CertificateChain::from_pem(TEST_CERT_PEM)
+                    .unwrap()
+                    .into_inner();
+                let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+                let mut roots = rustls::RootCertStore::empty();
+                for cert in &chain {
+                    roots.add(cert.clone()).unwrap();
+                }
+                let provider = Arc::new(rustls::crypto::ring::default_provider());
+                let client_config = ClientConfig::builder_with_provider(Arc::clone(&provider))
+                    .with_protocol_versions(&[version])
+                    .unwrap()
+                    .with_root_certificates(roots)
+                    .with_no_client_auth();
+                let server_config = ServerConfig::builder_with_provider(provider)
+                    .with_protocol_versions(&[version])
+                    .unwrap()
+                    .with_no_client_auth()
+                    .with_single_cert(chain, key.clone_inner())
+                    .unwrap();
+                let client_conn = ClientConnection::new(
+                    Arc::new(client_config),
+                    ServerName::try_from("localhost").unwrap(),
+                )
+                .unwrap();
+                let server_conn = ServerConnection::new(Arc::new(server_config)).unwrap();
+                let (client_io, server_io) = VirtualTcpStream::pair(
+                    "127.0.0.1:5240".parse().unwrap(),
+                    "127.0.0.1:5241".parse().unwrap(),
+                );
+                let mut client = TlsStream::new_client(
+                    StallsSecondWrite {
+                        inner: client_io,
+                        writes: 0,
+                    },
+                    client_conn,
+                );
+                let mut server = TlsStream::new_server(
+                    StallsSecondWrite {
+                        inner: server_io,
+                        writes: 0,
+                    },
+                    server_conn,
+                );
+                let (client_result, server_result) = zip(
+                    poll_fn(|cx| client.poll_handshake(cx)),
+                    poll_fn(|cx| server.poll_handshake(cx)),
+                )
+                .await;
+                client_result.expect("client handshake");
+                server_result.expect("server handshake");
+                assert_eq!(client.protocol_version(), Some(version.version));
+                assert_eq!(server.protocol_version(), Some(version.version));
+
+                for client_side in [true, false] {
+                    let (sender, peer) = if client_side {
+                        (&mut client, &mut server)
+                    } else {
+                        (&mut server, &mut client)
+                    };
+                    let binding = if version.version == rustls::ProtocolVersion::TLSv1_3 {
+                        Some(sender.tls_exporter_channel_binding().unwrap())
+                    } else {
+                        None
+                    };
+                    match &mut sender.conn {
+                        TlsConnection::Client(conn) => conn.set_buffer_limit(Some(64)),
+                        TlsConnection::Server(conn) => conn.set_buffer_limit(Some(64)),
+                    }
+                    let prefix = [b'a'; 64];
+                    let suffix = b"request completed after backpressure";
+                    {
+                        let mut cx = Context::from_waker(Waker::noop());
+                        // Admit the prefix, but keep its encrypted record in
+                        // rustls by stalling the next transport write.
+                        sender.io.writes = 1;
+                        assert!(matches!(
+                            Pin::new(&mut *sender).poll_write(&mut cx, &prefix),
+                            Poll::Ready(Ok(n)) if n == prefix.len()
+                        ));
+                        assert!(sender.conn.wants_write());
+                        assert_eq!(sender.io.writes, 2);
+                        // Witness the full buffer without consuming any probe
+                        // bytes. The next public write must take the retry path.
+                        assert_eq!(
+                            io::Write::write(&mut sender.conn.writer(), b"capacity probe").unwrap(),
+                            0
+                        );
+                        sender.io.writes = 1;
+                        assert!(Pin::new(&mut *sender).poll_write(&mut cx, suffix).is_pending());
+                        assert_eq!(sender.io.writes, 2);
+                        assert!(sender.conn.wants_write());
+
+                        // The transport now accepts writes. Do not issue a
+                        // flush or another write after this successful retry.
+                        assert!(matches!(
+                            Pin::new(&mut *sender).poll_write(&mut cx, suffix),
+                            Poll::Ready(Ok(n)) if n == suffix.len()
+                        ));
+                        assert!(
+                            !sender.conn.wants_write(),
+                            "retry left new encrypted records stranded on a writable transport"
+                        );
+                    }
+                    let mut received = vec![0; prefix.len() + suffix.len()];
+                    let mut offset = 0;
+                    while offset < received.len() {
+                        let n = poll_fn(|cx| {
+                            let mut buf = ReadBuf::new(&mut received[offset..]);
+                            Pin::new(&mut *peer)
+                                .poll_read(cx, &mut buf)
+                                .map(|result| result.map(|()| buf.filled().len()))
+                        })
+                        .await
+                        .expect("peer receives both accepted chunks");
+                        assert!(n > 0, "unexpected EOF before the accepted bytes arrived");
+                        offset += n;
+                    }
+                    assert_eq!(&received[..prefix.len()], &prefix);
+                    assert_eq!(&received[prefix.len()..], suffix);
+                    {
+                        let mut extra = [0; 1];
+                        let mut buf = ReadBuf::new(&mut extra);
+                        let mut cx = Context::from_waker(Waker::noop());
+                        assert!(Pin::new(&mut *peer).poll_read(&mut cx, &mut buf).is_pending());
+                        assert!(buf.filled().is_empty(), "a pending write duplicated plaintext");
+                    }
+                    if let Some(binding) = binding {
+                        assert_eq!(sender.tls_exporter_channel_binding().unwrap(), binding);
+                        assert_eq!(peer.tls_exporter_channel_binding().unwrap(), binding);
+                    }
+                }
+            });
+            assert!(runtime.is_quiescent());
+        }
     }
 }
