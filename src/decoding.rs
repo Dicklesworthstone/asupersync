@@ -535,6 +535,15 @@ pub struct DecodingPipeline {
     /// per-symbol log lines while still giving operators a visible
     /// signal that auth is off.
     verify_auth_disabled_warned: bool,
+    /// br-asupersync-w9yojl: the last rank analysis of each block, keyed on
+    /// the block's received symbol set. A rank depends only on which
+    /// equations are present, so a feedback round that saw no new symbol for
+    /// a block reuses it instead of rebuilding the block's whole constraint
+    /// system. At most one entry per block.
+    rank_cache: parking_lot::Mutex<HashMap<u8, (BlockSymbolsKey, Option<RankStatus>)>>,
+    /// Rank analyses actually run, for the rank-cache tests.
+    #[cfg(test)]
+    rank_analyses: std::sync::atomic::AtomicUsize,
 }
 
 impl DecodingPipeline {
@@ -569,6 +578,9 @@ impl DecodingPipeline {
             auth_context: None,
             skipped_verifications: 0,
             verify_auth_disabled_warned: false,
+            rank_cache: parking_lot::Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            rank_analyses: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1369,8 +1381,23 @@ impl DecodingPipeline {
 
     fn block_rank_status(&self, sbn: u8) -> Option<RankStatus> {
         let block_plan = self.block_plan(sbn)?.clone();
+        // The ATP QUIC receiver asks for every block's status on every
+        // feedback round; an unchanged block reuses its last analysis
+        // (br-asupersync-w9yojl).
+        let key = BlockSymbolsKey::of(&block_plan, self.symbols.symbols_for_block(sbn));
+        if let Some((cached_key, status)) = self.rank_cache.lock().get(&sbn) {
+            if *cached_key == key {
+                return *status;
+            }
+        }
+        #[cfg(test)]
+        self.rank_analyses
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let symbols: Vec<Symbol> = self.symbols.symbols_for_block(sbn).cloned().collect();
-        rank_status_for_block(&block_plan, &symbols, usize::from(self.config.symbol_size)).ok()
+        let status =
+            rank_status_for_block(&block_plan, &symbols, usize::from(self.config.symbol_size)).ok();
+        self.rank_cache.lock().insert(sbn, (key, status));
+        status
     }
 
     /// Returns missing systematic source symbols for incomplete blocks.
@@ -1415,6 +1442,41 @@ struct BlockPlan {
     sbn: u8,
     len: usize,
     k: usize,
+}
+
+/// What a block's rank analysis depends on: its plan and the identity and
+/// length of each received symbol (payload bytes do not change a rank). The
+/// two order-independent hash folds make a changed symbol set look different.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BlockSymbolsKey {
+    k: usize,
+    len: usize,
+    count: usize,
+    sum: u64,
+    xor: u64,
+}
+
+impl BlockSymbolsKey {
+    fn of<'a>(plan: &BlockPlan, symbols: impl Iterator<Item = &'a Symbol>) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut key = Self {
+            k: plan.k,
+            len: plan.len,
+            count: 0,
+            sum: 0,
+            xor: 0,
+        };
+        for symbol in symbols {
+            let mut hasher = std::hash::DefaultHasher::new();
+            symbol.id().hash(&mut hasher);
+            symbol.len().hash(&mut hasher);
+            let hash = hasher.finish();
+            key.count += 1;
+            key.sum = key.sum.wrapping_add(hash);
+            key.xor ^= hash.rotate_left(29).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+        key
+    }
 }
 
 fn plan_blocks(
@@ -3226,6 +3288,64 @@ mod tests {
             rank_deficit_positive
         );
         crate::test_complete!("block_status_collecting_after_partial_feed");
+    }
+
+    /// br-asupersync-w9yojl: the ATP QUIC receiver asks for every block's
+    /// status on every feedback round, and atpd's listener does not
+    /// authenticate clients. A round that saw no new symbol for a block
+    /// reuses its last rank analysis instead of rebuilding the block's
+    /// constraint system; a new symbol runs it again, with the result a fresh
+    /// analysis gives.
+    #[test]
+    fn block_status_reuses_the_rank_analysis_until_the_block_changes() {
+        fn feed(decoder: &mut DecodingPipeline, symbol: Symbol) {
+            let auth = AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            );
+            let _ = decoder.feed(auth).expect("feed");
+        }
+        fn analyses(decoder: &DecodingPipeline) -> usize {
+            decoder
+                .rank_analyses
+                .load(std::sync::atomic::Ordering::Relaxed)
+        }
+        init_test("block_status_reuses_the_rank_analysis_until_the_block_changes");
+        let config = encoding_config();
+        let mut encoder = EncodingPipeline::new(config.clone(), pool());
+        let object_id = ObjectId::new_for_test(105);
+        let data = vec![0xC3u8; 1024];
+        let mut symbols = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .map(|symbol| symbol.expect("encode").into_symbol());
+        // K = 4, so two symbols keep the block collecting (not yet decodable).
+        let mut decoder = decoder_with_params(&config, object_id, data.len(), 1.5, 1);
+        feed(&mut decoder, symbols.next().expect("first symbol"));
+
+        let first = decoder.block_status(0).expect("status");
+        for _ in 0..8 {
+            let again = decoder.block_status(0).expect("status");
+            assert_eq!(
+                (again.rank, again.rank_deficit),
+                (first.rank, first.rank_deficit)
+            );
+        }
+        assert_eq!(analyses(&decoder), 1, "an unchanged block is analyzed once");
+
+        feed(&mut decoder, symbols.next().expect("second symbol"));
+        let after = decoder.block_status(0).expect("status");
+        assert_eq!(
+            analyses(&decoder),
+            2,
+            "a new symbol runs the analysis again"
+        );
+        assert_eq!(after.symbols_received, 2);
+        let received: Vec<Symbol> = decoder.symbols.symbols_for_block(0).cloned().collect();
+        let fresh = rank_status_for_block(decoder.block_plan(0).expect("plan"), &received, 256)
+            .expect("fresh analysis");
+        assert_eq!(after.rank, Some(fresh.rank));
+        assert_eq!(after.rank_deficit, Some(fresh.deficit));
+        crate::test_complete!("block_status_reuses_the_rank_analysis_until_the_block_changes");
     }
 
     #[test]
