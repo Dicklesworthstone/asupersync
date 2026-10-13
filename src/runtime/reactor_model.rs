@@ -25,6 +25,10 @@
 //! It does not emulate descriptor identity, kernel queue ordering, or socket
 //! read/write errors. Events in one batch are coalesced and sorted by token.
 //!
+//! [`crate::lab::LabRuntime::with_reactor_model`] installs this model in a fresh
+//! lab runtime. Its driver, event queue, chaos source and virtual clock are
+//! shared; existing `LabRuntime::new` behavior is unchanged.
+//!
 //! ```
 //! # #[cfg(unix)]
 //! # fn main() -> std::io::Result<()> {
@@ -53,7 +57,10 @@ use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
+
+mod lab;
 
 /// Delivery policy for registrations without explicit trigger flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -181,6 +188,8 @@ struct ModelState {
     attempts: [u64; 5],
     injected_failures: [u64; 5],
     last_failure: Option<InjectedReactorFailure>,
+    /// At most one invisible deadline marker is queued for an attached lab.
+    clock_pump_pending: bool,
 }
 
 impl ModelState {
@@ -226,9 +235,11 @@ impl ModelState {
 /// or returns immediately when none exists. It never blocks a real thread.
 #[derive(Debug)]
 pub struct LabReactorModel {
-    events: LabReactor,
+    events: Arc<LabReactor>,
     state: Mutex<ModelState>,
     mode: ReadinessMode,
+    /// Only an attached lab needs latched readiness exposed as a deadline.
+    paired_clock: bool,
 }
 
 impl Default for LabReactorModel {
@@ -248,9 +259,10 @@ impl LabReactorModel {
     #[must_use]
     pub fn with_mode(mode: ReadinessMode) -> Self {
         Self {
-            events: LabReactor::new(),
+            events: Arc::new(LabReactor::new()),
             state: Mutex::new(ModelState::default()),
             mode,
+            paired_clock: false,
         }
     }
 
@@ -377,6 +389,7 @@ impl LabReactorModel {
         let mut state = self.state.lock();
         let registration = state.registrations.get_mut(&token).ok_or_else(not_registered)?;
         registration.set_ready(ready);
+        self.queue_clock_pump(&mut state);
         Ok(())
     }
 
@@ -459,6 +472,12 @@ impl Reactor for LabReactorModel {
     fn register(&self, source: &dyn Source, token: Token, interest: Interest) -> io::Result<()> {
         let mut state = self.state.lock();
         state.check_failure(ReactorOperation::Register, Some(token))?;
+        if self.paired_clock && token == lab::CLOCK_PUMP_TOKEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "token is reserved for the lab readiness clock pump",
+            ));
+        }
         if state.registrations.contains_key(&token) {
             return Err(io::Error::new(io::ErrorKind::AlreadyExists, "token already registered"));
         }
@@ -485,6 +504,7 @@ impl Reactor for LabReactorModel {
         registration.armed = true;
         // A native re-arm samples readiness again, even in edge-triggered mode.
         registration.edges = registration.ready;
+        self.queue_clock_pump(&mut state);
         Ok(())
     }
 
@@ -511,6 +531,10 @@ impl Reactor for LabReactorModel {
         // Reuse the caller's event buffer for the underlying queue, then replace
         // injected occurrences with one coalesced notification per ready source.
         self.events.poll(events, timeout)?;
+        // The marker is always due at the current time. A successful backend
+        // poll consumes it even if no real source is deliverable. Keep it on
+        // a scripted poll failure so the lab cannot jump past ready work.
+        state.clock_pump_pending = false;
         for event in events.iter() {
             if let Some(registration) = state.registrations.get_mut(&event.token) {
                 registration.set_ready(event.ready & READINESS);
@@ -528,6 +552,7 @@ impl Reactor for LabReactorModel {
                 registration.armed = false;
             }
         }
+        self.queue_clock_pump(&mut state);
         Ok(events.len())
     }
 
