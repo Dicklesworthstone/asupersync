@@ -30,22 +30,28 @@ where
     /// Dropping this future, even before its first poll, keeps the set's normal
     /// abort-on-drop behavior. Region close is the asynchronous drain backstop;
     /// a non-cooperative member can still delay it. No region or task is created.
+    /// Remaining members receive cancellation before destructors of already
+    /// collected values or errors run, including when such a destructor panics.
     ///
     /// The owner needs no runtime capabilities: a task's own context or a
     /// [`Cx::detached_cancel_context`] both work.
-    pub async fn join_all_cancel_on_owner<Caps>(mut self, cx: &Cx<Caps>) -> Vec<Outcome<T, E>> {
+    pub async fn join_all_cancel_on_owner<Caps>(self, cx: &Cx<Caps>) -> Vec<Outcome<T, E>> {
         let mut cancelled = pin!(cx.cancelled());
         let mut forwarded = false;
         let mut outcomes = Vec::with_capacity(self.members.len());
+        // Drop the member owner before collected user values. Function
+        // arguments drop after locals; moving the set here makes its abort
+        // loop run first on a parked future's drop or unwind.
+        let mut members = self;
         poll_fn(|task| {
-            // Remove only retired members. Keeping the rest in self preserves
+            // Remove only retired members. Keeping the rest in the set preserves
             // the set's cancellation ownership on every unwind/drop path.
             let mut consumed = 0;
             while consumed < 64 {
-                let Some((&index, _)) = self.members.first_key_value() else {
+                let Some((&index, _)) = members.members.first_key_value() else {
                     return Poll::Ready(std::mem::take(&mut outcomes));
                 };
-                let joined = self
+                let joined = members
                     .members
                     .get_mut(&index)
                     .expect("first member remains owned")
@@ -55,11 +61,11 @@ where
                     break;
                 };
                 let outcome = join_to_outcome(joined);
-                self.take_member(index, &outcome);
+                members.take_member(index, &outcome);
                 outcomes.push(outcome);
                 consumed += 1;
             }
-            if self.members.is_empty() {
+            if members.members.is_empty() {
                 return Poll::Ready(std::mem::take(&mut outcomes));
             }
             if !forwarded && cancelled.as_mut().poll(task).is_ready() {
@@ -68,7 +74,7 @@ where
                     .cancel_reason()
                     .unwrap_or_else(|| CancelReason::user("join set owner cancelled"));
                 let _ = cx.checkpoint();
-                self.cancel_unfinished_for_owner(&reason);
+                members.cancel_unfinished_for_owner(&reason);
                 task.waker().wake_by_ref();
             } else if consumed == 64 {
                 task.waker().wake_by_ref();

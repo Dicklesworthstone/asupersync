@@ -126,30 +126,36 @@ where
     ///
     /// Dropping this consuming future, including before its first poll,
     /// requests cancellation through the set's existing Drop implementation.
+    /// Remaining members receive that request before already-collected values
+    /// or errors are destroyed, including a panicking user destructor.
     /// The original regions remain the drain backstop. This does not create a
     /// region, detach tasks, forcibly preempt a non-cooperative member, or change
     /// the existing observation-only join APIs.
-    pub async fn try_join_all<Caps>(mut self, cx: &Cx<Caps>) -> Outcome<Vec<T>, E> {
+    pub async fn try_join_all<Caps>(self, cx: &Cx<Caps>) -> Outcome<Vec<T>, E> {
         let mut collected = Collected::new();
+        // Reverse local drop order puts the set's cancellation request before
+        // collected user destructors. Leaving the owner in the self argument
+        // would destroy `collected` first when the future is dropped.
+        let mut members = self;
         let mut cancelled = pin!(cx.cancelled());
         let mut owner_observed = false;
         let mut scan_from = 0;
-        let mut collector = CollectorWait::new(Arc::clone(&self.ready));
+        let mut collector = CollectorWait::new(Arc::clone(&members.ready));
         poll_fn(|task| {
-            if self.members.is_empty() {
+            if members.members.is_empty() {
                 return Poll::Ready(());
             }
             collector.refresh(task.waker());
 
             let mut from = Some(scan_from);
             for _ in 0..CANDIDATES_PER_POLL {
-                let Some(index) = from.and_then(|start| self.ready.next_candidate(start)) else {
+                let Some(index) = from.and_then(|start| members.ready.next_candidate(start)) else {
                     break;
                 };
                 from = index.checked_add(1);
-                self.ready.candidates.lock().remove(&index);
-                let ready = Arc::clone(&self.ready);
-                let Some(member) = self.members.get_mut(&index) else {
+                members.ready.candidates.lock().remove(&index);
+                let ready = Arc::clone(&members.ready);
+                let Some(member) = members.members.get_mut(&index) else {
                     // A late wake from an already-collected member is harmless.
                     continue;
                 };
@@ -160,14 +166,14 @@ where
                     member.handle.poll_join(&mut Context::from_waker(waker))
                 {
                     let outcome = join_to_outcome(joined);
-                    self.take_member(index, &outcome);
+                    members.take_member(index, &outcome);
                     if let Some(reason) = collected.record(index, outcome) {
-                        self.cancel_unfinished_for_owner(&reason);
+                        members.cancel_unfinished_for_owner(&reason);
                     }
                 }
             }
 
-            if self.members.is_empty() {
+            if members.members.is_empty() {
                 return Poll::Ready(());
             }
             let mut transition_wake = false;
@@ -176,7 +182,7 @@ where
                 && cancelled.as_mut().poll(task).is_ready()
             {
                 owner_observed = true;
-                if self
+                if members
                     .members
                     .values()
                     .any(|member| !member.handle.terminal_published())
@@ -186,11 +192,12 @@ where
                         .unwrap_or_else(|| CancelReason::user("fail-fast join owner cancelled"));
                     collected.failure = Some(Failure::Owner(reason.clone()));
                     let _ = cx.checkpoint();
-                    self.cancel_unfinished_for_owner(&reason);
+                    members.cancel_unfinished_for_owner(&reason);
                     transition_wake = true;
                 }
             }
-            let more_forward = from.is_some_and(|start| self.ready.next_candidate(start).is_some());
+            let more_forward =
+                from.is_some_and(|start| members.ready.next_candidate(start).is_some());
             scan_from = if more_forward {
                 from.expect("a forward candidate has a scan cursor")
             } else {
@@ -199,7 +206,7 @@ where
             // Backward arrivals are revisited only after the current sweep.
             // Their wakes may have happened during this poll; retain explicit
             // runnable work at the quantum boundary rather than losing it.
-            let runnable = !self.ready.candidates.lock().is_empty();
+            let runnable = !members.ready.candidates.lock().is_empty();
             if transition_wake || runnable {
                 task.waker().wake_by_ref();
             }

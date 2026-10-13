@@ -120,247 +120,6 @@ fn owner_reason(cx: &Cx) -> CancelReason {
     reason
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod drop_order_tests {
-    use super::*;
-    use crate::channel::oneshot;
-    use crate::observability::BlockReason;
-    use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, yield_now};
-    use crate::types::CancelKind;
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex, mpsc};
-    use std::time::Duration;
-
-    type Snapshot = Arc<Mutex<Option<Vec<(bool, Option<CancelReason>)>>>>;
-
-    struct DropCheck {
-        peers: Vec<Cx>,
-        observed: Snapshot,
-        panic_on_drop: bool,
-    }
-
-    struct Probe(Option<DropCheck>);
-
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            let Some(check) = self.0.take() else {
-                return;
-            };
-            let snapshot = check
-                .peers
-                .iter()
-                .map(|peer| (peer.is_cancel_requested(), peer.cancel_reason()))
-                .collect();
-            *check.observed.lock().unwrap() = Some(snapshot);
-            assert!(!check.panic_on_drop, "quorum prefix destructor");
-        }
-    }
-
-    #[derive(Clone, Copy)]
-    enum Prefix {
-        Value,
-        Error,
-        FirstOkError,
-    }
-
-    // A watchdog bounds a broken cancellation path; it is not the state
-    // witness. Members publish only after a native wait actually parks.
-    fn bounded(test: impl FnOnce() + Send + 'static) {
-        let (send, receive) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
-            let _ = send.send(catch_unwind(AssertUnwindSafe(test)));
-        });
-        let result = receive
-            .recv_timeout(Duration::from_secs(45))
-            .expect("native quorum destructor ordering exceeded watchdog");
-        thread.join().unwrap();
-        if let Err(payload) = result {
-            std::panic::resume_unwind(payload);
-        }
-    }
-
-    // Keep the native admission, drop, and delayed-cleanup witness in one
-    // sequence so the ordering under test is visible at the call site.
-    #[allow(clippy::too_many_lines)]
-    fn run_drop_order(workers: usize, prefix: Prefix, panic_on_drop: bool) {
-        let builder = if workers == 1 {
-            RuntimeBuilder::current_thread()
-        } else {
-            RuntimeBuilder::new().worker_threads(workers)
-        };
-        let runtime = builder.build().unwrap();
-        runtime.block_on(runtime.handle().spawn(async move {
-            let cx = Cx::current().expect("native parent context");
-            let mut set = JoinSet::<Probe, Probe, _>::in_cx(&cx);
-            let mut peers = Vec::new();
-            let mut cleanup_witnesses = Vec::new();
-            let mut releases = Vec::new();
-            let mut completions = Vec::new();
-            let cleaned = Arc::new(AtomicUsize::new(0));
-            for _ in 0..2 {
-                let (ready, mut started) = oneshot::channel();
-                let (cleanup_ready, cleanup_witness) = oneshot::channel();
-                let (release, mut gate) = oneshot::channel();
-                let (done, completion) = oneshot::channel();
-                let cleaned = Arc::clone(&cleaned);
-                set.spawn(&cx, move |child| async move {
-                    let mut ready = Some(ready);
-                    let mut cancellation = pin!(child.cancelled());
-                    poll_fn(|task| match cancellation.as_mut().poll(task) {
-                        Poll::Ready(()) => Poll::Ready(()),
-                        Poll::Pending => {
-                            if let Some(ready) = ready.take() {
-                                ready.send_blocking(child.clone()).unwrap();
-                            }
-                            Poll::Pending
-                        }
-                    })
-                    .await;
-                    assert!(child.checkpoint().is_err());
-                    let reason = child.cancel_reason().expect("member cancellation");
-                    let mut cleanup_ready = Some(cleanup_ready);
-                    // Acknowledged cleanup must be allowed to park again.
-                    // The caller releases this wait only AFTER dropping the
-                    // quorum and witnessing both cancellation acknowledgements.
-                    poll_fn(|task| {
-                        let result = gate.poll_recv_uninterruptible(task);
-                        if result.is_pending()
-                            && let Some(ready) = cleanup_ready.take()
-                        {
-                            ready.send_blocking(reason.clone()).unwrap();
-                        }
-                        result
-                    })
-                    .await
-                    .unwrap();
-                    cleaned.fetch_add(1, Ordering::SeqCst);
-                    done.send_blocking(()).unwrap();
-                    Ok(Probe(None))
-                })
-                .unwrap();
-                peers.push(started.recv(&cx).await.unwrap());
-                cleanup_witnesses.push(cleanup_witness);
-                releases.push(release);
-                completions.push(completion);
-            }
-
-            let observed: Snapshot = Arc::new(Mutex::new(None));
-            let probe = Probe(Some(DropCheck {
-                peers: peers.clone(),
-                observed: Arc::clone(&observed),
-                panic_on_drop,
-            }));
-            let (published, mut prefix_id) = oneshot::channel();
-            set.spawn(&cx, move |child| async move {
-                // Capture the admitted identity inside the real member, not
-                // a provisional mailbox ID or a scheduling-delay guess.
-                published.send_blocking(child.task_id()).unwrap();
-                match prefix {
-                    Prefix::Value => Ok(probe),
-                    Prefix::Error | Prefix::FirstOkError => Err(probe),
-                }
-            })
-            .unwrap();
-            let prefix_id = prefix_id.recv(&cx).await.unwrap();
-            let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
-            while !matches!(
-                diagnostics.explain_task_blocked(prefix_id).block_reason,
-                BlockReason::TaskNotFound
-            ) {
-                yield_now().await;
-            }
-            // Retirement opens the member's result barrier. The first poll
-            // MUST collect its prefix before parking on the two live members.
-            // For an error, a 2-of-3 quorum is still possible at this point.
-            let mut collecting: std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> =
-                match prefix {
-                    Prefix::FirstOkError => Box::pin(async {
-                        let _ = set.join_first_ok(&cx).await;
-                    }),
-                    Prefix::Value | Prefix::Error => Box::pin(async {
-                        let _ = set.join_quorum(&cx, 2).await;
-                    }),
-                };
-            poll_fn(|task| {
-                assert!(collecting.as_mut().poll(task).is_pending());
-                Poll::Ready(())
-            })
-            .await;
-            assert!(observed.lock().unwrap().is_none());
-            assert!(peers.iter().all(|peer| !peer.is_cancel_requested()));
-
-            let dropped = catch_unwind(AssertUnwindSafe(|| drop(collecting)));
-            for mut witness in cleanup_witnesses {
-                let reason = witness.recv(&cx).await.unwrap();
-                assert_eq!(reason.kind, CancelKind::User);
-                assert_eq!(reason.message.as_deref(), Some("abort"));
-            }
-            assert_eq!(cleaned.load(Ordering::SeqCst), 0);
-            for release in releases {
-                release.send_blocking(()).unwrap();
-            }
-            for mut completion in completions {
-                completion.recv(&cx).await.unwrap();
-            }
-            assert_eq!(cleaned.load(Ordering::SeqCst), 2);
-
-            // Assert the planted failure only after releasing cleanup, so the
-            // old-code control fails at this property rather than a watchdog.
-            let snapshot = observed.lock().unwrap().take().expect("prefix dropped once");
-            assert_eq!(snapshot.len(), 2);
-            for (requested, reason) in snapshot {
-                assert!(requested, "member was not cancelled before prefix destructor");
-                let reason = reason.expect("drop cancellation has an exact reason");
-                assert_eq!(reason.kind, CancelKind::User);
-                assert_eq!(reason.message.as_deref(), Some("abort"));
-            }
-            assert_eq!(dropped.is_err(), panic_on_drop);
-            if let Err(payload) = dropped {
-                assert_eq!(payload.downcast_ref::<&str>(), Some(&"quorum prefix destructor"));
-            }
-        }));
-        let report = runtime.shutdown_drained(Duration::from_secs(5));
-        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
-        assert_eq!(report.live_tasks, 0);
-        assert_eq!(report.pending_spawns, 0);
-        assert_eq!(report.pending_obligations, 0);
-    }
-
-    #[test]
-    fn native_quorum_drop_cancels_before_collected_value_destructors() {
-        bounded(|| {
-            for workers in [1, 2] {
-                for panic_on_drop in [false, true] {
-                    run_drop_order(workers, Prefix::Value, panic_on_drop);
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn native_quorum_drop_cancels_before_collected_error_destructors() {
-        bounded(|| {
-            for workers in [1, 2] {
-                for panic_on_drop in [false, true] {
-                    run_drop_order(workers, Prefix::Error, panic_on_drop);
-                }
-            }
-        });
-    }
-
-    #[test]
-    fn native_first_ok_drop_cancels_before_collected_error_destructors() {
-        bounded(|| {
-            for workers in [1, 2] {
-                for panic_on_drop in [false, true] {
-                    run_drop_order(workers, Prefix::FirstOkError, panic_on_drop);
-                }
-            }
-        });
-    }
-}
-
 impl<T, E, P> JoinSet<'_, T, E, P>
 where
     T: Send + 'static,
@@ -548,5 +307,293 @@ mod tests {
         assert!(selection.record(Outcome::Cancelled(CancelReason::shutdown())).is_none());
         let decision = selection.record(Outcome::Ok(6)).unwrap();
         assert_eq!(selection.finish(decision, None).unwrap(), [6]);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod drop_order_tests {
+    use super::*;
+    use crate::channel::oneshot;
+    use crate::observability::BlockReason;
+    use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder, yield_now};
+    use crate::types::CancelKind;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    type Snapshot = Arc<Mutex<Option<Vec<(bool, Option<CancelReason>)>>>>;
+
+    struct DropCheck {
+        peers: Vec<Cx>,
+        observed: Snapshot,
+        panic_on_drop: bool,
+    }
+
+    struct Probe(Option<DropCheck>);
+
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            let Some(check) = self.0.take() else {
+                return;
+            };
+            let snapshot = check
+                .peers
+                .iter()
+                .map(|peer| (peer.is_cancel_requested(), peer.cancel_reason()))
+                .collect();
+            *check.observed.lock().unwrap() = Some(snapshot);
+            assert!(!check.panic_on_drop, "quorum prefix destructor");
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Prefix {
+        Value,
+        Error,
+        FirstOkError,
+        OwnerValue,
+        OwnerError,
+        FailFastValue,
+    }
+
+    // A watchdog bounds a broken cancellation path; it is not the state
+    // witness. Members publish only after a native wait actually parks.
+    fn bounded(test: impl FnOnce() + Send + 'static) {
+        let (send, receive) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let _ = send.send(catch_unwind(AssertUnwindSafe(test)));
+        });
+        let result = receive
+            .recv_timeout(Duration::from_secs(45))
+            .expect("native collector destructor ordering exceeded watchdog");
+        thread.join().unwrap();
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
+
+    // Keep the native admission, drop, and delayed-cleanup witness in one
+    // sequence so the ordering under test is visible at the call site.
+    #[allow(clippy::too_many_lines)]
+    fn run_drop_order(workers: usize, prefix: Prefix, panic_on_drop: bool) {
+        let builder = if workers == 1 {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(workers)
+        };
+        let runtime = builder.build().unwrap();
+        runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("native parent context");
+            let mut set = JoinSet::<Probe, Probe, _>::in_cx(&cx);
+            // Spawn-order collectors need the completed result first. Supply
+            // its payload only after the later members have genuinely parked.
+            let (prefix_send, mut prefix_receive) = oneshot::channel::<Result<Probe, Probe>>();
+            let (published, mut prefix_id) = oneshot::channel();
+            set.spawn(&cx, move |child| async move {
+                let outcome = prefix_receive.recv(&child).await.unwrap();
+                // Capture the admitted identity, never a provisional mailbox ID.
+                published.send_blocking(child.task_id()).unwrap();
+                outcome
+            })
+            .unwrap();
+            let mut peers = Vec::new();
+            let mut cleanup_witnesses = Vec::new();
+            let mut releases = Vec::new();
+            let mut completions = Vec::new();
+            let cleaned = Arc::new(AtomicUsize::new(0));
+            for _ in 0..2 {
+                let (ready, mut started) = oneshot::channel();
+                let (cleanup_ready, cleanup_witness) = oneshot::channel();
+                let (release, mut gate) = oneshot::channel();
+                let (done, completion) = oneshot::channel();
+                let cleaned = Arc::clone(&cleaned);
+                set.spawn(&cx, move |child| async move {
+                    let mut ready = Some(ready);
+                    let mut cancellation = pin!(child.cancelled());
+                    poll_fn(|task| match cancellation.as_mut().poll(task) {
+                        Poll::Ready(()) => Poll::Ready(()),
+                        Poll::Pending => {
+                            if let Some(ready) = ready.take() {
+                                ready.send_blocking(child.clone()).unwrap();
+                            }
+                            Poll::Pending
+                        }
+                    })
+                    .await;
+                    assert!(child.checkpoint().is_err());
+                    let reason = child.cancel_reason().expect("member cancellation");
+                    let mut cleanup_ready = Some(cleanup_ready);
+                    // Acknowledged cleanup must be allowed to park again.
+                    // The caller releases this wait only AFTER dropping the
+                    // collector and witnessing both acknowledgements.
+                    poll_fn(|task| {
+                        let result = gate.poll_recv_uninterruptible(task);
+                        if result.is_pending()
+                            && let Some(ready) = cleanup_ready.take()
+                        {
+                            ready.send_blocking(reason.clone()).unwrap();
+                        }
+                        result
+                    })
+                    .await
+                    .unwrap();
+                    cleaned.fetch_add(1, Ordering::SeqCst);
+                    done.send_blocking(()).unwrap();
+                    Ok(Probe(None))
+                })
+                .unwrap();
+                peers.push(started.recv(&cx).await.unwrap());
+                cleanup_witnesses.push(cleanup_witness);
+                releases.push(release);
+                completions.push(completion);
+            }
+
+            let observed: Snapshot = Arc::new(Mutex::new(None));
+            let probe = Probe(Some(DropCheck {
+                peers: peers.clone(),
+                observed: Arc::clone(&observed),
+                panic_on_drop,
+            }));
+            let outcome = match prefix {
+                Prefix::Value | Prefix::OwnerValue | Prefix::FailFastValue => Ok(probe),
+                Prefix::Error | Prefix::FirstOkError | Prefix::OwnerError => Err(probe),
+            };
+            assert!(prefix_send.send_blocking(outcome).is_ok());
+            let prefix_id = prefix_id.recv(&cx).await.unwrap();
+            let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
+            while !matches!(
+                diagnostics.explain_task_blocked(prefix_id).block_reason,
+                BlockReason::TaskNotFound
+            ) {
+                yield_now().await;
+            }
+            // Retirement opens the member's result barrier. The first poll
+            // MUST collect its prefix before parking on the two live members.
+            // For an error, a 2-of-3 quorum is still possible at this point.
+            let mut collecting: std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>> =
+                match prefix {
+                    Prefix::FirstOkError => Box::pin(async {
+                        let _ = set.join_first_ok(&cx).await;
+                    }),
+                    Prefix::Value | Prefix::Error => Box::pin(async {
+                        let _ = set.join_quorum(&cx, 2).await;
+                    }),
+                    Prefix::OwnerValue | Prefix::OwnerError => Box::pin(async {
+                        let _ = set.join_all_cancel_on_owner(&cx).await;
+                    }),
+                    Prefix::FailFastValue => Box::pin(async {
+                        let _ = set.try_join_all(&cx).await;
+                    }),
+                };
+            poll_fn(|task| {
+                assert!(collecting.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            assert!(observed.lock().unwrap().is_none());
+            assert!(peers.iter().all(|peer| !peer.is_cancel_requested()));
+
+            let dropped = catch_unwind(AssertUnwindSafe(|| drop(collecting)));
+            for mut witness in cleanup_witnesses {
+                let reason = witness.recv(&cx).await.unwrap();
+                assert_eq!(reason.kind, CancelKind::User);
+                assert_eq!(reason.message.as_deref(), Some("abort"));
+            }
+            assert_eq!(cleaned.load(Ordering::SeqCst), 0);
+            for release in releases {
+                release.send_blocking(()).unwrap();
+            }
+            for mut completion in completions {
+                completion.recv(&cx).await.unwrap();
+            }
+            assert_eq!(cleaned.load(Ordering::SeqCst), 2);
+
+            // Assert the planted failure only after releasing cleanup, so the
+            // old-code control fails at this property rather than a watchdog.
+            let snapshot = observed.lock().unwrap().take().expect("prefix dropped once");
+            assert_eq!(snapshot.len(), 2);
+            for (requested, reason) in snapshot {
+                assert!(requested, "member was not cancelled before prefix destructor");
+                let reason = reason.expect("drop cancellation has an exact reason");
+                assert_eq!(reason.kind, CancelKind::User);
+                assert_eq!(reason.message.as_deref(), Some("abort"));
+            }
+            assert_eq!(dropped.is_err(), panic_on_drop);
+            if let Err(payload) = dropped {
+                assert_eq!(payload.downcast_ref::<&str>(), Some(&"quorum prefix destructor"));
+            }
+        }));
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    #[test]
+    fn native_quorum_drop_cancels_before_collected_value_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::Value, panic_on_drop);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_quorum_drop_cancels_before_collected_error_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::Error, panic_on_drop);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_first_ok_drop_cancels_before_collected_error_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::FirstOkError, panic_on_drop);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_owner_join_drop_cancels_before_collected_value_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::OwnerValue, panic_on_drop);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_owner_join_drop_cancels_before_collected_error_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::OwnerError, panic_on_drop);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_fail_fast_drop_cancels_before_collected_value_destructors() {
+        bounded(|| {
+            for workers in [1, 2] {
+                for panic_on_drop in [false, true] {
+                    run_drop_order(workers, Prefix::FailFastValue, panic_on_drop);
+                }
+            }
+        });
     }
 }
