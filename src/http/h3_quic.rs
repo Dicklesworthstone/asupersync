@@ -429,10 +429,10 @@ struct NativeH3PendingWrite {
 
 /// Incremental response writer for one established HTTP/3 request stream.
 ///
-/// The writer retains exactly one encoded H3 frame until both QUIC
-/// flow-control scopes admit its complete wire length. It also waits for the
-/// preceding STREAM frame to leave packet assembly, so a caller cannot build
-/// an unbounded transport-side queue by repeatedly polling a body producer.
+/// The writer retains exactly one encoded H3 frame, sending its remaining
+/// bytes as both QUIC flow-control scopes grant credit. It also waits for the
+/// preceding STREAM fragment to leave packet assembly, so a caller cannot
+/// build an unbounded transport-side queue by repeatedly polling a producer.
 #[derive(Debug)]
 pub(crate) struct NativeH3ResponseWriter {
     stream_id: StreamId,
@@ -528,7 +528,13 @@ impl NativeH3ResponseWriter {
         Ok(())
     }
 
-    /// Poll one retained write through exact QUIC queue and flow admission.
+    /// Poll one retained frame through QUIC queue and flow admission.
+    ///
+    /// Each poll queues at most one fragment. `Pending` can mean a prefix was
+    /// queued; the retained suffix prevents retries from repeating it. A frame
+    /// event and its phase transition occur only after the last byte is queued,
+    /// and only that final fragment can carry FIN. `Ok(None)` means no frame
+    /// was pending, never partial completion.
     pub fn poll_flush_one(
         &mut self,
         cx: &Cx,
@@ -538,28 +544,37 @@ impl NativeH3ResponseWriter {
         let Some(pending) = self.pending.as_ref() else {
             return Poll::Ready(Ok(None));
         };
-        let required = u64::try_from(pending.wire.len()).map_err(|_| {
-            NativeH3SessionError::Protocol(H3NativeError::InvalidFrame(
-                "encoded HTTP/3 frame exceeds addressable QUIC range",
-            ))
-        });
-        let required = match required {
-            Ok(required) => required,
-            Err(error) => return Poll::Ready(Err(error)),
-        };
-        match connection.poll_stream_write_ready(cx, self.stream_id, required, task_cx) {
-            Poll::Ready(Ok(_)) => {}
+        // HEADERS and trailers cannot be shortened at the HTTP/3 layer. Wait
+        // for one byte, not the entire encoded frame: a small receive window
+        // cannot grow until the peer has received and consumed a prefix.
+        // FIN-only writes need no byte credit, but still wait for queue drain.
+        let required = u64::from(!pending.wire.is_empty());
+        let capacity = match connection.poll_stream_write_ready(cx, self.stream_id, required, task_cx) {
+            Poll::Ready(Ok(capacity)) => capacity,
             Poll::Ready(Err(error)) => {
                 return Poll::Ready(Err(NativeH3SessionError::Transport(error)));
             }
             Poll::Pending => return Poll::Pending,
-        }
+        };
 
         let pending = self.pending.as_ref().expect("checked above");
-        if let Err(error) =
-            connection.write_stream(cx, self.stream_id, pending.wire.clone(), pending.fin)
-        {
+        let count = pending
+            .wire
+            .len()
+            .min(usize::try_from(capacity).unwrap_or(usize::MAX));
+        let complete = count == pending.wire.len();
+        let wire = pending.wire.slice(..count);
+        if let Err(error) = connection.write_stream(cx, self.stream_id, wire, complete && pending.fin) {
             return Poll::Ready(Err(NativeH3SessionError::Transport(error)));
+        }
+        if !complete {
+            let pending = self.pending.as_mut().expect("frame retained until complete");
+            pending.wire = pending.wire.slice(count..);
+            // Rearm after actual progress, not while flow-blocked. The next
+            // poll either advances or parks on queue/credit readiness. This
+            // also lets the enclosing listener pump the just-queued fragment.
+            task_cx.waker().wake_by_ref();
+            return Poll::Pending;
         }
         let pending = self.pending.take().expect("write retained until success");
         self.phase = pending.next_phase;
@@ -1055,9 +1070,8 @@ impl NativeH3Session {
     ///
     /// The response head is fully validated and encoded before this returns,
     /// but no QUIC state is mutated until the caller polls the writer. Setting
-    /// `end_stream` is intended for HEAD/body-forbidden responses: final
-    /// HEADERS and FIN are then committed atomically and no DATA producer is
-    /// started.
+    /// `end_stream` is intended for HEAD/body-forbidden responses: FIN is
+    /// attached to the last HEADERS fragment and no DATA producer is started.
     pub(crate) fn start_response_writer(
         &self,
         connection: &QuicConnection,
@@ -2454,5 +2468,245 @@ mod tests {
         buf.consume(5);
         assert!(buf.is_empty());
         assert_eq!((buf.start, buf.data.len()), (0, 0));
+    }
+
+    mod response_fragmentation {
+        use super::*;
+        use crate::net::atp::protocol::quic_frames::QuicFrame;
+        use crate::net::atp::protocol::varint::VarInt;
+        use crate::net::quic_native::PacketNumberSpace;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+
+        fn fixture(
+            cx: &Cx,
+            head: &H3ResponseHead,
+            end_stream: bool,
+        ) -> (QuicConnection, NativeH3ResponseWriter) {
+            let (mut session, mut connection) = server_with_request_limit(cx, 1);
+            receive_request_head(cx, &mut connection, StreamId(0), true);
+            while session.next_event(cx, &mut connection).unwrap().is_some() {}
+            let writer = session
+                .start_response_writer(&connection, StreamId(0), head, end_stream)
+                .unwrap();
+            (connection, writer)
+        }
+
+        fn drain(cx: &Cx, connection: &mut QuicConnection, wire: &mut Vec<u8>) -> usize {
+            let mut fins = 0;
+            for frame in connection
+                .inner_mut()
+                .generate_stream_frames_for(cx, PacketNumberSpace::ApplicationData, StreamId(0), 65_536)
+                .unwrap()
+            {
+                if let QuicFrame::Stream { stream_id, offset, data, fin } = frame {
+                    assert_eq!(stream_id.value(), 0);
+                    assert_eq!(offset.map_or(0, VarInt::value), wire.len() as u64);
+                    wire.extend_from_slice(&data);
+                    fins += usize::from(fin);
+                }
+            }
+            fins
+        }
+
+        fn grant(cx: &Cx, connection: &mut QuicConnection, stream_limit: u64, connection_limit: u64) {
+            for frame in [
+                QuicFrame::MaxStreamData {
+                    stream_id: VarInt::from_u64_unchecked(0),
+                    maximum_stream_data: VarInt::from_u64_unchecked(stream_limit),
+                },
+                QuicFrame::MaxData {
+                    maximum_data: VarInt::from_u64_unchecked(connection_limit),
+                },
+            ] {
+                connection
+                    .inner_mut()
+                    .process_frame(cx, &frame, PacketNumberSpace::ApplicationData)
+                    .unwrap();
+            }
+        }
+
+        fn constrain(cx: &Cx, connection: &mut QuicConnection, stream: u64, aggregate: u64) -> u64 {
+            connection.inner_mut().set_fresh_stream_send_limit(cx, StreamId(0), stream).unwrap();
+            let used = connection.inner().streams().connection_send_limit()
+                - connection.inner().streams().connection_send_remaining();
+            connection.inner_mut().constrain_connection_send_limit_for_testing(cx, used + aggregate).unwrap();
+            used
+        }
+
+        #[test]
+        fn response_headers_data_and_trailers_cross_small_credit_without_repeating_bytes() {
+            let cx = Cx::for_testing();
+            let head = H3ResponseHead::new(200, vec![("x-large".to_owned(), "h".repeat(512))]).unwrap();
+            let (mut connection, mut writer) = fixture(&cx, &head, false);
+            constrain(&cx, &mut connection, 17, 11);
+            let data = Bytes::from(vec![0xa5; 2048]);
+            let trailers = vec![("x-check".to_owned(), "t".repeat(256))];
+            let mut expected = Vec::new();
+            H3Frame::Headers(qpack_encode_response_field_section(&head).unwrap()).encode(&mut expected).unwrap();
+            H3Frame::Data(data.to_vec()).encode(&mut expected).unwrap();
+            H3Frame::Headers(qpack_encode_trailer_field_section(&trailers).unwrap()).encode(&mut expected).unwrap();
+            let mut task_cx = TaskContext::from_waker(Waker::noop());
+            let mut wire = Vec::new();
+            let mut fins = 0;
+            let mut pending_polls = 0;
+            for expected_event in [
+                NativeH3WriteEvent::Head { end_stream: false },
+                NativeH3WriteEvent::Data { payload_bytes: data.len() },
+                NativeH3WriteEvent::Trailers,
+            ] {
+                match expected_event {
+                    NativeH3WriteEvent::Data { .. } => writer.queue_data(data.clone()).unwrap(),
+                    NativeH3WriteEvent::Trailers => writer.queue_trailers(&trailers).unwrap(),
+                    _ => {}
+                }
+                if !matches!(expected_event, NativeH3WriteEvent::Head { .. }) {
+                    let next = connection.inner().streams().stream(StreamId(0)).unwrap().send_offset + 17;
+                    let aggregate = connection.inner().streams().connection_send_limit() + 17;
+                    grant(&cx, &mut connection, next, aggregate);
+                }
+                loop {
+                    let before = wire.len();
+                    let result = writer.poll_flush_one(&cx, &mut connection, &mut task_cx);
+                    assert!(connection.pending_stream_data_bytes(StreamId(0)) <= 17);
+                    if result.is_pending() {
+                        assert!(writer.has_pending_write());
+                        assert!(!writer.is_finished());
+                        assert!(writer.queue_data(Bytes::new()).is_err());
+                        let remaining = writer.pending.as_ref().unwrap().wire.len();
+                        assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+                        assert_eq!(writer.pending.as_ref().unwrap().wire.len(), remaining);
+                    }
+                    fins += drain(&cx, &mut connection, &mut wire);
+                    assert!(wire.len() > before, "nonzero credit must send a prefix, not wait for the whole frame");
+                    match result {
+                        Poll::Ready(Ok(Some(event))) => {
+                            assert_eq!(event, expected_event);
+                            break;
+                        }
+                        Poll::Pending => {
+                            pending_polls += 1;
+                            assert!(pending_polls < 512);
+                            assert_eq!(fins, 0, "FIN cannot overtake the retained suffix");
+                            let next = connection.inner().streams().stream(StreamId(0)).unwrap().send_offset + 17;
+                            let aggregate = connection.inner().streams().connection_send_limit() + 17;
+                            grant(&cx, &mut connection, next, aggregate);
+                        }
+                        other @ Poll::Ready(_) => panic!("unexpected response flush: {other:?}"),
+                    }
+                }
+            }
+            assert!(pending_polls > 100);
+            assert_eq!(wire, expected);
+            assert_eq!(fins, 1);
+            assert!(writer.is_finished());
+            assert!(!writer.has_pending_write());
+            assert_eq!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx), Poll::Ready(Ok(None)));
+        }
+
+        #[test]
+        fn head_only_response_attaches_fin_only_to_its_last_header_fragment() {
+            let cx = Cx::for_testing();
+            let head = H3ResponseHead::new(204, vec![("x-large".to_owned(), "h".repeat(128))]).unwrap();
+            let (mut connection, mut writer) = fixture(&cx, &head, true);
+            let used = constrain(&cx, &mut connection, 1, 1);
+            let expected = encode_frame(H3Frame::Headers(qpack_encode_response_field_section(&head).unwrap())).unwrap();
+            let mut wire = Vec::new();
+            let mut task_cx = TaskContext::from_waker(Waker::noop());
+            for sent in 1..=expected.len() {
+                let result = writer.poll_flush_one(&cx, &mut connection, &mut task_cx);
+                let fins = drain(&cx, &mut connection, &mut wire);
+                assert_eq!(wire.len(), sent);
+                assert_eq!(wire, expected[..sent]);
+                if sent == expected.len() {
+                    assert_eq!(result, Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: true }))));
+                    assert_eq!(fins, 1);
+                    assert!(writer.is_finished());
+                } else {
+                    assert!(result.is_pending());
+                    assert_eq!(fins, 0);
+                    assert!(!writer.is_finished());
+                    grant(&cx, &mut connection, sent as u64 + 1, used + sent as u64 + 1);
+                }
+            }
+        }
+
+        #[test]
+        fn fin_only_response_write_needs_no_byte_credit_but_waits_for_prior_queue_drain() {
+            let cx = Cx::for_testing();
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let (mut connection, mut writer) = fixture(&cx, &head, false);
+            let head_bytes = writer.pending.as_ref().unwrap().wire.len() as u64;
+            constrain(&cx, &mut connection, head_bytes, head_bytes);
+            let mut task_cx = TaskContext::from_waker(Waker::noop());
+            assert_eq!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx), Poll::Ready(Ok(Some(NativeH3WriteEvent::Head { end_stream: false }))));
+            writer.finish().unwrap();
+            assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            let mut wire = Vec::new();
+            assert_eq!(drain(&cx, &mut connection, &mut wire), 0);
+            assert_eq!(connection.inner().streams().connection_send_remaining(), 0);
+            assert_eq!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx), Poll::Ready(Ok(Some(NativeH3WriteEvent::Finished))));
+            assert_eq!(drain(&cx, &mut connection, &mut wire), 1);
+            assert_eq!(wire.len() as u64, head_bytes);
+            assert!(writer.is_finished());
+        }
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+            fn wake_by_ref(self: &Arc<Self>) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+
+        #[test]
+        fn response_fragment_waits_for_both_credit_scopes_without_self_waking() {
+            let cx = Cx::for_testing();
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let (mut connection, mut writer) = fixture(&cx, &head, false);
+            let used = constrain(&cx, &mut connection, 0, 0);
+            let counter = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&counter));
+            let mut task_cx = TaskContext::from_waker(&waker);
+            for _ in 0..3 {
+                assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            }
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+            grant(&cx, &mut connection, 1, used);
+            counter.0.store(0, Ordering::SeqCst);
+            assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+            assert_eq!(connection.pending_stream_data_bytes(StreamId(0)), 0);
+            grant(&cx, &mut connection, 1, used + 1);
+            assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            assert_eq!(connection.pending_stream_data_bytes(StreamId(0)), 1);
+            let remaining = writer.pending.as_ref().unwrap().wire.len();
+            counter.0.store(0, Ordering::SeqCst);
+            assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            assert_eq!(counter.0.load(Ordering::SeqCst), 0);
+            assert_eq!(writer.pending.as_ref().unwrap().wire.len(), remaining);
+        }
+
+        #[test]
+        fn peer_stop_after_a_response_prefix_prevents_suffix_and_fin_publication() {
+            let cx = Cx::for_testing();
+            let head = H3ResponseHead::new(200, Vec::new()).unwrap();
+            let (mut connection, mut writer) = fixture(&cx, &head, true);
+            constrain(&cx, &mut connection, 1, 1);
+            let mut task_cx = TaskContext::from_waker(Waker::noop());
+            assert!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx).is_pending());
+            let mut wire = Vec::new();
+            assert_eq!(drain(&cx, &mut connection, &mut wire), 0);
+            assert_eq!(wire.len(), 1, "cancellation must follow real prefix transmission");
+            connection.inner_mut().process_frame(&cx, &QuicFrame::StopSending {
+                stream_id: VarInt::from_u64_unchecked(0),
+                error_code: VarInt::from_u64_unchecked(H3_REQUEST_CANCELLED),
+            }, PacketNumberSpace::ApplicationData).unwrap();
+            assert!(matches!(writer.poll_flush_one(&cx, &mut connection, &mut task_cx), Poll::Ready(Err(_))));
+            assert!(!writer.is_finished());
+            assert_eq!(drain(&cx, &mut connection, &mut wire), 0);
+            assert_eq!(wire.len(), 1);
+            assert_eq!(connection.pending_stream_data_bytes(StreamId(0)), 0);
+        }
     }
 }
