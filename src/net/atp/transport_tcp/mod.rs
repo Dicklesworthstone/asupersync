@@ -5382,6 +5382,98 @@ mod tests {
         committed: Vec<u8>,
     }
 
+    /// Rewrites one data frame on its way to the receiver.
+    #[cfg(feature = "zstd")]
+    type Tamper = Box<dyn FnOnce(Frame) -> Frame + Send>;
+
+    /// Hands a receive the frames read from `stream`, with the first data
+    /// frame replaced by `tamper`'s: a sender that turns hostile once the
+    /// handshake is over.
+    #[cfg(feature = "zstd")]
+    struct TamperingStream<S> {
+        stream: S,
+        codec: AtpFrameCodec,
+        incoming: BytesMut,
+        outgoing: Vec<u8>,
+        served: usize,
+        tamper: Option<Tamper>,
+    }
+
+    #[cfg(feature = "zstd")]
+    impl<S: crate::io::AsyncRead + Unpin> crate::io::AsyncRead for TamperingStream<S> {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            loop {
+                if this.served < this.outgoing.len() {
+                    let count = buf.remaining().min(this.outgoing.len() - this.served);
+                    buf.put_slice(&this.outgoing[this.served..this.served + count]);
+                    this.served += count;
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                this.outgoing.clear();
+                this.served = 0;
+                while let Some(mut frame) = this
+                    .codec
+                    .decode(&mut this.incoming)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?
+                {
+                    if frame.frame_type() == FrameType::ObjectData
+                        && let Some(tamper) = this.tamper.take()
+                    {
+                        frame = tamper(frame);
+                    }
+                    let bytes = frame
+                        .to_wire_bytes()
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                    this.outgoing.extend_from_slice(&bytes);
+                }
+                if !this.outgoing.is_empty() {
+                    continue;
+                }
+                let mut bytes = [0_u8; 16 * 1024];
+                let mut read = crate::io::ReadBuf::new(&mut bytes);
+                match std::pin::Pin::new(&mut this.stream).poll_read(task, &mut read) {
+                    std::task::Poll::Ready(Ok(())) if read.filled().is_empty() => {
+                        return std::task::Poll::Ready(Ok(()));
+                    }
+                    std::task::Poll::Ready(Ok(())) => {
+                        this.incoming.extend_from_slice(read.filled());
+                    }
+                    other => return other,
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "zstd")]
+    impl<S: crate::io::AsyncWrite + Unpin> crate::io::AsyncWrite for TamperingStream<S> {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_write(task, buf)
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
+        }
+    }
+
     /// A real sender (`send_path_with_options`) transfers `payload` as
     /// `<root>/payload.bin` over loopback TCP to `receive_on_transport`
     /// committing into `<root>/inbox`. `receiver_decode` replaces what the
@@ -5393,6 +5485,19 @@ mod tests {
         payload: &[u8],
         options: SendOptions,
         receiver_decode: Option<DecodeCapability>,
+    ) -> OptionsTransfer {
+        transfer_through(root, payload, options, receiver_decode, None)
+    }
+
+    /// [`transfer_with_options`], with the sender's first data frame
+    /// rewritten by `tamper` on its way to the receiver.
+    #[cfg(feature = "zstd")]
+    fn transfer_through(
+        root: &Path,
+        payload: &[u8],
+        options: SendOptions,
+        receiver_decode: Option<DecodeCapability>,
+        tamper: Option<Tamper>,
     ) -> OptionsTransfer {
         const DEADLINE: Duration = Duration::from_secs(60);
         let source = root.join("payload.bin");
@@ -5437,7 +5542,27 @@ mod tests {
             let (stream, peer) = with_transport_timeout(&cx, DEADLINE, "accept", listener.accept())
                 .await
                 .expect("accept the sender");
-            let mut transport = FrameTransport::new(CountingStream { stream, read });
+            let counting = CountingStream { stream, read };
+            if let Some(tamper) = tamper {
+                let transport = FrameTransport::new(TamperingStream {
+                    stream: counting,
+                    codec: AtpFrameCodec::new(),
+                    incoming: BytesMut::new(),
+                    outgoing: Vec::new(),
+                    served: 0,
+                    tamper: Some(tamper),
+                });
+                return receive_on_transport(
+                    &cx,
+                    transport,
+                    peer,
+                    &dest_dir,
+                    TransferConfig::default(),
+                    "receiver",
+                )
+                .await;
+            }
+            let mut transport = FrameTransport::new(counting);
             if let Some(decode) = receiver_decode {
                 transport.decode = decode;
             }
@@ -5706,6 +5831,172 @@ mod tests {
             "the raw resync was a delta: {raw}"
         );
         assert!(zstd < raw / 2, "compressed delta {zstd} vs raw delta {raw}");
+    }
+
+    #[cfg(feature = "zstd")]
+    fn tamper(rewrite: impl FnOnce(Frame) -> Frame + Send + 'static) -> Tamper {
+        Box::new(rewrite)
+    }
+
+    /// `frame`, a data frame, with its chunk replaced by `chunk` and a codec
+    /// record claiming that `chunk` is zstd decoding to `raw_len` bytes.
+    #[cfg(feature = "zstd")]
+    fn claimed_chunk(frame: &Frame, raw_len: u32, chunk: &[u8]) -> Frame {
+        let (index, offset, _) = parse_data_frame(frame).expect("a data frame");
+        let mut claimed = data_frame(index, offset, chunk).expect("a data frame");
+        claimed.header.extensions.insert(
+            codec::CHUNK_CODEC_EXTENSION,
+            codec::ChunkCodec::new(codec::WireCodec::Zstd, raw_len).to_bytes(),
+        );
+        claimed
+    }
+
+    /// A zstd frame of `blocks` RLE blocks of 128 KiB: a few dozen bytes
+    /// that decode to `blocks` times 128 KiB. Its window is
+    /// `1 << window_log`; it declares `content_size` when given one.
+    #[cfg(feature = "zstd")]
+    fn rle_bomb(window_log: u8, content_size: Option<u32>, blocks: u32) -> Vec<u8> {
+        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
+        frame.push(if content_size.is_some() { 0x80 } else { 0 });
+        frame.push((window_log - 10) << 3);
+        if let Some(size) = content_size {
+            frame.extend_from_slice(&size.to_le_bytes());
+        }
+        for block in 1..=blocks {
+            let header = ((128 * 1024) << 3) | (1 << 1) | u32::from(block == blocks);
+            frame.extend_from_slice(&header.to_le_bytes()[..3]);
+            frame.push(b'a');
+        }
+        frame
+    }
+
+    /// A sender that turns hostile after the handshake. Each rewrite of its
+    /// first data frame is refused with its own typed error before anything
+    /// is committed, and the inbox is left empty: no file, no staging.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_hostile_sender_is_refused_before_anything_is_committed() {
+        // One 50 000-byte chunk, which a zstd session sends compressed.
+        let payload = compressible_payload(5, 50_000);
+        let zstd = SendOptions::new().with_compression(CompressionMode::Zstd);
+        let cases: Vec<(&str, SendOptions, Tamper, &str)> = vec![
+            (
+                "a bomb that declares its size",
+                zstd,
+                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, Some(8 << 17), 8))),
+                "output exceeds the decode limit",
+            ),
+            (
+                "a bomb that declares the claimed size",
+                zstd,
+                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, Some(50_000), 8))),
+                "content size mismatch",
+            ),
+            (
+                "a bomb that declares no size",
+                zstd,
+                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, None, 8))),
+                "does not declare its content size",
+            ),
+            (
+                "a raw length past what the entry lacks",
+                zstd,
+                tamper(|frame| {
+                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
+                    claimed_chunk(&frame, 50_001, &chunk)
+                }),
+                "chunk raw length 50001 exceeds the limit 50000",
+            ),
+            (
+                "a raw length short of the frame's content",
+                zstd,
+                tamper(|frame| {
+                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
+                    claimed_chunk(&frame, 49_999, &chunk)
+                }),
+                "output exceeds the decode limit",
+            ),
+            (
+                "a window past the negotiated one",
+                zstd,
+                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(19, Some(50_000), 1))),
+                "window exceeds the decode limit",
+            ),
+            (
+                "a truncated frame",
+                zstd,
+                tamper(|frame| {
+                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
+                    claimed_chunk(&frame, 50_000, &chunk[..chunk.len() / 2])
+                }),
+                "input truncated",
+            ),
+            (
+                "garbage",
+                zstd,
+                tamper(|frame| claimed_chunk(&frame, 50_000, b"garbage, not a zstd frame")),
+                "not a Zstandard frame",
+            ),
+            (
+                "a record naming another codec",
+                zstd,
+                tamper(|mut frame| {
+                    let record = frame
+                        .header
+                        .extensions
+                        .get_mut(&codec::CHUNK_CODEC_EXTENSION)
+                        .expect("a compressed chunk");
+                    record[1] = 9;
+                    frame
+                }),
+                "does not match the negotiated codec",
+            ),
+            (
+                "a compressed chunk on a session without a codec",
+                SendOptions::new(),
+                tamper(|frame| {
+                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
+                    let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
+                    let raw_len = u32::try_from(chunk.len()).expect("one chunk");
+                    let compressed = asupersync_zstd::encode_all(&chunk, &params);
+                    claimed_chunk(&frame, raw_len, &compressed)
+                }),
+                "compressed chunk without a negotiated codec",
+            ),
+        ];
+        let mut wrong = Vec::new();
+        for (number, (what, options, rewrite, expected)) in cases.into_iter().enumerate() {
+            let root = canonical_test_root(&format!("atp-tcp-hostile-{number}"));
+            let run = transfer_through(&root, &payload, options, None, Some(rewrite));
+            let left: Vec<_> = std::fs::read_dir(root.join("inbox"))
+                .expect("read the inbox")
+                .map(|entry| entry.expect("an inbox entry").file_name())
+                .collect();
+            let refused = matches!(
+                &run.received,
+                Err(TransportError::Frame(message)) if message.contains(expected)
+            );
+            if !refused || !left.is_empty() {
+                wrong.push(format!("{what}: {:?}, inbox {left:?}", run.received));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    /// A refused transfer leaves nothing in the way: the same transfer, sent
+    /// cleanly into the same inbox, commits.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_clean_retry_commits_after_a_refused_transfer() {
+        let payload = compressible_payload(6, 50_000);
+        let zstd = SendOptions::new().with_compression(CompressionMode::Zstd);
+        let root = canonical_test_root("atp-tcp-refused-then-clean");
+        let bomb = tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, None, 8)));
+        let refused = transfer_through(&root, &payload, zstd, None, Some(bomb));
+        assert!(refused.received.is_err(), "{:?}", refused.received);
+        assert!(refused.committed.is_empty());
+        let retry = transfer_with_options(&root, &payload, zstd, None);
+        assert_delivered(&retry, &payload, "the retry");
     }
 
     #[test]
