@@ -280,7 +280,8 @@ pub struct BlockBounds {
 }
 
 /// Decodes the sequences section `section` and executes it against
-/// `literals`, appending the block's output to `out` within `bounds`.
+/// `literals`, appending the block's output to `out` within `bounds`. The
+/// block's output never grows past `bounds.block_maximum`, not even briefly.
 pub fn decode_sequences(
     section: &[u8],
     literals: &[u8],
@@ -364,6 +365,11 @@ pub fn decode_sequences(
             .checked_add(literals_length)
             .filter(|&end| end <= literals.len())
             .ok_or(DecodeError::Malformed("sequence reads past the literals"))?;
+        if out.len() - block_start + literals_length > block_maximum {
+            return Err(DecodeError::Malformed(
+                "block output exceeds Block_Maximum_Size",
+            ));
+        }
         room(out, literals_length, limit)?;
         out.extend_from_slice(&literals[literal_pos..literal_end]);
         literal_pos = literal_end;
@@ -855,5 +861,43 @@ mod tests {
         let mut section = Vec::new();
         encode_sequences(&[], &mut section).unwrap();
         assert_eq!(section, [0]);
+    }
+
+    /// A sequence's literals are refused before they would carry the block
+    /// past Block_Maximum_Size, not after, when its match is checked.
+    #[test]
+    fn block_output_never_passes_the_block_maximum() {
+        let mut section = Vec::new();
+        encode_sequences(
+            &[
+                EncodedSequence {
+                    literals_length: 1,
+                    offset_value: 4,
+                    match_length: 1000,
+                },
+                EncodedSequence {
+                    literals_length: 100,
+                    offset_value: 1,
+                    match_length: 3,
+                },
+            ],
+            &mut section,
+        )
+        .unwrap();
+        let bounds = BlockBounds {
+            frame_start: 0,
+            window: 1024,
+            block_maximum: 1024,
+            limit: 1 << 20,
+        };
+        let mut state = SequenceState::new().unwrap();
+        let mut out = Vec::new();
+        assert_eq!(
+            decode_sequences(&section, &[b'a'; 101], &mut state, &mut out, bounds),
+            Err(DecodeError::Malformed(
+                "block output exceeds Block_Maximum_Size"
+            ))
+        );
+        assert_eq!(out, [b'a'; 1001]);
     }
 }
