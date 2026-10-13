@@ -372,8 +372,8 @@ ci-cross-platform = [
 ]
 # Enable HTTP response compression (gzip, deflate, Brotli).
 compression = ["dep:flate2", "dep:brotli"]
-# Negotiated zstd compression of ATP TCP bulk data, using the in-house,
-# forbid(unsafe_code) asupersync-zstd codec (br-asupersync-t1fblr).
+# Zstandard via the in-house, forbid(unsafe_code) asupersync-zstd codec: ATP TCP
+# bulk-data compression and the HTTP `zstd` content coding (br-asupersync-t1fblr).
 zstd = ["dep:asupersync-zstd"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
 # When disabled, the safe portable SIMD fallback (std::simd) still provides ~2-3x

@@ -306,6 +306,26 @@ compress slightly better than libzstd level 1. It has streaming encoder and
 decoder types, resumable async transfers, and differential tests against
 libzstd 1.5.7.
 
+### HTTP `zstd` content coding (feature `zstd`)
+
+With the `zstd` feature, HTTP speaks the `zstd` content coding (RFC 8878
+§7.2):
+- `Response::decode_content` decodes it, within the same
+  `DecompressionLimit` as the other codings. It accepts windows of up to the
+  8 MiB that RFC 9659 lets HTTP decoders require, and refuses larger ones.
+- A client with `response_decompression` (feature `compression`) asks for it:
+  `Accept-Encoding: gzip, deflate, br, zstd`. Without the `zstd` feature it
+  still sends `gzip, deflate, br`.
+- Servers opt in with `with_zstd()` on `web::compress::CompressionMiddleware`,
+  `web::middleware::CompressionMiddleware` or `CompressionLayer`. zstd is then
+  offered ahead of the configured encodings and wins ties in client quality.
+  Responses go out as frames of at most 1 MiB, within `max_compressed_size`.
+
+`ContentEncoding` was exhaustive in v0.4.3 and is unchanged. The new
+`#[non_exhaustive]` `http::compress::ContentCoding` names zstd, and
+`negotiate_coding` negotiates over it with exactly the rules of
+`negotiate_encoding`. (`br-asupersync-t1fblr.32`.)
+
 ### Behavior change — the production runtime enforces explicit poll quotas
 
 `Budget::with_poll_quota` bounds how many times a task is polled. The
