@@ -568,13 +568,24 @@ fn psk_parameters_unobservable() -> String {
 
 fn early_data_delivery_unobservable() -> String {
     format!(
-        "{NO_OBSERVABLE}: TlsStream keeps the rustls connection in a private enum \
-         (src/tls/stream.rs:86) and its public accessors (src/tls/stream.rs:213-257) include no \
-         early-data reader or received-early-data flag; poll_read reads only the 1-RTT plaintext \
-         (src/tls/stream.rs:514). EarlyDataReplayProtection::validate_request_for_early_data \
-         (src/tls/acceptor.rs:186) has no caller outside src/tls/acceptor.rs, so no server \
-         pipeline screens requests that arrived as 0-RTT; build() refuses the strategies that \
-         would need it (src/tls/acceptor.rs:1029-1060)"
+        "{NO_OBSERVABLE}: no early data reaches a server application. TlsAcceptor::accept \
+         rejects 0-RTT at the TLS layer on every connection (src/tls/acceptor.rs:504, \
+         br-asupersync-0n1dvh): TlsStream reads only the 1-RTT plaintext \
+         (src/tls/stream.rs:514), and EarlyDataReplayProtection::validate_request_for_early_data \
+         (src/tls/acceptor.rs:448) has no caller outside src/tls/acceptor.rs, so no server \
+         pipeline could screen requests that arrived as 0-RTT; build() refuses the strategies \
+         that would need it (src/tls/acceptor.rs:1343-1398)"
+    )
+}
+
+fn ticket_age_unobservable() -> String {
+    format!(
+        "{NO_OBSERVABLE}: the server's ticket-age window no longer decides anything visible. \
+         TlsAcceptor::accept rejects 0-RTT at the TLS layer on every connection \
+         (src/tls/acceptor.rs:504, br-asupersync-0n1dvh), so a fresh ticket and one received \
+         3600 s earlier both resume the PSK and both have their early data refused. The \
+         obfuscated age itself cannot be checked from the wire either: it is masked by the \
+         ticket's ticket_age_add, which travels in the encrypted NewSessionTicket"
     )
 }
 
@@ -1380,19 +1391,6 @@ Xg9lOuhkQdFEb9ak2cOw
             .transpose()
     }
 
-    fn offered_ticket_age(exchange: &Exchange, what: &str) -> Result<u32, String> {
-        let hello = exchange.first_client_hello(what)?;
-        let psk = hello
-            .extension(wire::EXT_PRE_SHARED_KEY)
-            .ok_or_else(|| format!("{what}: the ClientHello offers no pre_shared_key"))?;
-        let offered = wire::offered_psks(&psk.data).map_err(|e| format!("{what}: {e}"))?;
-        offered
-            .identities
-            .first()
-            .map(|(_, age)| *age)
-            .ok_or_else(|| format!("{what}: pre_shared_key lists no identity"))
-    }
-
     /// Every ClientHello the client side of every study produced.
     fn all_client_hellos(lab: &Lab) -> Result<Vec<(String, Hello)>, String> {
         let zero = zero_rtt(lab)?;
@@ -1879,85 +1877,11 @@ Xg9lOuhkQdFEb9ak2cOw
     // ------------------------------------------------------------------------
     // TicketAgeObfuscation and FreshnessWindow
     // ------------------------------------------------------------------------
-
-    /// TLS0RTT-AGE-01.
-    pub(super) fn ticket_age_reaches_server(lab: &Lab) -> Result<String, String> {
-        let fresh = &zero_rtt(lab)?.base.second;
-        let shifted = &stale(lab)?.second;
-        let fresh_age = offered_ticket_age(fresh, "fresh ticket")?;
-        let shifted_age = offered_ticket_age(shifted, "ticket recorded 3600 s early")?;
-        for (what, exchange) in [
-            ("fresh ticket", fresh),
-            ("ticket recorded 3600 s early", shifted),
-        ] {
-            exchange.require_tls13(what)?;
-            if !exchange.first_client_hello(what)?.has(wire::EXT_EARLY_DATA) {
-                return Err(format!(
-                    "{what}: the client did not offer early_data, so the server had no ticket age to judge"
-                ));
-            }
-            if selected_identity(&exchange.server_hello(what)?)?.is_none() {
-                return Err(format!("{what}: the server did not resume the PSK"));
-            }
-        }
-        let fresh_records = fresh.client_encrypted_records("fresh ticket")?;
-        let shifted_records = shifted.client_encrypted_records("ticket recorded 3600 s early")?;
-        if fresh_records != 2 {
-            return Err(format!(
-                "fresh ticket: the client sent {fresh_records} encrypted handshake records, expected EndOfEarlyData and Finished (2); the server did not find the age inside its window"
-            ));
-        }
-        if shifted_records != 1 {
-            return Err(format!(
-                "ticket recorded 3600 s early: the client sent {shifted_records} encrypted handshake records, expected Finished only (1); the server accepted an age 3600 s off"
-            ));
-        }
-        Ok(format!(
-            "obfuscated_ticket_age {fresh_age:#010x} (fresh ticket): 0-RTT accepted; \
-             obfuscated_ticket_age {shifted_age:#010x} (receipt time 3600 s earlier): 0-RTT refused, PSK resumed"
-        ))
-    }
-
-    /// TLS0RTT-AGE-02.
-    pub(super) fn server_checks_ticket_age(lab: &Lab) -> Result<String, String> {
-        let shifted = &stale(lab)?.second;
-        shifted.require_tls13("stale-ticket study, resumption handshake")?;
-        let hello = shifted.first_client_hello("stale-ticket resumption client flight")?;
-        if !hello.has(wire::EXT_EARLY_DATA) || !hello.has(wire::EXT_PRE_SHARED_KEY) {
-            return Err(format!(
-                "the stale-ticket ClientHello should offer 0-RTT (early_data and pre_shared_key); extensions {:?}",
-                hello.kinds()
-            ));
-        }
-        let answer = shifted.server_hello("stale-ticket resumption server flight")?;
-        if selected_identity(&answer)? != Some(0) {
-            return Err(format!(
-                "the server did not accept the PSK, so a 0-RTT refusal is not attributable to the ticket age; ServerHello extensions {:?}",
-                answer.kinds()
-            ));
-        }
-        let records = shifted.client_encrypted_records("stale-ticket resumption client flight")?;
-        if records != 1 {
-            return Err(format!(
-                "the server accepted 0-RTT for a ticket age 3600 s outside its window: the client sent {records} encrypted handshake records (EndOfEarlyData present)"
-            ));
-        }
-        let control = zero_rtt(lab)?
-            .base
-            .second
-            .client_encrypted_records("0-RTT resumption client flight")?;
-        if control != 2 {
-            return Err(format!(
-                "control: a fresh ticket's 0-RTT should be accepted (2 encrypted records), got {control}"
-            ));
-        }
-        Ok(
-            "0-RTT refused for a ticket age 3600 s outside the window: the server resumed the PSK \
-             (selected_identity 0) without early_data in EncryptedExtensions, and the client sent \
-             Finished without EndOfEarlyData; control: a fresh ticket's 0-RTT was accepted"
-                .to_string(),
-        )
-    }
+    //
+    // TLS0RTT-AGE-01 and -02 used to tell a fresh ticket (0-RTT accepted) from
+    // one received 3600 s earlier (0-RTT refused). Since br-asupersync-0n1dvh
+    // every TlsAcceptor refuses 0-RTT, so they are reported as unobservable
+    // (ticket_age_unobservable); TLS0RTT-SRV-03 checks the refusal itself.
 
     /// TLS0RTT-FRESH-01.
     pub(super) fn stale_ticket_completes_handshake(lab: &Lab) -> Result<String, String> {
@@ -2194,41 +2118,36 @@ Xg9lOuhkQdFEb9ak2cOw
         ))
     }
 
-    /// TLS0RTT-SRV-03.
-    pub(super) fn fresh_ticket_zero_rtt_accepted(lab: &Lab) -> Result<String, String> {
+    /// TLS0RTT-SRV-03 (br-asupersync-0n1dvh). Before the fix the server
+    /// accepted this early data (the client sent EndOfEarlyData and Finished)
+    /// and then dropped it, because TlsStream reads only 1-RTT data.
+    pub(super) fn fresh_ticket_zero_rtt_rejected(lab: &Lab) -> Result<String, String> {
         let second = &zero_rtt(lab)?.base.second;
         second.require_tls13("0-RTT study, resumption handshake")?;
         let hello = second.first_client_hello("resumption client flight")?;
         if !hello.has(wire::EXT_EARLY_DATA) || !hello.has(wire::EXT_PRE_SHARED_KEY) {
             return Err(format!(
-                "the resumption ClientHello should offer 0-RTT (early_data and pre_shared_key); extensions {:?}",
+                "the resumption ClientHello should offer 0-RTT (early_data and pre_shared_key), or there is no early data to reject; extensions {:?}",
                 hello.kinds()
             ));
         }
         let answer = second.server_hello("resumption server flight")?;
         if selected_identity(&answer)? != Some(0) {
             return Err(format!(
-                "the server did not resume with selected_identity 0; ServerHello extensions {:?}",
+                "the server did not resume with selected_identity 0, so a 0-RTT refusal would not be the TLS-layer rejection; ServerHello extensions {:?}",
                 answer.kinds()
             ));
         }
         let records = second.client_encrypted_records("resumption client flight")?;
-        if records != 2 {
+        if records != 1 {
             return Err(format!(
-                "the server did not accept 0-RTT on a fresh single-use ticket: the client sent {records} encrypted handshake records, expected EndOfEarlyData and Finished (2)"
-            ));
-        }
-        let control = stale(lab)?
-            .second
-            .client_encrypted_records("stale-ticket resumption client flight")?;
-        if control != 1 {
-            return Err(format!(
-                "control: with a stale ticket the client should send Finished only (1 encrypted record), got {control}"
+                "the server accepted 0-RTT on a fresh single-use ticket: the client sent {records} encrypted handshake records (EndOfEarlyData present), so early data the application never sees was taken"
             ));
         }
         Ok(
-            "fresh ticket: resumed with selected_identity 0, early_data accepted (the client sent \
-             EndOfEarlyData then Finished, 2 encrypted records); control: stale ticket, Finished only"
+            "fresh single-use ticket offering early_data: the server resumed the PSK \
+             (selected_identity 0) but rejected the early data; the client sent Finished only \
+             (1 encrypted record, no EndOfEarlyData), so it resends over 1-RTT"
                 .to_string(),
         )
     }
@@ -2502,8 +2421,6 @@ mod production {
         client_respects_ticket_without_early_data,
         default_connector_never_offers_early_data,
         connector_requires_replay_acknowledgement,
-        ticket_age_reaches_server,
-        server_checks_ticket_age,
         stale_ticket_completes_handshake,
         replayed_client_hello_not_resumed,
         zero_rtt_tickets_are_stateful,
@@ -2513,7 +2430,7 @@ mod production {
         missing_policy_refuses_all,
         acceptor_requires_replay_strategy,
         acceptor_refuses_unenforced_strategies,
-        fresh_ticket_zero_rtt_accepted,
+        fresh_ticket_zero_rtt_rejected,
         ticket_advertises_configured_cap,
         disabled_acceptor_issues_no_early_data,
         builder_cap_wiring,
@@ -2624,7 +2541,7 @@ fn requirements() -> Vec<Requirement> {
             category: TicketAgeObfuscation,
             level: Must,
             polarity: Conforms,
-            check: Production(production::ticket_age_reaches_server),
+            check: Unobservable(ticket_age_unobservable),
         },
         Requirement {
             id: "TLS0RTT-AGE-02",
@@ -2633,7 +2550,7 @@ fn requirements() -> Vec<Requirement> {
             category: TicketAgeObfuscation,
             level: Must,
             polarity: Refuses,
-            check: Production(production::server_checks_ticket_age),
+            check: Unobservable(ticket_age_unobservable),
         },
         Requirement {
             id: "TLS0RTT-FRESH-01",
@@ -2728,11 +2645,11 @@ fn requirements() -> Vec<Requirement> {
         Requirement {
             id: "TLS0RTT-SRV-03",
             rfc_section: "RFC 8446 §4.2.10, §4.5",
-            description: "On a fresh single-use ticket a 0-RTT TlsAcceptor accepts early data: it resumes with selected_identity 0 and the client closes the early data with EndOfEarlyData",
+            description: "On a fresh single-use ticket a 0-RTT TlsAcceptor resumes the PSK (selected_identity 0) but rejects the early data at the TLS layer, so the client sends no EndOfEarlyData and resends over 1-RTT (br-asupersync-0n1dvh)",
             category: ServerReplayRejection,
             level: Must,
-            polarity: Conforms,
-            check: Production(production::fresh_ticket_zero_rtt_accepted),
+            polarity: Refuses,
+            check: Production(production::fresh_ticket_zero_rtt_rejected),
         },
         Requirement {
             id: "TLS0RTT-SRV-04",
@@ -2909,7 +2826,9 @@ mod tests {
 
     /// The requirements no production observable can decide. Moving one out
     /// of this set needs a production observable for it.
-    const UNOBSERVABLE: [&str; 5] = [
+    const UNOBSERVABLE: [&str; 7] = [
+        "TLS0RTT-AGE-01",
+        "TLS0RTT-AGE-02",
         "TLS0RTT-FRESH-02",
         "TLS0RTT-SRV-04",
         "TLS0RTT-SRV-05",
@@ -2918,7 +2837,7 @@ mod tests {
     ];
 
     /// The requirements whose conforming outcome is a refusal.
-    const REFUSALS: [&str; 11] = [
+    const REFUSALS: [&str; 12] = [
         "TLS0RTT-PSK-04",
         "TLS0RTT-PSK-05",
         "TLS0RTT-PSK-09",
@@ -2930,6 +2849,7 @@ mod tests {
         "TLS0RTT-REPLAY-06",
         "TLS0RTT-SRV-01",
         "TLS0RTT-SRV-02",
+        "TLS0RTT-SRV-03",
     ];
 
     fn expected_verdict(requirement: &Requirement) -> TestVerdict {
