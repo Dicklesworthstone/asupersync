@@ -39,6 +39,29 @@ pub struct NativeH3ListenerConfig {
     pub router: NativeH3RouterConfig,
     /// Maximum admitted request regions across all connections.
     pub max_concurrent_requests: usize,
+    /// Optional listener-wide budget for request-body capacity reservations.
+    ///
+    /// Each newly observed request reserves its whole buffered-body allowance
+    /// (the smaller of the router's individual and connection body limits),
+    /// or, in streaming mode, its queue plus one pending chunk. Admission is
+    /// before HEADERS decoding, so partial heads and incomplete uploads count.
+    /// Untrusted Content-Length never reduces this reservation. Even an empty
+    /// request reserves the configured allowance; choose body limits together
+    /// with this budget. No body allocation is made by the reservation itself.
+    ///
+    /// All connections draw from one pool. A request keeps its reservation
+    /// through assembly, dispatch, response and region cleanup. Exhaustion
+    /// resets only the new request via the existing body-budget refusal path;
+    /// it does not wait while retaining a partially admitted body. `None`
+    /// preserves the existing per-connection-only admission. `Some(0)` admits
+    /// only zero-capacity buffered requests, not streaming request queues.
+    ///
+    /// This bounds admitted payload capacity, not process memory. QUIC
+    /// reassembly, H3 parser lookahead/headers, allocation growth and metadata,
+    /// extractor copies and application-retained aliases are separate. Await
+    /// the serve future for a cleanup receipt; dropping it stops admission but
+    /// does not synchronously drain runtime-owned work.
+    pub max_total_request_body_reservation_bytes: Option<usize>,
     /// Concurrent TLS handshakes, further capped by `endpoint.max_connections`.
     pub max_pending_handshakes: usize,
     /// Finite request-stream lifetime per connection (at most 4096). The
@@ -127,6 +150,7 @@ impl Default for NativeH3ListenerConfig {
                 .max_pending_requests(16)
                 .max_in_flight_dispatches(16),
             max_concurrent_requests: 128,
+            max_total_request_body_reservation_bytes: None,
             max_pending_handshakes: 16,
             max_requests_per_connection: 128,
             receive_window_bytes: 64 * 1024,
@@ -139,6 +163,19 @@ impl Default for NativeH3ListenerConfig {
             max_total_buffered_response_bytes: 64 * 1024 * 1024,
             max_buffered_response_bytes_per_connection: None,
             streaming_request_body_buffer_bytes: None,
+        }
+    }
+}
+
+impl NativeH3ListenerConfig {
+    fn request_body_reservation_bytes(&self) -> Option<usize> {
+        match self.streaming_request_body_buffer_bytes {
+            Some(queue) => queue.get().checked_add(streaming_chunk_bytes(queue)),
+            None => Some(
+                self.router
+                    .max_buffered_body_bytes
+                    .min(self.router.max_total_buffered_body_bytes),
+            ),
         }
     }
 }
@@ -163,6 +200,12 @@ pub struct NativeH3ListenerReport {
     pub completed_requests: u64,
     /// Requests refused before scheduler admission.
     pub refused_requests: u64,
+    /// Subset refused by the optional listener-wide request-body reservation
+    /// budget, before any handler or request region was admitted.
+    pub rejected_request_body_reservations: u64,
+    /// Largest sum of live request-body capacity reservations. This is not a
+    /// measurement of allocated or received bytes. Zero when not configured.
+    pub peak_reserved_request_body_bytes: usize,
     /// Admitted requests cancelled, failed, or reset before completion.
     pub cancelled_requests: u64,
     /// Closed request regions whose finalizers failed or exhausted cleanup.
@@ -386,6 +429,11 @@ impl NativeH3Listener {
             state.response_budget.connection_rejected.load(Ordering::Acquire);
         state.report.peak_buffered_response_bytes =
             state.response_budget.peak.load(Ordering::Acquire);
+        if let Some(budget) = &state.request_body_budget {
+            state.report.rejected_request_body_reservations =
+                budget.rejected.load(Ordering::Acquire);
+            state.report.peak_reserved_request_body_bytes = budget.peak.load(Ordering::Acquire);
+        }
         let shutdown_result = self.endpoint.shutdown(cx).await;
         if let Some(error) = state.failure {
             return Err(error);
@@ -517,6 +565,85 @@ impl Drop for ResponseCredit {
         if let Some(aggregate) = &self.budget.parent {
             aggregate.used.fetch_sub(self.bytes, Ordering::Release);
         }
+    }
+}
+
+/// One private pool per listener; reservations never outlive the admission
+/// owner as a reusable source of authority. No fixed per-peer partition.
+struct RequestBodyBudget {
+    limit: usize,
+    used: AtomicUsize,
+    peak: AtomicUsize,
+    rejected: AtomicU64,
+}
+
+impl RequestBodyBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            used: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            rejected: AtomicU64::new(0),
+        }
+    }
+
+    fn try_reserve(self: &Arc<Self>, bytes: usize) -> Option<RequestBodyReservation> {
+        let Ok(previous) = self.used.try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            used.checked_add(bytes).filter(|next| *next <= self.limit)
+        }) else {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            return None;
+        };
+        self.peak.fetch_max(previous + bytes, Ordering::Relaxed);
+        Some(RequestBodyReservation {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+}
+
+struct RequestBodyReservation {
+    budget: Arc<RequestBodyBudget>,
+    bytes: usize,
+}
+
+impl Drop for RequestBodyReservation {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::Release);
+    }
+}
+
+/// Stream IDs are connection-local. Keep separate ledgers over the same pool
+/// so equal IDs on distinct peers neither alias nor refund each other's work.
+struct RequestBodyReservations {
+    budget: Option<Arc<RequestBodyBudget>>,
+    held: BTreeMap<StreamId, RequestBodyReservation>,
+}
+
+impl RequestBodyReservations {
+    fn new(budget: Option<Arc<RequestBodyBudget>>) -> Self {
+        Self {
+            budget,
+            held: BTreeMap::new(),
+        }
+    }
+
+    fn admit(&mut self, stream_id: StreamId, bytes: usize) -> bool {
+        let Some(budget) = &self.budget else {
+            return true;
+        };
+        if self.held.contains_key(&stream_id) {
+            return true;
+        }
+        let Some(reservation) = budget.try_reserve(bytes) else {
+            return false;
+        };
+        self.held.insert(stream_id, reservation);
+        true
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&StreamId) -> bool) {
+        self.held.retain(|id, _| keep(id));
     }
 }
 
@@ -1226,6 +1353,9 @@ struct ListenerConnection {
     response_budget: Arc<ResponseBudget>,
     control: StreamId,
     requests: BTreeMap<StreamId, RequestWork>,
+    // Declared after the bridge and owned requests: on connection drop their
+    // retained data is dropped before reservation credit becomes reusable.
+    body_reservations: RequestBodyReservations,
     seen_requests: BTreeSet<StreamId>,
     assembly: BTreeMap<StreamId, (Time, ServerRequestDeadline)>,
     initial_receive_window: u64,
@@ -1243,6 +1373,7 @@ struct ListenerConnection {
 struct ListenerState {
     router: Arc<Router>,
     response_budget: Arc<ResponseBudget>,
+    request_body_budget: Option<Arc<RequestBodyBudget>>,
     config: NativeH3ListenerConfig,
     max_peer_uni_streams: u64,
     connections: Vec<ListenerConnection>,
@@ -1257,6 +1388,9 @@ impl ListenerState {
         Self {
             router,
             response_budget: Arc::new(ResponseBudget::new(config.max_total_buffered_response_bytes)),
+            request_body_budget: config
+                .max_total_request_body_reservation_bytes
+                .map(|limit| Arc::new(RequestBodyBudget::new(limit))),
             config,
             max_peer_uni_streams,
             connections: Vec::new(),
@@ -1399,6 +1533,9 @@ impl ListenerState {
                         ),
                         control,
                         requests: BTreeMap::new(),
+                        body_reservations: RequestBodyReservations::new(
+                            self.request_body_budget.clone(),
+                        ),
                         seen_requests: BTreeSet::new(),
                         assembly: BTreeMap::new(),
                         initial_receive_window,
@@ -1570,6 +1707,15 @@ impl ListenerState {
                     }
                 }
             });
+            if connection.live {
+                // Reap only after the owner-reap pass, never at request FIN or
+                // response publication. A failed connection can still retain
+                // pending bridge bodies, so it keeps all reservations until
+                // the complete connection is dropped after owned cleanup.
+                connection.body_reservations.retain(|id| {
+                    connection.assembly.contains_key(id) || connection.requests.contains_key(id)
+                });
+            }
             // Requests keep their connection alive until the complete region
             // close receipt, including descendants and finalizers. Check
             // idleness after ingress and ownership retirement so newly
@@ -1726,6 +1872,9 @@ impl ListenerConnection {
     ) -> Result<bool, NativeH3SessionError> {
         let mut progress = false;
         let mut lifetime_exhausted = false;
+        let reservation_bytes = config.request_body_reservation_bytes().ok_or(
+            NativeH3SessionError::InvalidState("HTTP/3 request body reservation overflow"),
+        )?;
         // Both loops are bounded by the authenticated local transport
         // parameters. Observe raw streams before decoding HEADERS, so a
         // partial frame cannot avoid the request assembly deadline.
@@ -1762,6 +1911,39 @@ impl ListenerConnection {
                     .refuse_request(cx, &mut self.session, connection, id, reason, true)?;
                 report.refused_requests = report.refused_requests.saturating_add(1);
             } else {
+                if !self.body_reservations.admit(id, reservation_bytes) {
+                    let limit = self
+                        .body_reservations
+                        .budget
+                        .as_ref()
+                        .expect("only a configured request body budget can refuse")
+                        .limit;
+                    // The connection could not obtain its request allocation
+                    // from the listener pool. Preserve the established wire
+                    // body-budget refusal and distinguish the enclosing scope
+                    // in both the trace and the final listener report.
+                    self.bridge.refuse_request(
+                        cx,
+                        &mut self.session,
+                        connection,
+                        id,
+                        NativeH3RouterRefusal::ConnectionBodyBudgetExhausted { limit },
+                        true,
+                    )?;
+                    report.refused_requests = report.refused_requests.saturating_add(1);
+                    let stream = id.0.to_string();
+                    let bytes = reservation_bytes.to_string();
+                    cx.trace_with_fields(
+                        "http3.request_body_budget_refused",
+                        &[
+                            ("scope", "listener"),
+                            ("stream_id", stream.as_str()),
+                            ("reservation_bytes", bytes.as_str()),
+                        ],
+                    );
+                    progress = true;
+                    continue;
+                }
                 self.application_idle_deadline = None;
                 connection.configure_stream_receive_window(cx, id, config.receive_window_bytes)?;
                 let budget = cx
@@ -2379,6 +2561,147 @@ impl ListenerConnection {
             };
         }
         Ok(progress)
+    }
+}
+
+#[cfg(test)]
+mod request_body_budget_tests {
+    use super::*;
+
+    #[test]
+    fn request_reservation_defaults_preserve_unbounded_shared_admission() {
+        let config = NativeH3ListenerConfig::default();
+        assert_eq!(config.max_total_request_body_reservation_bytes, None);
+        let state = ListenerState::new(Arc::new(Router::new()), config, 3);
+        assert!(state.request_body_budget.is_none());
+        let mut reservations = RequestBodyReservations::new(None);
+        assert!(reservations.admit(StreamId(0), usize::MAX));
+        assert!(reservations.admit(StreamId(4), usize::MAX));
+        assert!(reservations.held.is_empty());
+    }
+
+    #[test]
+    fn buffered_reservation_uses_the_smaller_existing_body_ceiling() {
+        let mut config = NativeH3ListenerConfig::default();
+        assert_eq!(config.request_body_reservation_bytes(), Some(16 * 1024 * 1024));
+        config.router = config
+            .router
+            .max_buffered_body_bytes(100)
+            .max_total_buffered_body_bytes(60);
+        assert_eq!(config.request_body_reservation_bytes(), Some(60));
+        config.router = config.router.max_buffered_body_bytes(25);
+        assert_eq!(config.request_body_reservation_bytes(), Some(25));
+        config.router = config.router.max_buffered_body_bytes(0);
+        assert_eq!(config.request_body_reservation_bytes(), Some(0));
+    }
+
+    #[test]
+    fn streaming_reservation_covers_queue_and_pending_chunk_without_overflow() {
+        let mut config = NativeH3ListenerConfig::default();
+        config.streaming_request_body_buffer_bytes = NonZeroUsize::new(64);
+        assert_eq!(config.request_body_reservation_bytes(), Some(128));
+        config.streaming_request_body_buffer_bytes = NonZeroUsize::new(32 * 1024);
+        assert_eq!(config.request_body_reservation_bytes(), Some(48 * 1024));
+        config.streaming_request_body_buffer_bytes = NonZeroUsize::new(usize::MAX);
+        assert_eq!(config.request_body_reservation_bytes(), None);
+    }
+
+    #[test]
+    fn peer_stream_id_reuse_does_not_alias_shared_request_credit() {
+        let budget = Arc::new(RequestBodyBudget::new(12));
+        let mut first = RequestBodyReservations::new(Some(Arc::clone(&budget)));
+        let mut second = RequestBodyReservations::new(Some(Arc::clone(&budget)));
+        assert!(first.admit(StreamId(0), 8));
+        assert!(!second.admit(StreamId(0), 8));
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        assert_eq!(budget.peak.load(Ordering::Acquire), 8);
+        assert_eq!(budget.rejected.load(Ordering::Acquire), 1);
+        assert!(second.held.is_empty());
+        first.retain(|_| false);
+        assert!(second.admit(StreamId(0), 8));
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        drop(first);
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        drop(second);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn observing_one_request_again_does_not_recharge_it() {
+        let budget = Arc::new(RequestBodyBudget::new(8));
+        let mut peer = RequestBodyReservations::new(Some(Arc::clone(&budget)));
+        for _ in 0..64 {
+            assert!(peer.admit(StreamId(4), 8));
+        }
+        assert_eq!(peer.held.len(), 1);
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        assert_eq!(budget.rejected.load(Ordering::Acquire), 0);
+        assert!(!peer.admit(StreamId(0), 1));
+        drop(peer);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn request_credit_survives_assembly_to_owned_cleanup_transition() {
+        let budget = Arc::new(RequestBodyBudget::new(12));
+        let mut peer = RequestBodyReservations::new(Some(Arc::clone(&budget)));
+        let mut assembly = BTreeSet::from([StreamId(0), StreamId(4), StreamId(8)]);
+        let mut owned = BTreeSet::new();
+        for id in &assembly {
+            assert!(peer.admit(*id, 4));
+        }
+        // FIN transfers one request to ownership without returning its credit.
+        assembly.remove(&StreamId(0));
+        owned.insert(StreamId(0));
+        // Another request is refused during assembly, with no admitted owner.
+        assembly.remove(&StreamId(4));
+        peer.retain(|id| assembly.contains(id) || owned.contains(id));
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        assert!(peer.held.contains_key(&StreamId(0)));
+        assert!(!peer.held.contains_key(&StreamId(4)));
+        // The same predicate stays true while the owner is draining/finalizing.
+        peer.retain(|id| assembly.contains(id) || owned.contains(id));
+        assert_eq!(budget.used.load(Ordering::Acquire), 8);
+        owned.remove(&StreamId(0));
+        peer.retain(|id| assembly.contains(id) || owned.contains(id));
+        assert_eq!(budget.used.load(Ordering::Acquire), 4);
+        drop(peer);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn zero_and_maximum_request_budgets_fail_closed_without_partial_credit() {
+        let zero = Arc::new(RequestBodyBudget::new(0));
+        let empty = zero.try_reserve(0).unwrap();
+        assert!(zero.try_reserve(1).is_none());
+        drop(empty);
+        assert_eq!(zero.used.load(Ordering::Acquire), 0);
+        let max = Arc::new(RequestBodyBudget::new(usize::MAX));
+        let held = max.try_reserve(usize::MAX).unwrap();
+        assert!(max.try_reserve(1).is_none());
+        assert_eq!(max.used.load(Ordering::Acquire), usize::MAX);
+        assert_eq!(max.peak.load(Ordering::Acquire), usize::MAX);
+        drop(held);
+        assert_eq!(max.used.load(Ordering::Acquire), 0);
+        assert!(max.try_reserve(1).is_some());
+    }
+
+    #[test]
+    fn dropping_request_ledger_during_unwind_refunds_every_reservation() {
+        let budget = Arc::new(RequestBodyBudget::new(12));
+        let result = std::panic::catch_unwind({
+            let budget = Arc::clone(&budget);
+            move || {
+                let mut peer = RequestBodyReservations::new(Some(budget));
+                assert!(peer.admit(StreamId(0), 4));
+                assert!(peer.admit(StreamId(4), 8));
+                panic!("intentional request owner unwind");
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+        assert_eq!(budget.peak.load(Ordering::Acquire), 12);
+        assert_eq!(Arc::strong_count(&budget), 1);
     }
 }
 
