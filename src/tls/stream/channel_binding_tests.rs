@@ -147,10 +147,13 @@ fn handshake(
             server_result = Some(result);
         }
         if client_result.is_some() && server_result.is_some() {
-            return (client_result.unwrap(), server_result.unwrap());
+            break;
         }
     }
-    panic!("TLS handshake exceeded the in-memory transport's step limit");
+    match (client_result, server_result) {
+        (Some(client), Some(server)) => (client, server),
+        _ => panic!("TLS handshake exceeded the in-memory transport's step limit"),
+    }
 }
 
 fn establish(client: &mut TlsStream<MemoryIo>, server: &mut TlsStream<MemoryIo>) {
@@ -369,4 +372,25 @@ fn resumed_tls13_connections_get_fresh_bindings_and_reject_early_export() {
     assert_eq!(binding, reference_binding(&resumed_peer));
     send_and_read(&mut resumed, &mut resumed_peer);
     send_and_read(&mut resumed_peer, &mut resumed);
+}
+
+#[test]
+fn tls13_traffic_key_updates_preserve_the_channel_binding() {
+    let (cc, sc) = configs(&[&rustls::version::TLS13], None, true);
+    let (mut client, mut server) = streams(&cc, &sc);
+    establish(&mut client, &mut server);
+    let binding = client.tls_exporter_channel_binding().unwrap();
+    let TlsConnection::Client(conn) = &mut client.conn else {
+        unreachable!();
+    };
+    conn.refresh_traffic_keys().unwrap();
+
+    // Carry the KeyUpdate and its response on real encrypted records. Traffic
+    // keys rotate, but the connection's normal exporter secret stays fixed.
+    send_and_read(&mut client, &mut server);
+    send_and_read(&mut server, &mut client);
+    assert_eq!(binding, client.tls_exporter_channel_binding().unwrap());
+    assert_eq!(binding, server.tls_exporter_channel_binding().unwrap());
+    assert_eq!(binding, reference_binding(&client));
+    assert_eq!(binding, reference_binding(&server));
 }
