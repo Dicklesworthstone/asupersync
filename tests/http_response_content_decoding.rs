@@ -287,3 +287,112 @@ fn an_empty_body_with_a_coding_decodes_to_the_empty_representation() {
     );
     assert_unchanged(&response, &before);
 }
+
+/// A zstd frame as the reference `zstd --no-check` CLI writes "hi": one raw
+/// block, with a declared content size.
+#[cfg(feature = "zstd")]
+const ZSTD_HI: [u8; 11] = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 2, 0x11, 0, 0, b'h', b'i'];
+
+#[cfg(feature = "zstd")]
+fn zstd(plain: &[u8]) -> Vec<u8> {
+    let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
+    asupersync_zstd::encode_all(plain, &params)
+}
+
+/// `zstd` has no `ContentEncoding` variant (that enum is exhaustive public
+/// API), but with the `zstd` feature a response in it decodes like the
+/// others, through to the JSON API.
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_responses_decode_through_to_the_json_api() {
+    let mut response = Response::new(200, "OK", ZSTD_HI.to_vec())
+        .with_header("Content-Encoding", "ZSTD")
+        .with_header("Content-Length", "11");
+    response
+        .decode_content(&Method::Get, DecompressionLimit::new(2))
+        .unwrap();
+    assert_eq!(response.body, b"hi");
+    assert!(response.headers.is_empty(), "{:?}", response.headers);
+
+    let items = [r#"{"answer":42,"ready":true}"#; 40].join(",");
+    let json = format!("[{items}]").into_bytes();
+    let wire = zstd(&json);
+    assert!(wire.len() < json.len() / 4, "{} bytes", wire.len());
+    let mut response = Response::new(200, "OK", wire)
+        .with_header("Content-Encoding", "zstd")
+        .with_header("Content-Type", "application/json");
+    response
+        .decode_content(&Method::Get, DecompressionLimit::new(json.len()))
+        .unwrap();
+    let value: serde_json::Value = response.json().unwrap();
+    assert_eq!(value[0]["answer"], 42);
+}
+
+/// A zstd response that would pass the limit, is cut short, or needs a
+/// window over the 8 MiB RFC 9659 lets HTTP decoders refuse, is refused, and
+/// the response stays as it was.
+#[cfg(feature = "zstd")]
+#[test]
+fn zstd_bombs_cut_frames_and_oversized_windows_leave_the_response_unchanged() {
+    // 4 MiB of zeros in a few hundred bytes.
+    let bomb = zstd(&vec![0; 4 << 20]);
+    assert!(bomb.len() < 4096, "{} bytes", bomb.len());
+    // No content size, a 16 MiB window, and one raw block holding "x".
+    let wide = [0x28, 0xb5, 0x2f, 0xfd, 0, 0x70, 0x09, 0, 0, b'x'];
+    let mut cases = vec![
+        (
+            bomb.clone(),
+            (4 << 20) - 1,
+            "output exceeds the decode limit",
+        ),
+        (wide.to_vec(), 1024, "window exceeds the decode limit"),
+    ];
+    for cut in [1, 4, bomb.len() / 2, bomb.len() - 1] {
+        cases.push((bomb[..cut].to_vec(), 4 << 20, "input truncated"));
+    }
+    for (wire, limit, expected) in cases {
+        let mut response = Response::new(200, "OK", wire)
+            .with_header("Content-Encoding", "zstd")
+            .with_header("Digest", "original-digest");
+        let before = response.clone();
+        let error = response
+            .decode_content(&Method::Get, DecompressionLimit::new(limit))
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{error}");
+        assert!(error.to_string().contains(expected), "{error}");
+        assert_unchanged(&response, &before);
+    }
+    let mut response = Response::new(200, "OK", bomb).with_header("Content-Encoding", "zstd");
+    response
+        .decode_content(&Method::Get, DecompressionLimit::new(4 << 20))
+        .unwrap();
+    assert_eq!(response.body.len(), 4 << 20);
+}
+
+/// zstd layers with the other codings, decoded in reverse order.
+#[cfg(all(feature = "zstd", feature = "compression"))]
+#[test]
+fn zstd_layers_with_the_other_codings() {
+    use asupersync::http::compress::ContentEncoding;
+    let plain = b"first zstd, then gzip".repeat(20);
+    let wire = encode(&zstd(&plain), ContentEncoding::Gzip);
+    let mut response = Response::new(200, "OK", wire).with_header("Content-Encoding", "zstd, gzip");
+    response
+        .decode_content(&Method::Get, DecompressionLimit::new(plain.len()))
+        .unwrap();
+    assert_eq!(response.body, plain);
+}
+
+/// Without the `zstd` feature a zstd response is an explicit, typed error.
+#[cfg(not(feature = "zstd"))]
+#[test]
+fn a_zstd_response_needs_the_zstd_feature() {
+    let mut response =
+        Response::new(200, "OK", b"wire".to_vec()).with_header("Content-Encoding", "zstd");
+    let before = response.clone();
+    let error = response
+        .decode_content(&Method::Get, DecompressionLimit::new(1024))
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+    assert_unchanged(&response, &before);
+}

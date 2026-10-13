@@ -40,7 +40,8 @@ impl Response {
     /// Returns an error for an unknown or unavailable codec, malformed coding
     /// list, excessive nesting, encoded partial response, invalid/truncated stream,
     /// or output exceeding the limit. Gzip, deflate, and Brotli require the
-    /// `compression` feature; identity bodies work without it.
+    /// `compression` feature, and zstd (a window of at most 8 MiB, per RFC
+    /// 9659) the `zstd` feature; identity bodies work without either.
     ///
     /// # Example
     ///
@@ -70,7 +71,7 @@ impl Response {
         }
 
         let codings = content_codings(&self.headers)?;
-        if codings.iter().all(|coding| *coding == ContentEncoding::Identity) {
+        if codings.iter().all(|coding| *coding == IDENTITY) {
             return check_size(self.body.len(), limit);
         }
         if self.status == 206
@@ -100,14 +101,20 @@ impl Response {
         // including each codec's trailer/checksum validation in finish().
         let mut decoded = Cow::Borrowed(self.body.as_slice());
         for coding in codings.into_iter().rev() {
-            if coding == ContentEncoding::Identity {
-                check_size(decoded.len(), limit)?;
-                continue;
-            }
-            let mut decoder = decoder_for(coding, limit)?;
-            let mut output = Vec::new();
-            decoder.decompress(decoded.as_ref(), &mut output)?;
-            decoder.finish(&mut output)?;
+            let output = match coding {
+                IDENTITY => {
+                    check_size(decoded.len(), limit)?;
+                    continue;
+                }
+                Coding::Standard(encoding) => {
+                    let mut decoder = decoder_for(encoding, limit)?;
+                    let mut output = Vec::new();
+                    decoder.decompress(decoded.as_ref(), &mut output)?;
+                    decoder.finish(&mut output)?;
+                    output
+                }
+                Coding::Zstd => zstd_decode(decoded.as_ref(), limit)?,
+            };
             check_size(output.len(), limit)?;
             decoded = Cow::Owned(output);
         }
@@ -139,7 +146,34 @@ fn check_size(size: usize, limit: DecompressionLimit) -> io::Result<()> {
     }
 }
 
-fn content_codings(headers: &[(String, String)]) -> io::Result<Vec<ContentEncoding>> {
+/// A response content coding. `zstd` has no [`ContentEncoding`] variant, since
+/// that public enum is exhaustive, so it is decoded here alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Coding {
+    Standard(ContentEncoding),
+    Zstd,
+}
+
+const IDENTITY: Coding = Coding::Standard(ContentEncoding::Identity);
+
+/// Decodes a `zstd` coding (RFC 8878 §7.2): one or more frames, skippable
+/// frames allowed, a window of at most 8 MiB as RFC 9659 requires of HTTP
+/// decoders, and output within `limit`.
+#[cfg(feature = "zstd")]
+fn zstd_decode(input: &[u8], limit: DecompressionLimit) -> io::Result<Vec<u8>> {
+    asupersync_zstd::decode_all(input, &asupersync_zstd::DecodeLimits::new(limit.get()))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+#[cfg(not(feature = "zstd"))]
+fn zstd_decode(_input: &[u8], _limit: DecompressionLimit) -> io::Result<Vec<u8>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "response codec requires the zstd feature",
+    ))
+}
+
+fn content_codings(headers: &[(String, String)]) -> io::Result<Vec<Coding>> {
     let mut codings = Vec::new();
     let mut present = false;
     for (name, value) in headers {
@@ -161,13 +195,15 @@ fn content_codings(headers: &[(String, String)]) -> io::Result<Vec<ContentEncodi
                 ));
             }
             let coding = if token.eq_ignore_ascii_case("identity") {
-                ContentEncoding::Identity
+                IDENTITY
             } else if token.eq_ignore_ascii_case("gzip") || token.eq_ignore_ascii_case("x-gzip") {
-                ContentEncoding::Gzip
+                Coding::Standard(ContentEncoding::Gzip)
             } else if token.eq_ignore_ascii_case("deflate") {
-                ContentEncoding::Deflate
+                Coding::Standard(ContentEncoding::Deflate)
             } else if token.eq_ignore_ascii_case("br") {
-                ContentEncoding::Brotli
+                Coding::Standard(ContentEncoding::Brotli)
+            } else if token.eq_ignore_ascii_case("zstd") {
+                Coding::Zstd
             } else {
                 // Do not echo an untrusted, potentially enormous header value.
                 return Err(io::Error::new(

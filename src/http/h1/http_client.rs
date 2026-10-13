@@ -874,7 +874,8 @@ impl HttpClientBuilder {
     ///
     /// It applies to a buffered request whose headers, and the client's
     /// default headers, name no `Accept-Encoding` and no `Range`. The client
-    /// then sends `Accept-Encoding: gzip, deflate, br` and decodes the response
+    /// then sends `Accept-Encoding: gzip, deflate, br` (with `, zstd` when the
+    /// `zstd` feature is also enabled) and decodes the response
     /// with [`Response::decode_content`], using the
     /// [`max_body_size`](Self::max_body_size) limit (16 MiB by default) for
     /// every decoded layer. Any error `decode_content` reports (an unknown
@@ -2953,7 +2954,13 @@ fn has_header(headers: &[(String, String)], name: &str) -> bool {
 }
 
 /// The `Accept-Encoding` a client with response decompression sends.
+#[cfg(not(feature = "zstd"))]
 const DECODED_CONTENT_CODINGS: &str = "gzip, deflate, br";
+
+/// The `Accept-Encoding` a client with response decompression sends; with
+/// the `zstd` feature it decodes zstd too (br-asupersync-t1fblr.32).
+#[cfg(feature = "zstd")]
+const DECODED_CONTENT_CODINGS: &str = "gzip, deflate, br, zstd";
 
 fn ensure_multipart_content_type(headers: &mut Vec<(String, String)>, form: &MultipartForm) {
     if headers
@@ -7855,6 +7862,11 @@ mod tests {
         fn the_client_asks_for_and_decodes_gzip_deflate_and_brotli() {
             let plain = b"hello, compressed world ".repeat(100);
             let client = HttpClient::builder().response_decompression(true).build();
+            let asked = if cfg!(feature = "zstd") {
+                "\r\naccept-encoding: gzip, deflate, br, zstd\r\n"
+            } else {
+                "\r\naccept-encoding: gzip, deflate, br\r\n"
+            };
             for (coding, encoded) in [
                 ("gzip", encode(GzipCompressor::new(), &plain)),
                 ("deflate", encode(DeflateCompressor::new(), &plain)),
@@ -7863,10 +7875,7 @@ mod tests {
                 let (url, server) = serve_once(encoded_head(coding, encoded.len()), encoded);
                 let response = get(&client, &url, Vec::new()).expect("decoded response");
                 let request = server.join().expect("server thread");
-                assert!(
-                    request.contains("\r\naccept-encoding: gzip, deflate, br\r\n"),
-                    "{coding}: {request}"
-                );
+                assert!(request.contains(asked), "{coding}: {request}");
                 assert_eq!(response.body, plain, "{coding}");
                 assert!(
                     !has_header(&response.headers, "content-encoding"),
@@ -7874,6 +7883,28 @@ mod tests {
                 );
                 assert!(!has_header(&response.headers, "content-length"), "{coding}");
             }
+        }
+
+        /// With the `zstd` feature the client also asks for zstd, and
+        /// decodes a zstd response.
+        #[cfg(feature = "zstd")]
+        #[test]
+        fn the_client_asks_for_and_decodes_zstd() {
+            let plain = b"hello, compressed world ".repeat(100);
+            let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
+            let encoded = asupersync_zstd::encode_all(&plain, &params);
+            assert!(encoded.len() < plain.len() / 4, "{} bytes", encoded.len());
+            let client = HttpClient::builder().response_decompression(true).build();
+            let (url, server) = serve_once(encoded_head("zstd", encoded.len()), encoded);
+            let response = get(&client, &url, Vec::new()).expect("decoded response");
+            let request = server.join().expect("server thread");
+            assert!(
+                request.contains("\r\naccept-encoding: gzip, deflate, br, zstd\r\n"),
+                "{request}"
+            );
+            assert_eq!(response.body, plain);
+            assert!(!has_header(&response.headers, "content-encoding"));
+            assert!(!has_header(&response.headers, "content-length"));
         }
 
         #[test]
