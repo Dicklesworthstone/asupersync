@@ -106,6 +106,7 @@ WORKSPACE_CRATES = {
     "asupersync-browser-core",
     "asupersync-tokio-compat",
     "asupersync-wasm",
+    "asupersync-zstd",
 }
 UNSAFE_BLOCK_RE = re.compile(r"\bunsafe\s*\{")
 INNER_CFG_RE = re.compile(r"#!\[cfg\(")
@@ -208,6 +209,10 @@ def is_worker_fault(clean: str) -> bool:
 
 KILLED_REASON = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
 NO_REMOTE_EXIT_REASON = "no remote exit in log"
+# The OS text for ENOSPC. Tests that synthesize io::ErrorKind::StorageFull print
+# "storage full", so only a real full disk matches.
+DISK_FULL_RE = re.compile(r"No space left on device")
+DISK_FULL_REASON = "the worker ran out of disk space (ENOSPC): the run proves nothing"
 
 
 def worker_side_no_evidence(outcome: dict[str, Any]) -> bool:
@@ -218,10 +223,11 @@ def worker_side_no_evidence(outcome: dict[str, Any]) -> bool:
     killed for memory on vmi workers. On 10-12 native-cancel-contract printed 43 passed on
     hz4, then rch could not confirm completion. `last_covered` stayed at 8f72be32a from
     10-10, so every run rebatched about 620 commits and posted its receipt on every bead
-    they cite.
+    they cite. A full disk on the worker is the same kind of fault.
     """
     return outcome["verdict"] == VERDICT_NO_EVIDENCE and (
-        outcome["reason"] == KILLED_REASON or outcome["reason"].startswith(NO_REMOTE_EXIT_REASON)
+        outcome["reason"] in (KILLED_REASON, DISK_FULL_REASON)
+        or outcome["reason"].startswith(NO_REMOTE_EXIT_REASON)
     )
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -701,6 +707,12 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         # Cargo refused the target list itself (for example a bisect probe asked for a
         # target that does not exist yet at that commit): nothing was tested.
         result["reason"] = f"cargo has no target `{missing_target.group(1)}` at this commit"
+        return result
+    if DISK_FULL_RE.search(clean):
+        # A full disk invalidates the whole run, whichever crate it hit. On 10-13 hz4 ran
+        # out of space compiling the conformance test at 7816ce34f; that compile error
+        # was read as a red and bisected for hours (br-asupersync-bi2462.147).
+        result["reason"] = DISK_FULL_REASON
         return result
 
     failing: list[str] = []
