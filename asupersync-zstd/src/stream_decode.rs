@@ -2,7 +2,7 @@
 
 use crate::huffman::HuffmanTable;
 use crate::literals::decode_literals;
-use crate::sequences::{MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
+use crate::sequences::{BlockBounds, MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
 use crate::{DecodeError, DecodeLimits, StreamProgress, StreamStatus, Xxh64};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -121,16 +121,22 @@ impl FrameState {
                 self.history.resize(start + size, block[0]);
             }
             2 => {
-                let used = decode_literals(block, &mut self.huffman, &mut self.literals)?;
+                let block_maximum = self.window.min(MAX_BLOCK_OUTPUT);
+                let used =
+                    decode_literals(block, block_maximum, &mut self.huffman, &mut self.literals)?;
                 let section = block.get(used..).ok_or(DecodeError::Truncated)?;
+                let bounds = BlockBounds {
+                    frame_start: 0,
+                    window: self.window,
+                    block_maximum,
+                    limit: cap,
+                };
                 decode_sequences(
                     section,
                     &self.literals,
                     &mut self.sequences,
                     &mut self.history,
-                    0,
-                    self.window,
-                    cap,
+                    bounds,
                 )?;
             }
             _ => return Err(DecodeError::Malformed("reserved block type")),
@@ -310,9 +316,8 @@ impl StreamDecoder {
         loop {
             let needed = match self.stage {
                 Stage::Magic | Stage::SkipLength | Stage::Checksum => 4,
-                Stage::Descriptor => 1,
+                Stage::Descriptor | Stage::Block { kind: 1, .. } => 1,
                 Stage::BlockHeader => 3,
-                Stage::Block { kind: 1, .. } => 1,
                 Stage::Header(size) | Stage::Block { size, .. } => size,
                 Stage::Skip(remaining) => {
                     let skipped = remaining.min(input.len() - read).min(MAX_BLOCK_OUTPUT);
@@ -483,7 +488,7 @@ mod tests {
         output_chunk: usize,
     ) -> Result<Vec<u8>, DecodeError> {
         let mut decoder = StreamDecoder::new(limits);
-        let mut decoded = Vec::new();
+        let mut plain = Vec::new();
         let mut out = vec![0_u8; output_chunk];
         for chunk in wire.chunks(input_chunk) {
             let mut offset = 0;
@@ -493,8 +498,8 @@ mod tests {
                 assert!(step.input_read <= chunk.len() - offset);
                 assert!(step.output_written <= out.len());
                 offset += step.input_read;
-                decoded.extend_from_slice(&out[..step.output_written]);
-                assert!(decoded.len() <= limits.max_output);
+                plain.extend_from_slice(&out[..step.output_written]);
+                assert!(plain.len() <= limits.max_output);
                 if let Some(frame) = &decoder.frame {
                     assert!(frame.history.len() <= frame.window * 2 + MAX_BLOCK_OUTPUT);
                     assert!(frame.literals.len() <= MAX_BLOCK_OUTPUT);
@@ -504,7 +509,7 @@ mod tests {
         }
         loop {
             let step = decoder.finish(&mut out)?;
-            decoded.extend_from_slice(&out[..step.output_written]);
+            plain.extend_from_slice(&out[..step.output_written]);
             if step.status == StreamStatus::Finished {
                 break;
             }
@@ -512,7 +517,7 @@ mod tests {
             assert!(step.output_written > 0);
         }
         assert_eq!(decoder.finish(&mut []).unwrap().status, StreamStatus::Finished);
-        Ok(decoded)
+        Ok(plain)
     }
 
     fn block_header(size: usize, kind: u32, last: bool, out: &mut Vec<u8>) {
@@ -642,7 +647,10 @@ mod tests {
             ..DecodeLimits::new(4)
         };
         assert_eq!(decode_chunks(&skip, strict, 1, 1), Err(DecodeError::BadMagic));
-        assert!(decode_chunks(&skip, DecodeLimits::new(0), 1, 1).unwrap().is_empty());
+        assert_eq!(
+            decode_chunks(&skip, DecodeLimits::new(0), 1, 1),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
@@ -657,7 +665,7 @@ mod tests {
         let payload = vec![0_u8; MAX_BLOCK_OUTPUT + 1];
         let step = decoder.decode(&payload, &mut []).unwrap();
         assert_eq!(step.input_read, MAX_BLOCK_OUTPUT);
-        assert!(decoder.input.is_empty());
+        assert_eq!(decoder.input, Vec::<u8>::new());
         assert_eq!(decoder.finish(&mut []).unwrap_err(), DecodeError::Truncated);
     }
 
@@ -747,7 +755,10 @@ mod tests {
         assert_eq!(decode_chunks(&wire, DecodeLimits::new(1024), 1, 7).unwrap(), vec![b'x'; 1024]);
         for level in [Level::Store, Level::Fast] {
             let empty = encode_all(&[], &EncodeParams::new(level));
-            assert!(decode_chunks(&empty, DecodeLimits::new(0), 1, 1).unwrap().is_empty());
+            assert_eq!(
+                decode_chunks(&empty, DecodeLimits::new(0), 1, 1),
+                Ok(Vec::new())
+            );
         }
     }
 

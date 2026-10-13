@@ -1,11 +1,5 @@
-//! FSE (finite state entropy) decoding tables, RFC 8878 §4.1.
-
-// The sequences decoder (br-asupersync-t1fblr.8) is the consumer; until it
-// lands these tables are exercised only by their tests.
-#![allow(
-    dead_code,
-    reason = "consumed by the zstd sequences decoder, br-asupersync-t1fblr.8"
-)]
+//! FSE (finite state entropy) tables, RFC 8878 §4.1: decoding, and the
+//! encoder side (normalization, table descriptions, tANS encoding).
 
 use crate::bitio::{BackwardBitReader, BitWriter, extract};
 
@@ -234,11 +228,13 @@ impl DecodeTable {
     }
 
     /// The table's accuracy log.
+    #[cfg(test)]
     pub const fn accuracy_log(&self) -> u8 {
         self.accuracy_log
     }
 
     /// All cells, indexed by state.
+    #[cfg(test)]
     pub fn cells(&self) -> &[Cell] {
         &self.cells
     }
@@ -437,11 +433,6 @@ impl EncodeTable {
             state_table,
             transforms,
         }
-    }
-
-    /// The table's accuracy log.
-    pub const fn accuracy_log(&self) -> u8 {
-        self.accuracy_log
     }
 
     fn state_at(&self, index: i64) -> usize {

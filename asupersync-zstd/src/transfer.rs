@@ -37,7 +37,7 @@ impl Transform for StreamEncoder {
     }
 
     fn finish(&mut self, output: &mut [u8]) -> io::Result<StreamProgress> {
-        Ok(StreamEncoder::finish(self, output))
+        Ok(Self::finish(self, output))
     }
 }
 
@@ -338,16 +338,16 @@ mod tests {
     }
 
     fn complete<F: Future>(future: F) -> F::Output {
-        let wakes = Arc::new(WakeCount::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let wake_count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
         let mut cx = Context::from_waker(&waker);
         let mut future = pin!(future);
         for _ in 0..500_000 {
-            let before = wakes.0.load(Ordering::Relaxed);
+            let before = wake_count.0.load(Ordering::Relaxed);
             match future.as_mut().poll(&mut cx) {
                 Poll::Ready(result) => return result,
                 Poll::Pending => assert!(
-                    wakes.0.load(Ordering::Relaxed) > before,
+                    wake_count.0.load(Ordering::Relaxed) > before,
                     "the scripted callbacks or transfer budget must arrange another poll"
                 ),
             }
@@ -415,7 +415,7 @@ mod tests {
             Self { chunk, ..Self::default() }
         }
         fn write(&mut self, cx: &mut Context<'_>, bytes: &[u8]) -> Poll<io::Result<usize>> {
-            assert!(!bytes.is_empty());
+            assert_ne!(bytes.len(), 0, "a write is never asked to write nothing");
             self.calls += 1;
             if self.interrupt_at.is_some_and(|at| self.bytes.len() >= at) {
                 self.interrupt_at = None;
@@ -504,7 +504,7 @@ mod tests {
         assert_eq!(source.offset, input.len());
         assert_eq!(session.progress().bytes_read, input.len() as u64);
         assert_eq!(session.progress().bytes_written, 0);
-        assert!(sink.bytes.is_empty());
+        assert_eq!(sink.bytes, Vec::<u8>::new());
         sink.blocked = false;
         run(&mut session, &mut source, &mut sink).unwrap();
         let expected: Vec<u8> = input.chunks(8).flat_map(|part| encode_all(part, &params)).collect();
@@ -535,7 +535,7 @@ mod tests {
         let mut sink = Sink::new(64);
         assert_eq!(run(&mut session, &mut source, &mut sink).unwrap_err().kind(), io::ErrorKind::Interrupted);
         assert_eq!(session.progress().bytes_read, 4);
-        assert!(sink.bytes.is_empty());
+        assert_eq!(sink.bytes, Vec::<u8>::new());
         run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(sink.bytes, encode_all(b"partial frame", &params));
     }
@@ -604,14 +604,14 @@ mod tests {
         let mut session = EncodeTransfer::new(params, 1024).unwrap();
         let mut source = Source::new(&input, 8192);
         let mut sink = Sink::new(8192);
-        let wakes = Arc::new(WakeCount::default());
-        let waker = Waker::from(Arc::clone(&wakes));
+        let wake_count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&wake_count));
         let mut cx = Context::from_waker(&waker);
         {
             let mut future = pin!(session.run(&mut source, &mut sink, Source::read, Sink::write, Sink::flush));
             assert!(future.as_mut().poll(&mut cx).is_pending());
         }
-        assert!(wakes.0.load(Ordering::Relaxed) > 0);
+        assert!(wake_count.0.load(Ordering::Relaxed) > 0);
         assert!(session.progress().bytes_read < input.len() as u64);
         run(&mut session, &mut source, &mut sink).unwrap();
         assert_eq!(decode_all(&sink.bytes, &DecodeLimits::new(input.len())).unwrap(), input);

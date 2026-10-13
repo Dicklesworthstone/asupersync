@@ -3,9 +3,6 @@
 use crate::frame::DecodeError;
 use crate::huffman::{HuffmanCode, HuffmanTable, read_tree_description};
 
-/// The largest literals section a block may regenerate (Block_Maximum_Size).
-const MAX_LITERALS: usize = 128 * 1024;
-
 fn field(block: &[u8], start: usize, width: usize) -> Result<u64, DecodeError> {
     let bytes = block
         .get(start..start + width)
@@ -22,11 +19,13 @@ fn size(value: u64) -> Result<usize, DecodeError> {
 }
 
 /// Decodes the literals section at the start of `block` into `literals`
-/// (cleared first). `huffman` holds the previous block's table for
-/// Treeless literals and receives a newly described table. Returns the
-/// bytes the section used.
+/// (cleared first). `block_maximum` is the frame's Block_Maximum_Size, the
+/// most literals one block may regenerate. `huffman` holds the previous
+/// block's table for Treeless literals and receives a newly described
+/// table. Returns the bytes the section used.
 pub fn decode_literals(
     block: &[u8],
+    block_maximum: usize,
     huffman: &mut Option<HuffmanTable>,
     literals: &mut Vec<u8>,
 ) -> Result<usize, DecodeError> {
@@ -41,7 +40,7 @@ pub fn decode_literals(
             1 => (size((field(block, 0, 2)? >> 4) & 0x0FFF)?, 2),
             _ => (size((field(block, 0, 3)? >> 4) & 0x000F_FFFF)?, 3),
         };
-        if regenerated > MAX_LITERALS {
+        if regenerated > block_maximum {
             return Err(DecodeError::Malformed("literals exceed the block maximum"));
         }
         if kind == 0 {
@@ -65,7 +64,7 @@ pub fn decode_literals(
     let mask = (1_u64 << bits) - 1;
     let regenerated = size((value >> 4) & mask)?;
     let compressed = size((value >> (4 + bits)) & mask)?;
-    if regenerated > MAX_LITERALS {
+    if regenerated > block_maximum {
         return Err(DecodeError::Malformed("literals exceed the block maximum"));
     }
     let data = block
@@ -91,8 +90,8 @@ pub fn decode_literals(
     Ok(header + compressed)
 }
 
-/// Appends the literals section for `literals` (at most [`MAX_LITERALS`]
-/// bytes): Huffman-compressed when that is smaller than storing them raw.
+/// Appends the literals section for `literals` (at most one 128 KiB block's
+/// worth): Huffman-compressed when that is smaller than storing them raw.
 pub fn encode_literals(literals: &[u8], out: &mut Vec<u8>) {
     if let Some(section) = compressed_section(literals) {
         out.extend_from_slice(&section);

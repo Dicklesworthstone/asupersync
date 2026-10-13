@@ -2,7 +2,7 @@
 
 use crate::huffman::HuffmanTable;
 use crate::literals::decode_literals;
-use crate::sequences::{MAX_BLOCK_OUTPUT, SequenceState, decode_sequences};
+use crate::sequences::{BlockBounds, MAX_BLOCK_OUTPUT, SequenceState, decode_sequences, reserve};
 use crate::xxhash64::Xxh64;
 
 const FRAME_MAGIC: u32 = 0xFD2F_B528;
@@ -99,14 +99,49 @@ fn read_le(input: &[u8], pos: usize, width: usize) -> Result<u64, DecodeError> {
 /// `limits`.
 pub fn decode_all(input: &[u8], limits: &DecodeLimits) -> Result<Vec<u8>, DecodeError> {
     let mut out = Vec::new();
-    let mut pos = 0;
+    decode_frames(input, limits, &mut out)?;
+    Ok(out)
+}
+
+/// Decodes every frame in `input` and appends the output to `out`.
+///
+/// It reuses `out`'s capacity, so a buffer kept across calls stops
+/// allocating once it is large enough. `limits.max_output` bounds the bytes
+/// appended, and no frame reaches back into what `out` held before. Returns
+/// the bytes appended; on error, `out` is truncated back to its previous
+/// length.
+pub fn decode_append(
+    input: &[u8],
+    out: &mut Vec<u8>,
+    limits: &DecodeLimits,
+) -> Result<usize, DecodeError> {
+    let start = out.len();
+    let absolute = DecodeLimits {
+        max_output: start.saturating_add(limits.max_output),
+        ..*limits
+    };
+    let decoded = decode_frames(input, &absolute, out);
+    if decoded.is_err() {
+        out.truncate(start);
+    }
+    decoded.map(|()| out.len() - start)
+}
+
+/// Decodes every frame in `input`, appending to `out`, whose final length
+/// `limits.max_output` bounds.
+fn decode_frames(
+    input: &[u8],
+    limits: &DecodeLimits,
+    out: &mut Vec<u8>,
+) -> Result<(), DecodeError> {
     if input.is_empty() {
         return Err(DecodeError::Truncated);
     }
+    let mut pos = 0;
     while pos < input.len() {
-        pos += decode_frame(&input[pos..], limits, &mut out)?;
+        pos += decode_frame(&input[pos..], limits, out)?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Decodes every frame in `input` into `out`, which also bounds the output:
@@ -211,7 +246,26 @@ fn decode_frame(
     }
 
     let frame_start = out.len();
-    let block_maximum = window.min(MAX_BLOCK_OUTPUT);
+    // A frame that declares its size may not produce more: it is refused as
+    // soon as a block would pass the declared end, not after decoding up to
+    // `max_output` (the check above keeps that end within `max_output`).
+    let (limit, overflow) = content_size.map_or(
+        (limits.max_output, DecodeError::OutputTooLarge),
+        |declared| (frame_start + declared, DecodeError::ContentSizeMismatch),
+    );
+    let overflowed = |error: DecodeError| {
+        if error == DecodeError::OutputTooLarge {
+            overflow
+        } else {
+            error
+        }
+    };
+    let bounds = BlockBounds {
+        frame_start,
+        window,
+        block_maximum: window.min(MAX_BLOCK_OUTPUT),
+        limit,
+    };
     let mut huffman: Option<HuffmanTable> = None;
     let mut sequences = SequenceState::new()?;
     let mut literals = Vec::new();
@@ -221,7 +275,7 @@ fn decode_frame(
         let last = header & 1 != 0;
         let block_type = (header >> 1) & 3;
         let block_size = usize::try_from(header >> 3).map_err(|_| DecodeError::Truncated)?;
-        if block_size > block_maximum {
+        if block_size > bounds.block_maximum {
             return Err(DecodeError::Malformed(
                 "block larger than Block_Maximum_Size",
             ));
@@ -231,17 +285,13 @@ fn decode_frame(
                 let bytes = input
                     .get(pos..pos + block_size)
                     .ok_or(DecodeError::Truncated)?;
-                if out.len() + block_size > limits.max_output {
-                    return Err(DecodeError::OutputTooLarge);
-                }
+                reserve(out, block_size, limit).map_err(overflowed)?;
                 out.extend_from_slice(bytes);
                 pos += block_size;
             }
             1 => {
                 let byte = *input.get(pos).ok_or(DecodeError::Truncated)?;
-                if out.len() + block_size > limits.max_output {
-                    return Err(DecodeError::OutputTooLarge);
-                }
+                reserve(out, block_size, limit).map_err(overflowed)?;
                 out.resize(out.len() + block_size, byte);
                 pos += 1;
             }
@@ -249,17 +299,16 @@ fn decode_frame(
                 let block = input
                     .get(pos..pos + block_size)
                     .ok_or(DecodeError::Truncated)?;
-                let used = decode_literals(block, &mut huffman, &mut literals)?;
+                // The block decodes to at most Block_Maximum_Size bytes:
+                // make room for that much (within the frame's limit) once,
+                // so the block never reallocates the output.
+                let most = bounds.block_maximum.min(limit.saturating_sub(out.len()));
+                reserve(out, most, limit).map_err(overflowed)?;
+                let used =
+                    decode_literals(block, bounds.block_maximum, &mut huffman, &mut literals)?;
                 let section = block.get(used..).ok_or(DecodeError::Truncated)?;
-                decode_sequences(
-                    section,
-                    &literals,
-                    &mut sequences,
-                    out,
-                    frame_start,
-                    window,
-                    limits.max_output,
-                )?;
+                decode_sequences(section, &literals, &mut sequences, out, bounds)
+                    .map_err(overflowed)?;
                 pos += block_size;
             }
             _ => return Err(DecodeError::Malformed("reserved block type")),
@@ -288,7 +337,7 @@ fn decode_frame(
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, DecodeLimits, decode_all, decode_into};
+    use super::{DecodeError, DecodeLimits, decode_all, decode_append, decode_into};
     use crate::xxhash64::xxh64;
 
     const FRAMES: &str = include_str!("../tests/vectors/frames_zstd_cli.txt");
@@ -421,6 +470,116 @@ mod tests {
         assert_eq!(
             decode_all(&[], &DecodeLimits::new(1)),
             Err(DecodeError::Truncated)
+        );
+    }
+
+    /// Block_Maximum_Size is min(window, 128 KiB) for the decoded size of
+    /// compressed blocks too. Both frames have a 1 KiB window and a small
+    /// compressed block that decodes to more than 1 KiB: RLE literals of 2000
+    /// bytes, and one literal plus a 1027-byte match. Reference zstd 1.5.7
+    /// refuses both ("Data corruption detected") and decodes the same blocks
+    /// under a 128 KiB window (descriptor 0x38).
+    #[test]
+    fn small_windows_bound_compressed_blocks() {
+        for (frame, expected) in [
+            ("28B52FFD0000250000057D6100", 2000),
+            ("28B52FFD00004D00000861015401002E0004", 1028),
+        ] {
+            let mut frame = hex(frame);
+            assert!(
+                matches!(
+                    decode_all(&frame, &DecodeLimits::new(1 << 20)),
+                    Err(DecodeError::Malformed(_))
+                ),
+                "{frame:02X?}"
+            );
+            frame[5] = 0x38;
+            assert_eq!(
+                decode_all(&frame, &DecodeLimits::new(1 << 20)),
+                Ok(vec![b'a'; expected])
+            );
+        }
+    }
+
+    /// decode_append adds after what the buffer holds, bounds only the bytes
+    /// it appends, reuses the buffer's capacity, and leaves the buffer as it
+    /// was on error.
+    #[test]
+    fn decode_append_reuses_the_buffer_and_restores_it_on_error() {
+        let (label, length, _, frame) = vectors().into_iter().find(|v| v.1 > 10_000).unwrap();
+        let expected = decode_all(&frame, &DecodeLimits::new(length)).unwrap();
+        let mut out = b"prefix".to_vec();
+        out.reserve(length);
+        let buffer = out.as_ptr();
+        assert_eq!(
+            decode_append(&frame, &mut out, &DecodeLimits::new(length)),
+            Ok(length),
+            "{label}"
+        );
+        assert_eq!(&out[..6], b"prefix");
+        assert!(out[6..] == expected[..], "{label}");
+        assert_eq!(out.as_ptr(), buffer, "{label}: no reallocation");
+
+        out.truncate(6);
+        assert_eq!(
+            decode_append(&frame, &mut out, &DecodeLimits::new(length - 1)),
+            Err(DecodeError::OutputTooLarge),
+            "{label}: the limit counts appended bytes only"
+        );
+        assert_eq!(out, b"prefix");
+        assert!(
+            decode_append(
+                &frame[..frame.len() / 2],
+                &mut out,
+                &DecodeLimits::new(length)
+            )
+            .is_err(),
+            "{label}: truncated"
+        );
+        assert_eq!(out, b"prefix", "{label}: restored after an error");
+    }
+
+    /// A 3-byte block header.
+    fn block_header(size: u32, block_type: u32, last: bool) -> [u8; 3] {
+        let header = (size << 3) | (block_type << 1) | u32::from(last);
+        let bytes = header.to_le_bytes();
+        [bytes[0], bytes[1], bytes[2]]
+    }
+
+    /// A frame that declares its size is refused as soon as a block passes
+    /// the declared end, before decoding on toward `max_output`: here the
+    /// first 128 KiB RLE block of a frame declaring 256 bytes, where
+    /// decoding the second block would only then pass `max_output`.
+    #[test]
+    fn the_declared_size_bounds_decoding() {
+        // Content-size flag 1 (2 bytes, plus 256), window 128 KiB, size 256.
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x40, 0x38, 0x00, 0x00];
+        for last in [false, true] {
+            frame.extend_from_slice(&block_header(128 * 1024, 1, last));
+            frame.push(b'a');
+        }
+        assert_eq!(
+            decode_all(&frame, &DecodeLimits::new(200_000)),
+            Err(DecodeError::ContentSizeMismatch)
+        );
+    }
+
+    /// Without a declared size, the output grows up to `max_output` and its
+    /// capacity never doubles past it.
+    #[test]
+    fn output_capacity_stays_within_the_limit() {
+        // No content size, window 128 KiB, RLE blocks of 40 000 and 30 000.
+        let mut frame = vec![0x28, 0xB5, 0x2F, 0xFD, 0x00, 0x38];
+        frame.extend_from_slice(&block_header(40_000, 1, false));
+        frame.push(b'x');
+        frame.extend_from_slice(&block_header(30_000, 1, true));
+        frame.push(b'y');
+        let out = decode_all(&frame, &DecodeLimits::new(70_000)).unwrap();
+        assert_eq!(out.len(), 70_000);
+        assert!(out.capacity() < 80_000, "capacity {}", out.capacity());
+        assert_eq!(
+            decode_all(&frame, &DecodeLimits::new(69_999)),
+            Err(DecodeError::OutputTooLarge)
         );
     }
 

@@ -1,24 +1,14 @@
-//! Bit readers for Zstandard (RFC 8878 §4.1, §4.2).
+//! Bitstreams for Zstandard (RFC 8878 §4.1, §4.2).
 //!
 //! FSE and Huffman bitstreams are read backward: the last byte carries an end
 //! mark (its highest set bit), and bits are consumed from the highest unread
-//! position down toward bit 0 of the first byte. Headers are read forward as
-//! little-endian fields.
+//! position down toward bit 0 of the first byte. [`BitWriter`] writes them.
 
-// The FSE/Huffman decoder (br-asupersync-t1fblr.6+) is the consumer; until it
-// lands these readers are exercised only by their tests.
-#![allow(
-    dead_code,
-    reason = "consumed by the zstd decoder, br-asupersync-t1fblr.6+"
-)]
-
-/// A malformed or exhausted bitstream.
+/// A malformed bitstream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BitError {
     /// The stream is empty or its last byte is zero, so it has no end mark.
     MissingEndMark,
-    /// A forward read ran past the end of the input.
-    Truncated,
 }
 
 /// The largest single read: with at most 7 bits of misalignment it still
@@ -122,14 +112,23 @@ pub fn extract(data: &[u8], start: usize, count: usize) -> u64 {
     }
     let first = start / 8;
     let shift = start % 8;
-    let mut window = [0_u8; 8];
-    let end = first.saturating_add(8).min(data.len());
-    if let (Some(dst), Some(src)) = (
-        window.get_mut(..end.saturating_sub(first)),
-        data.get(first..end),
-    ) {
-        dst.copy_from_slice(src);
-    }
+    // Eight whole bytes are almost always available: one fixed-size load.
+    // Only the last bytes of the input take the bounded copy.
+    let window = first
+        .checked_add(8)
+        .and_then(|end| data.get(first..end))
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .unwrap_or_else(|| {
+            let mut window = [0_u8; 8];
+            let end = first.saturating_add(8).min(data.len());
+            if let (Some(dst), Some(src)) = (
+                window.get_mut(..end.saturating_sub(first)),
+                data.get(first..end),
+            ) {
+                dst.copy_from_slice(src);
+            }
+            window
+        });
     let word = u64::from_le_bytes(window) >> shift;
     if count >= 64 {
         word
@@ -210,59 +209,9 @@ impl BitWriter {
     }
 }
 
-/// Reads little-endian header fields front to back.
-pub struct ForwardReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> ForwardReader<'a> {
-    /// A reader at the start of `data`.
-    pub const fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    /// The next `count` bytes.
-    pub fn read_bytes(&mut self, count: usize) -> Result<&'a [u8], BitError> {
-        let end = self.pos.checked_add(count).ok_or(BitError::Truncated)?;
-        let bytes = self.data.get(self.pos..end).ok_or(BitError::Truncated)?;
-        self.pos = end;
-        Ok(bytes)
-    }
-
-    /// The next byte.
-    pub fn read_u8(&mut self) -> Result<u8, BitError> {
-        self.read_bytes(1)?
-            .first()
-            .copied()
-            .ok_or(BitError::Truncated)
-    }
-
-    /// A little-endian unsigned field of `count` (1..=8) bytes.
-    pub fn read_le(&mut self, count: usize) -> Result<u64, BitError> {
-        debug_assert!((1..=8).contains(&count), "field of {count} bytes");
-        let bytes = self.read_bytes(count.min(8))?;
-        let mut word = [0_u8; 8];
-        if let Some(dst) = word.get_mut(..bytes.len()) {
-            dst.copy_from_slice(bytes);
-        }
-        Ok(u64::from_le_bytes(word))
-    }
-
-    /// Bytes consumed so far.
-    pub const fn position(&self) -> usize {
-        self.pos
-    }
-
-    /// The unread tail.
-    pub fn rest(&self) -> &'a [u8] {
-        self.data.get(self.pos..).unwrap_or(&[])
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{BackwardBitReader, BitError, BitWriter, ForwardReader, MAX_READ_BITS};
+    use super::{BackwardBitReader, BitError, BitWriter, MAX_READ_BITS};
 
     fn lcg(seed: u64) -> impl FnMut() -> u64 {
         let mut state = seed;
@@ -399,19 +348,5 @@ mod tests {
         writer.add(0x3FF, 10);
         assert_eq!(writer.into_bytes(), [0b1111_0101, 0xFF, 0b11]);
         assert_eq!(BitWriter::new().finish(), [1]);
-    }
-
-    #[test]
-    fn forward_reader_reads_fields_and_reports_truncation() {
-        let data = [0x01, 0x02, 0x03, 0x04, 0x05];
-        let mut reader = ForwardReader::new(&data);
-        assert_eq!(reader.read_u8(), Ok(0x01));
-        assert_eq!(reader.read_le(3), Ok(0x04_03_02));
-        assert_eq!(reader.position(), 4);
-        assert_eq!(reader.rest(), &[0x05]);
-        assert_eq!(reader.read_le(2), Err(BitError::Truncated));
-        assert_eq!(reader.position(), 4, "a failed read consumes nothing");
-        assert_eq!(reader.read_u8(), Ok(0x05));
-        assert_eq!(reader.read_u8(), Err(BitError::Truncated));
     }
 }
