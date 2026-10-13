@@ -37,6 +37,24 @@ pub struct NativeH3ListenerConfig {
     pub endpoint: ManagedEndpointConfig,
     /// Per-connection request assembly and dispatch limits.
     pub router: NativeH3RouterConfig,
+    /// Optional uncompressed size limit for each incoming HTTP/3 field section.
+    ///
+    /// Advertised as SETTINGS_MAX_FIELD_SECTION_SIZE on every connection and
+    /// enforced by its session before publishing request HEADERS or trailers.
+    /// Count name and value bytes plus 32 bytes per field occurrence, including
+    /// duplicates and pseudo-headers. The limit is inclusive and each section
+    /// has its own allowance; request bodies use the separate body budgets.
+    /// Excess sections reset only their stream with H3_EXCESSIVE_LOAD, without
+    /// waiting for FIN. An initial refusal admits no handler or request region;
+    /// a refused streaming trailer cancels the already-owned request normally.
+    ///
+    /// `None` preserves the existing unlimited setting. `Some(0)` rejects all
+    /// nonempty sections, including every valid initial request. Values above
+    /// the QUIC variable-integer maximum are rejected before binding a socket.
+    /// This is application admission, not a decoder-memory or RSS bound:
+    /// QPACK plans, expanded fields, encoded frames and QUIC reassembly have
+    /// already allocated independently before the session applies this limit.
+    pub max_request_field_section_size: Option<u64>,
     /// Maximum admitted request regions across all connections.
     pub max_concurrent_requests: usize,
     /// Optional listener-wide budget for request-body capacity reservations.
@@ -151,6 +169,7 @@ impl Default for NativeH3ListenerConfig {
             router: NativeH3RouterConfig::default()
                 .max_pending_requests(16)
                 .max_in_flight_dispatches(16),
+            max_request_field_section_size: None,
             max_concurrent_requests: 128,
             max_total_request_body_reservation_bytes: None,
             max_pending_handshakes: 16,
@@ -170,6 +189,13 @@ impl Default for NativeH3ListenerConfig {
 }
 
 impl NativeH3ListenerConfig {
+    fn local_h3_settings(&self) -> crate::http::h3::H3Settings {
+        crate::http::h3::H3Settings {
+            max_field_section_size: self.max_request_field_section_size,
+            ..crate::http::h3::H3Settings::default()
+        }
+    }
+
     fn request_body_reservation_bytes(&self) -> Option<usize> {
         match self.streaming_request_body_buffer_bytes {
             Some(queue) => queue.get().checked_add(streaming_chunk_bytes(queue)),
@@ -328,6 +354,15 @@ impl NativeH3Listener {
         {
             return Err(ManagedEndpointError::InvalidConfig(
                 "HTTP/3 listener counts and lifetime limits must be nonzero".to_string(),
+            )
+            .into());
+        }
+        if config
+            .max_request_field_section_size
+            .is_some_and(|limit| limit > crate::net::quic_core::QUIC_VARINT_MAX)
+        {
+            return Err(ManagedEndpointError::InvalidConfig(
+                "HTTP/3 request field-section limit exceeds the QUIC varint range".to_string(),
             )
             .into());
         }
@@ -1532,7 +1567,7 @@ impl ListenerState {
                     .inner_mut()
                     .set_remote_stream_limits(request_stream_credit(&self.config, 0), remote_uni);
                 session
-                    .initialize(cx, connection, crate::http::h3::H3Settings::default())
+                    .initialize(cx, connection, self.config.local_h3_settings())
                     .map(|control| {
                         (
                             control,
@@ -3007,5 +3042,44 @@ mod response_retention_tests {
         assert_eq!(budget.used.load(Ordering::Acquire), 0);
         assert_eq!(budget.peak.load(Ordering::Acquire), 0);
         assert_eq!(budget.rejected.load(Ordering::Acquire), 1);
+    }
+}
+
+#[cfg(test)]
+mod request_field_section_settings_tests {
+    use super::*;
+    use crate::http::h3::H3Settings;
+    use crate::net::quic_core::QUIC_VARINT_MAX;
+
+    #[test]
+    fn omitted_field_limit_preserves_default_wire_settings() {
+        let config = NativeH3ListenerConfig::default();
+        assert_eq!(config.max_request_field_section_size, None);
+        assert_eq!(config.local_h3_settings(), H3Settings::default());
+        let mut wire = Vec::new();
+        config.local_h3_settings().encode_payload(&mut wire).unwrap();
+        assert!(wire.is_empty());
+    }
+
+    #[test]
+    fn field_settings_preserve_inclusive_range_and_do_not_reduce_body_reservations() {
+        for streaming in [None, NonZeroUsize::new(64)] {
+            let mut config = NativeH3ListenerConfig {
+                streaming_request_body_buffer_bytes: streaming,
+                ..NativeH3ListenerConfig::default()
+            };
+            let reserved = config.request_body_reservation_bytes();
+            for limit in [0, 1, 63, 64, 16_383, 16_384, 65_536, QUIC_VARINT_MAX] {
+                config.max_request_field_section_size = Some(limit);
+                let mut wire = Vec::new();
+                config.local_h3_settings().encode_payload(&mut wire).unwrap();
+                let decoded = H3Settings::decode_payload(&wire).unwrap();
+                assert_eq!(decoded.max_field_section_size, Some(limit));
+                assert_eq!(decoded.qpack_max_table_capacity, None);
+                assert_eq!(decoded.qpack_blocked_streams, None);
+                assert!(decoded.unknown.is_empty());
+                assert_eq!(config.request_body_reservation_bytes(), reserved);
+            }
+        }
     }
 }
