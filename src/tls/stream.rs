@@ -492,6 +492,12 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         match self.conn.read_tls(&mut adapter) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            // EINTR is not evidence of a failed TLS session. Re-poll rather
+            // than closing the stream or stranding an unregistered waker.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
@@ -665,7 +671,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                     return Poll::Ready(Ok(()));
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
-                Err(e) => return Poll::Ready(Err(e)),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    return Poll::Ready(Err(self.fail_read(e.kind(), e.to_string())));
+                }
             }
 
             // Need more data - read from underlying IO
@@ -686,7 +695,13 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
                         ));
                     }
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                // A transport read failure means the authenticated session
+                // is unusable. Do not leave Ready/exporter access enabled,
+                // and repeat the exact failure on subsequent reads instead
+                // of turning it into clean EOF after a transport recovery.
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(self.fail_read(e.kind(), e.to_string())));
+                }
                 Poll::Pending => return Poll::Pending,
             }
         }

@@ -35,6 +35,7 @@ struct MemoryIo {
     buffered: Vec<u8>,
     shutdown_calls: usize,
     transport_eof: bool,
+    read_errors: VecDeque<io::ErrorKind>,
 }
 
 impl AsyncRead for MemoryIo {
@@ -46,6 +47,9 @@ impl AsyncRead for MemoryIo {
         self.io_calls += 1;
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
+        }
+        if let Some(kind) = self.read_errors.pop_front() {
+            return Poll::Ready(Err(kind.into()));
         }
         let mut incoming = self.incoming.borrow_mut();
         if incoming.is_empty() {
@@ -1121,6 +1125,83 @@ fn corrupt_or_truncated_records_permanently_revoke_exporter_access() {
                     assert_terminal_handshake(receiver);
                 }
             }
+        }
+    }
+}
+
+#[test]
+fn fatal_transport_read_errors_revoke_exporter_access_and_remain_sticky() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_receives in [true, false] {
+            for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+                let (cc, sc) = configs(&[version], None, true);
+                let (mut client, mut server) = streams(&cc, &sc);
+                establish(&mut client, &mut server);
+                let (receiver, sender) = if client_receives {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                if version.version == rustls::ProtocolVersion::TLSv1_3 {
+                    assert_eq!(
+                        receiver.tls_exporter_channel_binding().unwrap(),
+                        sender.tls_exporter_channel_binding().unwrap()
+                    );
+                }
+                receiver.io.read_errors.push_back(kind);
+                let mut cx = Context::from_waker(Waker::noop());
+                let mut bytes = [0; 64];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(matches!(
+                    Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
+                    Poll::Ready(Err(error)) if error.kind() == kind
+                ));
+                assert!(buf.filled().is_empty());
+                assert!(receiver.is_closed());
+                assert_disconnected(receiver);
+
+                // Recovering the underlying transport cannot make this TLS
+                // session usable or turn the original failure into clean EOF.
+                let io_calls = receiver.io.io_calls;
+                for _ in 0..3 {
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(matches!(
+                        Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
+                        Poll::Ready(Err(error)) if error.kind() == kind
+                    ));
+                    assert!(buf.filled().is_empty());
+                    assert_eq!(receiver.io.io_calls, io_calls);
+                    assert_terminal_handshake(receiver);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn interrupted_transport_reads_preserve_live_tls_and_exporter() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_receives in [true, false] {
+            let (cc, sc) = configs(&[version], None, true);
+            let (mut client, mut server) = streams(&cc, &sc);
+            establish(&mut client, &mut server);
+            let (receiver, sender) = if client_receives {
+                (&mut client, &mut server)
+            } else {
+                (&mut server, &mut client)
+            };
+            let binding = receiver.tls_exporter_channel_binding().ok();
+            receiver.io.read_errors.push_back(io::ErrorKind::Interrupted);
+            let mut cx = Context::from_waker(Waker::noop());
+            let mut bytes = [0; 64];
+            let mut buf = ReadBuf::new(&mut bytes);
+            assert!(Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf).is_pending());
+            assert!(buf.filled().is_empty());
+            assert!(receiver.is_ready());
+            assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
+            send_and_read(sender, receiver);
+            assert!(receiver.is_ready());
+            assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
         }
     }
 }
