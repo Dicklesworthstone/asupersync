@@ -540,7 +540,7 @@ impl StagedAtomicWrite {
     /// The claimed commit is not owned by the caller's region: region close does not
     /// wait for it, and a rename still pending after drop can overwrite a later write
     /// to the same path. For a region-owned offloaded replacement use
-    /// [`crate::fs::ScopedFs::write_atomic`].
+    /// [`crate::fs::scoped::ScopedFs::write_atomic`].
     ///
     /// An error from the parent-directory sync is reported after the replacement has
     /// committed; it is not proof of rollback.
@@ -667,7 +667,7 @@ pub async fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) ->
 /// The claimed commit is not owned by the caller's region: region close does not
 /// wait for it, and a rename still pending after drop can overwrite a later write
 /// to the same path. For a region-owned offloaded replacement use
-/// [`crate::fs::ScopedFs::write_atomic`].
+/// [`crate::fs::scoped::ScopedFs::write_atomic`].
 ///
 /// An error from the parent-directory sync is reported after the replacement has
 /// committed; it is not proof of rollback.
