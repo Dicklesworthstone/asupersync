@@ -36,6 +36,8 @@ Changed `src/` files are mapped through the module tree (`mod` declarations,
 chain. Touched feature-gated modules add a `check-features` all-targets check and
 run the lib lane with those features, as one union: a break that shows only under
 a subset of them is not detected (`--with-all-features` checks the full set). A
+`clippy-features` lane lints every target under that union plus the required
+features of touched test targets, which no default lane builds. A
 changed file no crate root reaches is reported as unmapped: nothing compiles it.
 A touched workspace member crate (for example asupersync-macros) gets its own
 `cargo test -p <crate>` lane; its clippy is not run. Head lanes run `--parallel`
@@ -1615,6 +1617,38 @@ def targeted_tests(head: str, paths: list[str]) -> dict[str, Any]:
 LEAN_TEST_ENV = ["env", "CARGO_INCREMENTAL=0", "CARGO_PROFILE_TEST_DEBUG=0"]
 
 
+def feature_lanes(src_features: list[str], test_features: list[str], jobs: int) -> list[dict[str, Any]]:
+    """Lanes for what the default lanes never build. `check-features` compiles every
+    target with the touched modules' features. `clippy-features` lints every target
+    with those features and the required features of touched test targets (their
+    group keys). A lint in a required-features test target otherwise stays red
+    unseen: tests/quic_h3_listener_streaming.rs:534 (http3,tls) failed -D warnings
+    from 7091e0415 until e22d652a3 (asupersync-bi2462.147)."""
+    lanes: list[dict[str, Any]] = []
+    if src_features:
+        lanes.append(
+            {
+                "id": "check-features",
+                "kind": "build",
+                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--features", ",".join(src_features), "--keep-going", "--message-format=short"],
+            }
+        )
+    lint_features = sorted(set(src_features) | {f for key in test_features for f in key.split(",") if f})
+    if lint_features:
+        lanes.append(
+            {
+                "id": "clippy-features",
+                "kind": "build",
+                "argv": [
+                    "cargo", "clippy", "-j", str(jobs), "--all-targets", "--features", ",".join(lint_features),
+                    "--keep-going", "--message-format=short", "--", "-D", "warnings",
+                ],
+                "needs_clippy_component": True,
+            }
+        )
+    return lanes
+
+
 def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool) -> tuple[list[dict[str, Any]], list[str]]:
     lanes: list[dict[str, Any]] = [
         {"id": "check-default", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--keep-going", "--message-format=short"]},
@@ -1664,17 +1698,10 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
     mapped = targeted_tests(head, paths)
     groups, lib_filters, unmapped, src_features = mapped["groups"], mapped["lib_filters"], mapped["unmapped"], mapped["src_features"]
     feature_args = ["--features", ",".join(src_features)] if src_features else []
-    if src_features:
-        # Touched feature-gated modules are invisible to check-default: check every target
-        # with the union of their features (a subset-only break needs --with-all-features).
-        lanes.insert(
-            1,
-            {
-                "id": "check-features",
-                "kind": "build",
-                "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", *feature_args, "--keep-going", "--message-format=short"],
-            },
-        )
+    # Touched feature-gated modules are invisible to check-default: check every target
+    # with the union of their features (a subset-only break needs --with-all-features),
+    # and lint every target that union or a touched test target's features build.
+    lanes[1:1] = feature_lanes(src_features, list(groups), jobs)
     for features, names in sorted(groups.items()):
         argv = [*LEAN_TEST_ENV, "cargo", "test", "-j", str(jobs), "-p", "asupersync", "--no-fail-fast"]
         if features:
@@ -3089,6 +3116,10 @@ def main(argv: list[str]) -> int:
                 for case in probes.get("rch_transport_retryable", [])
             ],
             "is_worker_fault": [is_worker_fault(text) for text in probes.get("is_worker_fault", [])],
+            "feature_lanes": [
+                feature_lanes(case["src_features"], case["test_features"], case["jobs"])
+                for case in probes.get("feature_lanes", [])
+            ],
             "receipt_ledger": [
                 {
                     "ledger": (ledger := receipt_ledger(case["commits"], case["receipts"], dt.datetime.fromisoformat(case["now"]))),

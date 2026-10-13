@@ -900,6 +900,81 @@ fn a_worker_fault_is_recognised_only_when_no_crate_of_this_repository_failed() {
     );
 }
 
+/// Touched feature-gated code gets an all-targets check, and a clippy lane that also
+/// builds the required features of touched test targets: a lint in
+/// tests/quic_h3_listener_streaming.rs (http3,tls) stayed red unseen for two days
+/// because no lane ran clippy with those features (asupersync-bi2462.147).
+#[test]
+fn feature_gated_changes_are_linted_with_their_features_and_their_test_targets_features() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"feature_lanes": [
+            {"src_features": ["http3"], "test_features": ["", "http3,tls"], "jobs": 1},
+            {"src_features": [], "test_features": ["", "kafka"], "jobs": 2},
+            {"src_features": [], "test_features": [""], "jobs": 1},
+        ]},
+    }));
+    let cases = probed["probe_results"]["feature_lanes"]
+        .as_array()
+        .expect("feature_lanes probe");
+    let ids = |case: &Value| -> Vec<String> {
+        case.as_array()
+            .expect("lanes")
+            .iter()
+            .map(|lane| lane["id"].as_str().expect("lane id").to_owned())
+            .collect()
+    };
+    assert_eq!(
+        ids(&cases[0]),
+        ["check-features", "clippy-features"],
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][0]["argv"],
+        json!([
+            "cargo",
+            "check",
+            "-j",
+            "1",
+            "--all-targets",
+            "--features",
+            "http3",
+            "--keep-going",
+            "--message-format=short"
+        ]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][1]["argv"],
+        json!([
+            "cargo",
+            "clippy",
+            "-j",
+            "1",
+            "--all-targets",
+            "--features",
+            "http3,tls",
+            "--keep-going",
+            "--message-format=short",
+            "--",
+            "-D",
+            "warnings"
+        ]),
+        "{probed:#}"
+    );
+    assert_eq!(
+        cases[0][1]["needs_clippy_component"],
+        json!(true),
+        "{probed:#}"
+    );
+    // A touched feature-gated test target alone is still linted with its features.
+    assert_eq!(ids(&cases[1]), ["clippy-features"], "{probed:#}");
+    assert_eq!(cases[1][0]["argv"][6], json!("kafka"), "{probed:#}");
+    // Default-feature changes add neither lane.
+    assert_eq!(ids(&cases[2]), Vec::<String>::new(), "{probed:#}");
+}
+
 /// Only this lane runs the rustdoc examples, the README's included (br-asupersync-69l7je).
 /// It runs when a batch touches crate source or the README. One `Doc-tests` header owns
 /// two libtest blocks (merged, then standalone doctests), so a failure is keyed by cargo's
