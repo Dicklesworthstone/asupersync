@@ -340,8 +340,8 @@ pub struct TlsAcceptor {
     #[cfg(feature = "tls")]
     sni_alpn_allow_list: Option<Arc<BTreeMap<String, Vec<Vec<u8>>>>>,
     /// br-asupersync-ycuuwy — replay protection strategy for TLS 1.3
-    /// 0-RTT early data. Applications can use this to implement
-    /// protection logic at the request processing layer.
+    /// 0-RTT early data. `accept` rejects early data whatever it is
+    /// (br-asupersync-0n1dvh); it records the configured policy.
     early_data_replay_protection: EarlyDataReplayProtection,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
@@ -394,10 +394,10 @@ impl TlsAcceptor {
 
     /// Get the 0-RTT replay protection strategy.
     ///
-    /// br-asupersync-ycuuwy: Applications can use this to implement
-    /// request-level replay protection logic. For example, if the
-    /// strategy is `SafeMethodsOnly`, the application should reject
-    /// state-changing HTTP methods when the request arrived as 0-RTT.
+    /// br-asupersync-ycuuwy: the configured policy. No request arrives as
+    /// 0-RTT through this acceptor today: `accept` rejects early data on
+    /// every connection (br-asupersync-0n1dvh). Callers that apply the
+    /// policy themselves, on another early-data path, can read it here.
     #[must_use]
     pub fn early_data_replay_protection(&self) -> &EarlyDataReplayProtection {
         &self.early_data_replay_protection
@@ -427,8 +427,8 @@ impl EarlyDataReplayProtection {
     /// `received_early_data()` accessor). Because the per-request gate is
     /// therefore unreachable, [`TlsAcceptorBuilder::build`] **refuses** to
     /// enable 0-RTT for `SafeMethodsOnly` / `IdempotencyKeys` /
-    /// `NonceValidation` (fail closed) until enforcement is wired — so 0-RTT
-    /// early data is never accepted un-screened. The helper remains available
+    /// `NonceValidation` (fail closed) until enforcement is wired, and `accept`
+    /// rejects early data on every connection (0n1dvh). The helper remains available
     /// for callers that surface an early-data flag themselves and want to apply
     /// the policy manually.
     ///
@@ -632,31 +632,31 @@ pub enum ClientAuth {
 
 /// TLS 1.3 0-RTT replay protection strategy.
 ///
-/// br-asupersync-ycuuwy: TLS 1.3 0-RTT (early data) is vulnerable to
-/// replay attacks where an attacker can capture and replay 0-RTT requests
-/// within the ticket validity window. This enum specifies the application-
-/// layer protection strategy required when 0-RTT is enabled.
+/// br-asupersync-ycuuwy: TLS 1.3 0-RTT (early data) is replayable within
+/// the ticket validity window. `build()` requires a strategy before it sets
+/// a non-zero early-data cap, and `TlsAcceptor::accept` rejects early data
+/// on every connection until one is enforced (br-asupersync-0n1dvh).
 #[derive(Debug, Clone, Default)]
 pub enum EarlyDataReplayProtection {
-    /// No replay protection (UNSAFE).
+    /// No replay protection strategy (the default).
     ///
-    /// **CRITICAL SECURITY WARNING**: This option disables replay protection
-    /// and should NEVER be used in production. 0-RTT requests can be captured
-    /// and replayed by attackers, potentially causing duplicate state changes,
-    /// financial transactions, or data corruption.
+    /// `build()` refuses a non-zero early-data cap with this strategy
+    /// (br-asupersync-ycuuwy), so 0-RTT stays off. Without a strategy,
+    /// captured 0-RTT requests could be replayed, causing duplicate state
+    /// changes, financial transactions, or data corruption.
     ///
-    /// Only use for testing scenarios where replay attacks are acceptable.
+    /// Choose a strategy before enabling 0-RTT.
     #[default]
     None,
 
     /// Restrict 0-RTT to safe HTTP methods only (GET, HEAD, OPTIONS).
     ///
-    /// This strategy allows 0-RTT only for HTTP methods that are idempotent
-    /// and do not cause state changes. Requests with state-changing methods
-    /// (POST, PUT, DELETE, PATCH) will be rejected if received as 0-RTT.
+    /// Intended to allow 0-RTT only for idempotent methods and to reject
+    /// POST, PUT, DELETE and PATCH received as 0-RTT. Not enforced yet:
+    /// `build()` refuses a non-zero early-data cap with this strategy
+    /// (br-asupersync-snv902).
     ///
-    /// Safe for read-only operations but still vulnerable to replay of
-    /// GET requests that might have side effects.
+    /// Even when enforced, GET requests with side effects stay replayable.
     SafeMethodsOnly,
 
     /// Application implements idempotency key validation.
@@ -667,7 +667,7 @@ pub enum EarlyDataReplayProtection {
     /// 3. Duplicate keys are rejected with 409 Conflict
     /// 4. Keys are stored with TTL matching the TLS ticket lifetime
     ///
-    /// This provides strong replay protection for properly designed APIs.
+    /// Not enforced yet: `build()` refuses a non-zero cap with it (snv902).
     IdempotencyKeys,
 
     /// Application implements nonce-based anti-replay.
@@ -678,17 +678,17 @@ pub enum EarlyDataReplayProtection {
     /// 3. Duplicate nonces within the window are rejected
     /// 4. The window size matches the TLS ticket lifetime
     ///
-    /// Provides strong replay protection but requires careful nonce management.
+    /// Not enforced yet: `build()` refuses a non-zero cap with it (snv902).
     NonceValidation,
 
     /// Explicit acknowledgment that no protection is implemented (DANGEROUS).
     ///
     /// **USE ONLY FOR TESTING**: This explicitly acknowledges that no replay
-    /// protection is implemented and accepts the security risk. This allows
-    /// build() to succeed but logs critical security warnings.
+    /// protection is implemented. It lets `build()` set a non-zero cap, so
+    /// tickets advertise 0-RTT, but `TlsAcceptor::accept` still rejects early
+    /// data on every connection (br-asupersync-0n1dvh): clients resend it.
     ///
-    /// NEVER use in production - this is only for test environments where
-    /// replay attacks are acceptable and you need to test 0-RTT behavior.
+    /// No configuration delivers 0-RTT today; never rely on this in production.
     UnprotectedForTesting,
 }
 
@@ -725,10 +725,10 @@ pub struct TlsAcceptorBuilder {
     /// br-asupersync-y0gm5q: TLS 1.3 0-RTT (early data) max size in
     /// bytes. `0` means 0-RTT is DISABLED (the secure default — see
     /// the doc on [`Self::enable_early_data`] for why). Non-zero
-    /// allows the server to accept early data up to this many bytes
-    /// per connection. Operators that opt in MUST also implement an
-    /// idempotency / anti-replay layer at the application level
-    /// because TLS 1.3 0-RTT is by-spec replay-vulnerable.
+    /// advertises 0-RTT in session tickets up to this many bytes,
+    /// but `TlsAcceptor::accept` rejects early data on every
+    /// connection (br-asupersync-0n1dvh), so the client resends it
+    /// over 1-RTT and no request is replayed.
     early_data_max_bytes: u32,
     /// br-asupersync-vu10zb — when `true`, `build()`-produced
     /// acceptors reject SNI-less ClientHellos. See
@@ -1356,10 +1356,10 @@ impl TlsAcceptorBuilder {
                     #[cfg(feature = "tracing-integration")]
                     tracing::error!(
                         max_early_data_bytes = self.early_data_max_bytes,
-                        "CRITICAL SECURITY WARNING: TLS 1.3 0-RTT enabled without replay protection! \
-                         This configuration is VULNERABLE to replay attacks and should NEVER be used \
-                         in production. Attackers can capture and replay 0-RTT requests causing \
-                         duplicate operations. Use only for testing (asupersync-ycuuwy)"
+                        "SECURITY WARNING: TLS 1.3 0-RTT advertised without replay protection. \
+                         Tickets offer early data, but accept() rejects it on every connection \
+                         (asupersync-0n1dvh), so clients resend over 1-RTT. Never rely on this \
+                         configuration in production. Use only for testing (asupersync-ycuuwy)"
                     );
                 }
                 EarlyDataReplayProtection::SafeMethodsOnly
@@ -1370,11 +1370,11 @@ impl TlsAcceptorBuilder {
                     // validate_request_for_early_data() runs PER REQUEST, but
                     // that gate is NOT wired into the server request pipeline
                     // (h1/h2/h3) and TlsStream exposes no early-data signal
-                    // (received_early_data() does not exist). Enabling 0-RTT on
-                    // the wire here would accept replayable early data that
-                    // NOTHING screens — a phantom control that manufactures a
-                    // false sense of replay protection (a captured 0-RTT POST
-                    // would be processed on replay). Fail CLOSED: refuse to
+                    // (received_early_data() does not exist). Since 0n1dvh,
+                    // accept() rejects early data on every connection, so none
+                    // is processed; building anyway would still name a policy
+                    // that nothing enforces, a phantom control. The message
+                    // below predates 0n1dvh and is pinned. Fail CLOSED: refuse to
                     // build a 0-RTT-enabled acceptor for a strategy whose
                     // per-request enforcement is unreachable, rather than ship
                     // un-enforced 0-RTT. (The build-time gate is the only place
