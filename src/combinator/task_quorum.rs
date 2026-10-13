@@ -464,9 +464,15 @@ mod drop_order_tests {
             };
             assert!(prefix_send.send_blocking(outcome).is_ok());
             let prefix_id = prefix_id.recv(&cx).await.unwrap();
-            let diagnostics = Runtime::current_handle().unwrap().diagnostics().unwrap();
+            // Diagnostics is not Send, so it is read inside the condition: a
+            // condition's temporaries are dropped before the body's await.
             while !matches!(
-                diagnostics.explain_task_blocked(prefix_id).block_reason,
+                Runtime::current_handle()
+                    .unwrap()
+                    .diagnostics()
+                    .unwrap()
+                    .explain_task_blocked(prefix_id)
+                    .block_reason,
                 BlockReason::TaskNotFound
             ) {
                 yield_now().await;
