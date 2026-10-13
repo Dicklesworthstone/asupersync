@@ -67,6 +67,8 @@ pub struct NativeH3ListenerConfig {
     /// Finite request-stream lifetime per connection (at most 4096). The
     /// advertised bidirectional stream count is clamped to this ceiling.
     /// Reaching it sends GOAWAY and retires the connection after its work drains.
+    /// Within it, the peer is granted `router`'s pending-request cap of open
+    /// request streams, and MAX_STREAMS raises the grant as requests finish.
     pub max_requests_per_connection: u64,
     /// Sliding receive window for each observed peer stream. Previously
     /// advertised initial credit cannot be retracted; this controls growth.
@@ -355,7 +357,9 @@ impl NativeH3Listener {
         }
         // Clamp the authenticated wire contract as well as the application
         // cap, so high stream IDs cannot allocate states beyond this profile.
-        parameters.initial_max_streams_bidi = Some(config.max_requests_per_connection);
+        // The initial grant is the pending-request cap; MAX_STREAMS extends it
+        // as requests finish (br-asupersync-nbixp2 M3).
+        parameters.initial_max_streams_bidi = Some(request_stream_credit(&config, 0));
         let mut transport_parameters = Vec::new();
         parameters
             .encode(&mut transport_parameters)
@@ -681,6 +685,19 @@ fn h3_connection_error_code(error: &NativeH3SessionError) -> Option<u64> {
 
 fn streaming_chunk_bytes(queue_bytes: NonZeroUsize) -> usize {
     queue_bytes.get().min(MAX_STREAMING_REQUEST_CHUNK_BYTES)
+}
+
+/// Bidirectional stream credit for a peer that has `finished` request streams.
+/// The peer may have the pending-request cap open at once, within the request
+/// lifetime. A compliant client is then held back by flow control instead of
+/// having requests past the cap refused (br-asupersync-nbixp2 M3).
+fn request_stream_credit(config: &NativeH3ListenerConfig, finished: u64) -> u64 {
+    let concurrent = u64::try_from(config.router.max_pending_requests)
+        .unwrap_or(u64::MAX)
+        .max(1);
+    finished
+        .saturating_add(concurrent)
+        .min(config.max_requests_per_connection)
 }
 
 /// The request task creates this source with its actual admitted Cx. Until
@@ -1508,6 +1525,12 @@ impl ListenerState {
                             .expect("streaming request chunk is nonzero"),
                     )?;
                 }
+                // The transport enforces the stream credit bind advertised, so
+                // MAX_STREAMS can grow it from there (br-asupersync-nbixp2 M3).
+                let (_, remote_uni) = connection.inner().streams().remote_stream_limits();
+                connection
+                    .inner_mut()
+                    .set_remote_stream_limits(request_stream_credit(&self.config, 0), remote_uni);
                 session
                     .initialize(cx, connection, crate::http::h3::H3Settings::default())
                     .map(|control| {
@@ -1981,6 +2004,42 @@ impl ListenerConnection {
             progress = true;
         }
         Ok(progress)
+    }
+
+    /// Grant MAX_STREAMS credit as request streams finish: the peer may keep
+    /// the pending-request cap of request streams open, up to the lifetime
+    /// (br-asupersync-nbixp2 M3). A draining or retiring connection grants
+    /// nothing more.
+    fn refresh_stream_credit(
+        &self,
+        connection: &mut QuicConnection,
+        config: &NativeH3ListenerConfig,
+        draining: bool,
+    ) -> bool {
+        if draining || self.retiring {
+            return false;
+        }
+        // A request stream is open while it assembles, while its request work
+        // runs, and while a produced response still streams on it.
+        let open = self
+            .seen_requests
+            .iter()
+            .filter(|id| {
+                self.assembly.contains_key(id)
+                    || self.requests.contains_key(id)
+                    || self.bridge.produced.contains_key(id)
+            })
+            .count();
+        let finished = self.seen_requests.len().saturating_sub(open);
+        let credit = request_stream_credit(config, u64::try_from(finished).unwrap_or(u64::MAX));
+        let (remote_bidi, remote_uni) = connection.inner().streams().remote_stream_limits();
+        if credit <= remote_bidi {
+            return false;
+        }
+        connection
+            .inner_mut()
+            .set_remote_stream_limits(credit, remote_uni);
+        true
     }
 
     fn refresh_receive_credit(
@@ -2539,6 +2598,7 @@ impl ListenerConnection {
             }
         }
         progress |= self.refresh_receive_credit(cx, connection)?;
+        progress |= self.refresh_stream_credit(connection, config, draining);
         if self.retirement_forced && self.requests.is_empty() && self.assembly.is_empty() {
             self.drained = true;
             return Ok(progress);

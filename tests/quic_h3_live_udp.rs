@@ -2871,6 +2871,141 @@ mod native_h3_listener_live {
         assert_eq!(runtime.draining_region_count(), 0);
     }
 
+    /// br-asupersync-nbixp2 M3: the listener grants the peer its pending-request
+    /// cap of open request streams and raises the grant with MAX_STREAMS as
+    /// requests finish. A client that sends more requests than the cap is held
+    /// back by stream credit and every request completes; none is refused with
+    /// H3_REQUEST_REJECTED, and none spends the connection's request lifetime.
+    #[test]
+    fn authenticated_listener_grants_request_stream_credit_as_requests_finish() {
+        use asupersync::web::extract::RawBody;
+        use std::collections::BTreeMap;
+
+        const CAP: usize = 2;
+        const REQUESTS: usize = 6;
+        let runtime = managed_runtime();
+        let parent: std::pin::Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async {
+            let cx = Cx::current().unwrap();
+            let router =
+                Router::new()
+                    .route(
+                        "/echo",
+                        post(AsyncCxFnHandler1::<_, RawBody>::new(
+                            |_cx: Cx, body: RawBody| async move {
+                                Response::new(StatusCode::OK, body.0)
+                            },
+                        )),
+                    )
+                    .without_default_trace();
+            let transport = connection_config();
+            let mut config = NativeH3ListenerConfig::default();
+            config.endpoint.max_connections = 1;
+            config.endpoint.connection_config = transport;
+            config.router = config
+                .router
+                .max_pending_requests(CAP)
+                .max_in_flight_dispatches(CAP);
+            let listener = NativeH3Listener::bind(
+                &cx,
+                "127.0.0.1:0".parse().unwrap(),
+                router,
+                server_config(
+                    vec![parse_one_cert(LEAF_CERT_PEM)],
+                    leaf_key(),
+                    vec![H3_ALPN.to_vec()],
+                )
+                .unwrap(),
+                transport_parameters(transport),
+                config,
+            )
+            .await
+            .unwrap();
+            let address = listener.local_addr();
+            let (shutdown_tx, mut shutdown_rx) = asupersync::channel::oneshot::channel();
+            let serving = listener.serve_with_shutdown(&cx, async {
+                shutdown_rx.recv(&cx).await.unwrap();
+            });
+            let client = async {
+                let (mut owner, mut session) = connect(&cx, address, 31).await;
+                let expected_head = H3ResponseHead::new(200, Vec::new()).unwrap();
+                let mut open: BTreeMap<_, (u8, Vec<u8>)> = BTreeMap::new();
+                let mut sent = 0_u8;
+                let mut finished = 0;
+                let mut held_back = 0;
+                while finished < REQUESTS {
+                    while usize::from(sent) < REQUESTS {
+                        match session.send_request(
+                            &cx,
+                            owner.connection_mut(),
+                            &request("/echo"),
+                            Bytes::from(vec![sent]),
+                        ) {
+                            Ok(stream) => {
+                                open.insert(stream, (sent, Vec::new()));
+                                sent += 1;
+                            }
+                            Err(_) => {
+                                held_back += 1;
+                                break;
+                            }
+                        }
+                    }
+                    owner.flush(&cx).await.unwrap();
+                    owner.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                    for event in drain_h3_events(&cx, &mut session, owner.connection_mut()) {
+                        match event {
+                            NativeH3Event::ResponseHeaders { stream_id, head } => {
+                                assert!(open.contains_key(&stream_id));
+                                assert_eq!(head, expected_head);
+                            }
+                            NativeH3Event::Data { stream_id, bytes } => {
+                                open.get_mut(&stream_id)
+                                    .expect("data for an open request")
+                                    .1
+                                    .extend_from_slice(&bytes);
+                            }
+                            NativeH3Event::Finished { stream_id } => {
+                                let (index, body) =
+                                    open.remove(&stream_id).expect("an open request finishes");
+                                assert_eq!(body, vec![index]);
+                                finished += 1;
+                            }
+                            other => panic!("unexpected listener response event: {other:?}"),
+                        }
+                    }
+                }
+                assert!(
+                    held_back > 0,
+                    "the client met the advertised stream credit before MAX_STREAMS raised it"
+                );
+                shutdown_tx.send(&cx, ()).unwrap();
+                acknowledge_shutdown_goaway(
+                    &cx,
+                    &mut owner,
+                    &mut session,
+                    4 * u64::try_from(REQUESTS).unwrap(),
+                    None,
+                )
+                .await;
+            };
+            let (report, ()) =
+                asupersync::time::timeout(cx.now(), Duration::from_secs(20), zip(serving, client))
+                    .await
+                    .expect("requests past the stream credit wait for MAX_STREAMS and complete");
+            let report = report.unwrap();
+            assert_eq!(report.accepted_connections, 1);
+            assert_eq!(report.completed_requests, u64::try_from(REQUESTS).unwrap());
+            assert_eq!(report.refused_requests, 0);
+            assert_eq!(report.cancelled_requests, 0);
+            assert_eq!(report.failed_connections, 0);
+            assert!(!report.drain_timed_out);
+            assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+        });
+        runtime.block_on(runtime.handle().spawn(parent));
+        managed_assert_runtime_cleanup(&runtime);
+        assert_eq!(runtime.draining_region_count(), 0);
+    }
+
     #[test]
     fn authenticated_listener_buffered_response_deadline_reclaims_global_slot() {
         response_deadline_reclaims_global_slot(false);
