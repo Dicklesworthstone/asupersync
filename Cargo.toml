@@ -372,6 +372,9 @@ ci-cross-platform = [
 ]
 # Enable HTTP response compression (gzip, deflate, Brotli).
 compression = ["dep:flate2", "dep:brotli"]
+# Negotiated zstd compression of ATP TCP bulk data, using the in-house,
+# forbid(unsafe_code) asupersync-zstd codec (br-asupersync-t1fblr).
+zstd = ["dep:asupersync-zstd"]
 # Enable unsafe AVX2/NEON intrinsics for ~8x GF(256) throughput in RaptorQ.
 # When disabled, the safe portable SIMD fallback (std::simd) still provides ~2-3x
 # over scalar table lookups. Disable to keep the raptorq module free of unsafe code.
@@ -489,6 +492,8 @@ opentelemetry-proto = { version = "0.32", default-features = false, features = [
 tower = { version = "0.5.3", optional = true }
 # Optional proc macros for structured concurrency
 asupersync-macros = { version = "0.6.0", path = "asupersync-macros", optional = true }
+# Optional in-house Zstandard codec for ATP bulk-data compression (feature `zstd`)
+asupersync-zstd = { version = "0.6.0", path = "asupersync-zstd", optional = true }
 # FrankenSuite evidence ledger, kernel types, and decision contracts (bd-1e2if.3, bd-1e2if.6)
 franken-decision = { version = "0.6.0", path = "franken_decision" }
 franken-evidence = { version = "0.6.0", path = "franken_evidence" }

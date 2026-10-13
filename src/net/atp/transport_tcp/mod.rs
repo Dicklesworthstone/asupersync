@@ -51,6 +51,9 @@ use crate::atp::safety::{
     portable_path_collision_key, validate_portable_path_component, validate_portable_path_set,
     validate_portable_relative_path,
 };
+use crate::net::atp::transport_common::codec::{
+    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
+};
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
@@ -94,6 +97,11 @@ pub const ATP_TCP_PROTOCOL: u32 = 2;
 /// Default bulk-data chunk size. Kept comfortably below the 1 MiB
 /// `MAX_FRAME_SIZE` so a chunk plus its frame header always fits one frame.
 pub const DEFAULT_CHUNK_SIZE: usize = 256 * 1024;
+
+/// The largest raw chunk a receiver decodes from one compressed data frame.
+/// It equals `MAX_FRAME_SIZE`, which no uncompressed chunk can exceed either,
+/// so a compressed chunk never needs a larger buffer than a raw one.
+const MAX_COMPRESSED_CHUNK_RAW: u32 = 1 << 20;
 
 /// Default ceiling on a single transfer's total bytes.
 ///
@@ -483,6 +491,11 @@ struct FrameTransport<S> {
     stream: S,
     codec: AtpFrameCodec,
     rbuf: BytesMut,
+    /// What this side can decode when it receives (br-asupersync-t1fblr.16).
+    decode: DecodeCapability,
+    /// The payload codec both sides agreed on in the handshake, if any. Only
+    /// then may data frames carry compressed chunks.
+    chunk_codec: Option<CodecAccept>,
 }
 
 impl<S> FrameTransport<S>
@@ -494,6 +507,8 @@ where
             stream,
             codec: AtpFrameCodec::new(),
             rbuf: BytesMut::new(),
+            decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
+            chunk_codec: None,
         }
     }
 
@@ -1153,7 +1168,7 @@ where
         if n == 0 {
             break;
         }
-        let frame = data_frame(index, offset, &buf[..n])?;
+        let frame = chunk_frame(transport.chunk_codec.as_ref(), index, offset, &buf[..n])?;
         with_transport_timeout(
             cx,
             config.idle_timeout,
@@ -1617,6 +1632,62 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
+/// An `ObjectData` frame for `chunk`. When the session negotiated a codec and
+/// compressing makes the chunk smaller, the payload carries the compressed
+/// chunk and the frame a [`codec::CHUNK_CODEC_EXTENSION`] record; otherwise
+/// the frame is byte-identical to [`data_frame`]'s.
+#[cfg(feature = "zstd")]
+fn chunk_frame(
+    accept: Option<&CodecAccept>,
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, TransportError> {
+    if let Some((record, compressed)) =
+        accept.and_then(|accept| codec::compress_chunk(accept, chunk))
+    {
+        let mut frame = data_frame(index, offset, &compressed)?;
+        frame
+            .header
+            .extensions
+            .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+        return Ok(frame);
+    }
+    data_frame(index, offset, chunk)
+}
+
+/// Without the `zstd` feature no codec is ever negotiated, so every chunk is
+/// sent raw.
+#[cfg(not(feature = "zstd"))]
+fn chunk_frame(
+    _accept: Option<&CodecAccept>,
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, TransportError> {
+    data_frame(index, offset, chunk)
+}
+
+/// The raw bytes an `ObjectData` frame carries: its payload, or, when the
+/// frame has a [`codec::CHUNK_CODEC_EXTENSION`] record, the payload
+/// decompressed into `scratch`. `remaining` is the most the frame may carry; a
+/// compressed chunk that declares more is refused before it is decoded, and a
+/// compressed chunk on a session without a negotiated codec is refused too.
+fn raw_chunk<'a>(
+    frame: &Frame,
+    accept: Option<&CodecAccept>,
+    remaining: u64,
+    payload: &'a [u8],
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], TransportError> {
+    let Some(record) = frame.header.extensions.get(&codec::CHUNK_CODEC_EXTENSION) else {
+        return Ok(payload);
+    };
+    codec::decompress_chunk(record, accept, remaining, payload, scratch)
+        .map_err(|error| TransportError::Frame(format!("ObjectData chunk: {error}")))?;
+    Ok(scratch.as_slice())
+}
+
 fn parse_data_frame(frame: &Frame) -> Result<(u32, u64, &[u8]), TransportError> {
     let p = frame.payload();
     if p.len() < 12 {
@@ -1927,7 +1998,12 @@ where
                 chunk.rel_path, chunk.entry_offset
             )));
         }
-        let frame = data_frame(chunk.entry_index, chunk.entry_offset, &bytes)?;
+        let frame = chunk_frame(
+            transport.chunk_codec.as_ref(),
+            chunk.entry_index,
+            chunk.entry_offset,
+            &bytes,
+        )?;
         with_transport_timeout(
             cx,
             config.idle_timeout,
@@ -3014,6 +3090,64 @@ pub async fn send_path_filtered(
     config: TransferConfig,
     peer_id: &str,
     filter: &FilterSet,
+    on_progress: impl FnMut(u64, u64) + Send,
+) -> Result<SendReport, TransportError> {
+    send_path_with_options(
+        cx,
+        addr,
+        source,
+        config,
+        peer_id,
+        filter,
+        SendOptions::new(),
+        on_progress,
+    )
+    .await
+}
+
+/// Sender options beyond [`TransferConfig`], which is exhaustively
+/// constructible and so cannot gain fields without breaking its callers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SendOptions {
+    /// Bulk-data compression (br-asupersync-t1fblr.16). The default,
+    /// [`CompressionMode::Off`], sends exactly the frames older senders send.
+    pub compression: CompressionMode,
+}
+
+impl SendOptions {
+    /// The default options: no compression.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            compression: CompressionMode::Off,
+        }
+    }
+
+    /// These options with `compression`.
+    #[must_use]
+    pub const fn with_compression(mut self, compression: CompressionMode) -> Self {
+        self.compression = compression;
+        self
+    }
+}
+
+/// Like [`send_path_filtered`], with [`SendOptions`].
+///
+/// With [`CompressionMode::Zstd`] (and the `zstd` cargo feature) the sender
+/// offers zstd in its handshake. A receiver that accepts gets each chunk as
+/// one zstd frame whenever that is smaller than the raw chunk; a receiver
+/// that does not, including any receiver that predates compression, gets
+/// every chunk raw. The manifest, the receiver's SHA-256 and merkle checks,
+/// and the receipt always describe the raw bytes.
+pub async fn send_path_with_options(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: TransferConfig,
+    peer_id: &str,
+    filter: &FilterSet,
+    options: SendOptions,
     mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
@@ -3159,8 +3293,9 @@ pub async fn send_path_filtered(
     let peer = stream.peer_addr().unwrap_or(addr);
     let mut transport = FrameTransport::new(stream);
 
-    // Handshake.
-    let hello = json_frame(
+    // Handshake. A compression offer rides in a frame-header extension, which
+    // receivers that predate it never read.
+    let mut hello = json_frame(
         FrameType::Handshake,
         &Hello {
             protocol: ATP_TCP_PROTOCOL,
@@ -3168,6 +3303,13 @@ pub async fn send_path_filtered(
             peer_id: peer_id.to_string(),
         },
     )?;
+    let offer = codec::local_offer(options.compression, config.chunk_size);
+    if let Some(offer) = &offer {
+        hello
+            .header
+            .extensions
+            .insert(codec::CODEC_OFFER_EXTENSION, offer.to_bytes());
+    }
     with_transport_timeout(
         cx,
         config.idle_timeout,
@@ -3194,6 +3336,15 @@ pub async fn send_path_filtered(
             ack.reason.unwrap_or_else(|| "no reason given".to_string()),
         ));
     }
+    // Compress only after an accept that fits what this sender offered.
+    transport.chunk_codec = offer.and_then(|offer| {
+        ack_frame
+            .header
+            .extensions
+            .get(&codec::CODEC_ACCEPT_EXTENSION)
+            .and_then(|bytes| CodecAccept::from_bytes(bytes))
+            .filter(|accept| offer.admits(accept))
+    });
 
     // Manifest.
     let manifest_frame = json_frame(FrameType::ObjectManifest, &manifest)?;
@@ -3461,6 +3612,14 @@ where
     let mut received_chunks = BTreeMap::<DeltaContentKey, Vec<u8>>::new();
     let mut received_keys = BTreeSet::<DeltaChunkKey>::new();
     let mut received = 0u64;
+    // No requested chunk is larger than this, so neither is a decompressed one.
+    let largest_requested = request
+        .missing_chunks
+        .iter()
+        .map(|chunk| chunk.size_bytes)
+        .max()
+        .unwrap_or(0);
+    let mut raw_scratch = Vec::new();
     let recv_result: Result<(), TransportError> = async {
         loop {
             cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
@@ -3469,7 +3628,14 @@ where
                     .await?;
             match frame.frame_type() {
                 FrameType::ObjectData => {
-                    let (entry_index, entry_offset, chunk) = parse_data_frame(&frame)?;
+                    let (entry_index, entry_offset, payload) = parse_data_frame(&frame)?;
+                    let chunk = raw_chunk(
+                        &frame,
+                        transport.chunk_codec.as_ref(),
+                        largest_requested,
+                        payload,
+                        &mut raw_scratch,
+                    )?;
                     let size_bytes = u64::try_from(chunk.len()).map_err(|_| {
                         TransportError::Frame("delta chunk length overflow".to_string())
                     })?;
@@ -3732,7 +3898,7 @@ where
     }
     let hello: Hello = parse_json(&hello_frame)?;
     let accepted = hello.protocol == ATP_TCP_PROTOCOL;
-    let handshake_ack = json_frame(
+    let mut handshake_ack = json_frame(
         FrameType::HandshakeAck,
         &HelloAck {
             accepted,
@@ -3747,6 +3913,23 @@ where
             },
         },
     )?;
+    // Accept a compression offer this build can decode. Senders that predate
+    // compression make no offer and get no accept, so they stay raw.
+    if accepted {
+        let accept = hello_frame
+            .header
+            .extensions
+            .get(&codec::CODEC_OFFER_EXTENSION)
+            .and_then(|bytes| CodecOffer::from_bytes(bytes))
+            .and_then(|offer| codec::negotiate(&transport.decode, &offer));
+        if let Some(accept) = accept {
+            handshake_ack
+                .header
+                .extensions
+                .insert(codec::CODEC_ACCEPT_EXTENSION, accept.to_bytes());
+            transport.chunk_codec = Some(accept);
+        }
+    }
     with_transport_timeout(
         cx,
         config.idle_timeout,
@@ -3881,6 +4064,8 @@ where
         .collect();
     let mut active: Option<(usize, crate::fs::File)> = None;
     let mut received: u64 = 0;
+    // Holds one decompressed chunk at a time (at most MAX_COMPRESSED_CHUNK_RAW).
+    let mut raw_scratch = Vec::new();
 
     // Drive the receive loop in a helper future so the staging directory is
     // always cleaned up on an error path instead of leaking partial data.
@@ -3892,11 +4077,23 @@ where
                     .await?;
             match frame.frame_type() {
                 FrameType::ObjectData => {
-                    let (index, offset, chunk) = parse_data_frame(&frame)?;
+                    let (index, offset, payload) = parse_data_frame(&frame)?;
                     let idx = index as usize;
                     let entry = manifest.entries.get(idx).ok_or_else(|| {
                         TransportError::Frame(format!("ObjectData for unknown entry index {index}"))
                     })?;
+                    // A compressed chunk may decode to at most what the entry
+                    // still lacks; the checks below then run on raw bytes.
+                    let remaining = entry
+                        .size
+                        .saturating_sub(states.get(idx).map_or(0, |st| st.bytes_written));
+                    let chunk = raw_chunk(
+                        &frame,
+                        transport.chunk_codec.as_ref(),
+                        remaining,
+                        payload,
+                        &mut raw_scratch,
+                    )?;
 
                     // Close the previous entry's staging file when a new entry
                     // begins (the sender streams entries in index order).
@@ -5123,6 +5320,392 @@ mod tests {
             std::fs::read(&run.committed).expect("read the committed file"),
             run.payload
         );
+    }
+
+    /// Passes a receive's reads and writes through to its TCP stream and
+    /// counts the bytes read: what actually crossed the wire to the receiver.
+    #[cfg(feature = "zstd")]
+    struct CountingStream {
+        stream: TcpStream,
+        read: std::sync::Arc<AtomicU64>,
+    }
+
+    #[cfg(feature = "zstd")]
+    impl crate::io::AsyncRead for CountingStream {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &mut crate::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let this = self.get_mut();
+            let before = buf.filled().len();
+            let polled = std::pin::Pin::new(&mut this.stream).poll_read(task, buf);
+            let read = (buf.filled().len() - before) as u64;
+            this.read.fetch_add(read, Ordering::AcqRel);
+            polled
+        }
+    }
+
+    #[cfg(feature = "zstd")]
+    impl crate::io::AsyncWrite for CountingStream {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_write(task, buf)
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            task: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
+        }
+    }
+
+    /// What [`transfer_with_options`] observed.
+    #[cfg(feature = "zstd")]
+    struct OptionsTransfer {
+        sent: Result<SendReport, TransportError>,
+        received: Result<ReceiveReport, TransportError>,
+        /// Bytes the receiver read off the socket.
+        wire_bytes: u64,
+        /// The committed file's bytes (empty if it is missing).
+        committed: Vec<u8>,
+    }
+
+    /// A real sender (`send_path_with_options`) transfers `payload` as
+    /// `<root>/payload.bin` over loopback TCP to `receive_on_transport`
+    /// committing into `<root>/inbox`. `receiver_decode` replaces what the
+    /// receiver can decode; an empty capability makes it behave like a
+    /// receiver that predates compression, which never answers an offer.
+    #[cfg(feature = "zstd")]
+    fn transfer_with_options(
+        root: &Path,
+        payload: &[u8],
+        options: SendOptions,
+        receiver_decode: Option<DecodeCapability>,
+    ) -> OptionsTransfer {
+        const DEADLINE: Duration = Duration::from_secs(60);
+        let source = root.join("payload.bin");
+        std::fs::write(&source, payload).expect("write the source file");
+        let dest = root.join("inbox");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+        let sender = std::thread::spawn(move || {
+            let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
+            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+                .build()
+                .expect("sender runtime");
+            runtime.block_on(runtime.handle().spawn(async move {
+                let cx = Cx::current().expect("sender cx");
+                send_path_with_options(
+                    &cx,
+                    addr,
+                    &source,
+                    TransferConfig::default(),
+                    "sender",
+                    &FilterSet::new(),
+                    options,
+                    |_, _| {},
+                )
+                .await
+            }))
+        });
+
+        let wire = std::sync::Arc::new(AtomicU64::new(0));
+        let read = std::sync::Arc::clone(&wire);
+        let dest_dir = dest.clone();
+        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+            .build()
+            .expect("receiver runtime");
+        let received = runtime.block_on(runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("receiver cx");
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            addr_tx
+                .send(listener.local_addr().expect("listener address"))
+                .expect("publish the listener address");
+            let (stream, peer) = with_transport_timeout(&cx, DEADLINE, "accept", listener.accept())
+                .await
+                .expect("accept the sender");
+            let mut transport = FrameTransport::new(CountingStream { stream, read });
+            if let Some(decode) = receiver_decode {
+                transport.decode = decode;
+            }
+            receive_on_transport(
+                &cx,
+                transport,
+                peer,
+                &dest_dir,
+                TransferConfig::default(),
+                "receiver",
+            )
+            .await
+        }));
+        let sent = sender.join().expect("sender thread");
+        OptionsTransfer {
+            sent,
+            received,
+            wire_bytes: wire.load(Ordering::Acquire),
+            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
+        }
+    }
+
+    /// Text-like bytes: words from a small vocabulary, several chunks long.
+    #[cfg(feature = "zstd")]
+    fn compressible_payload(seed: u64, len: usize) -> Vec<u8> {
+        const WORDS: [&str; 8] = [
+            "region ",
+            "obligation ",
+            "cancel ",
+            "scope ",
+            "budget ",
+            "trace ",
+            "join ",
+            "spawn\n",
+        ];
+        let mut state = seed;
+        let mut out = Vec::with_capacity(len + 16);
+        while out.len() < len {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            out.extend_from_slice(WORDS[usize::try_from(state >> 61).expect("3 bits")].as_bytes());
+        }
+        out.truncate(len);
+        out
+    }
+
+    #[cfg(feature = "zstd")]
+    fn assert_delivered(run: &OptionsTransfer, payload: &[u8], what: &str) {
+        assert!(
+            run.sent.is_ok(),
+            "{what}: sender failed: {:?}",
+            run.sent.as_ref().err()
+        );
+        assert!(
+            run.received.is_ok(),
+            "{what}: receiver failed: {:?}",
+            run.received.as_ref().err()
+        );
+        assert!(
+            run.committed == payload,
+            "{what}: committed bytes differ from the source"
+        );
+    }
+
+    /// The receive path refuses a compressed chunk on a session that
+    /// negotiated no codec, before decoding anything, and passes an
+    /// unmarked payload through untouched.
+    #[test]
+    fn a_compressed_chunk_without_a_negotiated_codec_is_refused() {
+        let mut frame = data_frame(0, 0, b"not really compressed").expect("data frame");
+        let mut scratch = Vec::new();
+        let (_, _, payload) = parse_data_frame(&frame).expect("parse");
+        assert_eq!(
+            raw_chunk(&frame, None, 100, payload, &mut scratch).expect("raw payload"),
+            b"not really compressed"
+        );
+        frame.header.extensions.insert(
+            codec::CHUNK_CODEC_EXTENSION,
+            codec::ChunkCodec::new(codec::WireCodec::Zstd, 21).to_bytes(),
+        );
+        let (_, _, payload) = parse_data_frame(&frame).expect("parse");
+        let refused = raw_chunk(&frame, None, 100, payload, &mut scratch);
+        assert!(
+            matches!(&refused, Err(TransportError::Frame(message)) if message.contains("without a negotiated codec")),
+            "{refused:?}"
+        );
+        assert!(scratch.is_empty(), "nothing was decoded");
+    }
+
+    /// A compressed data frame is never larger on the wire than the raw frame
+    /// for the same chunk, whatever the chunk's size and compressibility, so
+    /// a chunk that fits a frame raw also fits compressed.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_compressed_frame_is_never_larger_than_the_raw_frame() {
+        let offer = codec::local_offer(CompressionMode::Zstd, DEFAULT_CHUNK_SIZE).unwrap();
+        let accept = codec::negotiate(
+            &codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
+            &offer,
+        )
+        .unwrap();
+        let mut state = 3_u64;
+        let mut compressed_frames = 0;
+        for len in [1_usize, 16, 17, 30, 64, 100, 300, 1000, 5000, 70_000] {
+            for noise_every in [1_usize, 2, 7, 64, 1000] {
+                let chunk: Vec<u8> = (0..len)
+                    .map(|i| {
+                        state = state
+                            .wrapping_mul(6_364_136_223_846_793_005)
+                            .wrapping_add(1_442_695_040_888_963_407);
+                        if i % noise_every == 0 {
+                            state.to_be_bytes()[0]
+                        } else {
+                            u8::try_from(i % 7).unwrap()
+                        }
+                    })
+                    .collect();
+                let raw = data_frame(0, 0, &chunk).unwrap().to_wire_bytes().unwrap();
+                let frame = chunk_frame(Some(&accept), 0, 0, &chunk).unwrap();
+                if frame
+                    .header
+                    .extensions
+                    .contains_key(&codec::CHUNK_CODEC_EXTENSION)
+                {
+                    compressed_frames += 1;
+                }
+                let framed = frame.to_wire_bytes().unwrap();
+                assert!(
+                    framed.len() <= raw.len(),
+                    "len {len}, noise every {noise_every}: {} > {}",
+                    framed.len(),
+                    raw.len()
+                );
+            }
+        }
+        assert!(compressed_frames > 10, "some chunks were compressed");
+    }
+
+    /// With the default options a sender makes no offer, so its handshake is
+    /// byte-for-byte what senders before compression sent.
+    #[test]
+    fn default_send_options_make_no_offer() {
+        assert_eq!(SendOptions::default(), SendOptions::new());
+        assert_eq!(
+            codec::local_offer(SendOptions::new().compression, DEFAULT_CHUNK_SIZE),
+            None
+        );
+    }
+
+    /// Compression end to end over real TCP: the same compressible file
+    /// crosses the wire in a fraction of its size with zstd and in full
+    /// without, and both commits are byte-identical (the receiver verified
+    /// the raw SHA-256 and merkle root before committing).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn zstd_chunks_shrink_the_wire_and_commit_identical_bytes() {
+        // Four full chunks and a short one: enough to cross chunk boundaries,
+        // small enough that the unoptimized test build does not starve the
+        // wall-clock-bounded tests running beside it.
+        let payload = compressible_payload(1, 4 * DEFAULT_CHUNK_SIZE + 17);
+        let zstd = transfer_with_options(
+            &canonical_test_root("atp-tcp-zstd-on"),
+            &payload,
+            SendOptions::new().with_compression(CompressionMode::Zstd),
+            None,
+        );
+        assert_delivered(&zstd, &payload, "zstd");
+        let off = transfer_with_options(
+            &canonical_test_root("atp-tcp-zstd-off"),
+            &payload,
+            SendOptions::new(),
+            None,
+        );
+        assert_delivered(&off, &payload, "off");
+        let len = payload.len() as u64;
+        assert!(
+            off.wire_bytes > len,
+            "raw: {} wire bytes for {len}",
+            off.wire_bytes
+        );
+        assert!(
+            zstd.wire_bytes < len / 4,
+            "zstd: {} wire bytes for {len}",
+            zstd.wire_bytes
+        );
+    }
+
+    /// A receiver that cannot decode (like one that predates compression)
+    /// sends no accept, and a sender that offered zstd then sends every
+    /// chunk raw.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_receiver_without_a_codec_gets_raw_chunks() {
+        let payload = compressible_payload(2, 300_000);
+        let run = transfer_with_options(
+            &canonical_test_root("atp-tcp-zstd-old-receiver"),
+            &payload,
+            SendOptions::new().with_compression(CompressionMode::Zstd),
+            Some(DecodeCapability::new(0, 0, 0)),
+        );
+        assert_delivered(&run, &payload, "receiver without a codec");
+        assert!(
+            run.wire_bytes > payload.len() as u64,
+            "{} wire bytes",
+            run.wire_bytes
+        );
+    }
+
+    /// Chunks that do not shrink go raw on a compressed session.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn incompressible_chunks_go_raw_on_a_zstd_session() {
+        let mut state = 9_u64;
+        let payload: Vec<u8> = (0..300_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state.to_be_bytes()[0]
+            })
+            .collect();
+        let run = transfer_with_options(
+            &canonical_test_root("atp-tcp-zstd-noise"),
+            &payload,
+            SendOptions::new().with_compression(CompressionMode::Zstd),
+            None,
+        );
+        assert_delivered(&run, &payload, "noise");
+        assert!(
+            run.wire_bytes > payload.len() as u64,
+            "{} wire bytes",
+            run.wire_bytes
+        );
+    }
+
+    /// A delta resync on a compressed session: the second transfer of a
+    /// changed file sends only the changed chunks, compressed, and commits
+    /// the new bytes. The same resync without compression costs more wire.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn delta_chunks_are_compressed_and_commit_the_new_bytes() {
+        let first = compressible_payload(3, 1024 * 1024);
+        let mut second = first.clone();
+        let middle = second.len() / 2;
+        let changed = compressible_payload(4, 150_000);
+        second[middle..middle + changed.len()].copy_from_slice(&changed);
+        let mut wire = Vec::new();
+        for (label, options) in [
+            (
+                "atp-tcp-delta-zstd",
+                SendOptions::new().with_compression(CompressionMode::Zstd),
+            ),
+            ("atp-tcp-delta-raw", SendOptions::new()),
+        ] {
+            let root = canonical_test_root(label);
+            let initial = transfer_with_options(&root, &first, options, None);
+            assert_delivered(&initial, &first, label);
+            let resync = transfer_with_options(&root, &second, options, None);
+            assert_delivered(&resync, &second, label);
+            wire.push(resync.wire_bytes);
+        }
+        let (zstd, raw) = (wire[0], wire[1]);
+        assert!(
+            raw < second.len() as u64 / 2,
+            "the raw resync was a delta: {raw}"
+        );
+        assert!(zstd < raw / 2, "compressed delta {zstd} vs raw delta {raw}");
     }
 
     #[test]
