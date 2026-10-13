@@ -36,6 +36,7 @@ struct MemoryIo {
     shutdown_calls: usize,
     transport_eof: bool,
     read_errors: VecDeque<io::ErrorKind>,
+    write_errors: VecDeque<io::ErrorKind>,
 }
 
 impl AsyncRead for MemoryIo {
@@ -75,6 +76,9 @@ impl AsyncWrite for MemoryIo {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.io_calls += 1;
+        if let Some(kind) = self.write_errors.pop_front() {
+            return Poll::Ready(Err(kind.into()));
+        }
         if self.block_write {
             return Poll::Pending;
         }
@@ -1201,6 +1205,118 @@ fn interrupted_transport_reads_preserve_live_tls_and_exporter() {
             assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
             send_and_read(sender, receiver);
             assert!(receiver.is_ready());
+            assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
+        }
+    }
+}
+
+#[test]
+fn accepted_plaintext_is_counted_once_on_fatal_transport_write_error() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_sends in [true, false] {
+            for kind in [io::ErrorKind::ConnectionReset, io::ErrorKind::BrokenPipe] {
+                let (cc, sc) = configs(&[version], None, true);
+                let (mut client, mut server) = streams(&cc, &sc);
+                establish(&mut client, &mut server);
+                let (sender, receiver) = if client_sends {
+                    (&mut client, &mut server)
+                } else {
+                    (&mut server, &mut client)
+                };
+                if version.version == rustls::ProtocolVersion::TLSv1_3 {
+                    assert_eq!(
+                        sender.tls_exporter_channel_binding().unwrap(),
+                        receiver.tls_exporter_channel_binding().unwrap()
+                    );
+                }
+                sender.io.write_errors.push_back(kind);
+                let mut cx = Context::from_waker(Waker::noop());
+                let message = b"plaintext accepted before broken transport";
+                // The first public write has already committed the plaintext
+                // to rustls. Returning Err here would make write_all retry it.
+                assert!(matches!(
+                    Pin::new(&mut *sender).poll_write(&mut cx, message),
+                    Poll::Ready(Ok(n)) if n == message.len()
+                ));
+                assert!(sender.is_closed());
+                assert_disconnected(sender);
+                assert!(sender.write_error.is_some());
+                let calls = sender.io.io_calls;
+                for _ in 0..3 {
+                    assert!(matches!(
+                        Pin::new(&mut *sender).poll_write(&mut cx, message),
+                        Poll::Ready(Err(error)) if error.kind() == kind
+                    ));
+                    assert!(matches!(
+                        Pin::new(&mut *sender).poll_flush(&mut cx),
+                        Poll::Ready(Err(error)) if error.kind() == kind
+                    ));
+                    assert!(matches!(
+                        Pin::new(&mut *sender).poll_shutdown(&mut cx),
+                        Poll::Ready(Err(error)) if error.kind() == kind
+                    ));
+                    assert!(matches!(
+                        sender.poll_shutdown_tls(&mut cx),
+                        Poll::Ready(Err(TlsError::Io(error))) if error.kind() == kind
+                    ));
+                    let mut bytes = [0; 64];
+                    let mut buf = ReadBuf::new(&mut bytes);
+                    assert!(matches!(
+                        Pin::new(&mut *sender).poll_read(&mut cx, &mut buf),
+                        Poll::Ready(Err(error)) if error.kind() == kind
+                    ));
+                    assert!(buf.filled().is_empty());
+                    assert_eq!(sender.io.io_calls, calls);
+                    assert!(matches!(
+                        sender.poll_handshake(&mut cx),
+                        Poll::Ready(Err(TlsError::Io(error)))
+                            if error.kind() == io::ErrorKind::NotConnected
+                    ));
+                }
+                let mut bytes = [0; 64];
+                let mut buf = ReadBuf::new(&mut bytes);
+                assert!(Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf).is_pending());
+                assert!(buf.filled().is_empty(), "failed write leaked plaintext");
+            }
+        }
+    }
+}
+
+#[test]
+fn interrupted_transport_writes_allow_subsequent_flush_and_export() {
+    for version in [&rustls::version::TLS12, &rustls::version::TLS13] {
+        for client_sends in [true, false] {
+            let (cc, sc) = configs(&[version], None, true);
+            let (mut client, mut server) = streams(&cc, &sc);
+            establish(&mut client, &mut server);
+            let (sender, receiver) = if client_sends {
+                (&mut client, &mut server)
+            } else {
+                (&mut server, &mut client)
+            };
+            let binding = sender.tls_exporter_channel_binding().ok();
+            sender.io.write_errors.push_back(io::ErrorKind::Interrupted);
+            let mut cx = Context::from_waker(Waker::noop());
+            let message = b"write interrupted once, then delivered";
+            assert!(matches!(
+                Pin::new(&mut *sender).poll_write(&mut cx, message),
+                Poll::Ready(Ok(n)) if n == message.len()
+            ));
+            assert!(sender.is_ready());
+            assert!(sender.conn.wants_write());
+            assert!(matches!(
+                Pin::new(&mut *sender).poll_flush(&mut cx),
+                Poll::Ready(Ok(()))
+            ));
+            let mut bytes = [0; 64];
+            let mut buf = ReadBuf::new(&mut bytes);
+            assert!(matches!(
+                Pin::new(&mut *receiver).poll_read(&mut cx, &mut buf),
+                Poll::Ready(Ok(()))
+            ));
+            assert_eq!(buf.filled(), message);
+            assert!(sender.is_ready() && receiver.is_ready());
+            assert_eq!(sender.tls_exporter_channel_binding().ok(), binding);
             assert_eq!(receiver.tls_exporter_channel_binding().ok(), binding);
         }
     }

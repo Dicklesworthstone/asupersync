@@ -79,6 +79,9 @@ pub struct TlsStream<IO> {
     shutdown_flushed: bool,
     /// The error that ended reading, reported again by every later read.
     read_error: Option<(io::ErrorKind, String)>,
+    /// A fatal transport write error must not let callers retry accepted
+    /// plaintext or receive a spurious successful flush/shutdown.
+    write_error: Option<(io::ErrorKind, String)>,
 }
 
 /// Fallback `TlsStream` when TLS is disabled.
@@ -229,6 +232,7 @@ impl<IO> TlsStream<IO> {
             read_closed: false,
             shutdown_flushed: false,
             read_error: None,
+            write_error: None,
         }
     }
 
@@ -241,6 +245,7 @@ impl<IO> TlsStream<IO> {
             read_closed: false,
             shutdown_flushed: false,
             read_error: None,
+            write_error: None,
         }
     }
 
@@ -329,6 +334,20 @@ impl<IO> TlsStream<IO> {
         let err = io::Error::new(kind, message.clone());
         self.read_error = Some((kind, message));
         err
+    }
+
+    fn fail_write(&mut self, error: io::Error) -> io::Error {
+        self.state = TlsState::Closed;
+        let kind = error.kind();
+        let message = error.to_string();
+        self.write_error = Some((kind, message.clone()));
+        io::Error::new(kind, message)
+    }
+
+    fn retained_write_error(&self) -> Option<io::Error> {
+        self.write_error
+            .as_ref()
+            .map(|(kind, message)| io::Error::new(*kind, message.clone()))
     }
 }
 
@@ -549,6 +568,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
         match self.conn.write_tls(&mut adapter) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Err(e) => Poll::Ready(Err(e)),
         }
     }
@@ -599,6 +622,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> TlsStream<IO> {
     /// zero-byte write with TLS records still pending returns
     /// [`io::ErrorKind::WriteZero`], not a successful shutdown.
     pub fn poll_shutdown_tls(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), TlsError>> {
+        if let Some(error) = self.retained_write_error() {
+            return Poll::Ready(Err(TlsError::Io(error)));
+        }
         if self.state.is_terminal() {
             return Poll::Ready(Ok(()));
         }
@@ -626,6 +652,10 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncRead for TlsStream<IO> {
     ) -> Poll<io::Result<()>> {
         if buf.remaining() == 0 {
             return Poll::Ready(Ok(()));
+        }
+
+        if let Some(error) = self.retained_write_error() {
+            return Poll::Ready(Err(error));
         }
 
         if let Some((kind, message)) = &self.read_error {
@@ -715,6 +745,9 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if let Some(error) = self.retained_write_error() {
+            return Poll::Ready(Err(error));
+        }
         if self.state.shutdown_pending() || self.state.is_terminal() {
             return Poll::Ready(Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -747,7 +780,7 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
                 match self.poll_write_tls(cx) {
                     Poll::Ready(Ok(0)) => break,
                     Poll::Ready(Ok(_)) => {}
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(self.fail_write(e))),
                     Poll::Pending => return Poll::Pending,
                 }
             }
@@ -772,7 +805,17 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
             match self.poll_write_tls(cx) {
                 Poll::Ready(Ok(0)) => break,
                 Poll::Ready(Ok(_)) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) => {
+                    let error = self.fail_write(e);
+                    // rustls already accepted n bytes. Returning Err would
+                    // make write_all retry them and could duplicate the data.
+                    // Report acceptance once; expose the sticky transport
+                    // failure to the next write, read, flush, or shutdown.
+                    if n > 0 {
+                        return Poll::Ready(Ok(n));
+                    }
+                    return Poll::Ready(Err(error));
+                }
                 Poll::Pending => {
                     // If we wrote some data to the TLS session, report success
                     if n > 0 {
@@ -787,10 +830,16 @@ impl<IO: AsyncRead + AsyncWrite + Unpin> AsyncWrite for TlsStream<IO> {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(error) = self.retained_write_error() {
+            return Poll::Ready(Err(error));
+        }
         self.poll_flush_tls(cx)
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if let Some(error) = self.retained_write_error() {
+            return Poll::Ready(Err(error));
+        }
         if self.state.is_terminal() {
             return Pin::new(&mut self.io).poll_shutdown(cx);
         }
