@@ -4,6 +4,7 @@
 //! complete for frames without dictionaries. The encoder stores
 //! ([`Level::Store`]) or compresses with a greedy hash match finder,
 //! Huffman literals and FSE-coded sequences ([`Level::Fast`]).
+//! [`StreamEncoder`] accepts fragmented input and output with bounded buffering.
 //!
 //! Every decode takes [`DecodeLimits`]: a cap on total output and on the frame
 //! window. Malformed input is refused with a [`DecodeError`], never a panic,
@@ -27,8 +28,10 @@ mod huffman;
 mod literals;
 mod matcher;
 mod sequences;
+mod stream;
 pub mod xxhash64;
 
 pub use encode::{EncodeParams, Level, encode_all, encode_into};
 pub use frame::{DecodeError, DecodeLimits, decode_all, decode_into};
+pub use stream::{StreamEncodeError, StreamEncoder, StreamProgress, StreamStatus};
 pub use xxhash64::{Xxh64, xxh64};
