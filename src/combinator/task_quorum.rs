@@ -135,9 +135,17 @@ where
     /// Any member panic is fatal, including a panic during loser cleanup.
     ///
     /// Successful values are returned in observed completion order, exactly
-    /// `required` of them. Already-ready members use `join_next`'s spawn-order
-    /// tie-break. Previously collected members are excluded from both the count
-    /// and the result. Values and errors need not implement `Clone`.
+    /// `required` of them. Candidates ready at the start of a scan are examined
+    /// in spawn order. A pending scan resumes its forward sweep across polling
+    /// quanta before revisiting backward wakes. Previously collected members
+    /// are excluded from both the count and the result. Values and errors need
+    /// not implement `Clone`.
+    ///
+    /// Selection examines at most 64 candidates per poll, including pending
+    /// ones; a parked set does not self-spin. Loser collection also yields after
+    /// 64 retired members. The initial cancellation fan-out still visits every
+    /// unfinished member before awaiting any cleanup, and does not rewrite an
+    /// already-published outcome while waiting for its retirement barrier.
     ///
     /// Every member retires before this returns. Unselected values/errors are
     /// retained until that point, so their destructors cannot interrupt sibling
@@ -181,7 +189,7 @@ where
         // The later consuming drain likewise owns the set after `selection`.
         let mut members = self;
         let mut cancelled = pin!(cx.cancelled());
-        let mut completed_in_quantum = 0;
+        let mut remaining_candidates = Self::SELECTION_CANDIDATES_PER_POLL;
         let decision = if required == 0 || required > total {
             Decision::Invalid
         } else {
@@ -190,7 +198,7 @@ where
                 // ready. Dropping a borrowing join wait does not cancel or lose
                 // a member; its persistent registration lives on the handle.
                 let next = {
-                    let mut waiting = pin!(members.join_next(cx));
+                    let mut waiting = pin!(members.next_outcome_bounded(&mut remaining_candidates));
                     poll_fn(|task| {
                         if cancelled.as_mut().poll(task).is_ready() {
                             return Poll::Ready(Err(owner_reason(cx)));
@@ -208,11 +216,6 @@ where
                     }
                     Ok(None) => break Decision::Impossible,
                 }
-                completed_in_quantum += 1;
-                if completed_in_quantum == 64 {
-                    completed_in_quantum = 0;
-                    crate::runtime::yield_now().await;
-                }
             }
         };
         let reason = match &decision {
@@ -227,7 +230,7 @@ where
             Decision::OwnerCancelled(reason) => Some(reason.clone()),
             _ => None,
         };
-        let mut drain = pin!(members.cancel_all_with_reason(cx, reason));
+        let mut drain = pin!(members.cancel_remaining_for_selection(reason));
         let remainder = poll_fn(|task| {
             // Never drop/recreate the drain when the owner aborts. Observe once,
             // then continue polling the same uninterruptible retirement barrier.
