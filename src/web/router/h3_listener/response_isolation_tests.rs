@@ -401,3 +401,299 @@ fn run_isolation(streaming: bool) {
     runtime.block_on(runtime.handle().spawn(parent));
     assert_eq!(runtime.draining_region_count(), 0);
 }
+
+#[test]
+fn native_buffered_ingress_budget_covers_partial_headers_and_owned_cleanup() {
+    run_ingress_budget(false);
+}
+
+#[test]
+fn native_streaming_ingress_budget_covers_partial_headers_and_owned_cleanup() {
+    run_ingress_budget(true);
+}
+
+async fn expect_ingress_refusal(
+    cx: &Cx,
+    owner: &mut NativeQuicUdpConnection,
+    session: &mut NativeH3Session,
+    expected_stream: StreamId,
+) {
+    loop {
+        let mut refused = false;
+        for event in events(cx, session, owner) {
+            match event {
+                NativeH3Event::StreamReset {
+                    stream_id,
+                    error_code,
+                    final_size,
+                } => {
+                    assert_eq!(stream_id, expected_stream);
+                    assert_eq!(error_code, crate::http::h3_quic::H3_REQUEST_REJECTED);
+                    assert_eq!(final_size, 0, "no response bytes before admission refusal");
+                    assert!(!refused, "one terminal notification per rejected stream");
+                    refused = true;
+                }
+                other => panic!("ingress budget must reject before a response: {other:?}"),
+            }
+        }
+        owner.flush(cx).await.unwrap();
+        if refused {
+            return;
+        }
+        owner.drive_io_once(cx, IO_TIMEOUT).await.unwrap();
+    }
+}
+
+fn run_ingress_budget(streaming: bool) {
+    use crate::http::h3_native::{H3Frame, qpack_encode_request_field_section};
+    use crate::web::AsyncCxFnHandler;
+    use std::task::Poll;
+
+    const SERVER_RECEIVE_WINDOW: u64 = 128;
+    const QUEUE_BYTES: usize = 64;
+    let reservation_bytes = if streaming { QUEUE_BYTES * 2 } else { BODY_BYTES };
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .with_reactor(crate::runtime::reactor::create_reactor().expect("native reactor"))
+        .build()
+        .unwrap();
+    let parent: Pin<Box<dyn Future<Output = ()> + Send>> = Box::pin(async move {
+        let cx = Cx::current().unwrap();
+        let identities: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/atp_native_auth_identities.json"
+        )))
+        .unwrap();
+        let server = &identities["identities"]["server"];
+        let cert = certificate(server["certificate"].as_str().unwrap());
+        let ca = certificate(identities["ca"].as_str().unwrap());
+        let key = PrivateKeyDer::pem_reader_iter(&mut BufReader::new(
+            server["key"].as_str().unwrap().as_bytes(),
+        ))
+        .next()
+        .unwrap()
+        .unwrap();
+        let held_region = Arc::new(std::sync::Mutex::new(None));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let denied_calls = Arc::new(AtomicUsize::new(0));
+        let handler_region = Arc::clone(&held_region);
+        let handler_calls = Arc::clone(&calls);
+        let forbidden_calls = Arc::clone(&denied_calls);
+        let survivor_calls = Arc::clone(&calls);
+        let router = Router::new()
+            .route(
+                "/ingress-held",
+                post(AsyncCxFnHandler::new(move |request_cx: Cx| {
+                    let region = Arc::clone(&handler_region);
+                    let calls = Arc::clone(&handler_calls);
+                    async move {
+                        assert!(region.lock().unwrap().replace(request_cx.region_id()).is_none());
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        Response::new(StatusCode::OK, Bytes::from(vec![7; BODY_BYTES]))
+                    }
+                })),
+            )
+            .route(
+                "/ingress-denied",
+                post(FnHandler::new(move || {
+                    forbidden_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::OK, "must not dispatch")
+                })),
+            )
+            .route(
+                "/ingress-survivor",
+                post(FnHandler::new(move || {
+                    survivor_calls.fetch_add(1, Ordering::SeqCst);
+                    Response::new(StatusCode::OK, Bytes::from(vec![9; BODY_BYTES]))
+                })),
+            )
+            .without_default_trace();
+        let transport = NativeQuicConnectionConfig {
+            max_local_bidi: 8,
+            max_local_uni: 8,
+            recv_window: WINDOW,
+            connection_recv_limit: 4 << 20,
+            ..NativeQuicConnectionConfig::default()
+        };
+        let mut config = NativeH3ListenerConfig::default();
+        config.endpoint.max_connections = 2;
+        config.endpoint.connection_config = transport;
+        config.max_requests_per_connection = 8;
+        config.receive_window_bytes = SERVER_RECEIVE_WINDOW;
+        config.router = config
+            .router
+            .max_buffered_body_bytes(BODY_BYTES)
+            .max_total_buffered_body_bytes(BODY_BYTES * 4);
+        // Neither the per-connection body pool nor the request-count limits
+        // can cause these refusals. Only one listener-wide reservation fits.
+        config.max_total_request_body_reservation_bytes = Some(reservation_bytes);
+        if streaming {
+            config.streaming_request_body_buffer_bytes = std::num::NonZeroUsize::new(QUEUE_BYTES);
+        }
+        let listener = NativeH3Listener::bind(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            router,
+            server_config(vec![cert], key, vec![b"h3".to_vec()]).unwrap(),
+            parameters(transport),
+            config,
+        )
+        .await
+        .unwrap();
+        let address = listener.local_addr();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let serving = listener.serve_with_shutdown(&cx, async {
+            shutdown_rx.recv(&cx).await.unwrap();
+        });
+        let clients = async {
+            let (mut held, mut held_h3) = connect(&cx, address, 11, transport, ca.clone()).await;
+            let survivor_config = NativeQuicConnectionConfig {
+                recv_window: 4_096,
+                ..transport
+            };
+            let (mut survivor, mut survivor_h3) =
+                connect(&cx, address, 12, survivor_config, ca).await;
+            let stream = held.connection_mut().open_bidi_stream(&cx).unwrap();
+            assert_eq!(stream, StreamId(0));
+            assert_eq!(
+                held.connection().inner().streams().stream(stream).unwrap().send_credit.limit(),
+                WINDOW
+            );
+            let head = H3RequestHead::new(
+                H3PseudoHeaders {
+                    method: Some("POST".to_owned()),
+                    scheme: Some("https".to_owned()),
+                    authority: Some("localhost".to_owned()),
+                    path: Some("/ingress-held".to_owned()),
+                    ..H3PseudoHeaders::default()
+                },
+                // An explicit zero length must not exempt this stream from
+                // its whole-request reservation or release it before cleanup.
+                vec![("content-length".to_owned(), "0".to_owned())],
+            )
+            .unwrap();
+            let mut wire = Vec::new();
+            H3Frame::Headers(qpack_encode_request_field_section(&head).unwrap())
+                .encode(&mut wire)
+                .unwrap();
+            assert!(wire.len() > 1 && wire.len() <= SERVER_RECEIVE_WINDOW as usize);
+            held.connection_mut()
+                .write_stream(&cx, stream, Bytes::copy_from_slice(&wire[..1]), false)
+                .unwrap();
+            held.flush(&cx).await.unwrap();
+            loop {
+                let state = held.connection().inner().streams().stream(stream).unwrap();
+                assert_eq!(state.send_offset, 1);
+                assert!(state.recv_reset.is_none() && state.final_size.is_none());
+                if state.send_credit.limit() >= SERVER_RECEIVE_WINDOW {
+                    break;
+                }
+                held.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+                assert!(events(&cx, &mut held_h3, &mut held).is_empty());
+            }
+            // MAX_STREAM_DATA > the authenticated initial allowance proves
+            // the actual listener observed/admitted this one-byte partial head.
+            // It is stronger than a sleep, a sent packet, or a transport ACK.
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+            assert!(held_region.lock().unwrap().is_none());
+            cx.trace_with_fields("http3.ingress_budget.partial_head", &[
+                ("streaming", if streaming { "true" } else { "false" }),
+                ("request_bytes_sent", "1"),
+                ("handler_calls", "0"),
+                ("admission_witness", "max_stream_data_above_initial"),
+            ]);
+            let first_denied = request(
+                &cx, &mut survivor, &mut survivor_h3, "/ingress-denied",
+            ).await;
+            assert_eq!(first_denied, stream, "different peers reuse the same stream ID");
+            expect_ingress_refusal(&cx, &mut survivor, &mut survivor_h3, first_denied).await;
+            assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+            held.connection_mut()
+                .write_stream(&cx, stream, Bytes::copy_from_slice(&wire[1..]), true)
+                .unwrap();
+            held.flush(&cx).await.unwrap();
+            loop {
+                let state = held.connection().inner().streams().stream(stream).unwrap();
+                assert_eq!(state.read_offset, 0);
+                assert_eq!(state.recv_credit.limit(), WINDOW);
+                assert!(state.recv_reset.is_none() && state.final_size.is_none());
+                if state.recv_offset == WINDOW {
+                    break;
+                }
+                held.drive_io_once(&cx, IO_TIMEOUT).await.unwrap();
+            }
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let region = held_region.lock().unwrap().expect("the actual request region ran");
+            assert!(crate::runtime::Runtime::current_handle().unwrap()
+                .diagnostics().unwrap().explain_region_open(region).region_state.is_some());
+            // The upload is finished, but its region still owns a flow-blocked
+            // response. Returning ingress credit at request FIN would admit this.
+            let second_denied = request(
+                &cx, &mut survivor, &mut survivor_h3, "/ingress-denied",
+            ).await;
+            assert_eq!(second_denied, StreamId(4));
+            expect_ingress_refusal(&cx, &mut survivor, &mut survivor_h3, second_denied).await;
+            assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
+            cx.trace_with_fields("http3.ingress_budget.owned_response", &[
+                ("response_received_bytes", "64"),
+                ("response_consumed_bytes", "0"),
+                ("refused_requests", "2"),
+                ("denied_handler_calls", "0"),
+            ]);
+
+            held.connection_mut()
+                .stop_stream_receiving(&cx, stream, H3_REQUEST_CANCELLED).unwrap();
+            held.flush(&cx).await.unwrap();
+            assert!(reset(&cx, &mut held, stream).await <= WINDOW);
+            let retired = events(&cx, &mut held_h3, &mut held);
+            assert_eq!(retired.len(), 1);
+            assert!(matches!(&retired[0], NativeH3Event::StreamReset {
+                stream_id, error_code, ..
+            } if *stream_id == stream && *error_code == H3_REQUEST_CANCELLED));
+            let mut closed_seen = false;
+            std::future::poll_fn(|task_cx| {
+                let closed = crate::runtime::Runtime::current_handle().unwrap()
+                    .diagnostics().unwrap().explain_region_open(region).region_state.is_none();
+                if closed && closed_seen {
+                    return Poll::Ready(());
+                }
+                closed_seen = closed;
+                // The paired listener is polled on each turn. After observing
+                // actual region retirement, give its owner-reap pass a turn
+                // before testing admission; a wire reset alone is insufficient.
+                task_cx.waker().wake_by_ref();
+                Poll::Pending
+            }).await;
+            let served = request(
+                &cx, &mut survivor, &mut survivor_h3, "/ingress-survivor",
+            ).await;
+            assert_eq!(served, StreamId(8));
+            response(&cx, &mut survivor, &mut survivor_h3, served, &[9; BODY_BYTES]).await;
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+            assert_eq!(denied_calls.load(Ordering::SeqCst), 0);
+            shutdown_tx.send(&cx, ()).unwrap();
+            zip(
+                acknowledge_goaway(&cx, &mut held, &mut held_h3, 4),
+                acknowledge_goaway(&cx, &mut survivor, &mut survivor_h3, 12),
+            ).await;
+        };
+        let (report, ()) = crate::time::timeout(
+            cx.now(), Duration::from_secs(20), zip(serving, clients),
+        ).await.expect("shared ingress admission and cleanup must make native UDP progress");
+        let report = report.unwrap();
+        assert_eq!(report.accepted_connections, 2);
+        assert_eq!(report.failed_connections, 0);
+        assert_eq!(report.completed_requests, 1);
+        assert_eq!(report.cancelled_requests, 1);
+        assert_eq!(report.refused_requests, 2);
+        assert_eq!(report.rejected_request_body_reservations, 2);
+        assert_eq!(report.peak_reserved_request_body_bytes, reservation_bytes);
+        assert_eq!(report.failed_request_cleanups, 0);
+        assert_eq!(report.rejected_buffered_responses, 0);
+        assert!(!report.drain_timed_out);
+        assert_eq!(cx.timer_driver().unwrap().pending_count(), 0);
+    });
+    runtime.block_on(runtime.handle().spawn(parent));
+    assert_eq!(runtime.draining_region_count(), 0);
+}
