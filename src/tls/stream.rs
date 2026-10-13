@@ -4,6 +4,9 @@
 //! and implements `AsyncRead` + `AsyncWrite` with TLS encryption.
 
 #[cfg(feature = "tls")]
+mod channel_binding;
+
+#[cfg(feature = "tls")]
 use super::error::TlsError;
 #[cfg(feature = "tls")]
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
