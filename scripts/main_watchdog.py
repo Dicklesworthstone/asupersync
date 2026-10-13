@@ -134,6 +134,10 @@ DEPENDENCY_PREFLIGHT_REASON = "rch dependency preflight refused this commit's tr
 RCH_TRANSPORT_RE = re.compile(r"\bRCH-E1\d\d\b")
 TRANSPORT_RETRIES = 2
 TRANSPORT_RETRY_MAX_SECONDS = 600
+# A lane the worker left undecided (rustc killed for memory, or a run whose completion
+# rch could not confirm) is retried once, on WATCHDOG_RETRY_WORKERS (default: the clippy
+# workers), unless it already ran this long.
+NO_EVIDENCE_RETRY_MAX_SECONDS = 7200
 
 
 def rch_transport_retryable(text: str, code: int, elapsed: float) -> bool:
@@ -199,6 +203,25 @@ def is_worker_fault(clean: str) -> bool:
     local_crates = set(LOCAL_CRATE_RE.findall(clean))
     return bool(WORKER_FAULT_RE.search(clean)) and not any(
         name.startswith("asupersync") or name in local_crates for name in failing_crates
+    )
+
+
+KILLED_REASON = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
+NO_REMOTE_EXIT_REASON = "no remote exit in log"
+
+
+def worker_side_no_evidence(outcome: dict[str, Any]) -> bool:
+    """A no-evidence verdict the worker caused, which a run on another worker can decide.
+
+    One undecided lane keeps the whole batch uncovered (`last_covered` stays put). The
+    10-13 01:17Z run lost check-default, check-features and clippy-default to rustc
+    killed for memory on vmi workers. On 10-12 native-cancel-contract printed 43 passed on
+    hz4, then rch could not confirm completion. `last_covered` stayed at 8f72be32a from
+    10-10, so every run rebatched about 620 commits and posted its receipt on every bead
+    they cite.
+    """
+    return outcome["verdict"] == VERDICT_NO_EVIDENCE and (
+        outcome["reason"] == KILLED_REASON or outcome["reason"].startswith(NO_REMOTE_EXIT_REASON)
     )
 COMPILE_TARGET_RE = re.compile(r'\((?:test|bin|example|bench) "([^"]+)"\)')
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -671,7 +694,7 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
         result["reason"] = "RCH false green marker (E412/E504): nothing ran"
         return result
     if remote_exit is None:
-        result["reason"] = f"no remote exit in log (client exit {client_exit})"
+        result["reason"] = f"{NO_REMOTE_EXIT_REASON} (client exit {client_exit})"
         return result
     missing_target = NO_TARGET_RE.search(clean)
     if missing_target:
@@ -689,7 +712,7 @@ def classify_lane_output(text: str, client_exit: int, lane: dict[str, Any]) -> d
     # diagnostic beside it the lane is undecided, not red: such a red was once bisected
     # to an innocent commit (lib test, vmi workers, 2026-09-25).
     compiler_killed = bool(COMPILER_KILLED_RE.search(clean)) and not first_error
-    killed_reason = "rustc was killed on the worker (signal 9, out of memory): nothing was compiled or tested"
+    killed_reason = KILLED_REASON
     # Likewise a worker fault while only third-party crates failed: such reds were
     # bisected across innocent commits on hz4 (2026-09-28). A workspace crate that
     # failed beside it is still red, including a member not named asupersync-*. A
@@ -1901,6 +1924,7 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
         argv = ["rch", "exec", "--base", sha, "--clean-overlay", "--no-overlay", "--", *lane["argv"]]
         text, code = "", 103
         transport_retries = 0
+        undecided_retried = False
         retried: list[str] = []
         for _ in range(admission_attempts):
             started = time.monotonic()
@@ -1916,12 +1940,27 @@ def rch_runner(target_dir: str, admission_attempts: int, admission_sleep: int, l
                 and transport_retries < TRANSPORT_RETRIES
                 and (rch_transport_retryable(clean, code, time.monotonic() - started) or fault)
             )
-            if not (admission or transport):
+            outcome = classify_lane_output(text, code, lane)
+            undecided = (
+                not (admission or transport or undecided_retried)
+                and time.monotonic() - started < NO_EVIDENCE_RETRY_MAX_SECONDS
+                and worker_side_no_evidence(outcome)
+            )
+            if not (admission or transport or undecided):
                 break
             if transport:
                 transport_retries += 1
                 kind = "worker fault" if fault else "rch transport failure before any remote result"
                 retried.append(f"[main-watchdog] {kind} (exit {code}); retried\n")
+            if undecided:
+                undecided_retried = True
+                workers = os.environ.get("WATCHDOG_RETRY_WORKERS") or os.environ.get("WATCHDOG_CLIPPY_WORKERS")
+                if workers:
+                    env["RCH_WORKER"] = workers
+                retried.append(
+                    f"[main-watchdog] no evidence on {outcome['worker']} ({outcome['reason']}); "
+                    f"retried once on {workers or 'any worker'}\n"
+                )
             subprocess.run(["sleep", str(admission_sleep)], check=False)
         text = "".join(retried) + text
         return text, code
@@ -1936,8 +1975,21 @@ def load_state(path: Path) -> dict[str, Any]:
         return {"schema": SCHEMA_VERSION, "known_reds": {}}
 
 
-def post_receipts(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> None:
-    """Comment the batch receipt on every bead a commit in the batch cites.
+def receipt_beads(commits: list[dict[str, Any]], posted_through: str | None) -> list[str]:
+    """The beads a run's receipt goes on: those cited by commits no earlier run receipted.
+
+    A batch stays open until a run decides every lane, so each run used to post again on
+    every bead the whole open batch cited. With 8f72be32a..b96c71e7b open that was 77 beads
+    per run; by 10-13 there were 1395 receipt comments on 396 beads, 28 on one. A commit's
+    later coverage is still recorded in receipts.jsonl (`summary`, the 6 h escalation).
+    """
+    shas = [c["sha"] for c in commits]
+    fresh = commits[shas.index(posted_through) + 1 :] if posted_through in shas else commits
+    return sorted({b for c in fresh for b in c["beads"]})
+
+
+def post_receipts(plan: dict[str, Any], receipts: list[dict[str, Any]], posted_through: str | None) -> None:
+    """Comment the batch receipt on every bead cited by a commit no earlier run receipted.
 
     Commits that cite no bead are counted in `summary` instead.
     """
@@ -1950,7 +2002,7 @@ def post_receipts(plan: dict[str, Any], receipts: list[dict[str, Any]]) -> None:
             + (f"; failing: {', '.join(r['failing_targets'])}" if r["failing_targets"] else "")
         )
     text = "\n".join(lines) + "\n"
-    cited = sorted({b for c in plan["commits"] for b in c["beads"]})
+    cited = receipt_beads(plan["commits"], posted_through)
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
         handle.write(text)
         path = handle.name
@@ -3138,6 +3190,14 @@ def main(argv: list[str]) -> int:
                 for case in probes.get("rch_transport_retryable", [])
             ],
             "is_worker_fault": [is_worker_fault(text) for text in probes.get("is_worker_fault", [])],
+            "worker_side_no_evidence": [
+                worker_side_no_evidence(classify_lane_output(case["text"], case["code"], case["lane"]))
+                for case in probes.get("worker_side_no_evidence", [])
+            ],
+            "receipt_beads": [
+                receipt_beads(case["commits"], case.get("posted_through"))
+                for case in probes.get("receipt_beads", [])
+            ],
             "feature_lanes": [
                 feature_lanes(case["src_features"], case["test_features"], case["jobs"])
                 for case in probes.get("feature_lanes", [])
@@ -3215,7 +3275,8 @@ def main(argv: list[str]) -> int:
         file_or_queue(result["bead_payloads"], state, open_tracker_issues(), file_bead)
         report_heals(result["bead_heals"], open_tracker_issues())
     if args.post_receipts:
-        post_receipts(plan, result["receipts"])
+        post_receipts(plan, result["receipts"], state.get("receipts_posted_through"))
+        state["receipts_posted_through"] = plan["commits"][-1]["sha"]
     with open(args.state_dir / "receipts.jsonl", "a", encoding="utf-8") as handle:
         for receipt in result["receipts"]:
             handle.write(json.dumps(receipt, sort_keys=True) + "\n")
