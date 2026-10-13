@@ -27,12 +27,66 @@ pub struct Match {
     pub length: usize,
 }
 
+/// The length of the common prefix of `a` and `b`, compared eight bytes at a
+/// time.
+fn common_prefix(a: &[u8], b: &[u8]) -> usize {
+    let limit = a.len().min(b.len());
+    let word = |bytes: &[u8], at: usize| {
+        let mut word = [0_u8; 8];
+        word.copy_from_slice(&bytes[at..at + 8]);
+        u64::from_le_bytes(word)
+    };
+    let mut len = 0;
+    while len + 8 <= limit {
+        let differ = word(a, len) ^ word(b, len);
+        if differ != 0 {
+            return len + (differ.trailing_zeros() / 8) as usize;
+        }
+        len += 8;
+    }
+    while len < limit && a[len] == b[len] {
+        len += 1;
+    }
+    len
+}
+
+/// The eight bytes at `position` as a little-endian word, when they exist.
+fn load(src: &[u8], position: usize) -> Option<u64> {
+    let end = position.checked_add(8)?;
+    let bytes: [u8; 8] = src.get(position..end)?.try_into().ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+/// The low `width` (at most 7) bytes of a word.
+const fn low_bytes(width: usize) -> u64 {
+    (1 << (8 * width)) - 1
+}
+
+/// The `width` bytes at `position` as an integer (one load when the input
+/// has eight readable bytes there).
+fn key(src: &[u8], position: usize, width: usize) -> u64 {
+    load(src, position).map_or_else(
+        || {
+            let mut word = [0_u8; 8];
+            word[..width].copy_from_slice(&src[position..position + width]);
+            u64::from_le_bytes(word)
+        },
+        |word| word & low_bytes(width),
+    )
+}
+
+/// Whether the `width` bytes at `a` and at `b` are equal.
+fn same(src: &[u8], a: usize, b: usize, width: usize) -> bool {
+    match (load(src, a), load(src, b)) {
+        (Some(x), Some(y)) => (x ^ y) & low_bytes(width) == 0,
+        _ => src[a..a + width] == src[b..b + width],
+    }
+}
+
 /// The hash of the `width` bytes at `position`.
 fn hash(src: &[u8], position: usize, width: usize) -> usize {
-    let mut word = [0_u8; 8];
-    word[..width].copy_from_slice(&src[position..position + width]);
-    let key = u64::from_le_bytes(word);
-    usize::try_from(key.wrapping_mul(PRIME) >> (u64::BITS - HASH_LOG)).unwrap_or(0)
+    usize::try_from(key(src, position, width).wrapping_mul(PRIME) >> (u64::BITS - HASH_LOG))
+        .unwrap_or(0)
 }
 
 /// A greedy match finder for one frame. Its hash table carries over from
@@ -77,16 +131,14 @@ impl MatchFinder {
             let repeat = last_offset > 0
                 && ip > anchor
                 && ip >= window_start + last_offset
-                && src[ip..ip + width] == src[ip - last_offset..ip - last_offset + width];
+                && same(src, ip, ip - last_offset, width);
             let candidate = if repeat {
                 Some(ip - last_offset)
             } else {
                 let slot = hash(src, ip, width);
                 let previous = self.table[slot];
                 self.table[slot] = ip;
-                (previous != EMPTY
-                    && previous >= window_start
-                    && src[previous..previous + width] == src[ip..ip + width])
+                (previous != EMPTY && previous >= window_start && same(src, previous, ip, width))
                     .then_some(previous)
             };
             let Some(mut source) = candidate else {
@@ -96,10 +148,8 @@ impl MatchFinder {
                 continue;
             };
             misses = 0;
-            let mut length = width;
-            while ip + length < end && src[source + length] == src[ip + length] {
-                length += 1;
-            }
+            let mut length =
+                width + common_prefix(&src[source + width..end], &src[ip + width..end]);
             while ip > anchor && source > window_start && src[ip - 1] == src[source - 1] {
                 ip -= 1;
                 source -= 1;
@@ -124,7 +174,57 @@ impl MatchFinder {
 
 #[cfg(test)]
 mod tests {
-    use super::{Match, MatchFinder};
+    use super::{Match, MatchFinder, common_prefix, key, same};
+
+    /// The one-load key and comparison equal the byte-wise ones, including
+    /// positions too close to the end for an 8-byte load.
+    #[test]
+    fn word_loads_match_bytewise_keys_and_comparisons() {
+        let src: Vec<u8> = (0..64_u8).map(|i| i % 3).collect();
+        for width in [5, 6] {
+            for a in 0..=src.len() - width {
+                let mut word = [0_u8; 8];
+                word[..width].copy_from_slice(&src[a..a + width]);
+                assert_eq!(key(&src, a, width), u64::from_le_bytes(word), "key at {a}");
+                for b in 0..=src.len() - width {
+                    assert_eq!(
+                        same(&src, a, b, width),
+                        src[a..a + width] == src[b..b + width],
+                        "width {width} at {a} and {b}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The word-at-a-time prefix equals a byte-by-byte scan, wherever the
+    /// first difference falls and whatever the lengths.
+    #[test]
+    fn common_prefix_matches_a_bytewise_scan() {
+        let mut state = 11_u64;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            usize::try_from(state >> 33).unwrap()
+        };
+        for case in 0..3_000 {
+            let a: Vec<u8> = (0..next() % 50)
+                .map(|_| u8::try_from(next() % 4).unwrap())
+                .collect();
+            let mut b = a.clone();
+            b.truncate(next() % (a.len() + 1));
+            if !b.is_empty() && next().is_multiple_of(2) {
+                let at = next() % b.len();
+                b[at] ^= u8::try_from(1 + next() % 255).unwrap();
+            }
+            for _ in 0..next() % 10 {
+                b.push(u8::try_from(next() % 4).unwrap());
+            }
+            let naive = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+            assert_eq!(common_prefix(&a, &b), naive, "case {case}");
+        }
+    }
 
     /// Executes `matches` over `src[start..]` and checks they rebuild it.
     fn replay(src: &[u8], start: usize, end: usize, window_start: usize, matches: &[Match]) {

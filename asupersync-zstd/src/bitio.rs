@@ -122,14 +122,23 @@ pub fn extract(data: &[u8], start: usize, count: usize) -> u64 {
     }
     let first = start / 8;
     let shift = start % 8;
-    let mut window = [0_u8; 8];
-    let end = first.saturating_add(8).min(data.len());
-    if let (Some(dst), Some(src)) = (
-        window.get_mut(..end.saturating_sub(first)),
-        data.get(first..end),
-    ) {
-        dst.copy_from_slice(src);
-    }
+    // Eight whole bytes are almost always available: one fixed-size load.
+    // Only the last bytes of the input take the bounded copy.
+    let window = first
+        .checked_add(8)
+        .and_then(|end| data.get(first..end))
+        .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+        .unwrap_or_else(|| {
+            let mut window = [0_u8; 8];
+            let end = first.saturating_add(8).min(data.len());
+            if let (Some(dst), Some(src)) = (
+                window.get_mut(..end.saturating_sub(first)),
+                data.get(first..end),
+            ) {
+                dst.copy_from_slice(src);
+            }
+            window
+        });
     let word = u64::from_le_bytes(window) >> shift;
     if count >= 64 {
         word
