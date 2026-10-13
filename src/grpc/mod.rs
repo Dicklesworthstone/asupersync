@@ -60,6 +60,7 @@
 //! - `reflection_rpc`: Native v1/v1alpha reflection (`http2-streaming` feature)
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
+//! - `web_handler`: Native registered unary gRPC-Web dispatch (non-Wasm)
 
 pub mod client;
 pub mod codec;
@@ -84,6 +85,8 @@ pub mod service;
 pub mod status;
 pub mod streaming;
 pub mod web;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod web_handler;
 
 /// Default maximum gRPC message size (4 MiB).
 ///
@@ -162,3 +165,5 @@ pub use web::{
     base64_decode, base64_encode, decode_trailers, encode_trailers, is_grpc_web_request,
     is_text_mode,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use web_handler::{GrpcWebConfig, GrpcWebHandlerFuture};
