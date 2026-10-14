@@ -6,6 +6,7 @@
 pub mod codec;
 pub mod compression;
 pub mod delta;
+mod file_hash;
 pub mod filter;
 pub mod metadata;
 pub mod mirror;

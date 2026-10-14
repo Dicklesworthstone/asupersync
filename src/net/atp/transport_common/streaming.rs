@@ -34,7 +34,6 @@ use crate::atp::object::{
     ContentId, ContentIdHasher, MetadataPolicy, Object, ObjectEdge, ObjectId, ObjectKind,
 };
 use crate::atp::safety::validate_portable_path_component;
-use crate::io::AsyncReadExt;
 
 use super::metadata::{PathLinkKind, classify_path_link};
 
@@ -433,37 +432,26 @@ fn collect_dir<'a>(
     })
 }
 
-/// Stream a file off disk in `buf`-sized chunks, computing its size, content id,
-/// and plain SHA-256 without ever holding more than one chunk in memory.
+/// Stream a file off disk, computing its size, content id, and plain SHA-256
+/// without materializing the file. `buf.len()` bounds each batch (up to 128 KiB).
+///
+/// The borrowed-scratch API is retained for existing transport callers. Its
+/// contents are unspecified; one bounded owned scratch allocation is reused by
+/// the blocking jobs instead of allocating and copying on every async read.
+/// Opening, the first reads and a short file's EOF share one job. Both digest
+/// updates run on that worker, with at most 64 read attempts per batch.
+/// Dropping the future prevents later batches, but cannot preempt a running
+/// filesystem syscall.
 ///
 /// # Errors
 ///
-/// Returns [`StreamingError`] if the file cannot be opened or a read fails.
+/// Returns [`StreamingError`] if the buffer is empty, the file cannot be opened,
+/// the caller lacks ambient I/O authority, or a read fails.
 pub async fn hash_file_streaming(
     path: &Path,
     buf: &mut [u8],
 ) -> Result<(u64, ObjectId, [u8; 32]), StreamingError> {
-    let mut file = crate::fs::File::open(path)
-        .await
-        .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
-    let mut sha = Sha256::new();
-    let mut cid: ContentIdHasher = ContentId::streaming();
-    let mut size: u64 = 0;
-    loop {
-        let n = file
-            .read(buf)
-            .await
-            .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
-        if n == 0 {
-            break;
-        }
-        sha.update(&buf[..n]);
-        cid.update(&buf[..n]);
-        size = size.saturating_add(n as u64);
-    }
-    let content_sha256: [u8; 32] = sha.finalize().into();
-    let content_id = ObjectId::content(cid.finalize());
-    Ok((size, content_id, content_sha256))
+    super::file_hash::hash_file_batched(path, buf.len()).await
 }
 
 /// Incremental receive-side state for one staged manifest entry.
@@ -582,7 +570,7 @@ mod tests {
 
         let mut graph = ObjectGraph::new();
         let mut sorted: Vec<&(&str, &[u8])> = files.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let mut edges = Vec::new();
         for (rel, bytes) in sorted {
             let obj = Object::file(bytes.to_vec());
