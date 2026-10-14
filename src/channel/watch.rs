@@ -544,28 +544,28 @@ impl<T> Sender<T> {
         // The lock is released before the waiters are woken and the previous
         // value is dropped, as in `send()`: a waker that polls inline, or a
         // `T::Drop` that sends on this channel, would otherwise deadlock on it.
+        // Declare the speculative clone OUTSIDE the serialization-lock scope.
+        // During panic unwinding Rust destroys locals in reverse declaration
+        // order. A clone allocated within the lock scope would run T::drop
+        // before releasing send_lock, deadlocking a reentrant destructor.
+        let mut candidate: Option<T> = None;
         let _old_value = {
             let _write_serialize = self.inner.send_lock.lock();
 
-            // Clone current value while holding read lock to avoid calling
-            // user code under write lock
-            let mut value = {
+            candidate = Some({
                 let guard = self.inner.value.read();
                 guard.0.clone()
-            };
+            });
 
-            // Call user closure without holding the value lock to prevent deadlocks
-            f(&mut value);
+            // Execute the caller's closure without the value lock, while
+            // serializing against concurrent send and send_modify operations.
+            f(candidate.as_mut().expect("candidate initialized before mutation"));
 
-            // Write back under the value lock, but drop the PREVIOUS value only
-            // after releasing the guard — a `T::Drop` that reentrantly reads this
-            // channel (`borrow`/`current_version`/…) would otherwise self-deadlock
-            // on the non-reentrant `RwLock`, and a slow drop would stall every
-            // reader. This mirrors `send()`'s `mem::replace` discipline (see above);
-            // the wholesale `guard.0 = value` it replaced dropped the old value
-            // while the write lock was held.
             let mut guard = self.inner.value.write();
-            let old = std::mem::replace(&mut guard.0, value);
+            let old = std::mem::replace(
+                &mut guard.0,
+                candidate.take().expect("candidate initialized before publication"),
+            );
             guard.1 = guard.1.wrapping_add(1);
             old
         };
@@ -4194,4 +4194,74 @@ mod tests {
 
         crate::test_complete!("audit_send_modify_panic_safe_semantics");
     }
+    #[test]
+    fn send_modify_panic_drops_candidate_after_unlocking() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::{Arc, OnceLock, Weak};
+
+        struct Candidate {
+            generation: usize,
+            on_drop: Arc<AtomicBool>,
+            drops: Arc<AtomicUsize>,
+            sender: Arc<OnceLock<Weak<Sender<Candidate>>>>,
+        }
+
+        impl Clone for Candidate {
+            fn clone(&self) -> Self {
+                Self {
+                    generation: self.generation,
+                    on_drop: Arc::clone(&self.on_drop),
+                    drops: Arc::clone(&self.drops),
+                    sender: Arc::clone(&self.sender),
+                }
+            }
+        }
+
+        impl Drop for Candidate {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+                if self.on_drop.swap(false, Ordering::SeqCst) {
+                    let sender = self.sender.get().and_then(Weak::upgrade)
+                        .expect("sender must remain alive during unwind");
+                    assert!(sender.inner.send_lock.try_lock().is_some(),
+                        "aborted candidate dropped under send_lock");
+                    assert!(sender.inner.value.try_read().is_some(),
+                        "aborted candidate dropped under value lock");
+                    sender.send_modify(|value| value.generation += 1)
+                        .expect("candidate drop may reenter send_modify");
+                }
+            }
+        }
+
+        let on_drop = Arc::new(AtomicBool::new(false));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let sender_slot = Arc::new(OnceLock::new());
+        let (tx, rx) = channel(Candidate {
+            generation: 7,
+            on_drop: Arc::clone(&on_drop),
+            drops: Arc::clone(&drops),
+            sender: Arc::clone(&sender_slot),
+        });
+        let tx = Arc::new(tx);
+        assert!(sender_slot.set(Arc::downgrade(&tx)).is_ok());
+
+        on_drop.store(true, Ordering::SeqCst);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tx.send_modify(|value| {
+                value.generation = 999;
+                panic!("send_modify regression sentinel");
+            })
+        }));
+        assert_eq!(
+            panic.expect_err("modifier must panic").downcast_ref::<&str>(),
+            Some(&"send_modify regression sentinel"),
+        );
+        // The callback's speculative change is rolled back; only the
+        // destructor's separately serialized mutation is published.
+        assert_eq!(rx.borrow().generation, 8);
+        assert_eq!(drops.load(Ordering::SeqCst), 2);
+        tx.send_modify(|value| value.generation += 1).unwrap();
+        assert_eq!(rx.borrow().generation, 9);
+    }
+
 }
