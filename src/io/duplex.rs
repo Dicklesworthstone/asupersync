@@ -96,17 +96,15 @@ impl Pipe {
         }
     }
 
-    fn poll_read(
-        &mut self,
-        cx: &Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> (Poll<io::Result<()>>, Option<Waker>) {
+    fn try_read(&mut self, buf: &mut ReadBuf<'_>) -> PipeResult<()> {
+        if buf.remaining() == 0 {
+            return Some((Ok(()), None));
+        }
         if self.buffer.is_empty() {
             if self.write_closed {
-                return (Poll::Ready(Ok(())), None);
+                return Some((Ok(()), None));
             }
-            store_waker(&mut self.read_waker, cx);
-            return (Poll::Pending, None);
+            return None;
         }
         let take = self.buffer.len().min(buf.remaining());
         let (front, back) = self.buffer.as_slices();
@@ -114,54 +112,123 @@ impl Pipe {
         buf.put_slice(&front[..from_front]);
         buf.put_slice(&back[..take - from_front]);
         self.buffer.drain(..take);
-        (Poll::Ready(Ok(())), self.write_waker.take())
+        Some((Ok(()), self.write_waker.take()))
     }
 
-    fn poll_write(
-        &mut self,
-        cx: &Context<'_>,
-        data: &[u8],
-    ) -> (Poll<io::Result<usize>>, Option<Waker>) {
+    fn try_write(&mut self, data: &[u8]) -> PipeResult<usize> {
         if self.write_closed || self.read_closed {
-            return (Poll::Ready(Err(io::ErrorKind::BrokenPipe.into())), None);
+            return Some((Err(io::ErrorKind::BrokenPipe.into()), None));
         }
         if data.is_empty() {
-            return (Poll::Ready(Ok(0)), None);
+            return Some((Ok(0), None));
         }
         let room = self.max_buf_size - self.buffer.len();
         if room == 0 {
-            store_waker(&mut self.write_waker, cx);
-            return (Poll::Pending, None);
+            return None;
         }
         let written = room.min(data.len());
         self.buffer.extend(&data[..written]);
-        (Poll::Ready(Ok(written)), self.read_waker.take())
+        Some((Ok(written), self.read_waker.take()))
     }
 
-    fn close_write(&mut self) -> Option<Waker> {
+    fn close_write(&mut self) -> (Option<Waker>, Option<Waker>) {
         self.write_closed = true;
-        self.read_waker.take()
+        (self.read_waker.take(), self.write_waker.take())
     }
 
-    fn close_read(&mut self) -> Option<Waker> {
+    fn close_read(&mut self) -> (Option<Waker>, Option<Waker>) {
         self.read_closed = true;
         // Bytes nobody will read no longer hold the writer back.
         self.buffer.clear();
-        self.write_waker.take()
+        (self.write_waker.take(), self.read_waker.take())
     }
 }
 
-fn store_waker(slot: &mut Option<Waker>, cx: &Context<'_>) {
-    match slot {
-        Some(waker) if waker.will_wake(cx.waker()) => {}
-        _ => *slot = Some(cx.waker().clone()),
+type PipeResult<T> = Option<(io::Result<T>, Option<Waker>)>;
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Read,
+    Write,
+}
+
+impl Direction {
+    fn waiter(self, pipe: &mut Pipe) -> &mut Option<Waker> {
+        match self {
+            Self::Read => &mut pipe.read_waker,
+            Self::Write => &mut pipe.write_waker,
+        }
     }
 }
 
-/// Wakes outside the pipe's lock, so a woken task never contends with it.
-fn wake(waker: Option<Waker>) {
-    if let Some(waker) = waker {
-        waker.wake();
+/// Serialize the condition check and registration, but never run a `Waker`
+/// clone, drop, or wake callback while holding the pipe's lock.
+fn poll_pipe<T>(
+    shared: &Mutex<Pipe>,
+    cx: &Context<'_>,
+    direction: Direction,
+    mut attempt: impl FnMut(&mut Pipe) -> PipeResult<T>,
+) -> Poll<io::Result<T>> {
+    let mut incoming = None;
+    loop {
+        let mut pipe = shared.lock();
+        if let Some((result, wake)) = attempt(&mut pipe) {
+            let retired = direction.waiter(&mut pipe).take();
+            drop(pipe);
+            finish_callbacks([wake, None], [retired, incoming.take()]);
+            return Poll::Ready(result);
+        }
+        let slot = direction.waiter(&mut pipe);
+        if slot.as_ref().is_some_and(|waker| waker.will_wake(cx.waker())) {
+            drop(pipe);
+            finish_callbacks([None, None], [incoming.take(), None]);
+            return Poll::Pending;
+        }
+        if let Some(waker) = incoming.take() {
+            let retired = slot.replace(waker);
+            drop(pipe);
+            finish_callbacks([None, None], [retired, None]);
+            return Poll::Pending;
+        }
+        drop(pipe);
+        incoming = Some(cx.waker().clone());
+        // A clone callback may have changed the peer's state. Recheck the
+        // condition before parking, so its notification cannot be lost.
+    }
+}
+
+/// Finish every notification and retirement, even if an arbitrary callback
+/// panics. Normal calls preserve the first panic; teardown during an existing
+/// unwind must not double-panic. All pipe transitions precede this function.
+fn finish_callbacks(wake: [Option<Waker>; 2], retire: [Option<Waker>; 2]) {
+    let unwinding = std::thread::panicking();
+    let mut first_panic = None;
+    for waker in wake.into_iter().flatten() {
+        capture_callback_panic(&mut first_panic, || waker.wake());
+    }
+    for waker in retire.into_iter().flatten() {
+        capture_callback_panic(&mut first_panic, || drop(waker));
+    }
+    if let Some(payload) = first_panic {
+        if unwinding {
+            std::mem::forget(payload);
+        } else {
+            std::panic::resume_unwind(payload);
+        }
+    }
+}
+
+fn capture_callback_panic(
+    first: &mut Option<Box<dyn std::any::Any + Send>>,
+    callback: impl FnOnce(),
+) {
+    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback)) {
+        if first.is_none() {
+            *first = Some(payload);
+        } else {
+            // Even dropping an arbitrary panic payload may panic again.
+            std::mem::forget(payload);
+        }
     }
 }
 
@@ -171,9 +238,7 @@ impl AsyncRead for DuplexStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let (poll, waker) = self.read.lock().poll_read(cx, buf);
-        wake(waker);
-        poll
+        poll_pipe(&self.read, cx, Direction::Read, |pipe| pipe.try_read(buf))
     }
 }
 
@@ -183,9 +248,7 @@ impl AsyncWrite for DuplexStream {
         cx: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
-        let (poll, waker) = self.write.lock().poll_write(cx, data);
-        wake(waker);
-        poll
+        poll_pipe(&self.write, cx, Direction::Write, |pipe| pipe.try_write(data))
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -193,18 +256,19 @@ impl AsyncWrite for DuplexStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        let waker = self.write.lock().close_write();
-        wake(waker);
+        let (reader, retired) = self.write.lock().close_write();
+        finish_callbacks([reader, None], [retired, None]);
         Poll::Ready(Ok(()))
     }
 }
 
 impl Drop for DuplexStream {
     fn drop(&mut self) {
-        let reader = self.write.lock().close_write();
-        wake(reader);
-        let writer = self.read.lock().close_read();
-        wake(writer);
+        // Close BOTH directions before any callback can unwind or re-enter.
+        // Lock separately so simultaneous peer drops cannot invert lock order.
+        let (reader, own_writer) = self.write.lock().close_write();
+        let (writer, own_reader) = self.read.lock().close_read();
+        finish_callbacks([reader, writer], [own_writer, own_reader]);
     }
 }
 
@@ -221,3 +285,6 @@ impl std::fmt::Debug for DuplexStream {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests;
