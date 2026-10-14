@@ -20,6 +20,11 @@ use std::time::Instant;
 const CONTENT_ID_DOMAIN: &[u8] = b"asupersync.atp.content-id.v1\0";
 const DIGEST_BUFFER_SIZE: usize = 8192;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod scoped;
+#[cfg(not(target_arch = "wasm32"))]
+pub use scoped::{ScopedSparseWriter, ScopedWriterResult};
+
 /// Configuration for sparse writer behavior
 #[derive(Debug, Clone)]
 pub struct SparseWriterConfig {
@@ -81,7 +86,7 @@ pub enum WritePriority {
     Low = 0,
     /// Normal priority
     Normal = 1,
-    /// High priority, process quickly
+    /// High priority, process immediately
     High = 2,
     /// Critical priority, process immediately
     Critical = 3,
@@ -287,6 +292,17 @@ impl SparseWriter {
     pub async fn write_chunk(
         &self,
         _cx: &Cx,
+        offset: u64,
+        data: &[u8],
+        options: WriteOptions,
+    ) -> Outcome<ChunkRange, SparseWriterError> {
+        self.write_chunk_blocking(offset, data, options)
+    }
+
+    // One implementation for the historical host-boundary call and the
+    // region-owned pool adapter. This function must not await or spawn work.
+    fn write_chunk_blocking(
+        &self,
         offset: u64,
         data: &[u8],
         options: WriteOptions,
@@ -714,6 +730,10 @@ impl SparseWriter {
     /// A failed cleanup may be retried, but a committed or unresolved publication
     /// is never converted into cancellation or discarded by this operation.
     pub async fn cancel(&self, _cx: &Cx) -> Outcome<(), SparseWriterError> {
+        self.cancel_blocking()
+    }
+
+    fn cancel_blocking(&self) -> Outcome<(), SparseWriterError> {
         let _operation = self.operation.lock();
         {
             let mut state = self.lock_state();
