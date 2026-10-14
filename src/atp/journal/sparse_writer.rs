@@ -811,22 +811,19 @@ impl SparseWriter {
             return Ok(());
         }
 
-        // Generate temp path
-        let temp_path = {
-            let mut path_mgr = self.path_manager.lock();
-            path_mgr
-                .create_temp_path(&state.object_id.to_string())
-                .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?
-        };
-
-        // Create and open temp file
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(false)
-            .open(&temp_path)
-            .map_err(|e| SparseWriterError::FileOpen(e.to_string()))?;
+        // Own a newly created private inode, not merely an available-looking
+        // pathname. The manager retries collisions without tracking or deleting
+        // the pre-existing file, directory, or symlink that caused them.
+        let (temp_path, file) = self.path_manager.lock()
+            .create_temp_file(&state.object_id.to_string())
+            .map_err(|error| match error {
+                super::temp_management::TempFileCreationError::Path(error) => {
+                    SparseWriterError::TempPathCreation(error.to_string())
+                }
+                super::temp_management::TempFileCreationError::Open(error) => {
+                    SparseWriterError::FileOpen(error.to_string())
+                }
+            })?;
 
         state.temp_file = Some(file);
         state.temp_path = Some(temp_path);
