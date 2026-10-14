@@ -239,3 +239,143 @@ test("real peer disconnects for every active body; queued requests never reach t
   await ready.promise; const outcome = await batch.cancel("disconnect"); await allClosed.promise;
   assert.equal(outcome.outcome, "cancelled"); assert.equal(count, 3); assert.equal(closed, 3); assert.equal(f.calls.join.length, 3);
 });
+
+// br-asupersync-v8rp1h: Outcome severity must survive the whole batch drain,
+// without turning the batch's own stream cancellation into a consumer panic.
+test("caller cancellation outranks cleanup errors without skipping task publication", { timeout: 3000 }, async t => {
+  const entered = deferred(); let consumers = 0;
+  const f = await fixture(t, { join: () => err("cleanup ordinary error") });
+  const batch = f.map(9, item => new Promise(resolve => {
+    item.signal.addEventListener("abort", resolve, { once: true });
+    if (++consumers === 2) entered.resolve();
+  }), { concurrency: 2 });
+  await entered.promise;
+  const result = await batch.cancel("original owner cancellation");
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.message, "original owner cancellation");
+  assert.equal(f.calls.fetch.length, 2);
+  assert.equal(f.calls.join.length, 2);
+  assert.equal(await batch.result, result);
+});
+
+test("owner cancellation strengthens an earlier network error during witnessed cleanup", { timeout: 3000 }, async t => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture(t, { fetch: (_url, _init, index) => index === 0
+    ? Promise.reject(new Error("network stopped"))
+    : new Response(new ReadableStream({ cancel() { entered.resolve(); return release.promise; } }, { highWaterMark: 0 })) });
+  f.cleanup.push(release.resolve);
+  const batch = f.map(9, () => 1, { concurrency: 2 });
+  await entered.promise;
+  assert.equal(f.calls.fetch.length, 2);
+  const stopped = batch.cancel("owner stopped during drain");
+  await pending(stopped);
+  release.resolve();
+  const result = await stopped;
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.message, "owner stopped during drain");
+  assert.equal(f.calls.join.length, 2);
+});
+
+test("a genuine late consumer exception strengthens cancellation to panic", { timeout: 3000 }, async t => {
+  const entered = deferred(), release = deferred();
+  const f = await fixture(t); f.cleanup.push(release.resolve);
+  const batch = f.map(3, async () => {
+    entered.resolve(); await release.promise;
+    throw new Error("private late consumer detail");
+  }, { concurrency: 1 });
+  await entered.promise;
+  const stopped = batch.cancel("owner stopped");
+  await pending(stopped);
+  release.resolve();
+  const result = await stopped;
+  assert.equal(result.outcome, "panicked");
+  assert.equal(result.message, "fetch batch consumer threw or rejected");
+  assert.equal(f.calls.fetch.length, 1);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("rethrowing the batch's own abort reason remains cancellation, not panic", { timeout: 3000 }, async t => {
+  const entered = deferred();
+  const f = await fixture(t);
+  const batch = f.map(3, item => new Promise((_, reject) => {
+    item.signal.addEventListener("abort", () => reject(item.signal.reason), { once: true });
+    entered.resolve();
+  }), { concurrency: 1 });
+  await entered.promise;
+  const result = await batch.cancel("expected stop");
+  assert.equal(result.outcome, "cancelled");
+  assert.equal(result.cancellation.message, "expected stop");
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("a forged cause cannot disguise a late consumer exception as cancellation", { timeout: 3000 }, async t => {
+  const entered = deferred(), release = deferred(); let inspected = 0;
+  const forged = Object.defineProperty({}, "cause", { get() { inspected++; throw new Error("do not inspect"); } });
+  const f = await fixture(t); f.cleanup.push(release.resolve);
+  const batch = f.map(2, async () => { entered.resolve(); await release.promise; throw forged; }, { concurrency: 1 });
+  await entered.promise;
+  const stopped = batch.cancel("stop");
+  await pending(stopped);
+  release.resolve();
+  const result = await stopped;
+  assert.equal(result.outcome, "panicked");
+  assert.equal(inspected, 0);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("a raw cancellation panic is retained even when closed reports expected cancellation", { timeout: 3000 }, async t => {
+  const f = await fixture(t);
+  const scope = { fetch(request) {
+    const admitted = f.scope.fetch(request); assert.equal(admitted.outcome, "ok"); const handle = admitted.value;
+    return ok({ response: () => handle.response(), closed: handle.closed,
+      toReadableStream: () => err("conversion refused"),
+      async cancel(reason) { await handle.cancel(reason); return { outcome: "panicked", message: "cancel receipt panic" }; },
+    });
+  } };
+  const result = await f.mapFetches(scope, f.requests(2), () => assert.fail("no consumer")).value.result;
+  assert.equal(result.outcome, "panicked");
+  assert.equal(result.message, "cancel receipt panic");
+  assert.equal(f.calls.fetch.length, 1);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("a refused asynchronous admission still preserves its eventual panic", { timeout: 3000 }, async t => {
+  const f = await fixture(t);
+  const result = await f.mapFetches({ fetch: async () => ({ outcome: "panicked", message: "admission panic" }) },
+    f.requests(2), () => assert.fail("no consumer")).value.result;
+  assert.equal(result.outcome, "panicked");
+  assert.equal(result.message, "admission panic");
+  assert.equal(f.calls.fetch.length, 0);
+});
+
+test("ordinary body-read failure is not fabricated into a consumer panic", { timeout: 3000 }, async t => {
+  const entered = deferred(); let source;
+  const f = await fixture(t, { fetch: () => new Response(new ReadableStream({ start(controller) { source = controller; } }, { highWaterMark: 0 })) });
+  const batch = f.map(3, item => { entered.resolve(); return new Response(item.body).bytes(); }, { concurrency: 1 });
+  await entered.promise;
+  source.error(new Error("transport failure"));
+  const result = await batch.result;
+  assert.equal(result.outcome, "err");
+  assert.equal(f.calls.fetch.length, 1);
+  assert.equal(f.calls.join.length, 1);
+});
+
+test("equal-severity cleanup errors retain input-order ties despite opposite completion order", { timeout: 3000 }, async t => {
+  const entered = [deferred(), deferred()], release = [deferred(), deferred()];
+  const f = await fixture(t, {
+    fetch: (_url, _init, index) => new Response(new ReadableStream({ cancel() { entered[index].resolve(); return release[index].promise; } }, { highWaterMark: 0 })),
+    join: task => err(`cleanup ${task.toJSON().slot}`),
+  });
+  f.cleanup.push(...release.map(gate => gate.resolve));
+  const batch = f.map(9, () => 42, { concurrency: 2 });
+  await Promise.all(entered.map(gate => gate.promise));
+  release[1].resolve(); await pending(batch.result);
+  assert.equal(f.calls.join.length, 1);
+  assert.equal(f.calls.join[0].task.toJSON().slot, 2);
+  release[0].resolve();
+  const result = await batch.result;
+  assert.equal(result.outcome, "err");
+  assert.equal(result.failure.message, "cleanup 1");
+  assert.equal(f.calls.fetch.length, 2);
+  assert.equal(f.calls.join.length, 2);
+});

@@ -39,7 +39,7 @@ const cancelled = (reason: string): Failure => Object.freeze({ outcome: "cancell
   kind: "fetch_batch_cancel", phase: "completed", origin_region: "browser-fetch-batch", origin_task: null,
   timestamp_nanos: 0, message: reason, truncated: false,
 }) });
-const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 3 : outcome.outcome === "err" ? 2 : 1;
+const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 3 : outcome.outcome === "cancelled" ? 2 : 1;
 function streamError(outcome: Failure): Error {
   return Object.defineProperty(new Error("owned fetch batch stopped"), "cause", { value: outcome });
 }
@@ -123,8 +123,11 @@ interface Member {
  * statuses are responses; throw from consume to reject application-level errors.
  *
  * First observed admission, transport or consumer failure fences new work and
- * cancels siblings in parallel. Cleanup errors remain visible and cleanup panic
- * outranks ordinary failure. cancel() also waits for consumer promises; consumers
+ * cancels siblings in parallel. Until settlement, stronger failures replace
+ * weaker ones: panicked > cancelled > err. Expected member cancellation during
+ * cleanup is not a new owner failure. Genuine consumer exceptions remain panics;
+ * rethrowing this batch's own body/signal error preserves its original Outcome.
+ * cancel() also waits for consumer promises; consumers
  * that park outside the body must observe their signal to stop cooperatively.
  * No force-drain guarantee exists for nonsettling host or consumer promises.
  *
@@ -168,6 +171,15 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
   const results: T[] = new Array(inputs.length);
   let next = 0, stopped: Failure | undefined, finished = false;
   let cleanupFailure: { index: number; outcome: Failure } | undefined;
+  // Recognize only errors created by THIS batch. Reading arbitrary .cause
+  // properties would let a consumer forge a cancellation or run a getter.
+  const ownedFailures = new WeakMap<object, Failure>();
+
+  function ownedError(outcome: Failure): Error {
+    const error = streamError(outcome);
+    ownedFailures.set(error, outcome);
+    return error;
+  }
 
   function noteCleanup(index: number, outcome: Failure): void {
     if (!cleanupFailure || severity(outcome) > severity(cleanupFailure.outcome)
@@ -188,26 +200,31 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
       if (member.adopted) {
         const adopted = await member.adopted;
         if (adopted.outcome === "ok") { member.fetch = adopted.value; member.closed = closedOf(adopted.value); }
+        else noteCleanup(member.index, adopted);
       }
-      let refused = false;
+      let refusal: Failure | undefined;
       try {
         if (member.reader) await Reflect.apply(CANCEL!, member.reader, ["fetch batch member retired"]);
         else if (member.fetch) {
           const receipt = checked<void>(await member.fetch.cancel("fetch batch member retired"));
-          refused = receipt.outcome === "err" || receipt.outcome === "panicked";
+          if (receipt.outcome === "err" || receipt.outcome === "panicked") refusal = receipt;
         }
-      } catch { refused = true; }
+      } catch { refusal = failure("fetch batch cancellation or terminal publication refused", "internal_failure"); }
       let terminal: Outcome<void>;
       try { terminal = member.closed ? await member.closed : ok(undefined); }
       catch { terminal = failure("fetch batch terminal publication rejected", "internal_failure"); }
-      const outcome = terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal
-        : refused ? failure("fetch batch cancellation or terminal publication refused", "internal_failure") : ok(undefined);
+      // Successful cancellation normally produces a cancelled terminal. Only
+      // treat that receipt as a cleanup failure when cancellation was refused.
+      const terminalFailure = terminal.outcome === "err" || terminal.outcome === "panicked"
+        || terminal.outcome === "cancelled" && refusal ? terminal : undefined;
+      const outcome = terminalFailure && (!refusal || severity(terminalFailure) >= severity(refusal))
+        ? terminalFailure : refusal ?? ok(undefined);
       if (outcome.outcome !== "ok") noteCleanup(member.index, outcome);
       member.ended = true;
       if (member.bodyController) {
         try {
           const cause = stopped ?? (outcome.outcome !== "ok" ? outcome : undefined);
-          if (cause) member.bodyController.error(streamError(cause));
+          if (cause) member.bodyController.error(ownedError(cause));
           else member.bodyController.close();
         } catch { /* Consumer cancellation may already have closed the stream. */ }
       }
@@ -221,12 +238,18 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
     return done.promise;
   }
   function stop(outcome: Failure): void {
-    if (finished || stopped) return;
+    if (finished) return;
+    if (stopped) {
+      // The admission fence and notifications are one-shot, but the final
+      // Outcome must still incorporate failures observed during cleanup.
+      if (severity(outcome) > severity(stopped)) stopped = outcome;
+      return;
+    }
     stopped = outcome; // Admission fence precedes every host/user callback.
     results.fill(undefined as T);
     for (const member of members) {
       void drain(member);
-      try { Reflect.apply(ABORT!, member.controller, [streamError(outcome)]); } catch { /* Preserve first cause. */ }
+      try { Reflect.apply(ABORT!, member.controller, [ownedError(outcome)]); } catch { /* Preserve first cause. */ }
     }
   }
   function body(member: Member): ReadableStream<Uint8Array> {
@@ -248,7 +271,7 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
       async cancel() {
         member.ended = true;
         const outcome = await drain(member);
-        if (outcome.outcome !== "ok") throw streamError(outcome);
+        if (outcome.outcome !== "ok") throw ownedError(outcome);
       },
     }, { highWaterMark: 0 });
   }
@@ -288,7 +311,11 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
         if (head.outcome !== "ok") { stop(head); continue; }
         const item = Object.freeze({ index, response: head.value, body: body(member), signal: member.controller.signal });
         try { value = await consume(item); consumed = true; }
-        catch { stop(panic()); }
+        catch (error) {
+          const owned = error && (typeof error === "object" || typeof error === "function")
+            ? ownedFailures.get(error) : undefined;
+          stop(owned ?? panic());
+        }
       } catch { stop(failure("fetch batch admission or response failed", "internal_failure")); }
       finally {
         member.ready.resolve();
