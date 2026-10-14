@@ -22,7 +22,7 @@ impl ChunkId {
 }
 use crate::cx::Cx;
 use crate::fs;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -64,7 +64,7 @@ struct TransferRecoveryState {
     /// Chunk states being reconstructed
     chunk_states: HashMap<ChunkId, ChunkState>,
     /// Chunk sizes observed for each recovered chunk.
-    chunk_sizes: HashMap<ChunkId, u64>,
+    chunk_sizes: BTreeMap<ChunkId, u64>,
     /// Offered transfer size recovered from the journal, when present.
     total_size: Option<u64>,
     /// First timestamp observed for this transfer.
@@ -265,21 +265,21 @@ impl RecoveryContext {
         result
     }
 
-    /// Finalize recovery and return reconstructed state.
+    /// Finalize recovery and return a conservative fixed-grid view of records.
+    ///
+    /// A cell is present only when recorded ranges cover it completely. Mixed
+    /// states use their least advanced state; a partial cell remains unknown.
+    /// The grid uses the largest recorded chunk rather than a potentially
+    /// byte-sized GCD, so variable-size records cannot cause byte-wise expansion.
+    /// This view describes journal states, not revalidation of payload files.
     pub fn finalize(self) -> (HashMap<String, ChunkBitmap>, RecoveryStats) {
         let mut bitmaps = HashMap::new();
         let mut stats = self.stats;
 
         for (transfer_id, transfer_state) in self.transfers {
             if !transfer_state.chunk_states.is_empty() {
-                let (total_size, chunk_size, created_at) =
-                    transfer_state.recovered_bitmap_geometry();
-                let mut bitmap =
-                    ChunkBitmap::new(transfer_id.clone(), total_size, chunk_size, created_at);
-                for (chunk_id, state) in transfer_state.chunk_states {
-                    let _ = bitmap.update_chunk_state(chunk_id.as_u64(), state, 0, None);
-                    stats.chunks_recovered += 1;
-                }
+                let bitmap = transfer_state.into_bitmap(transfer_id.clone());
+                stats.chunks_recovered += bitmap.entry_count();
                 bitmaps.insert(transfer_id, bitmap);
                 stats.transfers_recovered += 1;
             }
@@ -293,7 +293,7 @@ impl RecoveryContext {
             .entry(transfer_id.to_string())
             .or_insert_with(|| TransferRecoveryState {
                 chunk_states: HashMap::new(),
-                chunk_sizes: HashMap::new(),
+                chunk_sizes: BTreeMap::new(),
                 total_size: None,
                 created_at: None,
                 commit_intent_time: None,
@@ -324,6 +324,9 @@ impl RecoveryContext {
             });
         }
 
+        // State advancement must never reuse a different range's geometry.
+        // Check before mutation; a refused record is not deduplicated as applied.
+        transfer.validate_chunk_geometry(chunk_id, chunk_size)?;
         transfer.record_chunk_geometry(chunk_id, chunk_size, timestamp);
         transfer.chunk_states.insert(chunk_id, new_state);
         Ok(())
@@ -416,6 +419,28 @@ impl RecoveryContext {
 }
 
 impl TransferRecoveryState {
+    fn validate_chunk_geometry(&self, id: ChunkId, size: u64) -> Result<(), RecoveryError> {
+        let invalid = || RecoveryError::JournalCorrupted(
+            "recovery chunk ranges are empty, overflowing, overlapping, or inconsistent".to_owned(),
+        );
+        let start = id.as_u64();
+        let end = start.checked_add(size).filter(|_| size != 0).ok_or_else(invalid)?;
+        if let Some(previous_size) = self.chunk_sizes.get(&id) {
+            return if *previous_size == size { Ok(()) } else { Err(invalid()) };
+        }
+        if let Some((previous, previous_size)) = self.chunk_sizes.range(..id).next_back()
+            && previous.as_u64().checked_add(*previous_size).is_none_or(|end| end > start)
+        {
+            return Err(invalid());
+        }
+        if let Some((next, _)) = self.chunk_sizes.range(id..).next()
+            && next.as_u64() < end
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
+
     fn record_offer(&mut self, total_size: u64, timestamp: u64) {
         self.total_size = Some(self.total_size.unwrap_or(total_size).max(total_size));
         self.created_at.get_or_insert(timestamp);
@@ -446,30 +471,61 @@ impl TransferRecoveryState {
     }
 
     fn recovered_chunk_size(&self) -> Option<u64> {
-        let max_size = self.chunk_sizes.values().copied().max()?;
-        if self
-            .chunk_sizes
-            .keys()
-            .all(|chunk_id| chunk_id.as_u64() % max_size == 0)
-        {
-            return Some(max_size);
-        }
+        self.chunk_sizes.values().copied().max()
+    }
 
-        self.chunk_sizes
-            .iter()
-            .flat_map(|(chunk_id, chunk_size)| [chunk_id.as_u64(), *chunk_size])
-            .filter(|value| *value > 0)
-            .reduce(gcd_u64)
+    fn into_bitmap(self, transfer_id: String) -> ChunkBitmap {
+        let (total, width, created_at) = self.recovered_bitmap_geometry();
+        let mut bitmap = ChunkBitmap::new(transfer_id, total, width, created_at);
+        let mut cell = None;
+        let mut covered = 0;
+        let mut complete_prefix = false;
+        let mut common_state = None;
+
+        // Each validated interval has length <= width, so it intersects at most
+        // two cells. Skip holes arithmetically; never enumerate missing bytes or
+        // a coprime GCD grid. Output size and work are proportional to records.
+        for (id, size) in self.chunk_sizes {
+            let Some(state) = self.chunk_states.get(&id).copied() else { continue; };
+            let mut cursor = id.as_u64();
+            let end = cursor + size; // Validated before insertion.
+            while cursor < end {
+                let start = (cursor / width) * width;
+                let cell_end = start.saturating_add(width).min(total);
+                let stop = end.min(cell_end);
+                if cell != Some(start) {
+                    cell = Some(start);
+                    covered = start;
+                    complete_prefix = true;
+                    common_state = None;
+                }
+                if cursor != covered {
+                    complete_prefix = false;
+                }
+                if complete_prefix {
+                    let combined = common_state.map_or(state, |old| common_chunk_state(old, state));
+                    common_state = Some(combined);
+                    covered = stop;
+                    if covered == cell_end {
+                        // No constituent hash authenticates a differently sized
+                        // projected cell. Keep hashes absent, as before recovery.
+                        bitmap.update_chunk_state(start, combined, 0, None);
+                    }
+                }
+                cursor = stop;
+            }
+        }
+        bitmap
     }
 }
 
-fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
-    while b != 0 {
-        let next = a % b;
-        a = b;
-        b = next;
+fn common_chunk_state(a: ChunkState, b: ChunkState) -> ChunkState {
+    match (a, b) {
+        (ChunkState::Invalidated, _) | (_, ChunkState::Invalidated) => ChunkState::Invalidated,
+        (ChunkState::Quarantined, _) | (_, ChunkState::Quarantined) => ChunkState::Quarantined,
+        _ if a.priority() <= b.priority() => a,
+        _ => b,
     }
-    a
 }
 
 /// Perform complete crash recovery for a journal and bitmap pair.
@@ -702,6 +758,10 @@ fn required_transfer_id_from_bitmap_path(bitmap_path: &Path) -> Result<String, R
             ))
         })
 }
+
+#[cfg(test)]
+#[path = "recovery/range_tests.rs"]
+mod range_tests;
 
 #[cfg(test)]
 mod tests {
