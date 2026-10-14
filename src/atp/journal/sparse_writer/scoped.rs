@@ -44,6 +44,7 @@ use std::sync::Arc;
 
 mod finalize;
 mod receive;
+mod restore;
 
 /// Runtime admission/retirement and the writer's actual outcome are separate.
 ///

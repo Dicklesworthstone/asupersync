@@ -42,3 +42,19 @@ pub use recovery::{
 };
 pub use sparse_writer::{SparseWriter, SparseWriterConfig, WriteOptions};
 pub use temp_management::{PathState, QuarantineReason, TempPathManager};
+
+/// Explicit resource limits for restoring a private writer from journaled bytes.
+///
+/// These bound the declared object, copied receipts and reusable payload buffer.
+/// They do not bound memory already owned by the journal or its decoded index.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+pub struct JournalRestoreLimits {
+    /// Maximum declared length of the complete object, including missing ranges.
+    pub max_bytes: u64,
+    /// Maximum number of authenticated receipts copied into the new writer.
+    pub max_chunks: u32,
+    /// Largest admitted receipt and maximum requested payload-buffer length.
+    /// Must be nonzero. Receipt boundaries are preserved, not silently split.
+    pub max_chunk_bytes: usize,
+}
