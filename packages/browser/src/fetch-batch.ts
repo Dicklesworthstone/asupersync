@@ -156,6 +156,7 @@ interface Member {
   adopted?: Promise<Outcome<FetchStreamHandle>>;
   fetch?: FetchStreamHandle;
   closed?: Promise<Outcome<void>>;
+  retire?: () => unknown;
   reader?: ReadableStreamDefaultReader<Uint8Array>;
   controller: AbortController;
   bodyController?: ReadableStreamDefaultController<Uint8Array>;
@@ -180,6 +181,10 @@ interface Member {
  * cancel() also waits for consumer promises; consumers
  * that park outside the body must observe their signal to stop cooperatively.
  * No force-drain guarantee exists for nonsettling host or consumer promises.
+ * When a handle supplies independent retire(), its checked receipt is also
+ * joined before releasing the worker slot or publishing a result. Failed
+ * retirement fences admission immediately, even with another consumer parked.
+ * Legacy handles keep their original operation-receipt-only cleanup boundary.
  *
  * An optional parent signal uses the same admission fence and drain as cancel().
  * A pre-aborted signal starts no requests; empty input remains a successful
@@ -521,6 +526,21 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
     }
     stop(outcome);
   }
+  function ownFetch(member: Member, fetch: FetchStreamHandle): Failure | undefined {
+    // Retain ownership before any provider getter can throw or re-enter stop.
+    // A malformed optional method must not strand an already-admitted handle.
+    member.fetch = fetch;
+    let issue: Failure | undefined;
+    try { member.closed = closedOf(fetch); }
+    catch { issue = failure("fetch batch terminal observation failed", "internal_failure"); }
+    try {
+      const retire = fetch.retire;
+      if (retire !== undefined && typeof retire !== "function") {
+        issue ??= failure("invalid fetch batch retirement method", "internal_failure");
+      } else if (retire) member.retire = () => Reflect.apply(retire, fetch, ["fetch batch member retired"]);
+    } catch { issue ??= failure("fetch batch retirement observation failed", "internal_failure"); }
+    return issue;
+  }
   function drain(member: Member): Promise<Outcome<void>> {
     if (member.drained) return member.drained;
     const done = deferred<Outcome<void>>();
@@ -532,9 +552,22 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       await member.ready.promise;
       if (member.adopted) {
         const adopted = await member.adopted;
-        if (adopted.outcome === "ok") { member.fetch = adopted.value; member.closed = closedOf(adopted.value); }
+        if (adopted.outcome === "ok") {
+          const issue = ownFetch(member, adopted.value);
+          if (issue) noteCleanup(member.index, issue);
+        }
         else noteCleanup(member.index, adopted);
       }
+      // Start independent retirement alongside native body cancellation. Its
+      // failure fences peers immediately; its settlement still joins all work.
+      const retiring = member.retire ? Promise.resolve().then(member.retire).then(value => {
+        const receipt = checked<void>(value);
+        return receipt.outcome === "ok" && receipt.value !== undefined
+          ? failure("invalid fetch batch retirement receipt", "internal_failure") : receipt;
+      }, () => failure("fetch batch retirement rejected", "internal_failure")).then(receipt => {
+        if (receipt.outcome !== "ok") noteCleanup(member.index, receipt);
+        return receipt;
+      }) : Promise.resolve(ok(undefined));
       let refusal: Failure | undefined;
       try {
         if (member.reader) await Reflect.apply(CANCEL!, member.reader, ["fetch batch member retired"]);
@@ -546,12 +579,17 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       let terminal: Outcome<void>;
       try { terminal = member.closed ? await member.closed : ok(undefined); }
       catch { terminal = failure("fetch batch terminal publication rejected", "internal_failure"); }
+      const retired = await retiring;
       // Successful cancellation normally produces a cancelled terminal. Only
       // treat that receipt as a cleanup failure when cancellation was refused.
       const terminalFailure = terminal.outcome === "err" || terminal.outcome === "panicked"
-        || terminal.outcome === "cancelled" && refusal ? terminal : undefined;
-      const outcome = terminalFailure && (!refusal || severity(terminalFailure) >= severity(refusal))
+        || terminal.outcome === "cancelled" && refusal && !member.retire ? terminal : undefined;
+      let outcome = terminalFailure && (!refusal || severity(terminalFailure) >= severity(refusal))
         ? terminalFailure : refusal ?? ok(undefined);
+      // With a separate retirement receipt, expected operation cancellation is
+      // not evidence of failed cleanup. Genuine owner cancellation was already
+      // observed by stop; do not manufacture a stronger cause during retirement.
+      if (retired.outcome !== "ok" && (outcome.outcome === "ok" || severity(retired) >= severity(outcome))) outcome = retired;
       if (outcome.outcome !== "ok") noteCleanup(member.index, outcome);
       member.ended = true;
       if (member.bodyController) {
@@ -634,12 +672,12 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
           }
           const admitted = checked<FetchStreamHandle>(raw);
           if (admitted.outcome !== "ok") { stop(admitted); continue; }
-          member.fetch = admitted.value;
-          member.closed = closedOf(member.fetch);
-          void member.closed.then((terminal) => {
+          const issue = ownFetch(member, admitted.value);
+          if (issue) { stop(issue); continue; }
+          void member.closed!.then((terminal) => {
             if (!member.retiring && terminal.outcome !== "ok") stop(terminal);
           });
-          const converted = checked<ReadableStream<Uint8Array>>(member.fetch.toReadableStream());
+          const converted = checked<ReadableStream<Uint8Array>>(admitted.value.toReadableStream());
           if (converted.outcome !== "ok") { stop(converted); continue; }
           member.reader = Reflect.apply(GET_READER!, converted.value, []) as ReadableStreamDefaultReader<Uint8Array>;
           void Promise.resolve(Reflect.apply(READER_CLOSED!, member.reader, [])).catch(() => {});
