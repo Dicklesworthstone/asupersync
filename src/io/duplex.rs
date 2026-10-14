@@ -15,13 +15,17 @@
 //! - writing to an end whose peer was dropped, or after shutting it down,
 //!   fails with [`io::ErrorKind::BrokenPipe`].
 
-use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
+use crate::io::{AsyncRead, AsyncReadVectored, AsyncWrite, ReadBuf};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
-use std::io;
+use std::io::{self, IoSlice, IoSliceMut};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
+
+// Leading empty descriptors are skipped before locking. Every locked copy
+// processes at most this many descriptors and at most the pipe's capacity.
+const MAX_VECTORED_BUFFERS: usize = 16;
 
 /// Creates a connected pair of in-memory streams; see the
 /// [module documentation](crate::io#in-memory-pipes-and-standard-streams).
@@ -66,6 +70,12 @@ pub fn duplex(max_buf_size: usize) -> (DuplexStream, DuplexStream) {
 }
 
 /// One end of an in-memory pipe created by [`duplex`].
+///
+/// Scalar and vectored operations share the same bounded queues, backpressure,
+/// and half-close state. Vectored operations transfer a prefix of the logical
+/// concatenation without allocating a temporary concatenated buffer. A call
+/// may stop before exhausting all descriptors; advance by the returned byte
+/// count before retrying. Empty descriptors do not indicate end-of-file.
 pub struct DuplexStream {
     read: Arc<Mutex<Pipe>>,
     write: Arc<Mutex<Pipe>>,
@@ -106,13 +116,35 @@ impl Pipe {
             }
             return None;
         }
+        self.read_into(buf);
+        Some((Ok(()), self.write_waker.take()))
+    }
+
+    fn read_into(&mut self, buf: &mut ReadBuf<'_>) -> usize {
         let take = self.buffer.len().min(buf.remaining());
         let (front, back) = self.buffer.as_slices();
         let from_front = take.min(front.len());
         buf.put_slice(&front[..from_front]);
         buf.put_slice(&back[..take - from_front]);
         self.buffer.drain(..take);
-        Some((Ok(()), self.write_waker.take()))
+        take
+    }
+
+    fn try_read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> PipeResult<usize> {
+        if bufs.is_empty() {
+            return Some((Ok(0), None));
+        }
+        if self.buffer.is_empty() {
+            return self.write_closed.then_some((Ok(0), None));
+        }
+        let mut read = 0;
+        for buf in bufs {
+            read += self.read_into(&mut ReadBuf::new(buf));
+            if self.buffer.is_empty() {
+                break;
+            }
+        }
+        Some((Ok(read), self.write_waker.take()))
     }
 
     fn try_write(&mut self, data: &[u8]) -> PipeResult<usize> {
@@ -128,6 +160,33 @@ impl Pipe {
         }
         let written = room.min(data.len());
         self.buffer.extend(&data[..written]);
+        Some((Ok(written), self.read_waker.take()))
+    }
+
+    fn try_write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> PipeResult<usize> {
+        // Preserve AsyncWrite's existing all-empty vectored fallback, even
+        // on a closed stream. A nonempty write still reports BrokenPipe.
+        if bufs.is_empty() {
+            return Some((Ok(0), None));
+        }
+        if self.write_closed || self.read_closed {
+            return Some((Err(io::ErrorKind::BrokenPipe.into()), None));
+        }
+        let room = self.max_buf_size - self.buffer.len();
+        if room == 0 {
+            return None;
+        }
+        let mut written = 0;
+        for buf in bufs {
+            let take = (room - written).min(buf.len());
+            self.buffer.extend(&buf[..take]);
+            written += take;
+            if written == room {
+                break;
+            }
+        }
+        // Count only bytes copied into the bounded queue. In particular, do
+        // not sum caller-provided lengths, which could overflow usize.
         Some((Ok(written), self.read_waker.take()))
     }
 
@@ -242,6 +301,20 @@ impl AsyncRead for DuplexStream {
     }
 }
 
+impl AsyncReadVectored for DuplexStream {
+    fn poll_read_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let start = bufs.iter().position(|buf| !buf.is_empty()).unwrap_or(bufs.len());
+        let end = start.saturating_add(MAX_VECTORED_BUFFERS).min(bufs.len());
+        poll_pipe(&self.read, cx, Direction::Read, |pipe| {
+            pipe.try_read_vectored(&mut bufs[start..end])
+        })
+    }
+}
+
 impl AsyncWrite for DuplexStream {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -249,6 +322,22 @@ impl AsyncWrite for DuplexStream {
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         poll_pipe(&self.write, cx, Direction::Write, |pipe| pipe.try_write(data))
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let start = bufs.iter().position(|buf| !buf.is_empty()).unwrap_or(bufs.len());
+        let end = start.saturating_add(MAX_VECTORED_BUFFERS).min(bufs.len());
+        poll_pipe(&self.write, cx, Direction::Write, |pipe| {
+            pipe.try_write_vectored(&bufs[start..end])
+        })
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        true
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -288,3 +377,7 @@ impl std::fmt::Debug for DuplexStream {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "duplex/vectored_tests.rs"]
+mod vectored_tests;
