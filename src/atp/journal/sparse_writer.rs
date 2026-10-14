@@ -3,7 +3,8 @@
 use super::{
     ChunkRange, CommitPolicy, PlatformCapabilities, RangeTracker, SparseRange, TempPathManager,
 };
-use crate::atp::manifest::{Manifest, MerkleRoot};
+use crate::atp::manifest::{ChunkBoundary, Manifest, MerkleRoot};
+use crate::atp::manifest_chunk_commitment::ManifestChunkCommitment;
 use crate::atp::object::ObjectId;
 use crate::cx::Cx;
 use crate::types::outcome::Outcome;
@@ -369,17 +370,50 @@ impl SparseWriter {
         Self::is_complete_locked(&state)
     }
 
-    /// Verify written data against expected manifest
+    /// Verify written data against a trusted manifest and selected object ID.
+    ///
+    /// A content-addressed ID is checked independently of optional manifest
+    /// hashes. A manifest-addressed file must have a whole-object content hash;
+    /// chunk-only authorization requires [`Self::verify_with_chunk_commitment`]
+    /// because the legacy manifest root does not commit chunk descriptors.
     pub async fn verify(
         &self,
         _cx: &Cx,
         expected_manifest: &Manifest,
     ) -> Outcome<(), SparseWriterError> {
+        self.verify_inner(expected_manifest, None)
+    }
+
+    /// Verify with an independently trusted chunk commitment before any file I/O.
+    ///
+    /// Obtain `expected` from the trusted producer, not by recomputing it from
+    /// untrusted received metadata. Chunk-only manifests must cover every file
+    /// byte exactly; a whole-object hash permits partial chunk hints. Failure
+    /// invalidates previous verification and never falls back to the legacy root.
+    /// This uses the same serialized verification/publication lifecycle as `verify`.
+    pub async fn verify_with_chunk_commitment(
+        &self,
+        _cx: &Cx,
+        expected_manifest: &Manifest,
+        expected: &ManifestChunkCommitment,
+    ) -> Outcome<(), SparseWriterError> {
+        self.verify_inner(expected_manifest, Some(expected))
+    }
+
+    fn verify_inner(
+        &self,
+        expected_manifest: &Manifest,
+        expected_commitment: Option<&ManifestChunkCommitment>,
+    ) -> Outcome<(), SparseWriterError> {
         let _operation = self.operation.lock();
         if let Err(error) = Self::require_accepting(&self.lock_state()) {
             return Outcome::Err(error);
         }
-        if let Err(error) = expected_manifest.validate() {
+        if let Some(expected) = expected_commitment {
+            if let Err(error) = expected.verify(expected_manifest) {
+                return self.fail_verification(format!("chunk commitment validation failed: {error}"));
+            }
+        } else if let Err(error) = expected_manifest.validate() {
             return self.fail_verification(format!("manifest validation failed: {error}"));
         }
 
@@ -434,6 +468,11 @@ impl SparseWriter {
         let Some(manifest_object) = expected_manifest.objects.get(&object_id) else {
             return self.fail_verification(format!("manifest does not contain object {object_id}"));
         };
+        if manifest_object.id != object_id {
+            return self.fail_verification(
+                "manifest object identity differs from the writer's selected object".to_owned(),
+            );
+        }
 
         let mut file = match File::open(&temp_path) {
             Ok(file) => file,
@@ -464,6 +503,25 @@ impl SparseWriter {
             }
         }
 
+        // Local write hashes only prove what this receiver wrote. They are not
+        // sender-authorized content evidence. When there is no whole-object hash,
+        // or independently selected content ID, the pinned chunk ledger must
+        // cover every byte. The unmodified legacy root alone cannot authorize it.
+        if manifest_object.content_hash.is_none() && !object_id.is_content_addressed() {
+            if expected_commitment.is_none() {
+                return self.fail_verification(
+                    "chunk-only verification requires an independently trusted chunk commitment"
+                        .to_owned(),
+                );
+            }
+            if let Err(reason) = Self::require_complete_manifest_chunks(
+                &manifest_object.chunk_boundaries,
+                file_len,
+            ) {
+                return self.fail_verification(reason);
+            }
+        }
+
         for (offset, metadata) in &written_chunks {
             let end = match offset.checked_add(metadata.size) {
                 Some(end) => end,
@@ -489,7 +547,10 @@ impl SparseWriter {
             }
         }
 
-        if let Some(expected_hash) = manifest_object.content_hash {
+        // A content-addressed key is an independent commitment. Do not permit
+        // a manifest to substitute another content_hash (or a chunk ledger) for
+        // the immutable identity selected by the receiving writer.
+        if manifest_object.content_hash.is_some() || object_id.is_content_addressed() {
             let actual_hash = if object_id.is_content_addressed() {
                 Self::hash_file_with_prefix(&mut file, Some(CONTENT_ID_DOMAIN))
             } else {
@@ -502,13 +563,12 @@ impl SparseWriter {
                         .fail_verification(format!("content hash verification failed: {error}"));
                 }
             };
-            if actual_hash != expected_hash {
+            if manifest_object.content_hash.is_some_and(|expected| actual_hash != expected) {
                 return self.fail_verification("manifest content hash mismatch".to_owned());
             }
-        } else if manifest_object.chunk_boundaries.is_empty() {
-            return self.fail_verification(
-                "manifest object has no content hash or chunk boundaries".to_owned(),
-            );
+            if object_id.is_content_addressed() && actual_hash != *object_id.hash_bytes() {
+                return self.fail_verification("content-addressed object identity mismatch".to_owned());
+            }
         }
 
         for boundary in &manifest_object.chunk_boundaries {
@@ -962,6 +1022,41 @@ impl SparseWriter {
         Ok(())
     }
 
+    /// Chunk-only verification must authenticate exactly [0, file_len).
+    /// Manifest::validate checks ordering and arithmetic, but intentionally does
+    /// not make a partial chunk description evidence for an entire local file.
+    fn require_complete_manifest_chunks(
+        chunks: &[ChunkBoundary],
+        file_len: u64,
+    ) -> Result<(), String> {
+        // A pinned empty ledger covers an empty file, but never a nonempty one.
+        // Coverage, rather than a fabricated zero-length descriptor, proves it.
+        let mut covered = 0_u64;
+        for chunk in chunks {
+            if chunk.size_bytes == 0 {
+                return Err(format!("manifest chunk {} has zero length", chunk.index));
+            }
+            if chunk.byte_offset != covered {
+                return Err(format!(
+                    "manifest chunk coverage expected offset {covered}, found {}",
+                    chunk.byte_offset,
+                ));
+            }
+            covered = covered.checked_add(chunk.size_bytes).ok_or_else(|| {
+                "manifest chunk coverage overflows u64".to_owned()
+            })?;
+            if covered > file_len {
+                return Err("manifest chunk coverage exceeds the local file length".to_owned());
+            }
+        }
+        if covered != file_len {
+            return Err(format!(
+                "manifest chunk coverage ends at {covered}, expected {file_len}",
+            ));
+        }
+        Ok(())
+    }
+
     fn fail_verification(&self, reason: String) -> Outcome<(), SparseWriterError> {
         let mut state = self.lock_state();
         Self::fail_verification_locked(&mut state, reason)
@@ -1121,6 +1216,10 @@ mod lifecycle_tests;
 #[cfg(test)]
 #[path = "sparse_writer_durability_tests.rs"]
 mod durability_tests;
+
+#[cfg(test)]
+#[path = "sparse_writer_integrity_tests.rs"]
+mod integrity_tests;
 
 #[cfg(test)]
 mod tests {
