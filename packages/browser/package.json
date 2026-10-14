@@ -45,6 +45,11 @@
       "types": "./dist/fetch-selection.d.ts",
       "import": "./dist/fetch-selection.js",
       "default": "./dist/fetch-selection.js"
+    },
+    "./pipeline": {
+      "types": "./dist/fetch-request-map.d.ts",
+      "import": "./dist/fetch-request-map.js",
+      "default": "./dist/fetch-request-map.js"
     }
   },
   "files": [
