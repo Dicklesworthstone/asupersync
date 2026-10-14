@@ -9,6 +9,9 @@ use crate::net::atp::chunk::stream::StreamProfile;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
+#[path = "receive_resume.rs"]
+mod resume;
+
 impl ScopedSparseWriter {
     /// Receive exactly the selected manifest object's bytes and publish them.
     ///
