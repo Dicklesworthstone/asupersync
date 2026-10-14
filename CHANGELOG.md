@@ -10,20 +10,21 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-12, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.5.0` is published to
-crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
+Scope window: current work through 2026-10-14, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.6.0` is published to
+crates.io and GitHub; `v0.5.0` release evidence is recorded in `asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 (unreleased)**: the workspace version was bumped on `main` in
-  `85f7a8e59` (2026-09-18), but v0.6.0 has not been tagged, released on GitHub or
-  published to crates.io; the latest published version is v0.5.0. Planned
-  content: durable ATP sender/receiver journaling and resume across process
-  loss, targeted resume-client revocation without peer restart, QUIC protected
-  close and post-close accounting shutdown, bounded clock capture and replay,
-  and an HTTP/1 fix that answers a rejected request head with
-  `400`/`413`/`431` instead of a silent close.
+- **v0.6.0 Release** (2026-10-14): durable ATP sender/receiver journaling and
+  resume across process loss, targeted resume-client revocation without peer
+  restart, QUIC protected close and post-close accounting shutdown, bounded
+  clock capture and replay, protected macaroon delegation, a `spawn_blocking`
+  fallback that never detaches its thread (GitHub #80), and an HTTP/1 fix that
+  answers a rejected request head with `400`/`413`/`431` instead of a silent
+  close. Ten crates, including the first `asupersync-zstd`, with signed Linux
+  (amd64 and arm64), macOS and Windows assets, published through DSR without
+  GitHub Actions. Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
@@ -83,11 +84,123 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## [Unreleased]
 
-## [v0.6.0] - Unreleased (version bumped on `main` 2026-09-18; not yet published)
+## [v0.6.0] - 2026-10-14
 
-250 commits since v0.5.0. The theme is **durability**: ATP transfers now survive
-a process dying mid-send or mid-receive, QUIC closes cleanly and stops accounting
-afterwards, and the clock can be captured and replayed within bounded windows.
+About 2,900 commits since v0.5.0. The theme is **durability**: ATP transfers now
+survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
+accounting afterwards, and the clock can be captured and replayed within bounded
+windows.
+
+### Security — third-party macaroon caveats (asupersync-s45073)
+
+- **Legacy third-party caveats can be stripped by the third party.**
+  - `MacaroonToken::add_third_party_caveat` encrypts the caveat key as
+    `vid = sig XOR caveat_key`. Whoever holds the caveat key, which is the third
+    party by design, can recover the chain signature before that caveat.
+  - With it they can mint a shorter token that still verifies, with that caveat
+    and every later caveat removed (an expiry, for example).
+  - This is unchanged in 0.6.0, so tokens already issued keep working.
+- **Migrate to protected delegation**, new in 0.6.0 (b3c086217, 3f025b5dc).
+  - Issue third-party caveats with `MacaroonToken::add_protected_third_party_caveat`,
+    and verify with `verify_with_protected_discharges_for_identifier`.
+  - That profile seals the caveat key with XChaCha20-Poly1305 under
+    identifier-bound AAD, and its verifier never falls back to the legacy
+    envelope.
+  - Use new issuer keys and identifiers, reissue outstanding grants, and rotate
+    the discharge keys. Rotating discharge keys does not revoke a prefix
+    signature that a legacy envelope has already revealed.
+- **Fixed: `MacaroonKeyRing::verify` no longer accepts an all-zero signature when
+  no retired key is set** (43aca3a0d). The comparison is still constant-time.
+- **Documented: `RuntimeBuilder::with_spawn_authorization_key` is checked only by
+  `RuntimeState::create_task_with_auth`.** `Cx::spawn`, `Scope::spawn*` and
+  runtime-handle spawns do not consult it.
+
+### Breaking changes — summary and migration
+
+A rustdoc-JSON comparison of the public surface against v0.5.0
+(`scripts/public_api_diff.py`) found no public item, method, field or variant
+removed or renamed. These six changes can break callers:
+
+1. **`net::atp::protocol::QuicFrame`** has three new variants (`NewConnectionId`,
+   `NewToken`, `RetireConnectionId`) and is now `#[non_exhaustive]`. Add a
+   wildcard arm to exhaustive matches. Details below.
+2. **`cx::ChildRegion` / `ChildRegionOpening`** are generic over the opener's
+   capability set, `<Caps = cap::All>`. Code holding `Cx<cap::All>` is
+   unchanged; with a restricted `Cx<Caps>`, name `Caps` or use the default.
+   Details below.
+3. **`http::h2::listener::Http2ListenerStatsSnapshot`** has a new public field,
+   `tls_handshake_rejections_total: u64` (bb0ffc016). The struct has no
+   `Default`, so add the field to struct literals and exhaustive patterns.
+4. **`supervision::ManagedSupervisorReport<E>`** has a new public field,
+   `restart_storm_detected: bool` (6ae74db04). Add it to struct literals and
+   exhaustive patterns; the library normally builds this report itself.
+5. **`signal::SignalMaskGuard` is now `!Send` and `!Sync`** (6fafb0065), because
+   dropping it on another thread would restore that thread's signal mask. Keep
+   the guard on the thread that created it, and do not hold it across an
+   `.await` in a `Send` future.
+6. **These types are no longer `UnwindSafe`/`RefUnwindSafe`**, because a new
+   field holds a lock, a waker or an `Arc<dyn …>`. Wrap them in
+   `std::panic::AssertUnwindSafe` where you pass them to `catch_unwind`.
+   - `http::h1::HttpClientConfig` and `HttpClientBuilder` (the DNS resolver, ceac580d9);
+   - `net::websocket::ServerWebSocket` (the heartbeat clock, 5cc3a89f1);
+   - `stream::Merge` (per-child wakeups, 03ab6cb58);
+   - `http::h3::NativeH3Session` (request-upload wakers, 7091e0415);
+   - `observability::otel::OtlpHttpExporter` and `OtlpLogsHttpExporter` (the
+     bounded export queue, a7251d323);
+   - `tls::TlsAcceptorBuilder` (the selectable crypto provider and SNI
+     certificates, b288f7b3c, 799d4d529);
+   - with the `kafka` feature off, `messaging::KafkaConsumer` and
+     `TransactionalProducer` (850af98a6, da0f00e65).
+
+The behaviour changes further down (poll quotas, the IO capability, budget
+deadlines and others) do not change signatures, but they can change what a
+program observes.
+
+### Fixed: `spawn_blocking` without a runtime no longer detaches its worker thread (GitHub #80)
+
+- Called with no asupersync runtime (for example from
+  `futures::executor::block_on` on a plain thread), `spawn_blocking` runs the
+  closure on a dedicated thread. 0.5.0 dropped that thread's `JoinHandle` as the
+  thread exited. On glibc before 2.43, detaching an exiting thread can crash in
+  `pthread_detach` (BZ19951).
+- The fallback now joins a finished thread, or parks a running one until a later
+  fallback spawn joins it. No fallback thread is detached (8e87ef3d1).
+- The same treatment covers:
+  - the custom-clock `Sleep` fallback thread (f87732a14);
+  - the process kill-on-drop reaper, the `shutdown_timeout` reaper, the MySQL
+    KILL-on-drop thread, debug-server connections, and blocking-pool threads
+    left over after a timed-out shutdown (7e04f79b3).
+- A census test fails when a new thread spawn site has no recorded answer for
+  its handle (c12042185).
+
+### Performance note — runtime shutdown retires every task
+
+Dropping a `RuntimeState` now retires every live task explicitly (acea99849,
+asupersync-bi2462.91): it requests cancellation, drops the stored future and
+completes the record, each isolated against panics, before opening the join
+barriers. That lets joins parked at shutdown finish. Teardown costs about 200 ns
+per live task, against about 20 ns before it, once per runtime. With that
+teardown excluded, this change leaves the scheduler's `next_task` and
+cancel-dispatch timings unchanged. The `next_task_hotpath` and
+`cancel_drain_bench` benchmarks include the teardown in their timings, because
+their routines consume their input.
+
+### Known issues
+
+- **Legacy third-party macaroon caveats** can be stripped by their third party;
+  see Security above (asupersync-s45073 H2). Use the protected delegation APIs
+  for new grants.
+- **The `zstd` feature is experimental, opt-in and off by default.**
+  `asupersync-zstd` 0.6.0 is the first published release of the in-house codec,
+  and its encoder strategies are still being built (asupersync-t1fblr).
+- **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
+  fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
+  decisions:
+  - CONNECT confirmation is opt-in, through `NatsClient::connect_with_policy`;
+  - the per-consumer 50 ms pull limiter is unchanged.
+- **`cargo fmt --check`** reports formatting drift on `main` that was not there at
+  v0.5.0 (GitHub #76). It is a known deviation; the code was not reformatted for
+  this release.
 
 ### Migration note — `Outcome<T, E>` and conditionally derived `Debug`
 
