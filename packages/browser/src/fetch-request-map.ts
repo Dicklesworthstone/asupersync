@@ -450,3 +450,251 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     return fail("request mapping setup refused", "compatibility_rejected");
   }
 }
+
+/** Bounds source count, pending reads and retained descriptors, not payload bytes. */
+export const FETCH_REQUEST_MERGE_LIMITS = Object.freeze({ maxSources: 64 });
+
+/**
+ * Merge 0..64 exclusively owned request sources without a detached pipe pump.
+ * A first output pull starts one native read per source. Each source retains at
+ * most one pending read OR unread descriptor; another read needs output demand.
+ * Ready sources are served in observation order, preserving each source's order.
+ * A parked source cannot hold up a ready peer, and queued peers are not bypassed
+ * by a source that becomes ready again. No cross-source total order is promised.
+ *
+ * Ownership transfers only if every source validates and every lock is acquired.
+ * Setup refusal releases acquired locks without reading/cancelling caller work.
+ * Native EOF is separate from an owned producer's completion: success joins both.
+ * Any failure stops all sources, discards queued references, and joins outstanding
+ * reads, native cancellation, owner cancellation and independent producer receipts.
+ * Expected retirement cancellation is not a new failure; stronger failures during
+ * drain remain visible. Same-severity cleanup failures use source input order.
+ *
+ * Pass the result directly to streamMapFetches/tryStreamMapFetches. No request is
+ * admitted, body acquired, task spawned, timer installed or retry performed here.
+ * Descriptors keep their identity. Unadmitted upload bodies, source queues, hidden
+ * raw-stream producer work and downstream buffering remain caller responsibilities.
+ * Read or cancel the output; waiting only for closed can intentionally stall.
+ * Already delivered descriptors/effects cannot be rolled back. An owner must
+ * truthfully join its work and must not await this merge's own closed/cancel.
+ */
+export function mergeFetchRequestSources(
+  sources: readonly Input<BrowserFetchOptions>[],
+): Outcome<FetchBatchRequestSource> {
+  if (!STREAM || !LOCKED || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED) {
+    return fail("request merging requires native stream readers", "compatibility_rejected");
+  }
+  interface Member {
+    reader: ReadableStreamDefaultReader<BrowserFetchOptions>;
+    terminal?: Promise<Outcome<void>>;
+    cancelOwner?: () => unknown;
+    reading?: Promise<void>;
+    eof: boolean;
+    queued: boolean;
+    fault?: Failure;
+  }
+  const members: Member[] = [];
+  const completion = deferred<Outcome<void>>();
+  const ready: { index: number; value: BrowserFetchOptions }[] = [];
+  let controller!: ReadableStreamDefaultController<BrowserFetchOptions>;
+  let demand: ReturnType<typeof deferred<void>> | undefined;
+  let accepted = false, ended = false, finalizing = false, consumerCancelled = false;
+  let stopped: Failure | undefined;
+  let cleanup: { index: number; outcome: Failure } | undefined;
+  let retirement: Promise<void> | undefined;
+
+  function release(): void {
+    for (const member of members) {
+      try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ }
+    }
+  }
+  function note(outcome: Failure): void {
+    if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
+  }
+  function noteCleanup(index: number, outcome: Failure): void {
+    if (!cleanup || severity(outcome) > severity(cleanup.outcome)
+        || severity(outcome) === severity(cleanup.outcome) && index < cleanup.index) {
+      cleanup = { index, outcome };
+    }
+    note(outcome);
+  }
+  function noteSource(index: number, outcome: Outcome<void>): void {
+    if (outcome.outcome === "ok") return;
+    const member = members[index];
+    // Replace only this source's provisional native-read diagnosis. Never
+    // authorize an exception's cause or replace another already selected cause.
+    if (member.fault && stopped === member.fault) stopped = outcome;
+    else if (outcome.outcome !== "cancelled" || !retirement || member.fault) note(outcome);
+  }
+  function finish(): void {
+    if (finalizing) return;
+    finalizing = true;
+    // A native read may call finish; do not await the finalizer from that read.
+    void (async () => {
+      await Promise.all(members.map(member => member.reading));
+      await Promise.all(members.map(async (member, index) => {
+        if (member.terminal) {
+          const outcome = await member.terminal;
+          noteSource(index, outcome);
+          if (outcome.outcome !== "ok" && !retirement) stop(outcome);
+        }
+      }));
+      if (retirement) await retirement;
+      ended = true;
+      release();
+      const outcome = cleanup && (!stopped || severity(cleanup.outcome) >= severity(stopped))
+        ? cleanup.outcome : stopped ?? ok(undefined);
+      try {
+        if (!consumerCancelled) {
+          if (outcome.outcome === "ok") controller.close();
+          else controller.error(mergeError(outcome));
+        }
+      } catch { /* Native consumer cancellation already closed output. */ }
+      demand?.resolve(); demand = undefined;
+      completion.resolve(outcome);
+    })();
+  }
+  function mergeError(outcome: Failure): Error {
+    return Object.defineProperty(new Error("owned request merge stopped"), "cause", { value: outcome });
+  }
+  function stop(outcome: Failure): Promise<Outcome<void>> {
+    if (ended) return completion.promise;
+    note(outcome);
+    if (!retirement) {
+      const joined = deferred<void>();
+      retirement = joined.promise; // Fence before every producer callback.
+      ready.length = 0;
+      for (const member of members) member.queued = false;
+      void Promise.all(members.map(async (member, index) => {
+        // Start native and owner cancellation independently. Either one can
+        // legitimately need the other to run before its own promise settles.
+        const native = Promise.resolve().then(() => Reflect.apply(CANCEL!, member.reader, ["request merge retired"]))
+          .then(() => undefined, () => fail("request merge native cancellation rejected"));
+        const owner = member.cancelOwner ? Promise.resolve().then(member.cancelOwner)
+          .then(value => checked<void>(value), () => fail("request merge owner cancellation rejected"))
+          : Promise.resolve(ok(undefined));
+        const [refusal, receipt, terminal] = await Promise.all([
+          native, owner, member.terminal ?? Promise.resolve(ok(undefined)), member.reading,
+        ]);
+        let issue = refusal;
+        if (receipt.outcome === "err" || receipt.outcome === "panicked") {
+          if (!issue || severity(receipt) >= severity(issue)) issue = receipt;
+        }
+        noteSource(index, terminal);
+        if (terminal.outcome === "err" || terminal.outcome === "panicked"
+            || terminal.outcome === "cancelled" && !!member.fault) {
+          if (!issue || severity(terminal) >= severity(issue)) issue = terminal;
+        }
+        if (issue) noteCleanup(index, issue);
+      })).then(() => joined.resolve());
+      finish();
+    }
+    return completion.promise;
+  }
+  function fault(index: number): void {
+    if (!accepted || ended || retirement) return;
+    const cause = fail("request merge input failed");
+    members[index].fault = cause;
+    void stop(cause);
+  }
+  function deliver(): void {
+    if (ended || retirement) return;
+    if (demand && ready.length) {
+      const item = ready.shift()!;
+      members[item.index].queued = false;
+      const pending = demand; demand = undefined;
+      controller.enqueue(item.value);
+      pending.resolve();
+    }
+    if (!ready.length && members.every(member => member.eof)) finish();
+  }
+  function read(index: number): void {
+    const member = members[index];
+    const done = deferred<void>();
+    member.reading = done.promise; // Own before native pull callbacks can run.
+    void (async () => {
+      try {
+        const item = await Reflect.apply(READ!, member.reader, []) as ReadableStreamReadResult<BrowserFetchOptions>;
+        if (ended || retirement) return;
+        if (item.done) member.eof = true;
+        else { member.queued = true; ready.push({ index, value: item.value }); }
+        deliver();
+      } catch { fault(index); }
+      finally { member.reading = undefined; done.resolve(); }
+    })();
+  }
+  try {
+    const count = Array.isArray(sources) ? sources.length : -1;
+    if (!Number.isSafeInteger(count) || count < 0 || count > FETCH_REQUEST_MERGE_LIMITS.maxSources) {
+      return fail("request merging requires an array of at most 64 sources", "compatibility_rejected");
+    }
+    const snapshots: { input: ReadableStream<BrowserFetchOptions>; terminal?: Promise<Outcome<void>>; cancelOwner?: () => unknown }[] = [];
+    const seen = new Set<ReadableStream<BrowserFetchOptions>>();
+    for (let index = 0; index < count; index++) {
+      const source = sources[index];
+      let input: ReadableStream<BrowserFetchOptions>, terminal: Promise<Outcome<void>> | undefined;
+      let cancelOwner: (() => unknown) | undefined;
+      let native = false;
+      try { Reflect.apply(LOCKED, source, []); native = true; } catch { /* Explicit owner form. */ }
+      if (native) input = source as ReadableStream<BrowserFetchOptions>;
+      else {
+        const owner = source as FetchBatchRequestSource;
+        input = owner.readable;
+        const cancel = owner.cancel, receipt = owner.closed;
+        if (typeof cancel !== "function" || !receipt || typeof receipt.then !== "function") throw new Error("invalid owner");
+        cancelOwner = () => Reflect.apply(cancel, owner, ["request merge retired"]);
+        terminal = Promise.resolve(receipt).then(value => checked<void>(value), () => fail("request merge source completion rejected"));
+      }
+      if (seen.has(input) || Reflect.apply(LOCKED, input, [])) throw new Error("duplicate or locked source");
+      seen.add(input);
+      snapshots.push({ input, terminal, cancelOwner });
+    }
+    const readable = new STREAM<BrowserFetchOptions>({
+      start(value) { controller = value; },
+      pull() {
+        if (ended || retirement) return completion.promise.then(() => undefined);
+        const pending = deferred<void>(); demand = pending;
+        // Snapshot eligibility before starting reads. Resolution uses microtasks,
+        // so every source in this demand wave gets exactly one chance to read.
+        for (let index = 0; index < members.length; index++) {
+          const member = members[index];
+          if (!member.eof && !member.queued && !member.reading) read(index);
+        }
+        deliver();
+        return pending.promise;
+      },
+      async cancel() {
+        consumerCancelled = true;
+        const outcome = await stop(cancelled("request merge output cancelled"));
+        if (outcome.outcome === "err" || outcome.outcome === "panicked") throw mergeError(outcome);
+      },
+    }, { highWaterMark: 0 });
+    for (const snapshot of snapshots) {
+      const reader = Reflect.apply(GET_READER, snapshot.input, []) as ReadableStreamDefaultReader<BrowserFetchOptions>;
+      const index = members.length;
+      members.push({ reader, terminal: snapshot.terminal, cancelOwner: snapshot.cancelOwner, eof: false, queued: false });
+      void Promise.resolve(Reflect.apply(READER_CLOSED, reader, [])).catch(() => fault(index));
+    }
+    accepted = true;
+    for (let index = 0; index < members.length; index++) {
+      void members[index].terminal?.then(outcome => {
+        if (!accepted || ended || outcome.outcome === "ok") return;
+        noteSource(index, outcome);
+        if (!retirement) void stop(outcome);
+      });
+    }
+    if (!members.length) {
+      ended = true;
+      controller.close();
+      completion.resolve(ok(undefined));
+    }
+    return ok(Object.freeze({ readable, closed: completion.promise, cancel(reason = "request merge cancelled by caller") {
+      return typeof reason === "string" ? stop(cancelled(reason))
+        : Promise.resolve(fail("request merge cancellation reason must be a string", "compatibility_rejected"));
+    } }));
+  } catch {
+    accepted = false;
+    release();
+    return fail("invalid or locked request merge source", "compatibility_rejected");
+  }
+}
