@@ -74,6 +74,37 @@ impl LabRuntime {
 }
 
 impl LabReactorModel {
+    /// Records new I/O activity, including an edge on an already-ready source.
+    ///
+    /// [`Self::set_ready`] asserts a condition and is deliberately idempotent.
+    /// A pulse instead models new activity, such as another write arriving
+    /// while earlier bytes are still unread. It asserts `ready` and records a
+    /// fresh edge for those directions without pretending the source drained.
+    /// Pulses before a poll coalesce into one notification per source.
+    ///
+    /// This does not re-arm a one-shot or dispatch registration, change its
+    /// interest, clear other conditions, or advance time. An attached runtime
+    /// sees deliverable activity at its current virtual time. Like `set_ready`,
+    /// a pulse is a direct scripted condition, not a raw chaos-injected event.
+    /// [`Self::schedule_ready`] retains its existing assertion semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` for trigger flags in `ready`, or `NotFound` for
+    /// an unregistered token. A rejected pulse changes no model or clock state.
+    pub fn pulse_ready(&self, token: Token, ready: Interest) -> std::io::Result<()> {
+        super::validate_readiness(ready)?;
+        let mut state = self.state.lock();
+        let registration = state
+            .registrations
+            .get_mut(&token)
+            .ok_or_else(super::not_registered)?;
+        registration.ready |= ready;
+        registration.edges |= ready;
+        self.queue_clock_pump(&mut state);
+        Ok(())
+    }
+
     /// Make latched readiness visible to LabRuntime's existing deadline picker.
     /// All callers hold `state`, keeping enqueue/consume bookkeeping serialized.
     pub(super) fn queue_clock_pump(&self, state: &mut ModelState) {
@@ -112,6 +143,189 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
+    }
+
+    fn ready_events(model: &LabReactorModel) -> Vec<Event> {
+        let mut events = Events::with_capacity(4);
+        let count = model.poll(&mut events, Some(Duration::ZERO)).unwrap();
+        assert_eq!(count, events.len());
+        events.iter().copied().collect()
+    }
+
+    #[test]
+    fn new_activity_retriggers_an_edge_without_faking_a_drain() {
+        let model = LabReactorModel::new();
+        let token = Token::new(40);
+        model
+            .register(
+                &std::io::stdin(),
+                token,
+                Interest::READABLE | Interest::EDGE_TRIGGERED,
+            )
+            .unwrap();
+        model.set_ready(token, Interest::READABLE).unwrap();
+        assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+        model.set_ready(token, Interest::READABLE).unwrap();
+        assert!(ready_events(&model).is_empty());
+        for _ in 0..3 {
+            model.pulse_ready(token, Interest::READABLE).unwrap();
+        }
+        assert_eq!(model.readiness(token).unwrap(), Interest::READABLE);
+        assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+        assert!(ready_events(&model).is_empty());
+        assert!(model.is_armed(token).unwrap());
+        assert_eq!(model.now(), Time::ZERO);
+    }
+
+    #[test]
+    fn activity_never_bypasses_one_shot_or_dispatch_rearming() {
+        for interest in [
+            Interest::READABLE,
+            Interest::READABLE | Interest::ONESHOT,
+            Interest::READABLE | Interest::EDGE_TRIGGERED | Interest::ONESHOT,
+            Interest::READABLE | Interest::EDGE_TRIGGERED | Interest::DISPATCH,
+        ] {
+            let model = LabReactorModel::new();
+            let token = Token::new(41);
+            model.register(&std::io::stdin(), token, interest).unwrap();
+            model.pulse_ready(token, Interest::READABLE).unwrap();
+            assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+            for _ in 0..3 {
+                model.pulse_ready(token, Interest::READABLE).unwrap();
+            }
+            assert!(!model.is_armed(token).unwrap());
+            assert!(ready_events(&model).is_empty());
+            model.modify(token, interest).unwrap();
+            assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+            assert!(ready_events(&model).is_empty());
+        }
+    }
+
+    #[test]
+    fn activity_coalesces_directions_and_preserves_unselected_conditions() {
+        let model = LabReactorModel::new();
+        let token = Token::new(42);
+        model
+            .register(
+                &std::io::stdin(),
+                token,
+                Interest::READABLE | Interest::EDGE_TRIGGERED,
+            )
+            .unwrap();
+        let both = Interest::READABLE | Interest::WRITABLE;
+        model.pulse_ready(token, both).unwrap();
+        assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+        model.pulse_ready(token, Interest::WRITABLE).unwrap();
+        assert!(ready_events(&model).is_empty());
+        assert_eq!(model.readiness(token).unwrap(), both);
+        model
+            .modify(token, Interest::WRITABLE | Interest::EDGE_TRIGGERED)
+            .unwrap();
+        assert_eq!(ready_events(&model), vec![Event::writable(token)]);
+        model.clear_ready(token, both).unwrap();
+        model.pulse_ready(token, Interest::NONE).unwrap();
+        assert!(ready_events(&model).is_empty());
+        assert_eq!(model.readiness(token).unwrap(), Interest::NONE);
+    }
+
+    #[test]
+    fn rejected_activity_preserves_conditions_edges_and_clock_deadlines() {
+        let (lab, model) =
+            LabRuntime::with_reactor_model(LabConfig::new(13), ReadinessMode::OneShot);
+        let token = Token::new(43);
+        model
+            .register(
+                &std::io::stdin(),
+                token,
+                Interest::READABLE | Interest::EDGE_TRIGGERED,
+            )
+            .unwrap();
+        model.pulse_ready(token, Interest::READABLE).unwrap();
+        assert_eq!(ready_events(&model), vec![Event::readable(token)]);
+        for invalid in [Interest::ONESHOT, Interest::EDGE_TRIGGERED, Interest::DISPATCH] {
+            assert_eq!(
+                model.pulse_ready(token, invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
+        assert_eq!(
+            model.pulse_ready(Token::new(44), Interest::READABLE).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
+        assert_eq!(model.readiness(token).unwrap(), Interest::READABLE);
+        assert!(model.is_armed(token).unwrap());
+        assert_eq!(lab.lab_reactor().next_event_time(), None);
+        assert!(ready_events(&model).is_empty());
+        assert_eq!(model.now(), Time::ZERO);
+    }
+
+    #[test]
+    fn activity_reaches_the_paired_driver_without_rearming_an_edge_source() {
+        let (lab, model) =
+            LabRuntime::with_reactor_model(LabConfig::new(14), ReadinessMode::OneShot);
+        let driver = lab.state.io_driver_handle().unwrap();
+        let count = Arc::new(CountWakes(AtomicUsize::new(0)));
+        let registration = driver
+            .register(
+                &std::io::stdin(),
+                Interest::READABLE | Interest::EDGE_TRIGGERED,
+                Waker::from(count.clone()),
+            )
+            .unwrap();
+        for expected in 1..=2 {
+            model.pulse_ready(registration.token(), Interest::READABLE).unwrap();
+            assert_eq!(lab.lab_reactor().next_event_time(), Some(Time::ZERO));
+            assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+            assert_eq!(count.0.load(Ordering::SeqCst), expected);
+            assert_eq!(lab.lab_reactor().next_event_time(), None);
+            assert_eq!(driver.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 0);
+        }
+        assert!(model.is_armed(registration.token()).unwrap());
+        drop(registration);
+        assert!(driver.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn activity_matches_native_epoll_when_unread_data_remains() {
+        use crate::runtime::reactor::EpollReactor;
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let native = EpollReactor::new().unwrap();
+        let model = LabReactorModel::new();
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+        let token = Token::new(45);
+        let interest = Interest::READABLE | Interest::EDGE_TRIGGERED;
+        native.register(&reader, token, interest).unwrap();
+        model.register(&reader, token, interest).unwrap();
+        let compare = |expected: usize| {
+            let mut events = Events::with_capacity(4);
+            assert_eq!(native.poll(&mut events, Some(Duration::ZERO)).unwrap(), expected);
+            assert_eq!(ready_events(&model), events.iter().copied().collect::<Vec<_>>());
+        };
+
+        writer.write_all(b"a").unwrap();
+        model.pulse_ready(token, Interest::READABLE).unwrap();
+        compare(1);
+        compare(0);
+        // No read, clear, or re-arm between writes: fresh activity is an edge.
+        writer.write_all(b"b").unwrap();
+        model.pulse_ready(token, Interest::READABLE).unwrap();
+        compare(1);
+        compare(0);
+        let mut bytes = [0_u8; 2];
+        reader.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"ab");
+        model.clear_ready(token, Interest::READABLE).unwrap();
+        compare(0);
+        writer.write_all(b"c").unwrap();
+        model.pulse_ready(token, Interest::READABLE).unwrap();
+        compare(1);
+        native.deregister(token).unwrap();
+        model.deregister(token).unwrap();
     }
 
     #[test]
