@@ -15,6 +15,8 @@ export interface FetchRequestMapSource<T> {
 export interface FetchRequestMapOptions {
   /** Maximum mapped input records, including skipped ones. Default 100,000. */
   maxInputs?: number;
+  /** Input-order mapping window, including unread results. Default 1; 1..64. */
+  concurrency?: number;
 }
 
 export interface FetchRequestFlatMapOptions extends FetchRequestMapOptions {
@@ -89,9 +91,12 @@ const ABORT = ABORT_CONTROLLER?.prototype.abort;
 /**
  * Map records to request descriptors (null skips a record), in input order.
  * No fetch is admitted here. Pass the returned owner directly to streamMapFetches.
- * One native input read/async mapper is active at a time, only on output demand.
- * Cancellation fences output and signals the mapper immediately, then joins its
- * settlement, native input cancellation, owner cancellation and owner.closed.
+ * By default one native input read/async mapper is active at a time. Opt-in
+ * concurrency reserves a bounded window on output demand: pending input,
+ * running mappers and unread mapped results all retain a slot. Input reads stay
+ * serialized and output stays in input order, even if mappers finish out of order.
+ * Cancellation fences output and signals every mapper immediately, then joins
+ * all mapper settlements, input cancellation, owner cancellation and owner.closed.
  * A late mapper panic is not hidden by cancellation; its returned request is
  * never emitted after a stop. Already-delivered requests are not rolled back.
  *
@@ -122,7 +127,8 @@ export function tryMapFetchRequests<T>(source: Input<T>, mapper: FetchRequestMap
  * Expand each input into a bounded array of requests, preserving input/array order.
  * Snapshot and validate the entire descriptor list before emitting any member;
  * never inspect request fields or use a caller-provided iterator. Empty arrays
- * skip an input. Pull no further input until every current descriptor is emitted.
+ * skip an input. Each expansion retains its mapping-window slot until every
+ * descriptor is emitted. At default concurrency, no later input is pulled then.
  * Cancellation discards unadmitted descriptors without acquiring their bodies.
  * Shares mapFetchRequests' mapper/producer join and non-rollback boundaries.
  */
@@ -148,11 +154,16 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let owner: FetchRequestMapSource<T> | undefined;
   let ownerCancel: FetchRequestMapSource<T>["cancel"] | undefined;
   let ownerClosed: Promise<Outcome<void>> | undefined;
-  let maxInputs: number, maxExpansion: number;
+  let maxInputs: number, maxExpansion: number, concurrency: number;
   try {
     maxInputs = options.maxInputs ?? 100_000;
     if (!Number.isSafeInteger(maxInputs) || maxInputs < 1 || typeof mapper !== "function") {
       return fail("request mapping requires a mapper and a positive safe maxInputs", "compatibility_rejected");
+    }
+    const suppliedConcurrency = options.concurrency;
+    concurrency = suppliedConcurrency === undefined ? 1 : suppliedConcurrency;
+    if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 64) {
+      return fail("request mapping concurrency must be an integer in 1..64", "compatibility_rejected");
     }
     maxExpansion = expand ? options.maxRequestsPerInput ?? 64 : 1;
     if (!Number.isSafeInteger(maxExpansion) || maxExpansion < 1 || maxExpansion > 1024) {
@@ -182,7 +193,20 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let active: Promise<void> | undefined;
   let retirement: Promise<void> | undefined;
   let finalizing = false, index = 0, consumerCancelled = false;
-  let requests: BrowserFetchOptions[] = [], nextRequest = 0;
+  // A slot is reserved BEFORE its input read, and released only after all of
+  // its descriptors have been accepted by output pulls. A slow early mapper
+  // cannot accumulate an unbounded reorder buffer behind it.
+  type Slot = { requests?: BrowserFetchOptions[]; next: number };
+  const slots: Slot[] = [];
+  const mapping = new Set<Promise<void>>();
+  let reading: Promise<void> | undefined, inputEof = false;
+  let changed = deferred<void>();
+
+  function notify(): void {
+    const previous = changed;
+    changed = deferred<void>();
+    previous.resolve();
+  }
 
   function note(outcome: Failure): void {
     if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
@@ -209,6 +233,10 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     // native stream does not itself wait for its pending pull computation.
     void (async () => {
       await active;
+      // The stop/EOF fence prevents new work. Native cancellation can settle a
+      // read without settling mappers that already own earlier input records.
+      await reading;
+      await Promise.all([...mapping]);
       if (ownerClosed) noteSource(await ownerClosed);
       if (retirement) await retirement;
       ended = true;
@@ -225,7 +253,9 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     if (ended) return completion.promise;
     note(outcome);
     ending = true; // Fence before any mapper/producer callback can re-enter.
-    requests = []; nextRequest = 0;
+    for (const slot of slots) slot.requests = undefined;
+    slots.length = 0;
+    notify();
     if (!retirement) {
       // Install before invoking callbacks, which may re-enter cancel().
       retirement = Promise.all([
@@ -245,66 +275,100 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     inputFailure = fail("request mapping input failed");
     void stop(inputFailure);
   }
+  function mapSlot(slot: Slot, inputValue: T, inputIndex: number): void {
+    const done = deferred<void>();
+    // Register before user code can synchronously call cancel().
+    mapping.add(done.promise);
+    void (async () => {
+      let value: unknown;
+      try {
+        value = await mapper(inputValue, inputIndex, control.signal);
+        if (typed) {
+          // A later failure must still strengthen a pending shutdown.
+          const outcome = checked<unknown>(value);
+          if (outcome.outcome !== "ok") { void stop(outcome); return; }
+          value = outcome.value;
+        }
+      } catch (thrown) {
+        const own = thrown && (typeof thrown === "object" || typeof thrown === "function") ? ownedErrors.get(thrown) : undefined;
+        void stop(own ?? panic()); return;
+      }
+      if (ending || ended) return;
+      if (expand) {
+        try {
+          if (!Array.isArray(value)) throw new Error("not an array");
+          const count = value.length;
+          if (ending || ended) return;
+          if (!Number.isSafeInteger(count) || count < 0 || count > maxExpansion) throw new Error("expansion limit");
+          const snapshot: BrowserFetchOptions[] = [];
+          for (let n = 0; n < count; n++) {
+            const request: unknown = value[n];
+            if (ending || ended) return;
+            if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("not a request");
+            snapshot.push(request as BrowserFetchOptions);
+          }
+          // Indexed accessors may re-enter cancellation. Never publish their
+          // results after that ownership fence, even behind a slower mapper.
+          if (ending || ended) return;
+          slot.requests = snapshot;
+        } catch {
+          void stop(fail("request expansion requires a bounded array of request objects", "compatibility_rejected"));
+        }
+      } else if (value === null) slot.requests = [];
+      else if (!value || typeof value !== "object" || Array.isArray(value)) {
+        void stop(fail("request mapper must return a request object or null", "compatibility_rejected"));
+      } else slot.requests = [value as BrowserFetchOptions];
+    })().catch(() => { void stop(fail("request mapping driver failed")); }).finally(() => {
+      mapping.delete(done.promise);
+      done.resolve();
+      notify();
+    });
+  }
+  function readSlot(): void {
+    const slot: Slot = { next: 0 };
+    slots.push(slot);
+    const done = deferred<void>();
+    reading = done.promise;
+    void (async () => {
+      let item: ReadableStreamReadResult<T>;
+      try { item = await Reflect.apply(READ!, reader, []); }
+      catch { sourceFault(); return; }
+      if (ending || ended) return;
+      if (item.done) {
+        inputEof = true;
+        // Reads are serialized, so the reserved read is always the last slot.
+        slots.pop();
+        return;
+      }
+      if (index === maxInputs) { void stop(fail("request mapping maxInputs exceeded", "compatibility_rejected")); return; }
+      mapSlot(slot, item.value, index++);
+    })().catch(() => { void stop(fail("request mapping driver failed")); }).finally(() => {
+      reading = undefined;
+      done.resolve();
+      notify();
+    });
+  }
   function pull(): Promise<void> | undefined {
     if (ending || ended) return;
     const done = deferred<void>();
     active = done.promise; // Install before invoking even a synchronous mapper.
     void (async () => {
       while (!ending && !ended) {
-        if (nextRequest < requests.length) {
-          const request = requests[nextRequest];
-          requests[nextRequest++] = undefined as unknown as BrowserFetchOptions;
-          if (nextRequest === requests.length) { requests = []; nextRequest = 0; }
+        const waiting = changed.promise;
+        const slot = slots[0];
+        if (slot?.requests) {
+          if (slot.next === slot.requests.length) { slots.shift(); continue; }
+          const request = slot.requests[slot.next];
+          slot.requests[slot.next++] = undefined as unknown as BrowserFetchOptions;
+          if (slot.next === slot.requests.length) slots.shift();
           controller.enqueue(request);
           return;
         }
-        let item: ReadableStreamReadResult<T>;
-        try { item = await Reflect.apply(READ!, reader, []); }
-        catch { sourceFault(); return; }
-        if (ending || ended) return;
-        if (item.done) { ending = true; finalize(); return; }
-        if (index === maxInputs) { void stop(fail("request mapping maxInputs exceeded", "compatibility_rejected")); return; }
-        let value: unknown;
-        try {
-          value = await mapper(item.value, index++, control.signal);
-          if (typed) {
-            const outcome = checked<unknown>(value);
-            if (outcome.outcome !== "ok") { void stop(outcome); return; }
-            value = outcome.value;
-          }
-        } catch (thrown) {
-          const own = thrown && (typeof thrown === "object" || typeof thrown === "function") ? ownedErrors.get(thrown) : undefined;
-          void stop(own ?? panic()); return;
-        }
-        if (ending || ended) return;
-        if (expand) {
-          try {
-            if (!Array.isArray(value)) throw new Error("not an array");
-            const count = value.length;
-            if (ending || ended) return;
-            if (!Number.isSafeInteger(count) || count < 0 || count > maxExpansion) throw new Error("expansion limit");
-            const snapshot: BrowserFetchOptions[] = [];
-            for (let n = 0; n < count; n++) {
-              const request: unknown = value[n];
-              if (ending || ended) return;
-              if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("not a request");
-              snapshot.push(request as BrowserFetchOptions);
-            }
-            // Indexed accessors may re-enter cancellation. Never install or
-            // publish their results after that ownership fence.
-            if (ending || ended) return;
-            requests = snapshot; nextRequest = 0;
-          } catch {
-            void stop(fail("request expansion requires a bounded array of request objects", "compatibility_rejected")); return;
-          }
-          continue;
-        }
-        if (value === null) continue;
-        if (!value || typeof value !== "object" || Array.isArray(value)) {
-          void stop(fail("request mapper must return a request object or null", "compatibility_rejected")); return;
-        }
-        controller.enqueue(value as BrowserFetchOptions);
-        return;
+        if (inputEof && !slots.length) { ending = true; finalize(); return; }
+        if (!inputEof && !reading && slots.length < concurrency) readSlot();
+        // Do not await the next input directly: a parked source read must not
+        // hide a completed earlier mapping result. Either can wake this driver.
+        await waiting;
       }
     })().catch(() => { void stop(fail("request mapping driver failed")); }).finally(() => {
       active = undefined;
