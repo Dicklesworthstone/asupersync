@@ -20,6 +20,8 @@ use std::time::Instant;
 const CONTENT_ID_DOMAIN: &[u8] = b"asupersync.atp.content-id.v1\0";
 const DIGEST_BUFFER_SIZE: usize = 8192;
 
+mod copy_commit;
+
 #[cfg(not(target_arch = "wasm32"))]
 mod scoped;
 #[cfg(not(target_arch = "wasm32"))]
@@ -115,6 +117,8 @@ struct SparseWriterState {
     temp_file: Option<File>,
     /// Current temp path
     temp_path: Option<PathBuf>,
+    /// Private destination-side copy retained after an unsuccessful publication.
+    publication_copy_path: Option<PathBuf>,
     /// Range tracker for written chunks
     range_tracker: RangeTracker,
     /// Written chunks metadata
@@ -235,6 +239,7 @@ impl SparseWriter {
             final_path,
             temp_file: None,
             temp_path: None,
+            publication_copy_path: None,
             range_tracker: RangeTracker::new(),
             written_chunks: BTreeMap::new(),
             expected_size: None,
@@ -502,7 +507,7 @@ impl SparseWriter {
             );
         }
 
-        let mut file = match File::open(&temp_path) {
+        let mut file = match self.open_verification_file(&temp_path) {
             Ok(file) => file,
             Err(error) => {
                 return self.fail_verification(format!("open for verification failed: {error}"));
@@ -642,7 +647,9 @@ impl SparseWriter {
     /// Once publication is attempted, this writer is sealed even on failure. Keep
     /// its staging/destination evidence for recovery instead of retrying blindly.
     /// Repeating a successful commit returns its path without publishing again.
-    /// `CopyAndVerify` retains its existing non-atomic visibility semantics.
+    /// Copy-based policies prepare, verify, and synchronize a private sibling
+    /// before replacing the destination name. Pre-publication failures retain
+    /// both staging files; errors after the rename still do not imply rollback.
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
         self.commit_with_fsync(File::sync_all)
     }
@@ -652,6 +659,16 @@ impl SparseWriter {
     fn commit_with_fsync(
         &self,
         sync_file: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Outcome<PathBuf, SparseWriterError> {
+        self.commit_with_publication(sync_file, Self::atomic_commit)
+    }
+
+    // Preserve the real sealing, durability, and cleanup path when tests inject
+    // a copy/barrier failure. Production always uses the canonical publisher.
+    fn commit_with_publication(
+        &self,
+        sync_file: impl FnOnce(&File) -> std::io::Result<()>,
+        publish: impl FnOnce(&Self) -> Outcome<PathBuf, SparseWriterError>,
     ) -> Outcome<PathBuf, SparseWriterError> {
         let _operation = self.operation.lock();
         {
@@ -689,7 +706,7 @@ impl SparseWriter {
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         }
 
-        let final_path = match self.atomic_commit() {
+        let final_path = match publish(self) {
             Outcome::Ok(path) => path,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
@@ -711,17 +728,11 @@ impl SparseWriter {
             return Ok(());
         }
 
-        // A copy creates a different inode, so syncing the staging file does not
-        // make the copied destination durable. Non-Unix link mode also copies.
-        if self.config.commit_policy == CommitPolicy::CopyAndVerify
-            || (cfg!(not(unix)) && self.config.commit_policy == CommitPolicy::LinkAndUnlink)
-        {
-            std::fs::OpenOptions::new()
-                .write(true)
-                .open(final_path)
-                .and_then(|file| file.sync_all())
-                .map_err(|error| SparseWriterError::SyncFailed(error.to_string()))?;
-        }
+        // Copy-based publication synchronizes its actual destination inode
+        // before rename. Never reopen a now-visible pathname to supply that
+        // barrier: it could have been replaced or made read-only in the meantime.
+        #[cfg(not(unix))]
+        let _ = final_path;
 
         #[cfg(unix)]
         {
@@ -949,6 +960,9 @@ impl SparseWriter {
     }
 
     fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
+        if self.uses_copy_publication() {
+            return self.copy_commit();
+        }
         let (temp_path, final_path) = {
             let mut state = self.lock_state();
             let temp_path = match state.temp_path.clone() {
@@ -972,15 +986,8 @@ impl SparseWriter {
                 Ok(_) => {}
                 Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
             },
-            CommitPolicy::CopyAndVerify => {
-                match std::fs::copy(&temp_path, &final_path) {
-                    Ok(_) => {}
-                    Err(e) => return Outcome::Err(SparseWriterError::CommitFailed(e.to_string())),
-                }
-                if let Err(error) = Self::verify_copied_file(&temp_path, &final_path) {
-                    return Outcome::Err(error);
-                }
-            }
+            // Handled above while the original staging descriptor is retained.
+            CommitPolicy::CopyAndVerify => unreachable!("copy publication dispatched above"),
             CommitPolicy::LinkAndUnlink => {
                 #[cfg(unix)]
                 {
@@ -999,13 +1006,7 @@ impl SparseWriter {
                 }
                 #[cfg(not(unix))]
                 {
-                    // Fallback to copy on non-Unix systems
-                    match std::fs::copy(&temp_path, &final_path) {
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Outcome::Err(SparseWriterError::CommitFailed(e.to_string()));
-                        }
-                    }
+                    unreachable!("copy publication dispatched above");
                 }
             }
         }
@@ -1099,34 +1100,6 @@ impl SparseWriter {
             reason: reason.clone(),
         };
         Outcome::Err(SparseWriterError::VerificationFailed(reason))
-    }
-
-    fn verify_copied_file(source: &Path, destination: &Path) -> Result<(), SparseWriterError> {
-        let source_digest = Self::file_digest(source)?;
-        let destination_digest = Self::file_digest(destination)?;
-        if source_digest != destination_digest {
-            return Err(SparseWriterError::CommitFailed(
-                "copy verification failed: destination digest differs from temp file".to_owned(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn file_digest(path: &Path) -> Result<[u8; 32], SparseWriterError> {
-        let mut file =
-            File::open(path).map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
-        let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            let read = file
-                .read(&mut buffer)
-                .map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(hasher.finalize().into())
     }
 
     fn hash_file_with_prefix(
