@@ -42,6 +42,8 @@ use std::path::PathBuf;
 use std::pin::pin;
 use std::sync::Arc;
 
+mod finalize;
+
 /// Runtime admission/retirement and the writer's actual outcome are separate.
 ///
 /// `Err` reports a `ScopedFs` authority, checkpoint, admission, or child failure.
