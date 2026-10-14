@@ -394,6 +394,18 @@ impl SparseWriter {
                 );
             }
 
+            // Empty objects have no write_chunk call to create their staging
+            // inode. Materialize one at the same verification boundary instead
+            // of treating an empty, complete object as missing data.
+            if state.expected_size == Some(0) && state.temp_file.is_none() {
+                if let Err(error) = self.ensure_temp_file_open_locked(&mut state) {
+                    return Self::fail_verification_locked(
+                        &mut state,
+                        format!("empty object staging failed: {error}"),
+                    );
+                }
+            }
+
             let Some(temp_path) = state.temp_path.clone() else {
                 return Self::fail_verification_locked(
                     &mut state,
@@ -544,6 +556,15 @@ impl SparseWriter {
     /// Repeating a successful commit returns its path without publishing again.
     /// `CopyAndVerify` retains its existing non-atomic visibility semantics.
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
+        self.commit_with_fsync(File::sync_all)
+    }
+
+    // A private injection point exercises the real terminal publication path,
+    // including its lifecycle transition, when the storage barrier fails.
+    fn commit_with_fsync(
+        &self,
+        sync_file: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Outcome<PathBuf, SparseWriterError> {
         let _operation = self.operation.lock();
         {
             let mut state = self.lock_state();
@@ -573,7 +594,7 @@ impl SparseWriter {
             state.lifecycle = WriterLifecycle::Committing;
         }
 
-        match self.apply_fsync_policy() {
+        match self.apply_fsync_policy_with(sync_file) {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
@@ -809,51 +830,29 @@ impl SparseWriter {
         Ok((hash, synced))
     }
 
-    fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
+    // Keep the storage barrier injectable only inside this module so tests can
+    // exercise sync failures without depending on a failing disk or unsafe FDs.
+    fn apply_fsync_policy_with(
+        &self,
+        sync_file: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Outcome<(), SparseWriterError> {
         let mut state = self.lock_state();
-        let verified = matches!(state.verification_state, VerificationState::Verified { .. });
+        let Some(file) = state.temp_file.as_ref() else {
+            // A missing descriptor is never evidence of a completed barrier,
+            // including for an explicitly non-durable publication policy.
+            return Outcome::Err(SparseWriterError::NoTempFile);
+        };
 
-        // Check sync requirements before borrowing file mutably
-        let needs_sync_for_every_write =
-            matches!(self.config.fsync_policy, super::FsyncPolicy::EveryWrite)
-                && state.written_chunks.values().any(|chunk| !chunk.synced);
-
-        if let Some(ref mut file) = state.temp_file {
-            match self.config.fsync_policy {
-                super::FsyncPolicy::Never => {
-                    // No sync required
-                }
-                super::FsyncPolicy::EveryWrite => {
-                    if needs_sync_for_every_write {
-                        // Force sync for any unsynced chunks
-                        match file.sync_data() {
-                            Ok(_) => {
-                                // Mark all chunks as synced
-                                for chunk in state.written_chunks.values_mut() {
-                                    chunk.synced = true;
-                                }
-                            }
-                            Err(e) => {
-                                return Outcome::Err(SparseWriterError::SyncFailed(e.to_string()));
-                            }
-                        }
-                    }
-                }
-                super::FsyncPolicy::VerifiedChunks => {
-                    // Sync only if verification passed
-                    if verified {
-                        match file.sync_data() {
-                            Ok(_) => {}
-                            Err(e) => {
-                                return Outcome::Err(SparseWriterError::SyncFailed(e.to_string()));
-                            }
-                        }
-                    }
-                }
-                super::FsyncPolicy::BeforeCommit => match file.sync_data() {
-                    Ok(_) => {}
-                    Err(e) => return Outcome::Err(SparseWriterError::SyncFailed(e.to_string())),
-                },
+        if self.config.fsync_policy != super::FsyncPolicy::Never {
+            // Per-chunk sync flags cannot stand in for the final inode barrier:
+            // empty objects have no chunks, and preallocation/metadata changes
+            // can follow the last chunk write. Synchronize the sealed inode for
+            // every durability-enabled policy before any publication effect.
+            if let Err(error) = sync_file(file) {
+                return Outcome::Err(SparseWriterError::SyncFailed(error.to_string()));
+            }
+            for chunk in state.written_chunks.values_mut() {
+                chunk.synced = true;
             }
         }
 
@@ -1118,6 +1117,10 @@ pub enum SparseWriterError {
 #[cfg(test)]
 #[path = "sparse_writer_lifecycle_tests.rs"]
 mod lifecycle_tests;
+
+#[cfg(test)]
+#[path = "sparse_writer_durability_tests.rs"]
+mod durability_tests;
 
 #[cfg(test)]
 mod tests {
