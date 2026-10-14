@@ -17,6 +17,8 @@ export interface FetchRequestMapOptions {
   maxInputs?: number;
   /** Input-order mapping window, including unread results. Default 1; 1..64. */
   concurrency?: number;
+  /** Borrowed parent signal. Stops admission and joins all mapper/producer work. */
+  signal?: AbortSignal | null;
 }
 
 export interface FetchRequestFlatMapOptions extends FetchRequestMapOptions {
@@ -87,6 +89,12 @@ const READ = READER?.prototype.read, CANCEL = READER?.prototype.cancel, RELEASE 
 const READER_CLOSED = READER && Object.getOwnPropertyDescriptor(READER.prototype, "closed")?.get;
 const ABORT_CONTROLLER = typeof AbortController === "undefined" ? undefined : AbortController;
 const ABORT = ABORT_CONTROLLER?.prototype.abort;
+const SIGNAL = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
+const ANY_SIGNAL = SIGNAL?.any;
+const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "aborted")?.get;
+const EVENT_TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
+const ADD_LISTENER = EVENT_TARGET?.prototype.addEventListener;
+const REMOVE_LISTENER = EVENT_TARGET?.prototype.removeEventListener;
 
 /**
  * Map records to request descriptors (null skips a record), in input order.
@@ -99,6 +107,11 @@ const ABORT = ABORT_CONTROLLER?.prototype.abort;
  * all mapper settlements, input cancellation, owner cancellation and owner.closed.
  * A late mapper panic is not hidden by cancellation; its returned request is
  * never emitted after a stop. Already-delivered requests are not rolled back.
+ * An optional parent signal uses the same fence and join, including before the
+ * first pull and during producer retirement after EOF. Supply an unmodified
+ * same-realm native signal; native AbortSignal.any prevents earlier parent
+ * listeners from suppressing observation. Arbitrary reasons are not inspected,
+ * the parent is never mutated, and its observer is detached at settlement.
  *
  * Source ownership transfers only on successful setup. A raw stream has no
  * independent producer join; use an owned source to cover hidden producer work.
@@ -155,6 +168,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let ownerCancel: FetchRequestMapSource<T>["cancel"] | undefined;
   let ownerClosed: Promise<Outcome<void>> | undefined;
   let maxInputs: number, maxExpansion: number, concurrency: number;
+  let parent: AbortSignal | undefined;
   try {
     maxInputs = options.maxInputs ?? 100_000;
     if (!Number.isSafeInteger(maxInputs) || maxInputs < 1 || typeof mapper !== "function") {
@@ -168,6 +182,22 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     maxExpansion = expand ? options.maxRequestsPerInput ?? 64 : 1;
     if (!Number.isSafeInteger(maxExpansion) || maxExpansion < 1 || maxExpansion > 1024) {
       return fail("maxRequestsPerInput must be an integer in 1..1024", "compatibility_rejected");
+    }
+    const suppliedSignal = options.signal;
+    if (suppliedSignal != null) {
+      if (!SIGNAL || !ANY_SIGNAL || !ABORTED || !ADD_LISTENER || !REMOVE_LISTENER) {
+        return fail("request mapping signals require native AbortSignal.any and EventTarget", "compatibility_rejected");
+      }
+      // Native composition can inspect accessors. Match the existing batch
+      // boundary without invoking customized aborted/reason properties.
+      if (Object.getPrototypeOf(suppliedSignal) !== SIGNAL.prototype
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "aborted")
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "reason")) {
+        return fail("request mapping requires an unmodified same-realm native signal", "compatibility_rejected");
+      }
+      Reflect.apply(ABORTED, suppliedSignal, []);
+      parent = Reflect.apply(ANY_SIGNAL, SIGNAL, [[suppliedSignal]]) as AbortSignal;
+      Reflect.apply(ABORTED, parent, []);
     }
     let native = false;
     try { Reflect.apply(LOCKED, source, []); native = true; } catch { /* Try the explicit owner form. */ }
@@ -201,6 +231,13 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   const mapping = new Set<Promise<void>>();
   let reading: Promise<void> | undefined, inputEof = false;
   let changed = deferred<void>();
+  const onAbort = () => { void stop(cancelled("request mapping cancelled by signal")); };
+
+  function detachParent(): void {
+    if (!parent) return;
+    try { Reflect.apply(REMOVE_LISTENER!, parent, ["abort", onAbort]); } catch { /* Preserve settlement. */ }
+    parent = undefined;
+  }
 
   function notify(): void {
     const previous = changed;
@@ -240,6 +277,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
       if (ownerClosed) noteSource(await ownerClosed);
       if (retirement) await retirement;
       ended = true;
+      detachParent();
       try { Reflect.apply(RELEASE!, reader, []); } catch { /* Already released. */ }
       const outcome = stopped ?? ok(undefined);
       if (!consumerCancelled) {
@@ -393,12 +431,21 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
       noteSource(outcome);
       void stop(outcome);
     });
+    if (parent) {
+      Reflect.apply(ADD_LISTENER!, parent, ["abort", onAbort, { once: true }]);
+      // Also catches parent aborts during caller-owned source property reads.
+      if (Reflect.apply(ABORTED!, parent, [])) onAbort();
+    }
     return ok(Object.freeze({ readable, closed: completion.promise, cancel(reason = "request mapping cancelled by caller") {
       return typeof reason === "string" ? stop(cancelled(reason))
         : Promise.resolve(fail("request mapping cancellation reason must be a string", "compatibility_rejected"));
     } }));
   } catch {
     // No source read/mapper has run: native HWM=0 construction does not pull.
+    // Invalidate already-installed promise observers on refused signal setup.
+    ending = true;
+    ended = true;
+    detachParent();
     try { if (reader!) Reflect.apply(RELEASE, reader, []); } catch { /* No owned lock. */ }
     return fail("request mapping setup refused", "compatibility_rejected");
   }

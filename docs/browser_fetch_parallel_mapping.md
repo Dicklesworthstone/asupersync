@@ -109,3 +109,53 @@ task ABI, Rust/WASM, cross-browser behavior, performance or payload-byte bounds.
 `ASUPERSYNC_REQUEST_MAP_SOURCE` selects an exact pre-feature source for controls.
 TypeScript stripping is not a typecheck; the package's pinned typecheck is a
 separate validation requirement.
+
+## Parent cancellation and caller-owned deadlines
+
+Every mapping function also accepts `signal?: AbortSignal | null`, independent
+of whether a downstream fetch batch has been attached. The same parent can be
+supplied to multiple stages:
+
+```ts
+const mapped = tryFlatMapFetchRequests(records, expandAuthorizedRecord, {
+  concurrency: 4,
+  maxRequestsPerInput: 16,
+  signal: AbortSignal.any([shutdownSignal, AbortSignal.timeout(5_000)]),
+});
+```
+
+The deadline signal above is explicitly caller-created; mapping creates no timer.
+A parent abort stops new input reads, mapper invocations and descriptor output,
+signals every admitted mapper, and joins their settlement and all producer
+cleanup. It works without output demand, with a parked native input read, and
+while waiting for the producer after native EOF. A valid pre-aborted parent
+still transfers ownership on successful setup and cancels that source without
+reading it. Invalid configuration or locked-source refusal leaves input with
+the caller, even if the parent is already aborted.
+
+Use an unmodified same-realm native `AbortSignal`. Signal use requires native
+`AbortSignal.any` and `EventTarget`; calls without a signal retain their existing
+host requirements. A private dependent signal prevents earlier parent listeners
+using `stopImmediatePropagation()` from suppressing cancellation. Customized
+`aborted`/`reason` accessors are refused before native composition. Arbitrary
+abort reasons are not inspected or printed: the stable cancellation message is
+`request mapping cancelled by signal`.
+
+Manual cancellation never aborts the parent. Its observer is removed at final
+settlement, so a later parent abort cannot reclaim delivered descriptors or
+restart cleanup. During drain, a late panic can still strengthen cancellation;
+equal-severity manual/parent stops retain the first cause. A mapper that catches
+a host's abort exception can call its supplied `signal.throwIfAborted()` to
+propagate this mapping stage's typed cancellation rather than a new panic.
+
+The signal lane is:
+
+```sh
+node --experimental-vm-modules --test scripts/test_browser_fetch_request_map_signal.mjs
+```
+
+It includes real parallel native-fetch requests, body-read suspension, parent
+abort, mapper settlement and server-observed disconnections. The full focused
+regression run includes that lane, the parallel lane, and the two existing
+mapping/flat-map suites. It remains scoped evidence, not full SDK, task-ABI,
+Rust/WASM or cross-browser certification.
