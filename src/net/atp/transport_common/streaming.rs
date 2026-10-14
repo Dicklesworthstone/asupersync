@@ -402,7 +402,7 @@ mod tests {
 
         let mut graph = ObjectGraph::new();
         let mut sorted: Vec<&(&str, &[u8])> = files.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
         let mut edges = Vec::new();
         for (rel, bytes) in sorted {
             let obj = Object::file(bytes.to_vec());

@@ -274,7 +274,7 @@ fn empty_and_complete_destinations_do_not_poll_or_consume_extra_input() {
 #[test]
 fn descriptor_and_poll_work_is_bounded_even_with_empty_destinations() {
     let mut storage = [[0; 1]; MAX_SLICES * 2 + 1];
-    let mut buffers: Vec<_> = (0..MAX_SLICES * POLL_BUDGET + 1).map(|_| IoSliceMut::new(&mut [])).collect();
+    let mut buffers: Vec<_> = (0..=MAX_SLICES * POLL_BUDGET).map(|_| IoSliceMut::new(&mut [])).collect();
     buffers.extend(storage.iter_mut().map(|b| IoSliceMut::new(b)));
     let mut reader = Reader::new(usize::MAX, Stop::Panic);
     reader.source = b"0123456789012345678901234567890123456789";
@@ -293,7 +293,7 @@ fn descriptor_and_poll_work_is_bounded_even_with_empty_destinations() {
     assert_eq!(finish(&mut session, &cx), MAX_SLICES * 2 + 1);
     assert_eq!(session.reader.widest, MAX_SLICES);
     assert_eq!(session.reader.calls, 3);
-    assert_eq!(filled(&session), &session.reader.source[..MAX_SLICES * 2 + 1]);
+    assert_eq!(filled(&session), &session.reader.source[..=MAX_SLICES * 2]);
 }
 
 #[test]
