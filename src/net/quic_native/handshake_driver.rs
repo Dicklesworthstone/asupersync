@@ -1091,11 +1091,12 @@ impl QuicHandshakeDriver {
     /// Trailing datagram padding and a coalesced 1-RTT short-header packet end
     /// processing (the latter belongs to the data plane). A packet for a space
     /// without live keys is skipped with a stale classification
-    /// (`is_stale_handshake_packet_error`); an authentication failure under
-    /// live keys fails the call with `PACKET_UNPROTECT_CODE`, unless an earlier
-    /// packet authenticated: then only the failed packet is discarded. The result is
-    /// `Ok` when at least one packet authenticated, otherwise the first
-    /// packet's error.
+    /// (`is_stale_handshake_packet_error`), and a packet that fails
+    /// authentication under live keys (`PACKET_UNPROTECT_CODE` and the other
+    /// `is_unauthenticated_handshake_packet_error` codes) is discarded: either
+    /// way the rest of the datagram is still processed (RFC 9000 section 12.2).
+    /// The result is `Ok` when at least one packet authenticated, otherwise the
+    /// first unauthenticated packet's error, else the first stale one.
     pub fn recv_handshake_packet(&mut self, datagram: &[u8]) -> Result<ConnectionId, QuicTlsError> {
         self.recv_handshake_packet_with_consumed(datagram)
             .map(|(cid, _)| cid)
@@ -1115,6 +1116,7 @@ impl QuicHandshakeDriver {
         let mut offset = 0usize;
         let mut accepted: Option<ConnectionId> = None;
         let mut skipped: Option<QuicTlsError> = None;
+        let mut unauthenticated: Option<QuicTlsError> = None;
         while offset < datagram.len() {
             let rest = &datagram[offset..];
             if rest[0] & 0x80 == 0 {
@@ -1147,12 +1149,15 @@ impl QuicHandshakeDriver {
                         skipped = Some(err);
                     }
                 }
-                // Once an earlier packet in the datagram has authenticated, an
-                // unauthenticated or invalid follower is discarded and the rest
-                // are still processed (RFC 9000 section 12.2). A TLS refusal, a
-                // peer close or a Handshake-space protocol error stays fatal.
-                Err(err)
-                    if accepted.is_some() && is_unauthenticated_handshake_packet_error(&err) => {}
+                // An unauthenticated or invalid packet is discarded and the rest
+                // are still processed, wherever it sits in the datagram (RFC 9000
+                // section 12.2). A TLS refusal, a peer close or a Handshake-space
+                // protocol error stays fatal.
+                Err(err) if is_unauthenticated_handshake_packet_error(&err) => {
+                    if unauthenticated.is_none() {
+                        unauthenticated = Some(err);
+                    }
+                }
                 Err(err) => return Err(err),
             }
             offset += packet_len;
@@ -1162,7 +1167,7 @@ impl QuicHandshakeDriver {
                 self.stage_outbound()?;
             }
         }
-        match (accepted, skipped) {
+        match (accepted, unauthenticated.or(skipped)) {
             (Some(peer_cid), _) => Ok((peer_cid, offset)),
             (None, Some(err)) => Err(err),
             (None, None) => Err(handshake_failure("expected_long_header")),
@@ -5541,6 +5546,75 @@ WkX8ykcdUfalGtZ1XFOTo+aaWs+3gyI1\n\
             "the genuine Handshake packet behind the corrupted one is processed"
         );
         assert!(client.is_complete(), "the client read the server Finished");
+    }
+
+    /// Fresh-eyes review of f08413312 (LOW-1.1): the discard holds wherever
+    /// the corrupted packet sits, including first. In
+    /// `[Initial, corrupted tag][Initial ok][Handshake ok]` the old code
+    /// returned the first packet's PACKET_UNPROTECT_CODE before reading the
+    /// genuine packets behind it.
+    #[test]
+    fn a_corrupted_first_coalesced_packet_is_discarded_and_the_rest_are_processed() {
+        let (mut client, mut server) = protected_pair();
+        let dcid = ConnectionId::new(DCID_BYTES).expect("dcid");
+        let client_scid = ConnectionId::new(CLIENT_SCID).expect("client scid");
+        let server_scid = ConnectionId::new(&[0x55, 0x66, 0x77, 0x88]).expect("server scid");
+
+        let mut client_flight = client.pump_outbound().expect("client flight");
+        let client_initial = client
+            .assemble_handshake_packet(&client_flight.remove(0), dcid, client_scid, 0)
+            .expect("client Initial");
+        server
+            .recv_handshake_packet(&client_initial)
+            .expect("server accepts ClientHello");
+        let server_flight = server.pump_outbound().expect("server flight");
+        let server_initial_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Initial)
+            .expect("ServerHello segment");
+        let server_handshake_segment = server_flight
+            .iter()
+            .find(|segment| segment.level == HandshakeLevel::Handshake)
+            .expect("server Handshake segment");
+        // The ServerHello twice: under packet number 0 with a corrupted tag,
+        // then intact under packet number 1, followed by the Handshake packet.
+        let mut datagram = server
+            .assemble_handshake_packet_at(server_initial_segment, 0, client_scid, server_scid, 0)
+            .expect("corrupted server Initial");
+        *datagram.last_mut().expect("tag byte") ^= 0x01;
+        let genuine_initial = server
+            .assemble_handshake_packet_at(server_initial_segment, 0, client_scid, server_scid, 1)
+            .expect("server Initial");
+        datagram.extend_from_slice(&genuine_initial);
+        let genuine_handshake = server
+            .assemble_handshake_packet(server_handshake_segment, client_scid, server_scid, 0)
+            .expect("server Handshake");
+        datagram.extend_from_slice(&genuine_handshake);
+
+        let peer = client
+            .recv_handshake_packet(&datagram)
+            .expect("the corrupted first packet is discarded, not fatal");
+        assert_eq!(peer, server_scid);
+        assert_eq!(
+            client.received_handshake_packet_numbers(HandshakeLevel::Initial),
+            vec![1]
+        );
+        assert_eq!(
+            client.received_handshake_packet_numbers(HandshakeLevel::Handshake),
+            vec![0]
+        );
+        assert!(client.is_complete(), "the client read the server Finished");
+
+        // With nothing authenticated, the first discarded packet's error stands.
+        let (mut client, _) = protected_pair();
+        let _ = client.pump_outbound().expect("client flight");
+        let mut forged = genuine_initial.clone();
+        *forged.last_mut().expect("tag byte") ^= 0x01;
+        forged.extend_from_slice(&forged.clone());
+        let err = client
+            .recv_handshake_packet(&forged)
+            .expect_err("no packet authenticates");
+        assert_eq!(failure_code(&err), PACKET_UNPROTECT_CODE);
     }
 
     /// br-asupersync-2eqmd2 M3, over UDP: a refused ALPN ends both handshake
