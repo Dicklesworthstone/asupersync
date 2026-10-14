@@ -72,9 +72,11 @@ function checked<T>(value: unknown): Outcome<T> {
         }
         break;
       }
-      case "panicked":
-        if (typeof outcome.message === "string") return Object.freeze({ outcome: "panicked", message: outcome.message });
+      case "panicked": {
+        const message = outcome.message;
+        if (typeof message === "string") return Object.freeze({ outcome: "panicked", message });
         break;
+      }
       case "cancelled": {
         const { kind, phase, origin_region, origin_task, timestamp_nanos, message, truncated } = outcome.cancellation;
         if (typeof kind === "string" && ["requested", "cancelling", "finalizing", "completed"].includes(phase)
@@ -121,6 +123,7 @@ interface Member {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   response: () => Promise<Outcome<BrowserFetchResponse>>;
   closed: Promise<Outcome<void>>;
+  retire?: () => Promise<Outcome<void>>;
   head?: BrowserFetchResponse;
   terminal?: Outcome<void>;
   draining?: Promise<void>;
@@ -136,8 +139,12 @@ interface Member {
  * This is a header quorum, NOT body validation, replica agreement, retry, or a
  * network-error-tolerant Promise.any. Transport failures, cancelled members,
  * malformed outcomes, predicate exceptions, and cleanup/publication refusals
- * fail the WHOLE group and drain it. The public fetch receipt does not separate
+ * fail the WHOLE group and drain it. The closed receipt alone does not separate
  * transport errors from cleanup failures, so suppressing them would be unsound.
+ * When a handle provides retire(), its independent cleanup receipt is joined too;
+ * a failed receipt prevents successful ownership transfer. Earlier handles keep
+ * their legacy native-cancel/closed boundary. Retirement success never suppresses
+ * an operation failure or certifies stronger core task-ABI acknowledgement.
  * Scope cancellation therefore cannot be mistaken for a rejected HTTP status.
  * A selected member failing during drain also fails the group; no replacement
  * requests are started. Failures strengthen through drain as panicked > cancelled
@@ -198,15 +205,16 @@ export function quorumFetchResponses(
       Reflect.apply(ABORTED, signal, []);
     }
     if (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !CLOSED) return fail("fetch selection requires native stream readers");
-    const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"] }[] = [];
+    const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"]; retire: FetchStreamHandle["retire"] }[] = [];
     const seen = new Set<FetchStreamHandle>();
     for (let index = 0; index < count; index += 1) {
       const fetch = fetches[index];
       if (!fetch || seen.has(fetch)) return fail("fetch selection requires distinct owned handles");
       seen.add(fetch);
-      const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream;
+      const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream, retire = fetch.retire;
       if (typeof response !== "function" || typeof convert !== "function" || !closed) return fail("invalid fetch selection member");
-      inputs.push({ fetch, response, closed, convert });
+      if (retire !== undefined && typeof retire !== "function") return fail("invalid fetch retirement method");
+      inputs.push({ fetch, response, closed, convert, retire });
     }
     const bodies = new Set<ReadableStream<Uint8Array>>();
     for (const input of inputs) {
@@ -220,6 +228,7 @@ export function quorumFetchResponses(
       members.push({ fetch: input.fetch, body, reader,
         response: () => Reflect.apply(input.response, input.fetch, []),
         closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch completion rejected")),
+        retire: input.retire ? () => Reflect.apply(input.retire!, input.fetch, ["fetch selection member retired"]) : undefined,
       });
     }
   } catch {
@@ -258,6 +267,18 @@ export function quorumFetchResponses(
     let resolve!: () => void;
     member.draining = new Promise<void>((done) => { resolve = done; });
     void (async () => {
+      // Initiate independent retirement alongside native cancellation. A source
+      // may already be errored/closed, so cancelling its reader alone is not a
+      // join of this additional cleanup barrier. Observe failure immediately,
+      // without waiting for another source's slow cleanup to finish first.
+      const retirement = member.retire ? Promise.resolve().then(member.retire).then(value => {
+        const receipt = checked<void>(value);
+        return receipt.outcome === "ok" && receipt.value !== undefined
+          ? internal("fetch retirement returned a non-void success") : receipt;
+      }, () => internal("fetch retirement rejected")) : Promise.resolve(ok(undefined));
+      const joinedRetirement = retirement.then(receipt => {
+        if (receipt.outcome !== "ok") noteCleanup(index, receipt);
+      });
       let refused = false;
       try { await Reflect.apply(CANCEL!, member.reader, ["fetch selection member retired"]); }
       catch { refused = true; }
@@ -266,10 +287,16 @@ export function quorumFetchResponses(
       const failure = terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal
         : refused ? terminal.outcome === "cancelled" ? terminal
           : internal("fetch cancellation or terminal publication refused") : undefined;
-      if (failure) { cleanupErrors.set(index, failure); stop(failure); }
+      if (failure) noteCleanup(index, failure);
+      await joinedRetirement;
       resolve();
     })();
     return member.draining;
+  }
+  function noteCleanup(index: number, failure: Failure): void {
+    const previous = cleanupErrors.get(index);
+    if (!previous || severity(failure) > severity(previous)) cleanupErrors.set(index, failure);
+    stop(failure);
   }
   if (signal) {
     onAbort = () => stop(cancellation("fetch selection aborted by caller signal", true));

@@ -96,3 +96,41 @@ a claim that every failed old expectation was an existing API bug.
 The isolated strict TypeScript check uses 5.8.3 and declaration fixtures, not the
 repository-pinned 6.0.3 full package check. Full SDK/Rust/WASM, cross-browser and
 repository release lanes are separate, unrun validation boundaries.
+
+## Selection joins the retirement receipt
+
+`firstAcceptableFetchResponse` and `quorumFetchResponses` now join `retire()` for
+every non-selected member that supplies it. Native reader cancellation and the
+independent retirement operation start in parallel; both, plus `closed`, must
+settle before successful body ownership can transfer. A retirement failure is
+observed promptly, so it can trigger the proposed winner's cleanup while another
+loser is still parked. The winner's retirement method is not called on success.
+
+The optional method is validated and snapshotted with its original receiver
+before body acquisition. A malformed method refuses setup without taking reader
+ownership. Replacing a handle's method afterward cannot replace the operation
+selection owns. Invalid, non-void-success, thrown, or rejected retirement receipts
+fail closed; arbitrary rejection causes and formatting hooks are not trusted.
+An explicit non-success retirement receipt participates in the same monotone
+`panicked > cancelled > err` aggregation as the existing cleanup outcomes.
+
+This strengthens failure reporting, not transport tolerance. An `ok` retirement
+receipt does NOT suppress an `err`, `cancelled`, or `panicked` operation receipt.
+Older handles without the method retain the prior native-cancellation/`closed`
+behavior. The task-ABI ambiguity above is unchanged, so a failed peer can still
+fail a quorum even when other peers could satisfy the header count. There is no
+new retry, replacement request, body prefetch, or automatic scope closure.
+
+The selection integration lane is:
+
+```sh
+node --experimental-vm-modules --test scripts/test_browser_fetch_retirement.mjs scripts/test_browser_fetch_selection_retirement.mjs scripts/test_browser_fetch_selection_outcomes.mjs
+```
+
+The 20 new integration tests exercise both actual public selection entry points
+with the actual fetch manager, independently gated native/retirement receipts,
+malformed providers, same-member failure strengthening, legacy handles, reentrant
+cancellation and native loopback HTTP. The 24 manager tests and 36 unchanged
+selection-outcome regressions remain green in the same invocation (80 tests).
+The core task ABI and some deliberately malformed/gated providers remain doubles.
+Full SDK, pinned TypeScript, Rust/WASM and cross-browser coverage remain separate.
