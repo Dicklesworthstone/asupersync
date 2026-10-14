@@ -56,6 +56,54 @@ leaves staging bytes available for an explicitly authorized retry; successful
 publication remains sealed and idempotent. No destination is published by a
 verification operation.
 
+## Region-owned execution and backpressure
+
+`SparseWriter::into_scoped()` consumes a prepared writer and returns
+`atp::journal::sparse_writer::ScopedSparseWriter`. Adoption itself performs no
+filesystem operation and changes no ranges, verification evidence, staging
+file, or terminal state. The historical constructor and its filesystem probes
+remain a synchronous host boundary; prepare it outside an async worker before
+adopting it. Existing unscoped APIs remain available with their old placement.
+
+The adapter's `set_expected_size`, `write_chunk`, `verify`,
+`verify_with_chunk_commitment`, `commit`, `cancel`, `get_stats`, and `is_complete`
+all take an explicit `Cx` with I/O and spawn authority. They use the existing
+`ScopedFs::run_io` gateway, requiring native runtime wiring and a blocking pool,
+without an inline fallback, detached thread, or nested executor. The same core
+writer implements verification, fsync, and publication. Writes take an owned
+`Vec<u8>` without a second payload copy; verification takes `Arc<Manifest>`.
+Even progress observations run through the pool rather than taking a possibly
+contended writer lock on a scheduler thread.
+
+Every clone shares one FIFO admission semaphore. Calls contend asynchronously
+before submitting work, so one busy writer does not occupy additional pool
+threads waiting for its own operation lock. Admission observes cancellation of
+the supplied context, even when a different task polls the wait. Cancelled or
+dropped waiters leave the queue; a failed dispatch returns capacity. This is an
+internal execution gate, not an extra application obligation: the actual
+admitted pool task owns the filesystem operation.
+
+The owned permit moves into the submitted closure and is retained until the
+core operation returns or unwinds. Dropping the calling future cannot release
+a running operation's slot early. A panic or queued cancellation also returns
+capacity. This bounds simultaneous core execution per writer, not the number of
+subsequently retiring runtime tasks or total memory retained by callers waiting
+with their own buffers. It provides no global transfer-memory quota.
+
+`ScopedWriterResult<T>` keeps the gateway result separate from the actual
+`Outcome<T, SparseWriterError>`. A pre-dispatch authority or checkpoint refusal
+is an outer error. A running operation's exact outcome survives later caller
+cancellation; success is not rewritten as cancellation, and an I/O error is not
+proof that a visible publication was rolled back. Dropping a wait requests
+cancellation while the owning region still drains the running job and its
+captures/results. OS calls themselves are not preemptible.
+
+Cancelling a wait does not implicitly discard the transfer's staging file.
+`cancel` is explicit filesystem cleanup and needs a live, authorized,
+non-cancelled cleanup context. A failed cleanup retains evidence for retry;
+an unresolved publication cannot be discarded by this operation. The adapter
+is opt-in: existing daemon/SDK callers are not automatically changed to use it.
+
 ## Validation and limits
 
 Seven commitment tests and twelve writer tests cover tampering invisible to the
@@ -64,15 +112,25 @@ empty-file staging, downgrade attempts, corrupt local bytes, and successful
 publication under all three existing policies. Old inline writer tests and the
 lifecycle and durability tests are retained unchanged.
 
+Thirteen additional scoped-writer Rust tests cover real-file workflows under
+current-thread and multi-thread runtimes, all three publication policies,
+empty files, exact domain and gateway errors, pre-cancellation, authority
+attenuation, unpolled Send futures, retained ownership during drain, and late
+results. State-witnessed backpressure tests cover spare-pool-worker progress,
+FIFO admission, supplied-context wakeups, dropped waiters, and capacity recovery
+after refusal or panic. Gated dispatcher tests invoke the actual core writer;
+they are supplemental to the public-method file-workflow tests.
+
 These Rust tests were authored but not compiled or executed in the authoring
-environment, which lacks Rust, Cargo, rustfmt and RCH. Complete source/blob hashes
-and unchanged test bodies were checked. An independent finite-domain Python
-coverage model matched a per-byte oracle in 287,934 cases; this is not execution
+environment, which lacks Rust, Cargo, rustfmt and RCH. Source/blob hashes,
+whitespace, and preservation of existing test bodies were checked. The earlier
+content-authentication work also compared an independent finite-domain Python
+coverage model with a per-byte oracle in 287,934 cases; that is not execution
 of the Rust implementation or native runtime proof. Run the focused commitment
 and sparse-writer library tests through the repository-authorized RCH lane
-before deployment.
+before deployment. No measured throughput or latency improvement is claimed.
 
-Synchronous filesystem placement, host path-race confinement, and external
+Historical constructor placement, host path-race confinement, and external
 modification between verification and publication are not solved here.
 `CopyAndVerify` retains its documented non-atomic destination visibility.
 No universal power-loss guarantee, automatic protocol migration, complete

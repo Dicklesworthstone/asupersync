@@ -17,6 +17,13 @@
 //! host boundary. The operations after adoption, including preallocation and
 //! observation of locked state, are dispatched to the owned blocking pool.
 //! Existing path-race and publication-policy limitations remain unchanged.
+//!
+//! A single cancel-safe admission permit is shared by every clone. Contending
+//! calls wait as futures before pool submission, instead of consuming workers
+//! while blocked on this writer's synchronous operation lock. The permit moves
+//! into the submitted closure: dropping its wait cannot release a running job's
+//! slot before its core operation returns. This serializes core execution, not
+//! subsequent runtime retirement or memory held by all awaiting callers.
 
 use super::{
     ChunkRange, Manifest, ManifestChunkCommitment, SparseWriter, SparseWriterError,
@@ -25,9 +32,14 @@ use super::{
 use crate::cx::Cx;
 use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
 use crate::fs::scoped::ScopedFsError;
+use crate::sync::semaphore::OwnedAcquireFuture;
+use crate::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::types::Outcome;
 use std::fs::File;
+use std::future::{Future, poll_fn};
+use std::io;
 use std::path::PathBuf;
+use std::pin::pin;
 use std::sync::Arc;
 
 /// Runtime admission/retirement and the writer's actual outcome are separate.
@@ -36,6 +48,9 @@ use std::sync::Arc;
 /// `Ok(outcome)` preserves exactly what the running writer returned, including
 /// a filesystem/verification error or a successful effect after cancellation.
 /// Neither an outer nor an inner error is evidence that publication rolled back.
+/// An unexpected internal-queue failure is `ScopedFsError::Io` with an
+/// `AcquireError` source, not a filesystem operation. Context cancellation and
+/// budget refusals while waiting remain `ScopedFsError::Checkpoint`.
 pub type ScopedWriterResult<T> = Result<Outcome<T, SparseWriterError>, ScopedFsError>;
 
 /// A shared sparse writer whose operations execute as region-owned pool jobs.
@@ -48,6 +63,7 @@ pub type ScopedWriterResult<T> = Result<Outcome<T, SparseWriterError>, ScopedFsE
 #[derive(Clone)]
 pub struct ScopedSparseWriter {
     writer: Arc<SparseWriter>,
+    admission: Arc<Semaphore>,
 }
 
 impl std::fmt::Debug for ScopedSparseWriter {
@@ -65,11 +81,49 @@ impl SparseWriter {
     /// constructor's probes are not retroactively made region-owned.
     #[must_use]
     pub fn into_scoped(self) -> ScopedSparseWriter {
-        ScopedSparseWriter { writer: Arc::new(self) }
+        ScopedSparseWriter {
+            writer: Arc::new(self),
+            admission: Arc::new(Semaphore::new(1)),
+        }
     }
 }
 
 impl ScopedSparseWriter {
+    // Acquire before submitting any pool job. Observe the explicitly supplied
+    // context's cancellation even when it is not the currently polling task's
+    // Cx. The semaphore owns FIFO/rollback; the explicit Cx owns checkpoints.
+    async fn reserve<Caps>(&self, cx: &Cx<Caps>) -> Result<OwnedSemaphorePermit, ScopedFsError>
+    where
+        Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+    {
+        if !cx.capabilities().io {
+            return Err(ScopedFsError::CapabilityDenied);
+        }
+        cx.checkpoint().map_err(ScopedFsError::Checkpoint)?;
+        let mut cancelled = pin!(cx.cancelled());
+        // This is an internal execution gate, not an application obligation.
+        // A child-region admission context need not be a live task holder.
+        // Avoid minting a caller-held obligation before the real pool task is
+        // admitted; that task, not this queue entry, owns filesystem work.
+        let mut acquiring = pin!(OwnedAcquireFuture::new_uncancelable(
+            Arc::clone(&self.admission), 1,
+        ));
+        poll_fn(|task| {
+            // Register before checking so cancellation between checking and
+            // queue registration cannot be lost. Checkpoint respects masking.
+            let _ = cancelled.as_mut().poll(task);
+            if !cx.capabilities().io {
+                return std::task::Poll::Ready(Err(ScopedFsError::CapabilityDenied));
+            }
+            if let Err(error) = cx.checkpoint() {
+                return std::task::Poll::Ready(Err(ScopedFsError::Checkpoint(error)));
+            }
+            acquiring.as_mut().poll(task).map(|result| {
+                result.map_err(|error| ScopedFsError::Io(io::Error::other(error)))
+            })
+        }).await
+    }
+
     // `ScopedFs` is the single authority/checkpoint/admission/cancel/drain
     // implementation. Wrapping the domain outcome in Ok deliberately does not
     // convert successful late effects into an artificial cancellation result.
@@ -79,8 +133,15 @@ impl ScopedSparseWriter {
         F: FnOnce(&SparseWriter) -> Outcome<T, SparseWriterError> + Send + 'static,
         T: Send + 'static,
     {
+        let permit = self.reserve(cx).await?;
         let writer = Arc::clone(&self.writer);
-        cx.scoped_fs().run_io(move |_| Ok(operation(&writer))).await
+        cx.scoped_fs().run_io(move |_| {
+            // Hold through the operation itself, not merely the borrowing
+            // await. Refusal, queued cancellation, panic and ordinary return
+            // all restore capacity using the permit's existing RAII behavior.
+            let _permit = permit;
+            Ok(operation(&writer))
+        }).await
     }
 
     /// Set the expected file length; any preallocation runs on the pool.
