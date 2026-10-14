@@ -756,8 +756,8 @@ fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
 fn peer_cred_impl(stream: &net::UnixStream) -> io::Result<UCred> {
     let (uid, gid) = nix::unistd::getpeereid(stream).map_err(nix_to_io)?;
     Ok(UCred {
-        uid: uid.as_raw() as u32,
-        gid: gid.as_raw() as u32,
+        uid: uid.as_raw(),
+        gid: gid.as_raw(),
         pid: None,
     })
 }

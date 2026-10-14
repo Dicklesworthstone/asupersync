@@ -312,7 +312,7 @@ impl Reactor for KqueueReactor {
         let mode = Self::interest_to_poll_mode(interest);
 
         // Modify the kqueue registration with the caller-selected mode.
-        let result = match self.poller.modify_with_mode(&borrowed_fd, event, mode) {
+        match self.poller.modify_with_mode(borrowed_fd, event, mode) {
             Ok(()) => {
                 entry.into_mut().interest = interest;
                 Ok(())
@@ -339,9 +339,7 @@ impl Reactor for KqueueReactor {
                 }
                 _ => Err(err),
             },
-        };
-
-        result
+        }
     }
 
     fn deregister(&self, token: Token) -> io::Result<()> {
@@ -361,7 +359,7 @@ impl Reactor for KqueueReactor {
         // definitely gone from the kernel or the target fd itself is already
         // closed. Keeping the entry on hard failures preserves accurate retry
         // semantics for Registration::deregister().
-        match self.poller.delete(&borrowed_fd) {
+        match self.poller.delete(borrowed_fd) {
             Ok(()) => {
                 regs.remove(&token);
                 Ok(())
