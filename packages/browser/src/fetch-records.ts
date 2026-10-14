@@ -4,9 +4,17 @@ import { BROWSER_FETCH_LIMITS, type BrowserFetchResponse, type FetchStreamHandle
 
 export interface FetchRecordStream<T> {
   readonly readable: ReadableStream<T>;
-  /** Parsing completion AND owned fetch cleanup, not merely response headers. */
+  /**
+   * Parsing completion AND owned fetch cleanup, not merely response headers.
+   * Joins the fetch's optional independent retire() receipt on EOF and stop.
+   * Expected cancellation cannot hide a failed retirement. Older handles
+   * without retire retain their original operation-receipt-only boundary.
+   * Already emitted records are not rolled back by a later cleanup failure.
+   */
   readonly closed: Promise<Outcome<void>>;
-  /** Also works while a consumer holds the readable's lock. Idempotent. */
+  /** Also works while a consumer holds the readable's lock. Idempotent.
+   * Joins native cancellation and independent fetch retirement in parallel.
+   */
   cancel(reason?: string): Promise<Outcome<void>>;
 }
 
@@ -125,6 +133,8 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
   let consumerCancelled = false;
   let readiness: Promise<void>;
   let sourceClosed: Promise<Outcome<void>>;
+  let sourceRetire: FetchStreamHandle["retire"];
+  let retirement: Promise<Outcome<void>> | undefined;
   let pending: Uint8Array | null = null;
   let offset = 0;
   let skipLF = false;
@@ -152,6 +162,17 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
     }
     resolveClosed(outcome);
   }
+  function retireSource(): Promise<Outcome<void>> {
+    // Install before provider callbacks can re-enter record cancellation.
+    // EOF uses this same receipt without cancelling unparsed buffered records.
+    return retirement ??= Promise.resolve().then(() => sourceRetire
+      ? Reflect.apply(sourceRetire, fetch, ["fetch record source retired"])
+      : Object.freeze({ outcome: "ok", value: undefined })).then(value => {
+        const receipt = checked<void>(value);
+        return receipt.outcome === "ok" && receipt.value !== undefined
+          ? recordFailure("invalid fetch record retirement receipt", "compatibility_rejected") : receipt;
+      }, () => recordFailure("fetch record retirement rejected", "compatibility_rejected"));
+  }
   function stop(failure: Failure | undefined, reason: unknown, unexpected = false): Promise<Outcome<void>> {
     if (ended || stopping) return closed;
     stopping = true;
@@ -159,6 +180,9 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
     void (async () => {
       let outcome = failure;
       let cleanupFailed = false;
+      // Native cancellation and independent retirement must start together:
+      // either provider may need the other callback to begin before settling.
+      const retiring = retireSource();
       // Native reader cancellation reaches the fetch adapter's implicit
       // cancellation path, including fail-closed ABI refusal and slow cleanup.
       try { await Reflect.apply(cancel, reader, [reason]); }
@@ -167,10 +191,17 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
         // The fetch's terminal receipt, not an arbitrary rejection's .cause,
         // is authoritative for source cancellation and publication failures.
         const terminal = await sourceClosed;
+        const retired = await retiring;
+        const cleanup = retired.outcome !== "ok" ? retired
+          : sourceRetire && cleanupFailed ? recordFailure("fetch record cleanup failed") : undefined;
         if (terminal.outcome === "err" || terminal.outcome === "panicked"
-            || (!outcome && terminal.outcome === "cancelled")) {
+            || (!outcome && !cleanup && terminal.outcome === "cancelled")) {
           if (!outcome || severity(terminal) >= severity(outcome)) outcome = terminal;
         }
+        // Expected source cancellation during retirement is not an independent
+        // owner failure and cannot hide failed cleanup. A cancellation that
+        // initiated stop remains authoritative over a weaker cleanup error.
+        if (cleanup && (!outcome || severity(cleanup) >= severity(outcome))) outcome = cleanup;
         if (!outcome && (cleanupFailed || unexpected)) outcome = recordFailure("fetch record stream failed");
       } catch {
         const cleanup = recordFailure("fetch record cleanup failed");
@@ -247,9 +278,11 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
     // Read provider properties before acquiring a body lock. One checked
     // terminal promise is shared by idle observation, EOF and cancellation.
     const response = fetch.response, convert = fetch.toReadableStream;
+    sourceRetire = fetch.retire;
     sourceClosed = Promise.resolve(fetch.closed).then(value => checked<void>(value),
       () => recordFailure("fetch record cleanup failed"));
-    if (typeof response !== "function" || typeof convert !== "function") {
+    if (typeof response !== "function" || typeof convert !== "function"
+        || sourceRetire !== undefined && typeof sourceRetire !== "function") {
       return recordFailure("invalid fetch record handle", "compatibility_rejected");
     }
     decoder = new DECODER("utf-8", { fatal: config.fatalUtf8, ignoreBOM: true });
@@ -268,6 +301,9 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
               const terminal = await sourceClosed;
               if (stopping || ended) return;
               if (terminal.outcome !== "ok") { await stop(terminal, "fetch terminated"); return; }
+              const retired = await retireSource();
+              if (stopping || ended) return;
+              if (retired.outcome !== "ok") { await stop(retired, "fetch retirement failed"); return; }
               if (final !== null) controller.enqueue(final);
               finish(terminal);
               return;
