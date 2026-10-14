@@ -454,6 +454,11 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
 /** Bounds source count, pending reads and retained descriptors, not payload bytes. */
 export const FETCH_REQUEST_MERGE_LIMITS = Object.freeze({ maxSources: 64 });
 
+export interface FetchRequestMergeOptions {
+  /** Borrowed parent signal; cancellation joins every acquired source. */
+  signal?: AbortSignal | null;
+}
+
 /**
  * Merge 0..64 exclusively owned request sources without a detached pipe pump.
  * A first output pull starts one native read per source. Each source retains at
@@ -467,6 +472,9 @@ export const FETCH_REQUEST_MERGE_LIMITS = Object.freeze({ maxSources: 64 });
  * Native EOF is separate from an owned producer's completion: success joins both.
  * Any failure stops all sources, discards queued references, and joins outstanding
  * reads, native cancellation, owner cancellation and independent producer receipts.
+ * An optional parent AbortSignal uses that same fence and join. A pre-aborted
+ * parent acquires then retires nonempty inputs without reading them; an empty merge
+ * remains a successful identity. The parent is borrowed and is never mutated.
  * Expected retirement cancellation is not a new failure; stronger failures during
  * drain remain visible. Same-severity cleanup failures use source input order.
  *
@@ -480,9 +488,29 @@ export const FETCH_REQUEST_MERGE_LIMITS = Object.freeze({ maxSources: 64 });
  */
 export function mergeFetchRequestSources(
   sources: readonly Input<BrowserFetchOptions>[],
+  options: FetchRequestMergeOptions = {},
 ): Outcome<FetchBatchRequestSource> {
   if (!STREAM || !LOCKED || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED) {
     return fail("request merging requires native stream readers", "compatibility_rejected");
+  }
+  let parent: AbortSignal | undefined;
+  try {
+    const suppliedSignal = options.signal;
+    if (suppliedSignal != null) {
+      if (!SIGNAL || !ANY_SIGNAL || !ABORTED || !ADD_LISTENER || !REMOVE_LISTENER) {
+        return fail("request merge signals require native AbortSignal.any and EventTarget", "compatibility_rejected");
+      }
+      if (Object.getPrototypeOf(suppliedSignal) !== SIGNAL.prototype
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "aborted")
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "reason")) {
+        return fail("request merge requires an unmodified same-realm native signal", "compatibility_rejected");
+      }
+      Reflect.apply(ABORTED, suppliedSignal, []);
+      parent = Reflect.apply(ANY_SIGNAL, SIGNAL, [[suppliedSignal]]) as AbortSignal;
+      Reflect.apply(ABORTED, parent, []);
+    }
+  } catch {
+    return fail("invalid request merge signal", "compatibility_rejected");
   }
   interface Member {
     reader: ReadableStreamDefaultReader<BrowserFetchOptions>;
@@ -502,6 +530,13 @@ export function mergeFetchRequestSources(
   let stopped: Failure | undefined;
   let cleanup: { index: number; outcome: Failure } | undefined;
   let retirement: Promise<void> | undefined;
+  const onAbort = () => { void stop(cancelled("request merge cancelled by signal")); };
+
+  function detachParent(): void {
+    if (!parent) return;
+    try { Reflect.apply(REMOVE_LISTENER!, parent, ["abort", onAbort]); } catch { /* Preserve settlement. */ }
+    parent = undefined;
+  }
 
   function release(): void {
     for (const member of members) {
@@ -541,6 +576,7 @@ export function mergeFetchRequestSources(
       }));
       if (retirement) await retirement;
       ended = true;
+      detachParent();
       release();
       const outcome = cleanup && (!stopped || severity(cleanup.outcome) >= severity(stopped))
         ? cleanup.outcome : stopped ?? ok(undefined);
@@ -685,8 +721,12 @@ export function mergeFetchRequestSources(
     }
     if (!members.length) {
       ended = true;
+      detachParent();
       controller.close();
       completion.resolve(ok(undefined));
+    } else if (parent) {
+      Reflect.apply(ADD_LISTENER!, parent, ["abort", onAbort, { once: true }]);
+      if (Reflect.apply(ABORTED!, parent, [])) onAbort();
     }
     return ok(Object.freeze({ readable, closed: completion.promise, cancel(reason = "request merge cancelled by caller") {
       return typeof reason === "string" ? stop(cancelled(reason))
@@ -694,6 +734,8 @@ export function mergeFetchRequestSources(
     } }));
   } catch {
     accepted = false;
+    ended = true;
+    detachParent();
     release();
     return fail("invalid or locked request merge source", "compatibility_rejected");
   }

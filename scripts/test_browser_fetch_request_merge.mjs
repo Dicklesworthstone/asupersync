@@ -52,7 +52,7 @@ function fixture(t) {
     }};
     return { readable,owner,terminal,count,controller,input:options.owned?owner:readable };
   }
-  const merge = inputs => { const admitted=api.mergeFetchRequestSources(inputs.map(x=>x.input??x)); assert.equal(admitted.outcome,"ok"); handles.push(admitted.value); return admitted.value; };
+  const merge = (inputs, options) => { const admitted=api.mergeFetchRequestSources(inputs.map(x=>x.input??x), options); assert.equal(admitted.outcome,"ok"); handles.push(admitted.value); return admitted.value; };
   const reader = h => { const r=h.readable.getReader(); readers.push(r); return r; };
   t.after(async()=>{ for(const g of gates)g.resolve(); for(const r of receipts)r.resolve(ok(undefined));
     await Promise.all(handles.map(h=>h.cancel("test cleanup"))); for(const r of readers){try{r.releaseLock();}catch{}} });
@@ -180,4 +180,35 @@ test("two real HTTP feeds are both disconnected and joined after output iteratio
   const admitted=api.mergeFetchRequestSources(owners);assert.equal(admitted.outcome,"ok");h=admitted.value;
   for await(const request of h.readable){assert.ok(request.url.endsWith("/one")||request.url.endsWith("/two"));break;}
   assert.equal(disconnects.size,2);assert.deepEqual(seen,["/one","/two"]);assert.equal((await h.closed).outcome,"cancelled");
+});
+
+test("pre-aborted parent retires every owned source without reading",async t=>{
+  const f=fixture(t),controller=new AbortController();controller.abort();
+  const list=[f.source("a",{owned:true,park:true}),f.source("b",{owned:true,park:true})],h=f.merge(list,{signal:controller.signal});
+  const result=await h.closed;assert.equal(result.outcome,"cancelled");assert.equal(msg(result),"request merge cancelled by signal");
+  assert.deepEqual(list.map(s=>[s.count.pulls,s.count.native,s.count.owner]),[[0,1,1],[0,1,1]]);
+  assert.equal(list.every(s=>!s.readable.locked),true);
+});
+test("parent abort joins parked reads, owner cancellation and producer completion",async t=>{
+  const f=fixture(t),ownerGate=f.gate(),controller=new AbortController();
+  const a=f.source("a",{owned:true,park:true,holdTerminal:true,ownerGate}),h=f.merge([a],{signal:controller.signal}),r=f.reader(h);
+  const read=r.read();void read.catch(()=>{});await turn();controller.abort();await pending(h.closed);
+  assert.equal(a.count.native,1);assert.equal(a.count.owner,1);a.terminal.resolve(cancelled("producer retired"));await pending(h.closed);
+  ownerGate.resolve();const result=await h.closed;assert.equal(result.outcome,"cancelled");assert.equal(msg(result),"request merge cancelled by signal");
+  await assert.rejects(read);assert.equal(a.readable.locked,false);
+});
+test("earlier parent listeners cannot suppress merge cancellation",async t=>{
+  const f=fixture(t),controller=new AbortController();controller.signal.addEventListener("abort",event=>event.stopImmediatePropagation());
+  const a=f.source("a",{park:true}),h=f.merge([a],{signal:controller.signal});controller.abort();
+  assert.equal((await h.closed).outcome,"cancelled");assert.equal(a.count.native,1);
+});
+test("customized parent signal is refused before source ownership",async t=>{
+  const f=fixture(t),controller=new AbortController(),a=f.source("a");
+  Object.defineProperty(controller.signal,"aborted",{value:false});
+  const admitted=api.mergeFetchRequestSources([a.readable],{signal:controller.signal});
+  assert.equal(admitted.outcome,"err");assert.equal(a.readable.locked,false);assert.equal(a.count.pulls,0);assert.equal(a.count.native,0);
+});
+test("empty merge stays a successful identity even with a pre-aborted parent",async t=>{
+  const f=fixture(t),controller=new AbortController();controller.abort();const h=f.merge([],{signal:controller.signal});
+  assert.deepEqual(await collect(h),[]);assert.equal((await h.closed).outcome,"ok");
 });
