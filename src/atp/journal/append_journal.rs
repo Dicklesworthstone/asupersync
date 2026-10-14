@@ -11,6 +11,11 @@ use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod storage;
+
+// The writer must not acknowledge a frame that its own recovery reader refuses.
+const MAX_JOURNAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
 /// Journal record types for tracking transfer progress
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JournalRecord {
@@ -1259,6 +1264,8 @@ pub struct AppendJournal {
     cache_limit: usize,
     /// Authentication key for record signing
     auth_key: AuthKey,
+    /// A failed/abandoned storage mutation requires disk recovery, not retry.
+    storage_failed: bool,
 }
 
 impl AppendJournal {
@@ -1280,6 +1287,7 @@ impl AppendJournal {
             transfer_entries: HashMap::new(),
             cache_limit,
             auth_key,
+            storage_failed: false,
         };
 
         // Try to recover from existing journal
@@ -1293,96 +1301,20 @@ impl AppendJournal {
         Outcome::Ok(journal)
     }
 
-    /// Append a new record to the journal
+    /// Append a new record to the journal.
+    ///
+    /// A write, flush, or synchronization failure can follow partial or complete
+    /// filesystem effects. This instance then refuses mutation and resumable
+    /// summaries until it is dropped and reopened from disk. A failed automatic
+    /// compaction may likewise follow an already persisted record; an error is
+    /// not evidence that the record is absent. Oversized frames refuse before I/O.
     pub fn append(&mut self, record: JournalRecord) -> Outcome<u64, JournalError> {
-        let Some(next_sequence) = self.sequence.checked_add(1) else {
-            return Outcome::Err(JournalError::Serialization(
-                "journal sequence exhausted".to_string(),
-            ));
-        };
-        // Ensure we have an active writer
-        match self.ensure_writer() {
-            Outcome::Ok(()) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        }
-
-        let is_boundary = matches!(record, JournalRecord::CompactionBoundary { .. });
-        if let Err(err) = validate_record_lengths(&record) {
-            return Outcome::Err(err);
-        }
-        let entry =
-            match JournalEntry::try_new(self.sequence, record.with_signature(&self.auth_key)) {
-                Ok(entry) => entry,
-                Err(err) => return Outcome::Err(err),
-            };
-
-        // Serialize the entry
-        let serialized = entry.encode();
-
-        // Write to disk
-        if let Some(ref mut writer) = self.writer {
-            // Write length prefix
-            let length = match checked_u32_len(serialized.len(), "journal frame") {
-                Ok(length) => length,
-                Err(err) => return Outcome::Err(err),
-            };
-            if let Err(e) = writer.write_all(&length.to_le_bytes()) {
-                return Outcome::Err(JournalError::WriteFailure(e.to_string()));
-            }
-
-            // Write entry data
-            if let Err(e) = writer.write_all(&serialized) {
-                return Outcome::Err(JournalError::WriteFailure(e.to_string()));
-            }
-
-            if self.config.force_sync {
-                if let Err(e) = sync_writer_data(writer) {
-                    return Outcome::Err(e);
-                }
-            } else if let Err(e) = flush_writer_buffer(writer) {
-                return Outcome::Err(e);
-            }
-        }
-
-        // Update in-memory state
-        let current_sequence = self.sequence;
-        self.sequence = next_sequence;
-
-        self.index_transfer_entry(&entry);
-        self.recent_entries.push_back(entry);
-        if self.recent_entries.len() > self.cache_limit {
-            self.recent_entries.pop_front();
-        }
-
-        // Check if compaction is needed (but not if we are already appending a compaction boundary)
-        if !is_boundary {
-            match self.should_compact() {
-                Outcome::Ok(true) => match self.trigger_compaction() {
-                    Outcome::Ok(()) => {}
-                    Outcome::Err(e) => return Outcome::Err(e),
-                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-                },
-                Outcome::Ok(false) => {}
-                Outcome::Err(e) => return Outcome::Err(e),
-                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            }
-        }
-
-        Outcome::Ok(current_sequence)
+        self.append_with_storage(record, storage::append_frame)
     }
 
     /// Flush any pending writes
     pub fn flush(&mut self) -> Outcome<(), JournalError> {
-        if let Some(ref mut writer) = self.writer {
-            if let Err(e) = sync_writer_data(writer) {
-                return Outcome::Err(e);
-            }
-        }
-        Outcome::Ok(())
+        self.flush_with_storage(sync_writer_data)
     }
 
     /// Get recent entries from cache
@@ -1422,6 +1354,9 @@ impl AppendJournal {
         &self,
         transfer_id: &str,
     ) -> Outcome<TransferResumeSummary, JournalError> {
+        if let Err(error) = self.require_storage_ready() {
+            return Outcome::Err(error);
+        }
         let entries = match self.get_transfer_entries(transfer_id) {
             Outcome::Ok(entries) => entries,
             Outcome::Err(err) => return Outcome::Err(err),
@@ -1949,7 +1884,7 @@ impl AppendJournal {
             let length = u32::from_le_bytes(length_bytes) as usize;
 
             // Prevent OOM from corrupted length prefix (max 16 MB)
-            if length > 16 * 1024 * 1024 {
+            if length > MAX_JOURNAL_FRAME_BYTES {
                 corrupted = true;
                 break;
             }
