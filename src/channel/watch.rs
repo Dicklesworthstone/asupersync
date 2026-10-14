@@ -548,7 +548,7 @@ impl<T> Sender<T> {
         // During panic unwinding Rust destroys locals in reverse declaration
         // order. A clone allocated within the lock scope would run T::drop
         // before releasing send_lock, deadlocking a reentrant destructor.
-        let mut candidate: Option<T> = None;
+        let mut candidate: Option<T>;
         let _old_value = {
             let _write_serialize = self.inner.send_lock.lock();
 
