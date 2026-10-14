@@ -220,7 +220,7 @@ struct CxHandles {
 /// spawn closure receives shares it, so both carry the same handles
 /// (br-asupersync-93zkbz).
 pub(crate) struct InheritedHandles {
-    /// Taken by admission into the task's [`DeferredFork`].
+    /// Taken by admission, which forks it for the task in spawn order.
     entropy: Option<Arc<dyn EntropySource>>,
     io_cap: Option<Arc<dyn crate::io::IoCap>>,
     registry: Option<RegistryHandle>,
@@ -233,19 +233,19 @@ pub(crate) struct InheritedHandles {
 }
 
 impl InheritedHandles {
-    /// The child's entropy source: the spawner's, forked for `task` when the
-    /// task first polls (see [`DeferredFork`]). Admission calls this once,
-    /// under the runtime lock, so it only moves the spawner's source.
+    /// The child's entropy source: the spawner's, forked for `task` now, in
+    /// admission (spawn) order, under the runtime lock; only a user fork that
+    /// panics is deferred to the task's first poll (`fork_contained`).
     pub(crate) fn deferred_entropy(&mut self, task: TaskId) -> Arc<dyn EntropySource> {
         let parent = self
             .entropy
             .take()
             .expect("admission takes a task's inherited entropy once");
-        Arc::new(DeferredFork::new(parent, task))
+        fork_contained(&parent, task)
     }
 }
 
-pub(crate) use crate::util::DeferredFork;
+use crate::util::entropy::fork_contained;
 
 /// Opaque ownership token for one auxiliary cancellation-Waker registration.
 ///
@@ -5772,7 +5772,7 @@ where
     }
 
     /// Snapshots the handles a task spawned from this context inherits:
-    /// the entropy source (forked for the task on its first poll) and the io-cap,
+    /// the entropy source (forked for the task at admission) and the io-cap,
     /// registry, remote, blocking-pool, evidence, macaroon, HTTP-client and
     /// pressure handles. The spawner takes it outside the runtime lock and
     /// moves it into the task's admission slot (br-asupersync-93zkbz).
@@ -5793,8 +5793,8 @@ where
     /// Moves a spawner's inherited handles into an admission-built context,
     /// mirroring `Scope::build_child_task_cx`: the handles replace what
     /// admission built, and a spawner without a pressure handle keeps the
-    /// runtime's. Admission has already wrapped the spawner's entropy in a
-    /// [`DeferredFork`]. This only moves fields: the context is still private
+    /// runtime's. Admission has already forked the spawner's entropy for the
+    /// task. This only moves fields: the context is still private
     /// to admission, so `Arc::make_mut` does not clone (br-asupersync-93zkbz).
     pub(crate) fn adopt_inherited_handles(&mut self, inherited: InheritedHandles) {
         let InheritedHandles {
@@ -5842,9 +5842,9 @@ where
     ) -> Cx<Out> {
         let region = self.region_id();
         *self.observability.write() = parent.child_observability(region, task_id);
-        // Fork the inherited entropy now, on the task and before its code
-        // runs, where a panicking fork reaches the join handle. Admission only
-        // wrapped it (DeferredFork); source_id draws no randomness.
+        // A user fork that panicked at admission was deferred (DeferredFork):
+        // retry it now, on the task and before its code runs, where the panic
+        // reaches the join handle. source_id draws no randomness.
         let _ = self.handles.entropy.source_id();
         let _ = self.apply_child_capability_budget(
             capability_budget,
