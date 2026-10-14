@@ -1,7 +1,9 @@
 //! Rebuild private staging from authenticated journal evidence and actual bytes.
 
 use super::*;
-use crate::atp::journal::{AppendJournal, JournalRecord, JournalRestoreLimits, TransferResumeChunk};
+use crate::atp::journal::{
+    AppendJournal, JournalRecord, JournalRestoreLimits, JournalRestoreRequest, TransferResumeChunk,
+};
 use std::io::{Read, Seek, SeekFrom};
 use sha2::{Digest, Sha256};
 
@@ -12,6 +14,70 @@ struct RestorePlan {
 }
 
 impl ScopedSparseWriter {
+    /// Reopen journal and payload paths inside the same owned restore job.
+    ///
+    /// Unlike `restore_from_journal`, this entry point requires no synchronous
+    /// journal reconstruction or source-file opening on the caller. All paths
+    /// and the authentication key are explicitly supplied by the application.
+    /// The journal directory must already exist; an absent directory is not
+    /// initialized as an empty recovery history. Journal authentication, transfer
+    /// status, identity and limits are checked before the payload path is opened.
+    ///
+    /// Uses the identical receipt checker and new-staging reconstruction as
+    /// `restore_from_journal`. The returned writer remains unverified; restoring
+    /// does not append subsequent write receipts or delete old journal/payload
+    /// evidence. Path opens follow normal host semantics in a trusted directory,
+    /// not a sandbox. Blocking journal parsing or an OS open cannot be preempted;
+    /// checkpoints separate those stages and region close drains the whole job.
+    pub async fn restore_from_storage<Caps>(
+        cx: &Cx<Caps>,
+        request: JournalRestoreRequest,
+    ) -> ScopedWriterResult<Self>
+    where
+        Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+    {
+        cx.scoped_fs().run_io(move |child| {
+            let checkpoint = || child.checkpoint()
+                .map_err(|error| io::Error::new(io::ErrorKind::Interrupted, error));
+            checkpoint()?;
+            if request.limits.max_chunk_bytes == 0 {
+                return Ok(Outcome::Err(invalid("journal restore needs a nonzero payload-buffer limit")));
+            }
+            match std::fs::metadata(&request.journal_config.base_dir) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return Ok(Outcome::Err(SparseWriterError::FileOpen(
+                    "restore journal path is not a directory".to_owned(),
+                ))),
+                Err(error) => return Ok(Outcome::Err(SparseWriterError::FileOpen(
+                    format!("restore journal directory: {error}"),
+                ))),
+            }
+            checkpoint()?;
+            let journal = match AppendJournal::new(request.journal_config, request.auth_key) {
+                Outcome::Ok(journal) => journal,
+                Outcome::Err(error) => return Ok(Outcome::Err(invalid(format!("journal restore: {error}")))),
+                Outcome::Cancelled(reason) => return Ok(Outcome::Cancelled(reason)),
+                Outcome::Panicked(payload) => return Ok(Outcome::Panicked(payload)),
+            };
+            checkpoint()?;
+            let plan = match restore_plan(&journal, &request.transfer_id, request.limits) {
+                Outcome::Ok(plan) => plan,
+                Outcome::Err(error) => return Ok(Outcome::Err(error)),
+                Outcome::Cancelled(reason) => return Ok(Outcome::Cancelled(reason)),
+                Outcome::Panicked(payload) => return Ok(Outcome::Panicked(payload)),
+            };
+            checkpoint()?;
+            let source = match File::open(&request.source_path) {
+                Ok(source) => source,
+                Err(error) => return Ok(Outcome::Err(SparseWriterError::FileOpen(
+                    format!("restore source open: {error}"),
+                ))),
+            };
+            restore_file(source, request.final_path, request.writer_config, plan, checkpoint)
+                .map(|outcome| outcome.map(SparseWriter::into_scoped))
+        }).await
+    }
+
     /// Restore recorded ranges from an explicitly supplied whole-object file.
     ///
     /// The journal must have been reopened with its trusted authentication key.
@@ -152,7 +218,7 @@ impl RestoreStaging {
         let cleanup = self.writer().cancel_blocking();
         // An ordinary cleanup failure retains the path as evidence. Do not
         // silently retry it from Drop after reporting that retained path.
-        self.0.take();
+        drop(self.0.take());
         match cleanup {
             Outcome::Ok(()) => error,
             failure => SparseWriterError::WriteFailed(format!(

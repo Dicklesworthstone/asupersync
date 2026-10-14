@@ -325,3 +325,112 @@ fn lazy_restore_is_send_and_does_not_create_a_writer() {
     assert!(!root.path().join("final").exists());
     assert_eq!(std::fs::read(source).unwrap(), b"abcdefgh");
 }
+
+fn storage_request(root: &Path) -> JournalRestoreRequest {
+    JournalRestoreRequest {
+        journal_config: JournalConfig {
+            base_dir: root.join("journal"), ..JournalConfig::default()
+        },
+        auth_key: AuthKey::from_seed(42),
+        transfer_id: "transfer".to_owned(),
+        source_path: root.join("old-payload"),
+        final_path: root.join("final"),
+        writer_config: config(CommitPolicy::AtomicRename),
+        limits: limits(),
+    }
+}
+
+#[test]
+fn storage_entrypoint_reopens_all_resources_then_uses_the_same_finalizer() {
+    for workers in [1, 2] {
+        let root = tempfile::tempdir().unwrap();
+        let (journal, manifest, source) = setup(root.path(), b"abcdefgh", &[(0, 4), (4, 8)]);
+        drop(journal);
+        let request = storage_request(root.path());
+        let runtime = runtime(workers);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let writer = ScopedSparseWriter::restore_from_storage(&cx, request).await.unwrap().unwrap();
+            assert_eq!(writer.get_stats(&cx).await.unwrap().unwrap().total_bytes_written, 8);
+            assert!(matches!(writer.commit(&cx).await.unwrap(), Outcome::Err(SparseWriterError::NotVerified)));
+            writer.verify_and_commit(&cx, manifest).await.unwrap().unwrap();
+        });
+        drain(&runtime);
+        assert_eq!(std::fs::read(root.path().join("final")).unwrap(), b"abcdefgh");
+        assert_eq!(std::fs::read(source).unwrap(), b"abcdefgh");
+    }
+}
+
+#[test]
+fn storage_authentication_and_status_refusal_precede_source_open() {
+    for case in 0..3 {
+        let root = tempfile::tempdir().unwrap();
+        let (mut journal, _, _) = setup(root.path(), b"abcdefgh", &[(0, 4)]);
+        if case == 1 {
+            journal.append(JournalRecord::Cancellation {
+                transfer_id: "transfer".to_owned(), reason: "stop".to_owned(),
+                timestamp: 9, auth_tag: AuthenticationTag::zero(),
+            }).unwrap();
+        }
+        drop(journal);
+        let mut request = storage_request(root.path());
+        // A missing source would produce FileOpen if source acquisition were
+        // accidentally moved ahead of authenticated preflight.
+        request.source_path = root.path().join("missing-source");
+        if case == 0 { request.auth_key = AuthKey::from_seed(43); }
+        if case == 2 { request.limits.max_bytes = 7; }
+        let runtime = runtime(1);
+        runtime.block_on(async {
+            let result = ScopedSparseWriter::restore_from_storage(&Cx::current().unwrap(), request)
+                .await.unwrap();
+            assert!(matches!(result, Outcome::Err(SparseWriterError::VerificationFailed(_))));
+        });
+        drain(&runtime);
+        assert!(!root.path().join(".quarantine").exists());
+        assert!(!root.path().join("final").exists());
+    }
+}
+
+#[test]
+fn missing_storage_never_initializes_an_empty_journal_or_destination() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = runtime(1);
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let result = ScopedSparseWriter::restore_from_storage(&cx, storage_request(root.path()))
+            .await.unwrap();
+        assert!(matches!(result, Outcome::Err(SparseWriterError::FileOpen(_))));
+        let mut invalid = storage_request(root.path());
+        invalid.limits.max_chunk_bytes = 0;
+        let result = ScopedSparseWriter::restore_from_storage(&cx, invalid).await.unwrap();
+        assert!(matches!(result, Outcome::Err(SparseWriterError::VerificationFailed(_))));
+    });
+    drain(&runtime);
+    assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn storage_authority_cancellation_and_lazy_wait_have_no_path_effects() {
+    for case in 0..3 {
+        let root = tempfile::tempdir().unwrap();
+        let cx = if case == 0 {
+            let _guard = Cx::for_testing().restrict::<crate::cx::NoCaps>().set_current_restricted();
+            Cx::current().unwrap()
+        } else { Cx::for_testing() };
+        if case == 1 { cx.cancel_with(crate::types::CancelKind::User, Some("before restore")); }
+        let work = ScopedSparseWriter::restore_from_storage(&cx, storage_request(root.path()));
+        fn assert_send<T: Send>(_: &T) {}
+        assert_send(&work);
+        if case == 2 {
+            drop(work);
+        } else {
+            let result = futures_lite::future::block_on(work);
+            match case {
+                0 => assert!(matches!(result, Err(ScopedFsError::CapabilityDenied))),
+                1 => assert!(matches!(result, Err(ScopedFsError::Checkpoint(_)))),
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+}

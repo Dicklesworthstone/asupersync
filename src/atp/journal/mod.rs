@@ -58,3 +58,26 @@ pub struct JournalRestoreLimits {
     /// Must be nonzero. Receipt boundaries are preserved, not silently split.
     pub max_chunk_bytes: usize,
 }
+
+/// Explicit host resources for a fully offloaded journal/payload restoration.
+///
+/// Paths come from the application, never from an untrusted journal record.
+/// The existing journal directory must exist. Restoration does not initialize
+/// a new journal, append new progress, or retire the original payload evidence.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalRestoreRequest {
+    /// Configuration used when reopening retained journal generations.
+    pub journal_config: JournalConfig,
+    /// Trusted key used to authenticate the reopened transfer's records.
+    pub auth_key: crate::security::AuthKey,
+    /// Transfer whose offered identity and recorded ranges will be restored.
+    pub transfer_id: String,
+    /// Application-selected whole-object payload file, opened read-only.
+    pub source_path: std::path::PathBuf,
+    /// Destination for a later explicit verification and commit operation.
+    pub final_path: std::path::PathBuf,
+    /// Existing staging, preallocation, cleanup and publication policies.
+    pub writer_config: SparseWriterConfig,
+    /// Explicit object, receipt and payload-buffer limits.
+    pub limits: JournalRestoreLimits,
+}

@@ -68,3 +68,26 @@ apart from one module declaration.
 Rust, Cargo, rustfmt and RCH are unavailable in the authoring environment. These
 Rust tests have not been compiled or executed. Source/blob and whitespace checks
 are not native-runtime, cross-platform, performance or release-readiness proof.
+
+## Fully offloaded startup
+
+`ScopedSparseWriter::restore_from_storage(&cx, request)` also owns journal
+reconstruction and source-file acquisition. Its `JournalRestoreRequest` carries
+the application-selected journal configuration, trusted key, transfer ID, source
+path, destination, writer policies and limits. No synchronous setup is required
+on the caller's scheduler thread. The descriptor-based entry point remains
+available for applications that already own a reopened journal and source.
+
+Both entry points use the same authenticated restore plan and private-staging
+copy implementation. The path-based entry requires an existing journal directory;
+it does not initialize absent storage as an empty history. Transfer status,
+authentication, identity and limits are checked before opening the payload path.
+Journal-record filenames never become source-opening authority. Normal host path
+semantics still apply, and a slow open or journal parse cannot be preempted.
+
+Restoration does not automatically journal later writes or delete the old journal
+and source. Applications still own subsequent durability ordering and checkpoint
+production. Four additional authored tests cover path-based startup and shared
+finalization on both schedulers, refusals before source opening, missing storage,
+capability/cancellation refusal and lazy Send ownership. These tests are also
+uncompiled and unexecuted in this environment.
