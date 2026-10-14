@@ -33,6 +33,7 @@ pub mod lab;
 pub mod logging;
 pub mod mailbox;
 pub mod manifest;
+pub mod manifest_chunk_commitment;
 pub mod object;
 pub mod path;
 pub mod planner;
