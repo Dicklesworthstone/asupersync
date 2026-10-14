@@ -8959,6 +8959,71 @@ impl ThreeLaneWorker {
         // Sample an injected clock before any task/state lock is acquired.
         let capture_time = self.schedule_capture.get().map(|_| self.capture_now());
         if self.task_table.is_some() {
+            /// Owns the record detached from shard A until its completion
+            /// commits. The configured Panic leak policy unwinds out of the
+            /// completion audit, and an unwind that dropped the record left the
+            /// task in its region for good: the unwind guard finds no record to
+            /// complete (br-asupersync-73t5r3). Dropped during an unwind before
+            /// the commit, this guard resumes the completion once the state lock
+            /// is released, as the `block_on` caller retirement does. The
+            /// record keeps the outcome its poll produced.
+            struct DetachedCompletion<'a> {
+                worker: &'a ThreeLaneWorker,
+                record: Option<crate::record::task::TaskRecord>,
+                cancel_wakes: crate::types::task_context::CancelWakeEffects,
+                protocol_retired: bool,
+                committed: bool,
+            }
+
+            impl Drop for DetachedCompletion<'_> {
+                fn drop(&mut self) {
+                    if self.committed || !std::thread::panicking() {
+                        return;
+                    }
+                    let record = self.record.take();
+                    let protocol_retired = &mut self.protocol_retired;
+                    let worker = self.worker;
+                    let resumed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let Some(mut record) = record else {
+                            return;
+                        };
+                        let mut state = worker
+                            .state
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        let retirement_cx_inner = record.cx_inner.clone();
+                        let (waiters, cancel_waker_retirements) = state
+                            .task_completed_from_external_record_resuming(
+                                &mut record,
+                                protocol_retired,
+                            )
+                            .into_waiters_and_retirements_without_observers();
+                        let finalizers = worker.drain_ready_finalizers_locked(&mut state);
+                        worker.wake_dependents_locked(&state, waiters);
+                        let finalizer_publication = worker.publish_ready_finalizers(finalizers);
+                        drop(state);
+                        UnwindCompletionArtifacts {
+                            cancel_waker_retirements,
+                            detached_record: Some(record),
+                            retirement_cx_inner,
+                            finalizer_publication,
+                        }
+                        .dispatch_post_lock(worker);
+                    }));
+                    if let Err(payload) = resumed {
+                        std::mem::forget(payload);
+                    }
+                    let cancel_wakes = std::mem::take(&mut self.cancel_wakes);
+                    if let Err(payload) =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            cancel_wakes.dispatch();
+                        }))
+                    {
+                        std::mem::forget(payload);
+                    }
+                }
+            }
+
             // The holder must still be in its dispatch table when Reserve
             // posts are admitted. Release B before the existing detach phase
             // takes A; the drainer acquires A/C in the ordinary minting order
@@ -8969,7 +9034,7 @@ impl ThreeLaneWorker {
             // record before taking RuntimeState. This avoids both the
             // wrong-table completion bug and shard/state lock nesting around
             // validator, region, and observer work.
-            let (cancel_ack, mut cancel_wakes, mut detached_record) = self.with_task_table(|tt| {
+            let (cancel_ack, cancel_wakes, detached_record) = self.with_task_table(|tt| {
                 let effects = Self::consume_cancel_ack_from_table(tt, task_id);
                 let (cancel_ack, cancel_wakes) = effects.into_parts();
                 let ack_materialized = cancel_ack.is_some();
@@ -8979,6 +9044,15 @@ impl ThreeLaneWorker {
                 let detached_record = tt.remove_task(task_id);
                 (cancel_ack, cancel_wakes, detached_record)
             });
+            // Declared before the state guard, so an unwind releases the lock
+            // before this guard resumes the completion.
+            let mut detached = DetachedCompletion {
+                worker: self,
+                record: detached_record,
+                cancel_wakes,
+                protocol_retired: false,
+                committed: false,
+            };
 
             if let (Some(receipt), Some(now)) = (cancel_ack.as_ref(), capture_time) {
                 self.capture_cancel_ack(task_id, receipt, now);
@@ -8992,20 +9066,26 @@ impl ThreeLaneWorker {
                 && let Some(validation_result) = state
                     .external_checkpoint_cancel_materialization_violation(task_id, receipt, true)
             {
-                cancel_wakes.push_cancel_protocol_violation(
+                detached.cancel_wakes.push_cancel_protocol_violation(
                     "external-shard checkpoint cancellation materialization",
                     validation_result,
                 );
             }
-            let completion_effects = match detached_record.as_mut() {
-                Some(record) => state.task_completed_from_external_record(record),
+            let completion_effects = match detached.record.as_mut() {
+                Some(record) => state.task_completed_from_external_record_resuming(
+                    record,
+                    &mut detached.protocol_retired,
+                ),
                 None => state.task_completed(task_id),
             };
+            detached.committed = true;
             let (waiters, completion_observer) = completion_effects.into_parts();
             let finalizers = self.drain_ready_finalizers_locked(&mut state);
             self.wake_dependents_locked(&state, waiters);
             let finalizer_publication = self.publish_ready_finalizers(finalizers);
             drop(state);
+            let detached_record = detached.record.take();
+            let cancel_wakes = std::mem::take(&mut detached.cancel_wakes);
             let retirement_cx_inner = detached_record
                 .as_ref()
                 .and_then(|record| record.cx_inner.clone());

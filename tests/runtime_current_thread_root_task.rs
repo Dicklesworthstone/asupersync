@@ -800,6 +800,60 @@ fn block_on_leak_panic_preserves_remaining_posts_and_retires_the_holder() {
     }
 }
 
+/// A spawned task that forgets a tracked obligation trips the default Panic
+/// leak policy in its completion audit, on the scheduler worker that ran it.
+/// On the sharded layout the record had already left the task shard, and that
+/// unwind dropped it: the task never left its region, so the runtime never
+/// drained again (asupersync-73t5r3). On both layouts the task must leave.
+#[test]
+fn spawned_task_leak_panic_still_retires_the_holder() {
+    use asupersync::record::ObligationKind;
+
+    for sharded in [false, true] {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(2)
+            .with_sharded_state(sharded)
+            .build()
+            .expect("build runtime");
+        let (ran_tx, ran_rx) = mpsc::channel();
+        let join = runtime.handle().spawn(async move {
+            let cx = Cx::current().expect("spawned task context");
+            let token = cx
+                .try_register_obligation_checked(ObligationKind::Lease, cx.task_id())
+                .expect("admitted lease")
+                .expect("tracked lease");
+            // Forgotten, so only the completion audit can find it.
+            std::mem::forget(token);
+            ran_tx.send(()).expect("test is waiting");
+        });
+        ran_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the task ran");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !runtime.is_quiescent() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let quiescent = runtime.is_quiescent();
+        let tasks_left = runtime
+            .task_inspector(TaskInspectorConfig::default())
+            .list_tasks()
+            .len();
+        let drain = quiescent.then(|| runtime.drain_root_region(Duration::from_secs(5)));
+        let retired = quiescent && tasks_left == 0 && drain == Some(RootDrainOutcome::Quiescent);
+        drop(join);
+        if !retired {
+            // A stranded task can keep shutdown waiting in Drop; let the
+            // assertion report instead.
+            std::mem::forget(runtime);
+        }
+        assert!(
+            retired,
+            "sharded={sharded}: quiescent={quiescent} tasks_left={tasks_left} drain={drain:?}"
+        );
+        eprintln!("scenario=spawned_leak_panic sharded={sharded} retired=true");
+    }
+}
+
 /// Planted negative: the multi-thread flavor is unchanged — a task spawned
 /// from the root runs on a scheduler worker, not on the calling thread.
 #[test]
