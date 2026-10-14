@@ -56,7 +56,8 @@ const POLL_STEPS: usize = 32;
 /// unknown extension frames, and empty or padding-only DATA without
 /// END_STREAM) a server may send during one use of a connection; one more
 /// fails the request with a connection error `ENHANCE_YOUR_CALM` and drops
-/// the connection. See `is_overhead_frame`.
+/// the connection (on an idle pooled connection, it only drops the
+/// connection). See `is_overhead_frame`.
 const DEFAULT_MAX_OVERHEAD_FRAMES: usize = 10_000;
 /// Advertised receive-window bounds (RFC 9113 §6.9.2). The response body is
 /// buffered up to its limit anyway, so the windows track that limit within
@@ -256,16 +257,18 @@ impl Http2Client {
     /// connection: PING, SETTINGS other than the server's connection-preface
     /// SETTINGS, PRIORITY, unknown extension frames, and empty or
     /// padding-only DATA without END_STREAM. One more fails the request with
-    /// a connection error `ENHANCE_YOUR_CALM` and drops the connection.
-    /// Acknowledgements of the client's own SETTINGS are not counted, nor is
+    /// a connection error `ENHANCE_YOUR_CALM` and drops the connection; if it
+    /// arrived while a pooled connection sat idle, only that connection is
+    /// dropped and the request goes to another one. The acknowledgement of
+    /// the client's own SETTINGS is not counted (a repeated one is), nor is
     /// WINDOW_UPDATE, which an upload legitimately receives many of.
     ///
     /// The budget covers one use of the connection, not its lifetime: a
     /// request, plus, on a reused pooled connection
     /// ([`Self::reuse_connections`]), what the server sent while the
     /// connection sat idle before it. A pooled connection that used its whole
-    /// budget is not reused. `0` admits no overhead frame at all. Defaults to
-    /// 10,000.
+    /// budget is not reused. `0` admits no overhead frame at all; a connection
+    /// that received none is still reused. Defaults to 10,000.
     #[must_use]
     pub fn max_overhead_frames(mut self, limit: usize) -> Self {
         self.max_overhead_frames = limit;
@@ -1007,15 +1010,17 @@ impl From<io::Error> for AttemptFailure {
 /// A SETTINGS that is not an ACK forces the client to queue an ACK, so each
 /// unsolicited one counts. The exception is the server's connection-preface
 /// SETTINGS: the connection stays `Handshaking` until it has processed the
-/// first non-ACK SETTINGS, so exactly that one is exempt. A SETTINGS ACK is
-/// the server's mandatory reply to the client's own SETTINGS and does not
-/// count. WINDOW_UPDATE does not count either: a client uploading a large
-/// body legitimately receives thousands. RST_STREAM floods (CVE-2019-9514)
-/// are bounded by the connection's peer-reset rate limit, not by this budget.
-fn is_overhead_frame(frame: &Frame, connection: &Connection) -> bool {
+/// first non-ACK SETTINGS, so exactly that one is exempt. The first SETTINGS
+/// ACK is the server's mandatory reply to the client's only SETTINGS and does
+/// not count; `settings_acked` records it, and any later ACK counts.
+/// WINDOW_UPDATE does not count: a client uploading a large body
+/// legitimately receives thousands. RST_STREAM floods (CVE-2019-9514) are
+/// bounded by the connection's peer-reset rate limit, not by this budget.
+fn is_overhead_frame(frame: &Frame, connection: &Connection, settings_acked: &mut bool) -> bool {
     match frame {
         Frame::Ping(_) => true,
-        Frame::Settings(s) if !s.ack => connection.state() != ConnectionState::Handshaking,
+        Frame::Settings(s) if s.ack => std::mem::replace(settings_acked, true),
+        Frame::Settings(_) => connection.state() != ConnectionState::Handshaking,
         Frame::Unknown { .. } => true,
         Frame::Priority(_) => true,
         Frame::Data(d) if d.data.is_empty() && !d.end_stream => true,
@@ -1031,6 +1036,9 @@ struct Http2Conn<T> {
     /// since it was started, or since `refresh` prepared it for reuse.
     overhead_frames: usize,
     max_overhead_frames: usize,
+    /// Whether the server acknowledged the client's SETTINGS. The client sends
+    /// SETTINGS once, so only the first ACK is free (`is_overhead_frame`).
+    settings_acked: bool,
 }
 
 impl<T> Http2Conn<T>
@@ -1067,6 +1075,7 @@ where
             connection,
             overhead_frames: 0,
             max_overhead_frames,
+            settings_acked: false,
         })
     }
 
@@ -1080,7 +1089,7 @@ where
             && !self.connection.goaway_received()
             && !self.connection.goaway_sent()
             && self.connection.remote_settings().max_concurrent_streams != 0
-            && self.overhead_frames < self.max_overhead_frames
+            && (self.overhead_frames == 0 || self.overhead_frames < self.max_overhead_frames)
     }
 
     /// Before reuse: take in what the server sent while the connection sat
@@ -1096,7 +1105,7 @@ where
             loop {
                 match Pin::new(&mut self.wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
-                        if is_overhead_frame(&frame, &self.connection) {
+                        if is_overhead_frame(&frame, &self.connection, &mut self.settings_acked) {
                             if self.overhead_frames >= self.max_overhead_frames {
                                 return Poll::Ready(Err(H2Error::connection(
                                     ErrorCode::EnhanceYourCalm,
@@ -1141,6 +1150,7 @@ where
             connection,
             overhead_frames,
             max_overhead_frames,
+            settings_acked,
         } = self;
         let mut headers = Some(request.headers);
         let mut stream_id = None;
@@ -1154,7 +1164,7 @@ where
                 match Pin::new(&mut *wire).poll_next(task) {
                     Poll::Ready(Some(Ok(frame))) => {
                         progress = true;
-                        if is_overhead_frame(&frame, connection) {
+                        if is_overhead_frame(&frame, connection, settings_acked) {
                             if *overhead_frames >= *max_overhead_frames {
                                 return Poll::Ready(Err(H2Error::connection(
                                     ErrorCode::EnhanceYourCalm,
@@ -2273,5 +2283,75 @@ mod tests {
             }
             other => panic!("an unsolicited SETTINGS flood must be stopped, got {other:?}"),
         }
+    }
+
+    /// Fresh-eyes review of dd16a63d6 (br-asupersync-r96ybl) LOW-2.2: every
+    /// SETTINGS ACK became free, but the client sends SETTINGS once, so only
+    /// the first ACK answers it. On the old code the repeated ACKs below are
+    /// never counted and the exchange completes with 200.
+    #[test]
+    fn only_the_first_settings_ack_is_free() {
+        use crate::http::h2::frame::SettingsFrame;
+
+        let settings = || Frame::Settings(SettingsFrame::new(vec![]));
+        let ack = || Frame::Settings(SettingsFrame::ack());
+        let client = Http2Client::new();
+
+        let response = drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(1),
+            server_frames([settings(), ack(), ack(), ok_response(1)]),
+        )
+        .expect("one repeated ACK is within a limit of 1");
+        assert_eq!(response.status, 200);
+
+        match drive_exchange(
+            client.get("http://localhost/").max_overhead_frames(1),
+            server_frames([settings(), ack(), ack(), ack(), ok_response(1)]),
+        ) {
+            Err(Http2ClientError::Protocol(error)) => {
+                assert_eq!(error.code, ErrorCode::EnhanceYourCalm);
+            }
+            other => panic!("a SETTINGS ACK flood must be stopped, got {other:?}"),
+        }
+    }
+
+    /// Fresh-eyes review of dd16a63d6 (br-asupersync-r96ybl) LOW-2.1: with a
+    /// budget of 0, a connection that received no overhead frame at all was
+    /// still "out of budget", so it was never pooled, and a request using the
+    /// override 0 emptied its origin's pool. On the old code `reusable` is
+    /// false here.
+    #[test]
+    fn a_zero_budget_connection_without_overhead_is_reused() {
+        use crate::http::h2::frame::SettingsFrame;
+
+        let request = Http2Client::new()
+            .get("http://localhost/")
+            .prepare()
+            .expect("valid request");
+        let mut conn = complete(Http2Conn::start(
+            ScriptedTransport::new(crate::bytes::BytesMut::new()),
+            DEFAULT_BODY_LIMIT,
+            0,
+        ))
+        .expect("client preface");
+        feed(
+            &mut conn,
+            [
+                Frame::Settings(SettingsFrame::new(vec![])),
+                Frame::Settings(SettingsFrame::ack()),
+                ok_response(1),
+            ],
+        );
+        let (response, _) = complete(conn.request(request, Bytes::new(), DEFAULT_BODY_LIMIT))
+            .map_err(|failure| failure.error)
+            .expect("no overhead frame arrived");
+        assert_eq!(response.status, 200);
+        assert!(conn.reusable(), "no overhead frame was received");
+        complete(conn.refresh()).expect("nothing arrived while idle");
+        feed(&mut conn, pings(1));
+        assert!(
+            complete(conn.refresh()).is_err(),
+            "a budget of 0 still refuses one idle PING"
+        );
     }
 }
