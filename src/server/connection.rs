@@ -546,9 +546,11 @@ impl ConnectionManager {
             // Check if drain deadline has passed
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
                 if self.shutdown_signal.current_time() >= deadline {
-                    // Timeout expired — transition to force close
-                    let (drained, remaining) = self.drain_counts(initial_count);
+                    // Timeout expired — transition to force close. Count after
+                    // the transition: its snapshot, taken under the registry
+                    // lock, is the boundary drain_counts reports.
                     let _ = self.begin_force_close();
+                    let (drained, remaining) = self.drain_counts(initial_count);
                     return self.shutdown_signal.collect_stats(drained, remaining);
                 }
             }
@@ -581,8 +583,8 @@ impl ConnectionManager {
 
             if let Some(deadline) = self.shutdown_signal.drain_deadline() {
                 if self.shutdown_signal.current_time() >= deadline {
-                    let (drained, remaining) = self.drain_counts(initial_count);
                     let _ = self.begin_force_close();
+                    let (drained, remaining) = self.drain_counts(initial_count);
                     return self.shutdown_signal.collect_stats(drained, remaining);
                 }
             }
