@@ -69,6 +69,10 @@ impl<'a> ReadBuf<'a> {
 }
 
 #[cfg(test)]
+#[path = "copy_read_contract_tests.rs"]
+mod copy_read_contract_tests;
+
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::pedantic,

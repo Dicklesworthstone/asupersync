@@ -91,6 +91,39 @@ where
     drained
 }
 
+/// Poll into owned copy storage without trusting a substituted `ReadBuf`.
+///
+/// A reader can replace the covariant buffer with one over other memory. Its
+/// filled length must not become a cursor into our unchanged storage. Also
+/// retain progress from providers that fill in place before returning Pending:
+/// discarding those bytes would advance the source without advancing the copy.
+fn poll_read_checked<R>(
+    reader: &mut R,
+    cx: &mut Context<'_>,
+    buffer: &mut [u8],
+) -> Poll<io::Result<usize>>
+where
+    R: AsyncRead + Unpin + ?Sized,
+{
+    let start = buffer.as_ptr();
+    let offered = buffer.len();
+    let mut read_buf = ReadBuf::new(buffer);
+    let result = Pin::new(reader).poll_read(cx, &mut read_buf);
+    let filled = read_buf.filled();
+    if !super::transfer_session::filled_in_place(filled, start, offered) {
+        return Poll::Ready(Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "copy reader replaced the read buffer it was given; endpoint effects are unknown",
+        )));
+    }
+
+    match result {
+        Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+        Poll::Pending if filled.is_empty() => Poll::Pending,
+        Poll::Pending | Poll::Ready(Ok(())) => Poll::Ready(Ok(filled.len())),
+    }
+}
+
 fn checked_write_progress(n: usize, remaining: usize) -> io::Result<usize> {
     if n > remaining {
         Err(io::Error::new(
@@ -241,8 +274,7 @@ where
             }
 
             // Read more data
-            let mut read_buf = ReadBuf::new(&mut this.buf);
-            match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+            match poll_read_checked(&mut *this.reader, cx, &mut this.buf) {
                 Poll::Pending => {
                     if this.need_flush {
                         match Pin::new(&mut *this.writer).poll_flush(cx) {
@@ -262,8 +294,7 @@ where
                     this.completed = true;
                     return Poll::Ready(Err(err));
                 }
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
+                Poll::Ready(Ok(n)) => {
                     if n == 0 {
                         this.read_done = true;
                     } else {
@@ -604,8 +635,7 @@ where
             }
 
             // Read more data
-            let mut read_buf = ReadBuf::new(&mut this.buf);
-            match Pin::new(&mut *this.reader).poll_read(cx, &mut read_buf) {
+            match poll_read_checked(&mut *this.reader, cx, &mut this.buf) {
                 Poll::Pending => {
                     if this.need_flush {
                         match Pin::new(&mut *this.writer).poll_flush(cx) {
@@ -625,8 +655,7 @@ where
                     this.completed = true;
                     return Poll::Ready(Err(err));
                 }
-                Poll::Ready(Ok(())) => {
-                    let n = read_buf.filled().len();
+                Poll::Ready(Ok(n)) => {
                     if n == 0 {
                         this.read_done = true;
                     } else {
@@ -781,8 +810,7 @@ where
         state.pos = 0;
         state.cap = 0;
 
-        let mut read_buf = ReadBuf::new(&mut self.a_to_b_buf);
-        match Pin::new(&mut *self.a).poll_read(cx, &mut read_buf) {
+        match poll_read_checked(&mut *self.a, cx, &mut self.a_to_b_buf) {
             Poll::Pending => {
                 if state.need_flush {
                     match Pin::new(&mut *self.b).poll_flush(cx) {
@@ -798,8 +826,7 @@ where
                 }
             }
             Poll::Ready(Err(err)) => TransferResult::Error(err),
-            Poll::Ready(Ok(())) => {
-                let n = read_buf.filled().len();
+            Poll::Ready(Ok(n)) => {
                 if n == 0 {
                     state.read_done = true;
                 }
@@ -863,8 +890,7 @@ where
         state.pos = 0;
         state.cap = 0;
 
-        let mut read_buf = ReadBuf::new(&mut self.b_to_a_buf);
-        match Pin::new(&mut *self.b).poll_read(cx, &mut read_buf) {
+        match poll_read_checked(&mut *self.b, cx, &mut self.b_to_a_buf) {
             Poll::Pending => {
                 if state.need_flush {
                     match Pin::new(&mut *self.a).poll_flush(cx) {
@@ -880,8 +906,7 @@ where
                 }
             }
             Poll::Ready(Err(err)) => TransferResult::Error(err),
-            Poll::Ready(Ok(())) => {
-                let n = read_buf.filled().len();
+            Poll::Ready(Ok(n)) => {
                 if n == 0 {
                     state.read_done = true;
                 }
