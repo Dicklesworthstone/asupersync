@@ -288,6 +288,64 @@ impl RecoveryContext {
         (bitmaps, stats)
     }
 
+    // The public low-level finalizer is a diagnostic view of every record
+    // state. Restart admission is narrower: only a resumable authenticated
+    // summary AND an accepted Written transition can authorize reusable bytes.
+    fn finalize_resumable(
+        self,
+        journal: &AppendJournal,
+    ) -> Result<(HashMap<String, ChunkBitmap>, RecoveryStats), RecoveryError> {
+        let mut bitmaps = HashMap::new();
+        let mut stats = self.stats;
+        let transfers: BTreeMap<_, _> = self.transfers.into_iter().collect();
+        let mut names = HashSet::new();
+        for (transfer_id, mut transfer) in transfers {
+            let name = recovery_bitmap_name(&transfer_id)?;
+            if !names.insert(name.to_ascii_lowercase()) {
+                return Err(RecoveryError::BitmapRecovery(
+                    "transfer identifiers alias the same bitmap filename".to_owned(),
+                ));
+            }
+            let summary = match journal.get_resume_summary(&transfer_id) {
+                Outcome::Ok(summary) => summary,
+                Outcome::Err(error) => {
+                    return Err(RecoveryError::JournalCorrupted(error.to_string()));
+                }
+                Outcome::Cancelled(_) => {
+                    return Err(RecoveryError::JournalCorrupted("resume summary cancelled".to_owned()));
+                }
+                Outcome::Panicked(_) => {
+                    return Err(RecoveryError::JournalCorrupted("resume summary panicked".to_owned()));
+                }
+            };
+            if !summary.is_resumable() {
+                continue;
+            }
+            let Some(total_size) = summary.total_size else {
+                // Chunk observations alone do not establish the offered object
+                // extent. Keep them in the journal, not the active bitmap set.
+                continue;
+            };
+            let mut durable = BTreeMap::new();
+            for chunk in summary.durable_chunks {
+                let id = ChunkId::from_u64(chunk.chunk_offset);
+                if transfer.chunk_states.get(&id) == Some(&ChunkState::Written)
+                    && transfer.chunk_sizes.get(&id) == Some(&chunk.chunk_size)
+                {
+                    durable.insert(id, chunk.chunk_size);
+                }
+            }
+            transfer.chunk_sizes = durable;
+            transfer.chunk_states.retain(|id, _| transfer.chunk_sizes.contains_key(id));
+            transfer.total_size = Some(total_size);
+            let bitmap = transfer.into_bitmap(transfer_id.clone());
+            stats.chunks_recovered += bitmap.entry_count();
+            stats.transfers_recovered += 1;
+            bitmaps.insert(transfer_id, bitmap);
+        }
+        Ok((bitmaps, stats))
+    }
+
     fn ensure_transfer(&mut self, transfer_id: &str) -> &mut TransferRecoveryState {
         self.transfers
             .entry(transfer_id.to_string())
@@ -528,7 +586,18 @@ fn common_chunk_state(a: ChunkState, b: ChunkState) -> ChunkState {
     }
 }
 
-/// Perform complete crash recovery for a journal and bitmap pair.
+/// Reconstruct active resume bitmaps from authenticated journal evidence.
+///
+/// Only resumable transfers with an offered length are activated. A reusable
+/// cell needs complete coverage by matching verified/written records and valid
+/// replay transitions. Received-only data and terminal/uncertain transfers are
+/// not advertised as reusable after restart. The returned journal retains their
+/// status and evidence. This does not rehash or reopen the actual payload files.
+///
+/// Authentication, summary and filename validation precede bitmap mutations.
+/// Each replacement uses the existing synced atomic-write helper; publication
+/// is per bitmap, not transactional across transfers. Its rename and directory
+/// sync are synchronous, and a post-rename sync error does not mean rollback.
 pub async fn recover_journal_and_bitmap(
     cx: &Cx,
     journal_path: &Path,
@@ -583,21 +652,31 @@ pub async fn recover_journal_and_bitmap(
     };
 
     for entry in entries {
-        process_recovery_record(&mut context, &entry, auth_key)?;
+        match context.process_record(&entry, auth_key) {
+            Ok(_) => {}
+            Err(RecoveryError::InvalidStateTransition { .. }) => {
+                context.stats.corrupted_skipped += 1;
+            }
+            // Publication cannot silently omit an unauthenticated cancellation
+            // or commit boundary and then reactivate an earlier valid prefix.
+            Err(error) => return Err(error),
+        }
     }
 
-    let (bitmaps, stats) = context.finalize();
+    let (bitmaps, stats) = context.finalize_resumable(&journal)?;
 
+    fs::create_dir_all(bitmap_dir).await?;
     let stale_bitmaps_quarantined = quarantine_stale_bitmap_files(bitmap_dir, &bitmaps).await?;
 
     // Export recovered bitmaps to disk. Each bitmap is written atomically as
     // its canonical serialized form so a subsequent `load_recovered_or_create_bitmap`
     // call can reconstruct the exact same state — this is the on-disk side of
     // the crash-recovery contract.
-    for (transfer_id, bitmap) in bitmaps.iter() {
-        let bitmap_path = bitmap_dir.join(format!("transfer_{}.bitmap", transfer_id));
+    let ordered: BTreeMap<_, _> = bitmaps.iter().collect();
+    for (transfer_id, bitmap) in ordered {
+        let bitmap_path = bitmap_dir.join(recovery_bitmap_name(transfer_id)?);
         let exported = bitmap.serialize_to_bytes();
-        fs::write(&bitmap_path, exported).await?;
+        fs::write_atomic(&bitmap_path, exported).await?;
     }
 
     cx.trace(&format!(
@@ -611,6 +690,21 @@ pub async fn recover_journal_and_bitmap(
     ));
 
     Ok((journal, bitmaps))
+}
+
+fn recovery_bitmap_name(transfer_id: &str) -> Result<String, RecoveryError> {
+    // Transfer IDs are journal data, not paths. Reject separators on either OS,
+    // Windows stream syntax and nonportable filename characters before joining.
+    // Ordinary Unicode identifiers remain supported; this is not general
+    // filesystem Unicode/alias normalization or parent-path confinement.
+    if transfer_id.is_empty() || transfer_id.chars().any(|ch| {
+        ch.is_control() || matches!(ch, '/' | '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    }) {
+        return Err(RecoveryError::BitmapRecovery(
+            "transfer identifier is not a portable bitmap filename component".to_owned(),
+        ));
+    }
+    Ok(format!("transfer_{transfer_id}.bitmap"))
 }
 
 async fn quarantine_stale_bitmap_files(
@@ -672,6 +766,9 @@ async fn next_stale_bitmap_path(path: &Path) -> Result<PathBuf, RecoveryError> {
     )))
 }
 
+// Legacy diagnostic replay may count invalid records and continue. The public
+// disk recovery path above is deliberately stricter before publishing progress.
+#[cfg(test)]
 fn process_recovery_record(
     context: &mut RecoveryContext,
     record: &JournalRecord,
@@ -762,6 +859,10 @@ fn required_transfer_id_from_bitmap_path(bitmap_path: &Path) -> Result<String, R
 #[cfg(test)]
 #[path = "recovery/range_tests.rs"]
 mod range_tests;
+
+#[cfg(test)]
+#[path = "recovery/resume_tests.rs"]
+mod resume_tests;
 
 #[cfg(test)]
 mod tests {
