@@ -26,6 +26,35 @@ const result = await batch.result;
 // A UI teardown handler can instead await batch.cancel("view closed").
 ```
 
+## Parent cancellation and caller-owned deadlines
+
+Pass `signal` alongside `concurrency` to connect a batch to a view, operation,
+or service's cancellation boundary. For example, replace the options above with:
+
+```ts
+{
+  concurrency: 4,
+  signal: AbortSignal.any([viewController.signal, AbortSignal.timeout(5_000)]),
+}
+```
+
+The signal stops queued admission synchronously, notifies active consumers,
+cancels owned bodies, and waits for all admitted consumers and cleanup before
+settling `batch.result`. A pre-aborted signal starts no requests. Empty input
+still succeeds with a valid pre-aborted signal. `null` is equivalent to omission.
+This is cooperative cancellation, not forced termination of consumer code.
+
+Signals must be unmodified same-realm native `AbortSignal` objects; signal use
+requires native `AbortSignal.any` and `EventTarget`. A private dependent signal
+prevents an earlier caller listener using `stopImmediatePropagation()` from
+suppressing cancellation. Arbitrary abort reasons are not inspected or copied
+into diagnostics: the cancellation message is `fetch batch cancelled by signal`.
+The first same-severity stop reason wins, including races with `batch.cancel()`.
+The observer is detached at settlement; later aborts cannot reclaim delivered
+values. Manual cancellation never aborts the supplied signal. Calls without a
+signal keep their existing host requirements. The batch itself creates no timer;
+the timeout in the example is explicitly owned by the caller.
+
 ## The slot is a lifecycle, not a header count
 
 There are at most `concurrency` active members (default 4, range 1..64).
@@ -63,10 +92,11 @@ fetch cleanup. A host or consumer that never settles keeps shutdown pending;
 this is not forced termination or a bounded wall-clock guarantee. Cancellation
 cannot undo transmitted POSTs or other side effects.
 
-Task cancellation/publication refusals are failures, not successes. A cleanup
-panic outranks an ordinary error or cancellation. Other cleanup errors outrank
-cancellation; the first selected consumer panic is retained over non-panic
-cleanup failures. Same-severity cleanup ties use input order. This composite
+Task cancellation/publication refusals are failures, not successes. Throughout
+drain, stronger failures replace weaker ones: `panicked > cancelled > err`.
+Expected member cancellation is cleanup, not a new owner failure. Rethrowing a
+batch-owned body/signal error preserves its Outcome; genuine consumer exceptions
+remain panics. Same-severity cleanup ties use input order. This composite
 Outcome does not rewrite the existing fetch tasks' own terminal outcomes.
 
 The scope's `fetch` must return its admission Outcome synchronously, as the
@@ -101,3 +131,12 @@ and batch implementation, native streams, and loopback HTTP; task ABI calls
 are explicitly doubled. Native browser checks and strict TypeScript are also
 recorded in the session's verification bundle. These are not Rust/WASM or
 full-workspace integration receipts.
+
+The parent-signal lane is
+`node --experimental-vm-modules --test scripts/test_browser_fetch_batch_signal.mjs`.
+It executes the actual batch TypeScript, native Streams/signals, and real
+loopback HTTP cancellation, with explicit scope/handle/terminal and request-limit
+doubles. It does not execute the SDK task ABI or certify browser/WASM integration.
+Set `ASUPERSYNC_FETCH_BATCH_SOURCE` to a pre-feature source file for negative
+controls. TypeScript stripping is not a strict typecheck; run the package's
+existing typecheck and full SDK suite separately.

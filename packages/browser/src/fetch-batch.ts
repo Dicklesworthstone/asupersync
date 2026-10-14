@@ -21,6 +21,8 @@ export interface FetchBatchResponse {
 export interface FetchBatchOptions {
   /** Active requests INCLUDING consumer work and cleanup. Default 4; 1..64. */
   concurrency?: number;
+  /** Parent cancellation; null is omission. The batch still joins all admitted work. */
+  signal?: AbortSignal | null;
 }
 
 export interface FetchBatch<T> {
@@ -99,6 +101,12 @@ const READ = READER?.prototype.read, CANCEL = READER?.prototype.cancel, RELEASE 
 const READER_CLOSED = READER && Object.getOwnPropertyDescriptor(READER.prototype, "closed")?.get;
 const CONTROLLER = typeof AbortController === "undefined" ? undefined : AbortController;
 const ABORT = CONTROLLER?.prototype.abort;
+const SIGNAL = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
+const ANY_SIGNAL = SIGNAL?.any;
+const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "aborted")?.get;
+const EVENT_TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
+const ADD_LISTENER = EVENT_TARGET?.prototype.addEventListener;
+const REMOVE_LISTENER = EVENT_TARGET?.prototype.removeEventListener;
 
 interface Member {
   index: number;
@@ -131,6 +139,16 @@ interface Member {
  * that park outside the body must observe their signal to stop cooperatively.
  * No force-drain guarantee exists for nonsettling host or consumer promises.
  *
+ * An optional parent signal uses the same admission fence and drain as cancel().
+ * A pre-aborted signal starts no requests; empty input remains a successful
+ * identity. Supply an unmodified same-realm native AbortSignal. Signal use
+ * requires native AbortSignal.any: a private dependent signal prevents earlier
+ * caller listeners from suppressing cancellation. Its arbitrary reason is not
+ * inspected or included in diagnostics. The observer is removed at settlement;
+ * aborting afterward cannot reclaim returned values or mutate the parent signal.
+ * Callers may supply AbortSignal.timeout for deadlines; this function creates
+ * no timer. Unsignalled calls retain their existing host requirements.
+ *
  * The request array is snapshotted; option objects/bodies are read only when
  * admitted and must not be mutated while queued. Unstarted bodies remain with
  * the caller. The caller owns returned values and their memory; only request
@@ -142,6 +160,7 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
   let inputs: BrowserFetchOptions[];
   let start: FetchBatchScope["fetch"];
   let concurrency: number;
+  let signal: AbortSignal | undefined;
   try {
     if (!Array.isArray(requests)) return failure("fetch batch requests must be an array");
     const count = requests.length;
@@ -149,6 +168,22 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
     concurrency = options.concurrency === undefined ? 4 : options.concurrency;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) return failure("fetch batch concurrency must be an integer in 1..64");
     if (typeof consume !== "function") return failure("fetch batch requires a consumer function");
+    const suppliedSignal = options.signal;
+    if (suppliedSignal != null) {
+      if (!SIGNAL || !ANY_SIGNAL || !ABORTED || !ADD_LISTENER || !REMOVE_LISTENER) {
+        return failure("fetch batch signals require native AbortSignal.any and EventTarget");
+      }
+      // Match the fetch/selection/group boundary. Native any() can inspect
+      // public accessors, so reject customized signals before invoking it.
+      if (Object.getPrototypeOf(suppliedSignal) !== SIGNAL.prototype
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "aborted")
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "reason")) {
+        return failure("fetch batches require an unmodified same-realm native signal");
+      }
+      Reflect.apply(ABORTED, suppliedSignal, []);
+      signal = Reflect.apply(ANY_SIGNAL, SIGNAL, [[suppliedSignal]]) as AbortSignal;
+      Reflect.apply(ABORTED, signal, []);
+    }
     start = scope.fetch;
     if (typeof start !== "function") return failure("fetch batch requires an explicit fetch scope");
     inputs = [];
@@ -325,6 +360,22 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
       if (!stopped && consumed) results[index] = value;
     }
   }
+  const onAbort = () => stop(cancelled("fetch batch cancelled by signal"));
+  function detachSignal(): void {
+    if (!signal) return;
+    try { Reflect.apply(REMOVE_LISTENER!, signal, ["abort", onAbort]); } catch { /* Do not prevent settlement. */ }
+    signal = undefined;
+  }
+  if (signal) {
+    try {
+      Reflect.apply(ADD_LISTENER!, signal, ["abort", onAbort, { once: true }]);
+      // Also catches a signal aborted while validating or snapshotting inputs.
+      if (Reflect.apply(ABORTED!, signal, [])) onAbort();
+    } catch {
+      detachSignal();
+      return failure("fetch batch signal observation refused");
+    }
+  }
   // Return the cancellation handle before executing user scope admission.
   void Promise.resolve().then(async () => {
     try { await Promise.all(Array.from({ length: Math.min(concurrency, inputs.length) }, () => worker().catch(() => {
@@ -332,6 +383,7 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
     }))); }
     catch { stop(failure("fetch batch driver failed", "internal_failure")); await Promise.all([...members].map(drain)); }
     finished = true;
+    detachSignal();
     inputs.length = 0;
     const cleanup = cleanupFailure?.outcome;
     const outcome = cleanup && (!stopped || severity(cleanup) >= severity(stopped)) ? cleanup : stopped;
