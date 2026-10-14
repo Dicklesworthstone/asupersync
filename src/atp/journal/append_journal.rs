@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod storage;
+mod compaction;
 
 // The writer must not acknowledge a frame that its own recovery reader refuses.
 const MAX_JOURNAL_FRAME_BYTES: usize = 16 * 1024 * 1024;
@@ -1198,7 +1199,7 @@ impl JournalEntry {
 pub struct JournalConfig {
     /// Base directory for journal files
     pub base_dir: PathBuf,
-    /// Maximum size before triggering compaction
+    /// New journal bytes before compaction, excluding carried-forward history.
     pub max_journal_size: u64,
     /// Maximum number of recent entries kept in memory.
     pub recent_entries_limit: usize,
@@ -1206,7 +1207,8 @@ pub struct JournalConfig {
     pub force_sync: bool,
     /// Buffer size for writes
     pub write_buffer_size: usize,
-    /// Maximum number of generations to keep
+    /// Previous generations to retain in addition to the current snapshot.
+    /// Damaged generations are retained as evidence even beyond this window.
     pub max_generations: u32,
     /// Enable detailed logging
     pub enable_detailed_logs: bool,
@@ -1266,6 +1268,8 @@ pub struct AppendJournal {
     auth_key: AuthKey,
     /// A failed/abandoned storage mutation requires disk recovery, not retry.
     storage_failed: bool,
+    /// Bytes already carried forward, not fresh growth that triggers rotation.
+    generation_base_bytes: u64,
 }
 
 impl AppendJournal {
@@ -1288,6 +1292,7 @@ impl AppendJournal {
             cache_limit,
             auth_key,
             storage_failed: false,
+            generation_base_bytes: 0,
         };
 
         // Try to recover from existing journal
@@ -1381,7 +1386,10 @@ impl AppendJournal {
         }
     }
 
-    /// Force compaction of the journal
+    /// Carry all retained history into a synchronized generation before cleanup.
+    /// Original record signatures and sequence numbers are preserved. This
+    /// consolidates generations, not semantic history: cancelled and completed
+    /// transfers remain known after reopen. No physical payload is copied here.
     pub fn compact(&mut self) -> Outcome<(), JournalError> {
         self.trigger_compaction()
     }
@@ -1454,100 +1462,16 @@ impl AppendJournal {
             .and_then(|path| std::fs::metadata(path).ok())
             .map_or(0, |meta| meta.len());
 
-        Outcome::Ok(current_size >= self.config.max_journal_size)
+        Outcome::Ok(current_size.saturating_sub(self.generation_base_bytes)
+            >= self.config.max_journal_size)
     }
 
     fn trigger_compaction(&mut self) -> Outcome<(), JournalError> {
-        // Flush current writer
-        match self.flush() {
-            Outcome::Ok(()) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        }
-
-        let next_generation = match self.generation.checked_add(1) {
-            Some(generation) => generation,
-            None => {
-                return Outcome::Err(JournalError::CompactionFailed(
-                    "journal generation overflow".to_string(),
-                ));
-            }
-        };
-
-        // Create compaction boundary record
-        let boundary_record = JournalRecord::signed_compaction_boundary(
-            next_generation,
-            self.sequence,
-            SystemTime::now() // ubs:ignore - timestamp used for recording, not crypto randomness
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            &self.auth_key,
-        );
-
-        // Write the boundary record
-        match self.append(boundary_record) {
-            Outcome::Ok(_) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        }
-
-        // Close current writer and create the next generation before success is
-        // reported, so recovery observes the boundary and its target file.
-        self.writer = None;
-        self.current_file = None;
-
-        self.generation = next_generation;
-        match self.ensure_writer() {
-            Outcome::Ok(()) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        }
-
-        // Clean up old generations
-        match self.cleanup_old_generations() {
-            Outcome::Ok(()) => {}
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-        }
-
-        Outcome::Ok(())
-    }
-
-    fn cleanup_old_generations(&self) -> Outcome<(), JournalError> {
-        if self.generation <= self.config.max_generations as u64 {
-            return Outcome::Ok(());
-        }
-
-        let cutoff_generation = self.generation - self.config.max_generations as u64;
-
-        let generations = match self.discover_generations() {
-            Ok(generations) => generations,
-            Err(error) => return Outcome::Err(error),
-        };
-        for generation_num in generations
-            .into_iter()
-            .take_while(|generation| *generation < cutoff_generation)
-        {
-            let old_file = journal_file_path(&self.config.base_dir, generation_num);
-            if old_file.exists() {
-                if let Err(e) = std::fs::remove_file(&old_file) {
-                    if self.config.enable_detailed_logs {
-                        eprintln!(
-                            "Failed to remove old journal generation {}: {}",
-                            generation_num, e
-                        );
-                    }
-                    // Continue cleanup despite errors
-                }
-            }
-        }
-
-        Outcome::Ok(())
+        self.compact_with_storage(
+            compaction::write_entry,
+            File::sync_all,
+            sync_journal_directory,
+        )
     }
 
     fn discover_generations(&self) -> Result<Vec<u64>, JournalError> {
@@ -1569,92 +1493,7 @@ impl AppendJournal {
     }
 
     fn recover_from_disk(&mut self) -> Outcome<(), JournalError> {
-        // Retained generations need not be contiguous. Bound filesystem work
-        // by directory contents, not by an untrusted numeric filename suffix.
-        let generations = match self.discover_generations() {
-            Ok(generations) => generations,
-            Err(error) => return Outcome::Err(error),
-        };
-        let max_generation = generations.last().copied().unwrap_or(0);
-        let mut max_sequence = 0;
-
-        // Read all valid entries once so recovery rebuilds both the recent-entry
-        // window and the transfer-id index used by targeted lookups.
-        let mut all_recent = VecDeque::new();
-        let mut transfer_entries: HashMap<String, Vec<JournalEntry>> = HashMap::new();
-        let mut found_sequence = false;
-        let mut recovered_generation = max_generation;
-
-        for generation in generations {
-            let file_path = journal_file_path(&self.config.base_dir, generation);
-
-            match file_path.try_exists() {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
-            }
-
-            let (entries, corrupted) = match self.read_entries_from_file(&file_path) {
-                Outcome::Ok(res) => res,
-                Outcome::Err(e) => return Outcome::Err(e),
-                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-            };
-
-            if generation == max_generation && corrupted {
-                // If the latest file was corrupted (e.g. partial write from power loss),
-                // we must not append to it. We increment max_generation so the next write
-                // starts a new file cleanly.
-                recovered_generation = match recovered_generation.checked_add(1) {
-                    Some(generation) => generation,
-                    None => {
-                        return Outcome::Err(JournalError::Deserialization(
-                            "cannot rotate corrupted journal: generation exhausted".to_string(),
-                        ));
-                    }
-                };
-            }
-
-            for entry in entries {
-                max_sequence = max_sequence.max(entry.sequence);
-                found_sequence = true;
-
-                if let Some(transfer_id) = entry.record.transfer_id() {
-                    transfer_entries
-                        .entry(transfer_id.to_string())
-                        .or_default()
-                        .push(entry.clone());
-                }
-
-                all_recent.push_back(entry);
-                if all_recent.len() > self.cache_limit {
-                    all_recent.pop_front();
-                }
-            }
-        }
-
-        for entries in transfer_entries.values_mut() {
-            entries.sort_by_key(|entry| entry.sequence);
-            entries.dedup_by_key(|entry| entry.sequence);
-        }
-
-        self.recent_entries = all_recent;
-        self.transfer_entries = transfer_entries;
-        self.generation = recovered_generation;
-        if found_sequence {
-            self.sequence = match max_sequence.checked_add(1) {
-                Some(sequence) => sequence,
-                None => {
-                    return Outcome::Err(JournalError::Deserialization(
-                        "recovered journal sequence exhausted".to_string(),
-                    ));
-                }
-            };
-        } else {
-            self.sequence = 0;
-        }
-
-        Outcome::Ok(())
+        self.recover_storage_history()
     }
 
     fn index_transfer_entry(&mut self, entry: &JournalEntry) {
@@ -1932,36 +1771,8 @@ impl AppendJournal {
     }
 
     fn read_all_entries_from_disk(&self) -> Outcome<Vec<JournalEntry>, JournalError> {
-        let mut all_entries = Vec::new();
-
-        let generations = match self.discover_generations() {
-            Ok(generations) => generations,
-            Err(error) => return Outcome::Err(error),
-        };
-        // Preserve the journal instance's generation frontier while skipping
-        // absent generations, including gaps left by retention cleanup.
-        for generation_num in generations
-            .into_iter()
-            .take_while(|generation| *generation <= self.generation)
-        {
-            let file_path = journal_file_path(&self.config.base_dir, generation_num);
-            let exists = match file_path.try_exists() {
-                Ok(exists) => exists,
-                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
-            };
-            if exists {
-                let (entries, _corrupted) = match self.read_entries_from_file(&file_path) {
-                    Outcome::Ok(res) => res,
-                    Outcome::Err(e) => return Outcome::Err(e),
-                    Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
-                    Outcome::Panicked(payload) => return Outcome::Panicked(payload),
-                };
-                all_entries.extend(entries);
-            }
-        }
-
-        all_entries.sort_by_key(|e| e.sequence);
-        Outcome::Ok(all_entries)
+        self.read_storage_history(Some(self.generation))
+            .map(|history| history.entries.into_values().collect())
     }
 }
 

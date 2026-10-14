@@ -32,15 +32,21 @@ pub(super) fn append_frame(
     encoded: &[u8],
     force_sync: bool,
 ) -> Result<(), JournalError> {
-    let length = frame_length(encoded.len())?;
-    writer.write_all(&length.to_le_bytes())
-        .and_then(|()| writer.write_all(encoded))
-        .map_err(|error| JournalError::WriteFailure(error.to_string()))?;
+    write_frame(writer, encoded)?;
     if force_sync {
         sync_writer_data(writer)
     } else {
         flush_writer_buffer(writer)
     }
+}
+
+// One canonical frame writer for appends and carry-forward copies. Durability
+// belongs to the caller: compaction synchronizes the complete snapshot once.
+pub(super) fn write_frame(writer: &mut impl Write, encoded: &[u8]) -> Result<(), JournalError> {
+    let length = frame_length(encoded.len())?;
+    writer.write_all(&length.to_le_bytes())
+        .and_then(|()| writer.write_all(encoded))
+        .map_err(|error| JournalError::WriteFailure(error.to_string()))
 }
 
 fn frame_length(length: usize) -> Result<u32, JournalError> {
