@@ -45,7 +45,7 @@ const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 
 function streamError(outcome: Failure): Error {
   return Object.defineProperty(new Error("owned fetch batch stopped"), "cause", { value: outcome });
 }
-/** Copy a scope- or handle-supplied Outcome; a malformed envelope fails closed. */
+/** Copy a supplied Outcome; a malformed envelope fails closed. */
 function checked<T>(value: unknown): Outcome<T> {
   try {
     if (!value || typeof value !== "object") return failure("invalid fetch batch outcome", "internal_failure");
@@ -128,7 +128,8 @@ interface Member {
  * consume after each header arrives; keep its slot until the consumer settles
  * AND the request's body/host cleanup and task publication settle. Results are
  * input-ordered. Returning early from consume cancels unread bytes. HTTP error
- * statuses are responses; throw from consume to reject application-level errors.
+ * statuses are responses. Use tryMapFetches for typed application failures;
+ * throwing from consume remains a panic, not an ordinary error.
  *
  * First observed admission, transport or consumer failure fences new work and
  * cancels siblings in parallel. Until settlement, stronger failures replace
@@ -157,6 +158,38 @@ interface Member {
  */
 export function mapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
   consume: (response: FetchBatchResponse) => T | PromiseLike<T>, options: FetchBatchOptions = {}): Outcome<FetchBatch<T>> {
+  return runFetchBatch<T>(scope, requests, consume, options, false);
+}
+
+/**
+ * Bounded fetch processing with an explicit Outcome from each consumer.
+ * Successful values are unwrapped into the input-ordered result array. A returned
+ * err, cancelled or panicked Outcome fences queued admission and drains every
+ * active consumer, body and terminal publication before result/cancel settles.
+ * Ordinary application errors therefore need not masquerade as thrown panics.
+ *
+ * Shares mapFetches' scope authority, concurrency, parent signal, ownership and
+ * cleanup rules. Late outcomes can strengthen a stop as panicked > cancelled >
+ * err; first equal-severity consumer causes and input-order cleanup ties remain.
+ * Malformed consumer envelopes fail closed as internal_failure. Envelopes are
+ * copied and frozen before stop callbacks, but successful values retain their
+ * identity and are not deep-frozen. Throws/rejections remain sanitized panics,
+ * except rethrowing this batch's own body/signal error preserves its cause.
+ *
+ * This is fail-fast processing with full drain, not all-settled collection or
+ * rollback. Already completed remote effects cannot be undone. mapFetches stays
+ * unchanged: an Outcome returned to mapFetches is an ordinary result value.
+ */
+export function tryMapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+  consume: (response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>,
+  options: FetchBatchOptions = {}): Outcome<FetchBatch<T>> {
+  return runFetchBatch<T>(scope, requests, consume, options, true);
+}
+
+function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+  consume: ((response: FetchBatchResponse) => T | PromiseLike<T>)
+    | ((response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>),
+  options: FetchBatchOptions, consumerOutcomes: boolean): Outcome<FetchBatch<T>> {
   let inputs: BrowserFetchOptions[];
   let start: FetchBatchScope["fetch"];
   let concurrency: number;
@@ -345,7 +378,20 @@ export function mapFetches<T>(scope: FetchBatchScope, requests: readonly Browser
         if (stopped) continue;
         if (head.outcome !== "ok") { stop(head); continue; }
         const item = Object.freeze({ index, response: head.value, body: body(member), signal: member.controller.signal });
-        try { value = await consume(item); consumed = true; }
+        try {
+          const supplied = await consume(item);
+          if (consumerOutcomes) {
+            // Observe even a late consumer: a genuine stronger outcome during
+            // drain must not disappear behind the first failure or cancellation.
+            const outcome = checked<T>(supplied);
+            if (outcome.outcome !== "ok") { stop(outcome); continue; }
+            value = outcome.value;
+          } else {
+            // Legacy consumers may legitimately return an Outcome as DATA.
+            value = supplied as T;
+          }
+          consumed = true;
+        }
         catch (error) {
           const owned = error && (typeof error === "object" || typeof error === "function")
             ? ownedFailures.get(error) : undefined;
