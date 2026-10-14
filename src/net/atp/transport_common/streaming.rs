@@ -36,10 +36,11 @@ use crate::atp::object::{
 use crate::atp::safety::validate_portable_path_component;
 
 use super::metadata::{PathLinkKind, classify_path_link};
+use super::source_walk::collect_dir;
 
 /// Failure from a transport-agnostic streaming/walk helper.
 ///
-/// Carries a pre-formatted, source-path-scoped message (the same string the
+/// Carries a pre-formatted, source-scoped message (the same string the
 /// original transport_tcp helpers embedded in `TransportError::Source`). A
 /// transport converts it into its own error type with a `From<StreamingError>`
 /// impl, keeping error messages byte-identical to the pre-extraction code.
@@ -255,10 +256,17 @@ pub async fn collect_entries(
 ///
 /// Symbolic links are emitted as leaves when preservation is enabled. Other
 /// reparse points and links disallowed by policy fail closed before traversal.
+/// Directory discovery uses bounded blocking-pool batches and an explicit
+/// traversal stack; returned entry paths remain sorted. Dropping the future
+/// prevents subsequent batches, but cannot preempt a running filesystem call.
 pub async fn collect_entries_with_policy(
     root: &Path,
     policy: &MetadataPolicy,
 ) -> Result<(String, bool, Vec<SourceEntry>), StreamingError> {
+    // Gate before classification: a preserved root symlink returns early and
+    // must not bypass authority merely because it needs no content read.
+    crate::cx::io_gate::require_ambient_io("fs")
+        .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
     let root_link_kind = classify_path_link(root)
         .await
         .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
@@ -332,104 +340,6 @@ pub async fn collect_entries_with_policy(
         "{}: not a regular file or directory",
         root.display()
     )))
-}
-
-/// Recursive directory walk producing [`SourceEntry`] metadata with
-/// forward-slash relative paths. Reads directory entries and file types, never
-/// file content.
-fn collect_dir<'a>(
-    dir: &'a Path,
-    prefix: String,
-    policy: &'a MetadataPolicy,
-    out: &'a mut Vec<SourceEntry>,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StreamingError>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut read_dir = crate::fs::read_dir(dir)
-            .await
-            .map_err(|e| StreamingError::new(format!("{}: {e}", dir.display())))?;
-        // Collect child names first for deterministic ordering.
-        let mut children: Vec<(String, PathBuf, bool)> = Vec::new();
-        while let Some(entry) = read_dir
-            .next_entry()
-            .await
-            .map_err(|e| StreamingError::new(format!("{}: {e}", dir.display())))?
-        {
-            let path = entry.path();
-            let link_kind = classify_path_link(&path)
-                .await
-                .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
-            let name = entry
-                .file_name()
-                .to_str()
-                .ok_or_else(|| {
-                    StreamingError::new(format!(
-                        "{}: source entry name is not valid Unicode",
-                        path.display()
-                    ))
-                })?
-                .to_string();
-            validate_portable_path_component(&name).map_err(|_| {
-                StreamingError::new(format!(
-                    "{}: source entry name is not portable: {name:?}",
-                    path.display()
-                ))
-            })?;
-            let ft = entry
-                .file_type()
-                .await
-                .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
-            let is_dir = match link_kind {
-                PathLinkKind::NotLink => ft.is_dir(),
-                PathLinkKind::Symlink(_) if policy.preserve_symlinks => false,
-                PathLinkKind::Symlink(_) => {
-                    return Err(StreamingError::new(format!(
-                        "{}: source symlink rejected by metadata policy",
-                        path.display()
-                    )));
-                }
-                PathLinkKind::UnsupportedReparse => {
-                    return Err(StreamingError::new(format!(
-                        "{}: unsupported Windows reparse point",
-                        path.display()
-                    )));
-                }
-            };
-            children.push((name, path, is_dir));
-        }
-        children.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // An empty subdirectory is otherwise lost — the walk emits only regular
-        // files, so a structural/empty dir would vanish on the receiver. Emit an
-        // explicit entry for it (J2, `b0k8qo.11.2`); the receiver recreates it
-        // from the dir-kind manifest metadata. A non-empty dir stays implicit
-        // (reconstructed when its descendant files commit), so existing transfers
-        // and their merkle roots are unchanged. The transfer root's own emptiness
-        // is the caller's concern (`is_directory` with no entries).
-        if children.is_empty() && !prefix.is_empty() {
-            out.push(SourceEntry {
-                rel_path: prefix,
-                abs_path: dir.to_path_buf(),
-            });
-            return Ok(());
-        }
-
-        for (name, path, is_dir) in children {
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if is_dir {
-                collect_dir(&path, rel, policy, out).await?;
-            } else {
-                out.push(SourceEntry {
-                    rel_path: rel,
-                    abs_path: path,
-                });
-            }
-        }
-        Ok(())
-    })
 }
 
 /// Stream a file off disk, computing its size, content id, and plain SHA-256
