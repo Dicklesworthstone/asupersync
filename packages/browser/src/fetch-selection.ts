@@ -27,6 +27,7 @@ export interface FetchSelectionOptions {
 /** Independent selection bounds; selection never admits additional requests. */
 export const FETCH_SELECTION_LIMITS = Object.freeze({ maxMembers: 64, maxHeaders: 128, maxHeaderChars: 65_536 });
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
+const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 3 : outcome.outcome === "cancelled" ? 2 : 1;
 const ok = <T>(value: T): Outcome<T> => Object.freeze({ outcome: "ok", value });
 const fail = (message: string): Failure => Object.freeze({ outcome: "err", failure: Object.freeze({
   code: "compatibility_rejected", recoverability: "permanent", message,
@@ -139,7 +140,9 @@ interface Member {
  * transport errors from cleanup failures, so suppressing them would be unsound.
  * Scope cancellation therefore cannot be mistaken for a rejected HTTP status.
  * A selected member failing during drain also fails the group; no replacement
- * requests are started. Cleanup panics outrank errors and cancellation.
+ * requests are started. Failures strengthen through drain as panicked > cancelled
+ * > err. Preserve the first same-severity stop cause; cleanup ties use input order.
+ * Expected member cancellation during retirement is not a new owner failure.
  *
  * An optional unmodified same-realm AbortSignal uses the same drain barrier,
  * even with every header parked or while loser cleanup is pending. A pre-aborted
@@ -239,8 +242,13 @@ export function quorumFetchResponses(
 
   function stop(outcome: Failure): void {
     if (finished) return;
-    // A later panic must not be hidden behind an earlier ordinary failure.
-    if (!stopped || outcome.outcome === "panicked") stopped = outcome;
+    if (stopped) {
+      // Retirement is one-shot, but its final cause can still strengthen while
+      // cleanup is pending. Equal-severity notifications keep the first cause.
+      if (severity(outcome) > severity(stopped)) stopped = outcome;
+      return;
+    }
+    stopped = outcome;
     decide();
     for (let index = 0; index < members.length; index += 1) void drain(index);
   }
@@ -316,15 +324,16 @@ export function quorumFetchResponses(
     await Promise.all(members.map((_, index) => !stopped && chosen?.includes(index) ? undefined : drain(index)));
     if (chosen) for (const index of chosen) {
       const terminal = members[index].terminal;
-      if (terminal && terminal.outcome !== "ok") stop(terminal);
+      // Once we retired a proposed winner, its expected cancelled terminal is
+      // cleanup, not an independent owner cancellation. drain() owns failures.
+      if (!members[index].draining && terminal && terminal.outcome !== "ok") stop(terminal);
     }
     if (stopped || !chosen) {
       await Promise.all(members.map((_, index) => drain(index)));
     }
-    const severity = (outcome: Failure) => outcome.outcome === "panicked" ? 3 : outcome.outcome === "err" ? 2 : 1;
     const cleanupFailure = [...cleanupErrors].sort(([a, x], [b, y]) => severity(y) - severity(x) || a - b)[0]?.[1];
-    const failure = stopped?.outcome === "panicked" && cleanupFailure?.outcome !== "panicked" ? stopped
-      : cleanupFailure ?? stopped;
+    const failure = cleanupFailure && (!stopped || severity(cleanupFailure) >= severity(stopped))
+      ? cleanupFailure : stopped;
     finished = true;
     if (signal && onAbort) {
       Reflect.apply(REMOVE_LISTENER!, signal, ["abort", onAbort]);
@@ -340,7 +349,7 @@ export function quorumFetchResponses(
   })();
   return ok(Object.freeze({ result, cancel(reason = "fetch selection cancelled by caller") {
     if (typeof reason !== "string") return Promise.resolve(fail("fetch selection cancellation reason must be a string"));
-    if (!finished && !stopped) stop(cancellation(reason));
+    if (!finished) stop(cancellation(reason));
     return settlement;
   } }));
 }
