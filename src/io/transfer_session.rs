@@ -224,5 +224,8 @@ impl<R: AsyncRead + Unpin> ReadExactSession<'_, R> {
 mod write;
 pub use write::WriteAllSession;
 
+mod vectored;
+pub use vectored::WriteAllVectoredSession;
+
 #[cfg(test)]
 mod tests;
