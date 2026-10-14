@@ -23,6 +23,9 @@ use crate::stream::Stream;
 use super::profiles::ChunkingProfile as _;
 use super::stream::{RollingManifestUpdate, StreamProfile};
 
+#[path = "reader_context.rs"]
+mod context;
+
 const READS_PER_POLL: usize = 16;
 
 /// One owned payload and its canonical ATP chunk descriptor.
@@ -78,7 +81,9 @@ enum ReadState {
 ///
 /// This layout is deliberately not a byte-for-byte replacement for the
 /// whole-slice profile's size-dependent plan and tail merging. The existing
-/// profile APIs and persisted descriptors are unchanged.
+/// profile APIs and persisted descriptors are unchanged. In particular, its
+/// whole-slice validator's minimum-size and early-consumption heuristics are
+/// not the contract of this explicitly sized, provisional incremental layout.
 #[must_use = "chunk readers do nothing until polled"]
 pub struct StreamChunkReader<R> {
     reader: Pin<Box<R>>,
