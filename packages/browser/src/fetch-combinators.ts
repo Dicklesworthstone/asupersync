@@ -25,6 +25,11 @@ export interface FetchResponseJoin {
   cancel(reason?: string): Promise<Outcome<void>>;
 }
 
+export interface FetchResponseGroupOptions {
+  /** Borrowed unmodified same-realm signal, observed until ownership transfers. */
+  signal?: AbortSignal | null;
+}
+
 type Selection = FetchResponseWinner | readonly FetchResponseWinner[];
 interface ResponseGroup {
   readonly result: Promise<Outcome<Selection>>;
@@ -42,6 +47,12 @@ const READER = typeof ReadableStreamDefaultReader === "undefined" ? undefined : 
 const CANCEL = READER?.prototype.cancel;
 const RELEASE = READER?.prototype.releaseLock;
 const READER_CLOSED = READER && Object.getOwnPropertyDescriptor(READER.prototype, "closed")?.get;
+const SIGNAL = typeof AbortSignal === "undefined" ? undefined : AbortSignal;
+const ANY_SIGNAL = SIGNAL?.any;
+const ABORTED = SIGNAL && Object.getOwnPropertyDescriptor(SIGNAL.prototype, "aborted")?.get;
+const TARGET = typeof EventTarget === "undefined" ? undefined : EventTarget;
+const ADD_LISTENER = TARGET?.prototype.addEventListener;
+const REMOVE_LISTENER = TARGET?.prototype.removeEventListener;
 const ok = <T>(value: T): Outcome<T> => Object.freeze({ outcome: "ok", value });
 const fail = (message: string): Failure => Object.freeze({ outcome: "err", failure: Object.freeze({
   code: "compatibility_rejected", recoverability: "permanent", message,
@@ -80,10 +91,11 @@ function checked<T>(value: unknown): Outcome<T> {
   return internal("invalid fetch group outcome");
 }
 
-function cancellation(reason: string, join: boolean): Failure {
+function cancellation(reason: string, join: boolean, signal = false): Failure {
   // A composite outcome, not a new task or a claim about a member's ABI receipt.
   return Object.freeze({ outcome: "cancelled", cancellation: Object.freeze({
-    kind: join ? "fetch_join_cancel" : "fetch_race_cancel", phase: "completed",
+    kind: join ? (signal ? "fetch_join_signal" : "fetch_join_cancel")
+      : (signal ? "fetch_race_signal" : "fetch_race_cancel"), phase: "completed",
     origin_region: join ? "browser-fetch-join" : "browser-fetch-race",
     origin_task: null, timestamp_nanos: 0, message: reason, truncated: false,
   }) });
@@ -106,6 +118,16 @@ interface Member {
  * Losers are cancelled in parallel and drained before result resolves. Any
  * cleanup/publication refusal fails the race and drains the proposed winner.
  * Winner failure or caller cancellation during that drain also drains all work.
+ * Failures strengthen as Panicked > Cancelled > Err; successful loser
+ * cancellation is cleanup, not an owner cancellation.
+ *
+ * An optional AbortSignal also cancels and drains every member, including a
+ * proposed winner still waiting for loser cleanup. A pre-aborted signal skips
+ * response methods after acquiring the inputs. Native AbortSignal.any is
+ * required only when a signal is supplied. A private dependent signal prevents
+ * earlier caller listeners from suppressing cancellation. The caller's signal
+ * is not mutated, its reason is not inspected, and the observer is removed at
+ * settlement. Callers may supply their own timeout signal; no timer is created.
  *
  * No request, timer, runtime task, retry or additional authority is created.
  * Requests (including POSTs) have already been explicitly admitted by their
@@ -124,8 +146,10 @@ interface Member {
  * still work. A nonsettling host keeps result/cancel pending. Input ordering
  * breaks ties between responses already ready at registration, not network races.
  */
-export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outcome<FetchResponseRace> {
-  return responseGroup(fetches, false);
+export function raceFetchResponses(
+  fetches: readonly FetchStreamHandle[], options: FetchResponseGroupOptions = {},
+): Outcome<FetchResponseRace> {
+  return responseGroup(fetches, false, options);
 }
 
 /**
@@ -137,23 +161,44 @@ export function raceFetchResponses(fetches: readonly FetchStreamHandle[]): Outco
  * immediate successful identity, even on hosts without native stream readers.
  *
  * Shares raceFetchResponses' exclusive reader ownership, refusal/cleanup rules,
- * original scope authority and no-read-ahead bounds. Does not buffer responses,
+ * signal cancellation, original scope authority and no-read-ahead bounds.
+ * Empty input remains successful even with a valid pre-aborted signal.
+ * Does not buffer responses,
  * start requests, or join body EOF: callers must consume/cancel every returned
  * body and await each original fetch.closed after successful transfer.
  */
-export function joinFetchResponses(fetches: readonly FetchStreamHandle[]): Outcome<FetchResponseJoin> {
-  return responseGroup(fetches, true);
+export function joinFetchResponses(
+  fetches: readonly FetchStreamHandle[], options: FetchResponseGroupOptions = {},
+): Outcome<FetchResponseJoin> {
+  return responseGroup(fetches, true, options);
 }
 
-function responseGroup(fetches: readonly FetchStreamHandle[], join: false): Outcome<FetchResponseRace>;
-function responseGroup(fetches: readonly FetchStreamHandle[], join: true): Outcome<FetchResponseJoin>;
-function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Outcome<ResponseGroup> {
+function responseGroup(fetches: readonly FetchStreamHandle[], join: false, options: FetchResponseGroupOptions): Outcome<FetchResponseRace>;
+function responseGroup(fetches: readonly FetchStreamHandle[], join: true, options: FetchResponseGroupOptions): Outcome<FetchResponseJoin>;
+function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, options: FetchResponseGroupOptions): Outcome<ResponseGroup> {
   const members: Member[] = [];
+  let signal: AbortSignal | undefined;
   try {
     if (!Array.isArray(fetches)) return fail("fetch group members must be an array");
     const count = fetches.length;
     if (!Number.isInteger(count) || count < (join ? 0 : 1) || count > BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) {
       return fail(`fetch groups require ${join ? 0 : 1}..${BROWSER_FETCH_LIMITS.maxRequestsPerRuntime} members`);
+    }
+    const suppliedSignal = options.signal;
+    if (suppliedSignal != null) {
+      if (!SIGNAL || !ANY_SIGNAL || !ABORTED || !ADD_LISTENER || !REMOVE_LISTENER) {
+        return fail("fetch group signals require native AbortSignal.any and EventTarget");
+      }
+      // Native any() may inspect public accessors. Reject customized signals
+      // without invoking those accessors, then brand-check through the intrinsic.
+      if (Object.getPrototypeOf(suppliedSignal) !== SIGNAL.prototype
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "aborted")
+          || Object.getOwnPropertyDescriptor(suppliedSignal, "reason")) {
+        return fail("fetch groups require an unmodified same-realm native signal");
+      }
+      Reflect.apply(ABORTED, suppliedSignal, []);
+      signal = Reflect.apply(ANY_SIGNAL, SIGNAL, [[suppliedSignal]]) as AbortSignal;
+      Reflect.apply(ABORTED, signal, []);
     }
     if (count && (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !READER_CLOSED)) {
       return fail("fetch groups require native ReadableStream readers");
@@ -204,6 +249,7 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Ou
   let finished = false;
   let readyCount = 0;
   const cleanupErrors = new Map<number, Failure>();
+  let onAbort: (() => void) | undefined;
 
   function drain(index: number): Promise<Outcome<void>> {
     const member = members[index];
@@ -249,7 +295,18 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Ou
     }
   }
   function release() {
+    if (signal && onAbort) {
+      Reflect.apply(REMOVE_LISTENER!, signal, ["abort", onAbort]);
+      onAbort = undefined;
+    }
     for (const member of members) { try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ } }
+  }
+  if (signal) {
+    onAbort = () => stop(cancellation("fetch group aborted by caller signal", join, true));
+    try {
+      Reflect.apply(ADD_LISTENER!, signal, ["abort", onAbort, { once: true }]);
+      if (Reflect.apply(ABORTED!, signal, [])) onAbort();
+    } catch { stop(internal("fetch group signal observer failed")); }
   }
   // Register every observer before calling any member's response method.
   for (let index = 0; index < members.length; index += 1) {
@@ -260,6 +317,7 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Ou
     }, () => stop(internal("fetch group member completion rejected")));
   }
   for (let index = 0; index < members.length; index += 1) {
+    if (stopped) break;
     const member = members[index];
     try {
       void Promise.resolve(member.response()).then((outcome) => {

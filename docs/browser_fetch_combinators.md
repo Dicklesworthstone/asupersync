@@ -49,8 +49,11 @@ Losers are cancelled in parallel. Their initiating native cancellation promises
 and original fetch completion promises must settle before the winner transfers.
 A cancellation/publication refusal fails the whole group and retires the
 proposed winner. Failure of that winner during slow loser cleanup also prevents
-successful transfer. Cleanup failure precedence is panicked, error, then
-cancelled, with input order breaking ties at the same severity.
+successful transfer. Failure precedence follows the native Outcome lattice:
+**panicked > cancelled > error**, across both the initiating failure and cleanup.
+Input order breaks equal-severity cleanup ties. Successful cancellation of a
+loser is expected cleanup, not a new owner cancellation. A caller cancellation
+can strengthen an error while the group is still draining; it cannot hide a panic.
 
 `race.cancel(reason)` before transfer cancels every member, including a selected
 winner still waiting for loser cleanup. Repeated calls share one settlement
@@ -83,6 +86,13 @@ with Node 22.13 or later. Tests use the actual fetch manager and combinator with
 native streams, including a real loopback HTTP race and peer disconnection.
 The task ABI is explicitly doubled; these tests do not establish Rust/WASM
 integration, complete workspace health, or cross-browser network compatibility.
+
+The cross-combinator lifecycle suite is
+`node --experimental-vm-modules --test scripts/test_browser_fetch_group_lifecycle.mjs`.
+It exercises the actual combinator source with native Streams, explicit fetch
+handle/terminal-receipt doubles and a request-limit double. It checks outcome
+precedence, cancellation during drain, ownership transfer, signal observation
+and listener removal; it does not substitute for the SDK or Rust/WASM lanes.
 
 ## All-response joins
 
@@ -126,3 +136,43 @@ method is inert; original scopes and each returned fetch still own cleanup.
 A joined handle can subsequently participate in a race, or a race winner can
 be joined with another handle, provided no consumer currently holds its native
 reader lock. These compositions do not issue another request or duplicate bytes.
+
+## External cancellation and deadlines
+
+Both combinators accept an optional `FetchResponseGroupOptions` argument with a
+borrowed `signal`. Existing one-argument calls are unchanged:
+
+```ts
+import { joinFetchResponses } from "@asupersync/browser/concurrency";
+
+// The caller creates the deadline; the combinator itself creates no timer.
+const admitted = joinFetchResponses([userRequest, permissionsRequest], {
+  signal: AbortSignal.any([shutdownSignal, AbortSignal.timeout(5_000)]),
+});
+if (admitted.outcome !== "ok") {
+  await Promise.all([userRequest.cancel(), permissionsRequest.cancel()]);
+  throw new Error("join setup refused");
+}
+const outcome = await admitted.value.result;
+// On success, consume/cancel every returned body and await each fetch.closed.
+// On failure/cancellation, all group-owned fetches have already drained.
+```
+
+The signal is observed while headers are parked **and throughout loser cleanup**.
+Cancellation retires every acquired fetch, including a proposed race winner.
+It does not merely stop awaiting `result`: result and cancellation retain the
+same cleanup barrier. A pre-aborted signal skips response methods after taking
+ownership of the inputs. An empty join remains the successful identity.
+
+Signals must be unmodified, same-realm native `AbortSignal` objects. Signal use
+requires native `AbortSignal.any`; calls without a signal need no signal support.
+A private dependent signal prevents an earlier caller listener using
+`stopImmediatePropagation()` from suppressing cancellation. The borrowed signal
+is never aborted or modified; its arbitrary reason is not read or stringified.
+Observers are removed at settlement. Signal cancellation has the composite kind
+`fetch_race_signal` or `fetch_join_signal` rather than impersonating a task receipt.
+
+After successful ownership transfer, aborting the group signal is inert. For a
+deadline that must also cover body consumption, pass the signal to the original
+scope-owned fetches too. A timeout requests cancellation; it cannot force an
+uncooperative host's cleanup to finish by the deadline.

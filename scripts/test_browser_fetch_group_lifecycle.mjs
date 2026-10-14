@@ -5,7 +5,9 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { getEventListeners } from "node:events";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { stripTypeScriptTypes } from "node:module";
 import { test } from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
@@ -150,5 +152,182 @@ for (const kind of kinds) {
     }
     assert.equal((await run.cancel()).outcome, "ok");
     for (const winner of winners) assert.equal([a, b][winner.index].count.cancels, 0);
+  });
+}
+
+for (const kind of kinds) {
+  test(`${kind}: pre-aborted signal drains inputs without invoking response methods`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(); controller.abort();
+    const gate = deferred(), a = member(t, { gate }), b = member(t);
+    const run = group(kind, [a, b], { signal: controller.signal });
+    assert.equal(a.count.responses, 0); assert.equal(b.count.responses, 0);
+    assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+    await pending(run.result); gate.resolve();
+    const result = await run.result;
+    assert.equal(result.outcome, "cancelled");
+    assert.equal(result.cancellation.kind, kind === "raceFetchResponses" ? "fetch_race_signal" : "fetch_join_signal");
+    assert.equal(a.body.locked, false); assert.equal(b.body.locked, false);
+  });
+  test(`${kind}: signal during drain retires ready bodies and waits for every cleanup`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), gate = deferred();
+    const a = member(t), b = member(t, { gate }); a.respond();
+    const run = group(kind, [a, b], { signal: controller.signal });
+    await pending(run.result); controller.abort();
+    assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+    await pending(run.result);
+    const cancelledAgain = run.cancel("late manual cancellation");
+    gate.resolve();
+    const result = await run.result;
+    assert.equal(result.outcome, "cancelled"); assert.match(result.cancellation.kind, /_signal$/);
+    assert.equal(await cancelledAgain, result);
+    for (const item of [a, b]) { assert.equal(item.count.pulls, 0); assert.equal(item.body.locked, false); }
+  });
+  test(`${kind}: earlier stopImmediatePropagation cannot suppress group cancellation`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController();
+    controller.signal.addEventListener("abort", (event) => event.stopImmediatePropagation());
+    const a = member(t), b = member(t);
+    const run = group(kind, [a, b], { signal: controller.signal });
+    controller.abort();
+    assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+    assert.equal((await run.result).outcome, "cancelled");
+  });
+  test(`${kind}: cancellation during body conversion is observed before response methods`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), a = member(t), b = member(t);
+    const convert = a.handle.toReadableStream;
+    a.handle.toReadableStream = () => { controller.abort(); return convert(); };
+    const run = group(kind, [a, b], { signal: controller.signal });
+    assert.equal(a.count.responses, 0); assert.equal(b.count.responses, 0);
+    assert.equal(a.count.cancels, 1); assert.equal(b.count.cancels, 1);
+    assert.equal((await run.result).outcome, "cancelled");
+  });
+  test(`${kind}: arbitrary abort reasons are neither read nor stringified`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), a = member(t);
+    const run = group(kind, [a], { signal: controller.signal });
+    let inspected = 0;
+    const reason = { get cause() { inspected += 1; throw new Error("cause inspected"); },
+      toString() { inspected += 1; throw new Error("stringified"); },
+      [Symbol.toPrimitive]() { inspected += 1; throw new Error("coerced"); } };
+    controller.abort(reason);
+    assert.equal(a.count.cancels, 1);
+    assert.equal((await run.result).outcome, "cancelled"); assert.equal(inspected, 0);
+  });
+  test(`${kind}: caller shutdown dominates ordinary cleanup failure but not panic`, { timeout: 3000 }, async (t) => {
+    for (const terminalKind of ["err", "panicked"]) {
+      const controller = new AbortController(), gate = deferred();
+      const a = member(t, { gate, terminal: failure(terminalKind, "cleanup") });
+      const run = group(kind, [a], { signal: controller.signal });
+      controller.abort(); assert.equal(a.count.cancels, 1);
+      await pending(run.result); gate.resolve();
+      assert.equal((await run.result).outcome, terminalKind === "panicked" ? "panicked" : "cancelled");
+    }
+  });
+  test(`${kind}: manual group cancellation never aborts the borrowed signal`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), a = member(t);
+    const run = group(kind, [a], { signal: controller.signal });
+    assert.equal((await run.cancel()).outcome, "cancelled");
+    assert.equal(controller.signal.aborted, false);
+    assert.equal(getEventListeners(controller.signal, "abort").length, 0);
+  });
+  test(`${kind}: abort after transfer cannot reclaim the delivered body`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), a = member(t); a.respond();
+    const run = group(kind, [a], { signal: controller.signal });
+    assert.equal((await run.result).outcome, "ok");
+    controller.abort(); await turn();
+    assert.equal(a.count.cancels, 0); assert.equal(a.count.pulls, 0); assert.equal(a.body.locked, false);
+  });
+  test(`${kind}: invalid or customized signals refuse before ownership transfer`, { timeout: 3000 }, async (t) => {
+    const a = member(t), controller = new AbortController(); let reads = 0;
+    Object.defineProperty(controller.signal, "aborted", { get() { reads += 1; throw new Error("getter invoked"); } });
+    for (const options of [null, { signal: {} }, { signal: controller.signal }]) {
+      assert.equal(methods[kind]([a.handle], options).outcome, "err");
+    }
+    assert.equal(reads, 0); assert.equal(a.count.conversions, 0); assert.equal(a.count.cancels, 0);
+  });
+  test(`${kind}: hosts without signal support still run unsignalled groups`, { timeout: 3000 }, async (t) => {
+    const implementation = await api({ AbortSignal: undefined }), a = member(t); a.respond();
+    assert.equal(implementation[kind]([a.handle], { signal: new AbortController().signal }).outcome, "err");
+    assert.equal(a.count.conversions, 0);
+    assert.equal((await group(kind, [a], undefined, implementation).result).outcome, "ok");
+  });
+  test(`${kind}: private signal listeners are removed on success, error and cancellation`, { timeout: 3000 }, async (t) => {
+    const copies = [];
+    // Observe the private dependency while still using native any() and getters.
+    function ObservedSignal() { throw new Error("signal construction is forbidden"); }
+    ObservedSignal.prototype = AbortSignal.prototype;
+    ObservedSignal.any = (signals) => { const copy = AbortSignal.any(signals); copies.push(copy); return copy; };
+    const implementation = await api({ AbortSignal: ObservedSignal });
+    for (const end of ["ok", "err", "cancelled"]) {
+      const controller = new AbortController(), a = member(t);
+      const run = group(kind, [a], { signal: controller.signal }, implementation);
+      const copy = copies.at(-1);
+      assert.ok(copy); assert.equal(getEventListeners(copy, "abort").length, 1);
+      if (end === "cancelled") controller.abort();
+      else a.respond(end === "ok" ? undefined : failure("err", "network"));
+      assert.equal((await run.result).outcome, end);
+      assert.equal(getEventListeners(copy, "abort").length, 0);
+    }
+  });
+  test(`${kind}: refused setup rolls back locks even when conversion aborts the signal`, { timeout: 3000 }, async (t) => {
+    const controller = new AbortController(), a = member(t), b = member(t);
+    const held = b.body.getReader(); t.after(() => held.releaseLock());
+    const convert = a.handle.toReadableStream;
+    a.handle.toReadableStream = () => { controller.abort(); return convert(); };
+    assert.equal(methods[kind]([a.handle, b.handle], { signal: controller.signal }).outcome, "err");
+    assert.equal(a.body.locked, false); assert.equal(a.count.cancels, 0); assert.equal(b.count.cancels, 0);
+  });
+}
+test("empty join retains its identity with a valid pre-aborted signal", async () => {
+  const controller = new AbortController(); controller.abort();
+  const admitted = methods.joinFetchResponses([], { signal: controller.signal });
+  assert.equal(admitted.outcome, "ok");
+  const result = await admitted.value.result;
+  assert.equal(result.outcome, "ok"); assert.equal(result.value.length, 0);
+});
+
+for (const kind of kinds) {
+  test(`${kind}: group signal aborts real loopback requests and joins native cleanup`, { timeout: 5000 }, async (t) => {
+    const received = deferred(), disconnected = deferred(), controllers = [];
+    let requests = 0, closes = 0;
+    const server = createServer((_request, response) => {
+      requests += 1; if (requests === 2) received.resolve();
+      // Deliberately leave headers parked until the client aborts the request.
+      response.on("close", () => { closes += 1; if (closes === 2) disconnected.resolve(); });
+    });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject); server.listen(0, "127.0.0.1", resolve);
+    });
+    t.after(async () => {
+      for (const controller of controllers) controller.abort();
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+    });
+    const origin = `http://127.0.0.1:${server.address().port}`;
+    function nativeMember(index) {
+      const controller = new AbortController(), completion = deferred(); controllers.push(controller);
+      let response;
+      const count = { cancels: 0 };
+      // Only the member controller reaches fetch; the group signal cannot bypass
+      // the combinator's owned-reader cancellation path.
+      const headers = fetch(`${origin}/${index}`, { signal: controller.signal }).then((value) => {
+        response = value;
+        return ok({ status: value.status, statusText: value.statusText, url: value.url, headers: [...value.headers] });
+      }, () => cancelled("native fetch aborted"));
+      const body = new ReadableStream({ async cancel() {
+        count.cancels += 1; controller.abort(); await headers;
+        if (response?.body) { try { await response.body.cancel(); } catch { /* Native abort. */ } }
+        completion.resolve(cancelled("native cleanup complete"));
+      } }, { highWaterMark: 0 });
+      return { body, count, handle: { response: () => headers, closed: completion.promise, toReadableStream: () => ok(body) } };
+    }
+    const members = [nativeMember(0), nativeMember(1)], controller = new AbortController();
+    const run = group(kind, members, { signal: controller.signal });
+    await received.promise; await pending(run.result); controller.abort();
+    for (const item of members) assert.equal(item.count.cancels, 1);
+    assert.equal((await run.result).outcome, "cancelled");
+    await disconnected.promise;
+    assert.equal(requests, 2); assert.equal(closes, 2);
+    for (const item of members) {
+      assert.equal(item.body.locked, false); assert.equal((await item.handle.closed).outcome, "cancelled");
+    }
   });
 }
