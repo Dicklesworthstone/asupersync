@@ -25,6 +25,14 @@ export interface FetchBatchOptions {
   signal?: AbortSignal | null;
 }
 
+/** Array inputs retain their existing snapshot semantics. Stream inputs are owned. */
+export type FetchBatchRequests = readonly BrowserFetchOptions[] | ReadableStream<BrowserFetchOptions>;
+
+export interface FetchBatchStreamOptions extends FetchBatchOptions {
+  /** Stream-input admission limit; default 100,000. Arrays retain their fixed cap. */
+  maxRequests?: number;
+}
+
 export interface FetchBatch<T> {
   /** Input-ordered results, only after every admitted request and consumer drains. */
   readonly result: Promise<Outcome<readonly T[]>>;
@@ -214,7 +222,21 @@ export function tryMapFetches<T>(scope: FetchBatchScope, requests: readonly Brow
  * concurrency workers wait to deliver results. The native output has a zero
  * high-water mark; one in-flight pull can still enqueue if its reader releases
  * its lock. Payload byte size and caller/downstream queues are not bounded.
- * The input array is still snapshotted (at most maxRequests entries).
+ * Arrays are snapshotted (at most maxRequests entries). A native request stream
+ * is acquired exclusively after validation and pulled incrementally, with one
+ * pending read at a time and no separate request backlog. Each read reserves a
+ * worker slot. Stream indices follow input order, not request completion order.
+ * Stream inputs may exceed the array cap via options.maxRequests, a positive
+ * safe integer; encountering a further request fails before admitting it.
+ *
+ * On stop, request-stream cancellation runs in parallel with member cleanup and
+ * its initiating promise is joined before closed. A successful input close does
+ * not discard queued requests; an idle input error stops the batch. Native
+ * cancellation cannot join arbitrary work hidden in the input's producer. The
+ * producer owns cleanup of its queue and unadmitted upload bodies, including a
+ * request produced concurrently with cancellation. No such body is acquired by
+ * the batch before scope admission. Input/downstream queues are outside our
+ * retained-work bound. Setup refusal unlocks without reading or cancelling.
  *
  * Drain results concurrently with closed; awaiting closed without reading a
  * nonempty result stream intentionally applies backpressure. Cancelling the
@@ -227,23 +249,23 @@ export function tryMapFetches<T>(scope: FetchBatchScope, requests: readonly Brow
  * Otherwise shares mapFetches' consumer, parent-signal and ownership semantics.
  * Consume/cancel each body inside consume; do not return live body resources.
  */
-export function streamMapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+export function streamMapFetches<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   consume: (response: FetchBatchResponse) => T | PromiseLike<T>,
-  options: FetchBatchOptions = {}): Outcome<FetchBatchStream<T>> {
+  options: FetchBatchStreamOptions = {}): Outcome<FetchBatchStream<T>> {
   return streamFetchBatch<T>(scope, requests, consume, options, false);
 }
 
 /** streamMapFetches with tryMapFetches' checked, explicit consumer Outcomes. */
-export function tryStreamMapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+export function tryStreamMapFetches<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   consume: (response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>,
-  options: FetchBatchOptions = {}): Outcome<FetchBatchStream<T>> {
+  options: FetchBatchStreamOptions = {}): Outcome<FetchBatchStream<T>> {
   return streamFetchBatch<T>(scope, requests, consume, options, true);
 }
 
-function streamFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+function streamFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   consume: ((response: FetchBatchResponse) => T | PromiseLike<T>)
     | ((response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>),
-  options: FetchBatchOptions, consumerOutcomes: boolean): Outcome<FetchBatchStream<T>> {
+  options: FetchBatchStreamOptions, consumerOutcomes: boolean): Outcome<FetchBatchStream<T>> {
   if (!STREAM) return failure("streaming fetch batches require native ReadableStream");
   const queue: { item: FetchBatchResult<T>; release: () => void }[] = [];
   let controller!: ReadableStreamDefaultController<FetchBatchResult<T>>;
@@ -315,18 +337,35 @@ function streamFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserF
   return ok(Object.freeze({ results, closed, cancel: batch.cancel }));
 }
 
-function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   consume: ((response: FetchBatchResponse) => T | PromiseLike<T>)
     | ((response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>),
-  options: FetchBatchOptions, consumerOutcomes: boolean, delivery?: BatchDelivery<T>): Outcome<FetchBatch<T>> {
+  options: FetchBatchStreamOptions, consumerOutcomes: boolean, delivery?: BatchDelivery<T>): Outcome<FetchBatch<T>> {
   let inputs: BrowserFetchOptions[];
+  let requestReader: ReadableStreamDefaultReader<BrowserFetchOptions> | undefined;
+  let requestClosed: Promise<unknown> | undefined;
+  let requestLimit: number = FETCH_BATCH_LIMITS.maxRequests;
+  let requestEof = false;
+  let requestTurn = Promise.resolve();
+  let inputRetirement: Promise<void> | undefined;
+  function releaseRequests(): void {
+    if (requestReader) {
+      try { Reflect.apply(RELEASE!, requestReader, []); } catch { /* Already released. */ }
+    }
+  }
   let start: FetchBatchScope["fetch"];
   let concurrency: number;
   let signal: AbortSignal | undefined;
   try {
-    if (!Array.isArray(requests)) return failure("fetch batch requests must be an array");
-    const count = requests.length;
+    const arrayInput = Array.isArray(requests);
+    if (!arrayInput && !delivery) return failure("fetch batch requests must be an array");
+    const count = arrayInput ? requests.length : 0;
     if (!Number.isSafeInteger(count) || count < 0 || count > FETCH_BATCH_LIMITS.maxRequests) return failure("fetch batch requires at most maxRequests requests");
+    if (!arrayInput) {
+      const suppliedLimit = options.maxRequests;
+      requestLimit = suppliedLimit === undefined ? FETCH_BATCH_LIMITS.maxRequests : suppliedLimit;
+      if (!Number.isSafeInteger(requestLimit) || requestLimit < 1) return failure("request stream maxRequests must be a positive safe integer");
+    }
     concurrency = options.concurrency === undefined ? 4 : options.concurrency;
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > BROWSER_FETCH_LIMITS.maxRequestsPerRuntime) return failure("fetch batch concurrency must be an integer in 1..64");
     if (typeof consume !== "function") return failure("fetch batch requires a consumer function");
@@ -349,13 +388,20 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
     start = scope.fetch;
     if (typeof start !== "function") return failure("fetch batch requires an explicit fetch scope");
     inputs = [];
-    for (let index = 0; index < count; index += 1) inputs.push(requests[index]);
-    if (inputs.length && (!STREAM || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED || !CONTROLLER || !ABORT)) {
+    for (let index = 0; index < count; index += 1) inputs.push((requests as readonly BrowserFetchOptions[])[index]);
+    if ((!arrayInput || inputs.length) && (!STREAM || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED || !CONTROLLER || !ABORT)) {
       return failure("fetch batch requires native stream readers and AbortController");
     }
-  } catch { return failure("invalid fetch batch configuration"); }
+    if (!arrayInput) {
+      // The intrinsic checks the native stream brand and refuses locked input.
+      // Never call an arbitrary object's getReader method during admission.
+      requestReader = Reflect.apply(GET_READER!, requests, []) as ReadableStreamDefaultReader<BrowserFetchOptions>;
+      requestClosed = Promise.resolve(Reflect.apply(READER_CLOSED!, requestReader, []));
+      void requestClosed.catch(() => {}); // Releasing on setup refusal rejects it.
+    }
+  } catch { releaseRequests(); return failure("invalid fetch batch configuration"); }
 
-  if (!inputs.length) {
+  if (!inputs.length && !requestReader) {
     const result = Promise.resolve(ok(Object.freeze([]) as readonly T[]));
     const settled = Promise.resolve(ok(undefined));
     return ok(Object.freeze({ result, cancel(reason = "fetch batch cancelled by caller") {
@@ -371,6 +417,43 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
   // Recognize only errors created by THIS batch. Reading arbitrary .cause
   // properties would let a consumer forge a cancellation or run a getter.
   const ownedFailures = new WeakMap<object, Failure>();
+
+  function retireRequests(): void {
+    if (!requestReader || inputRetirement) return;
+    const done = deferred<void>();
+    inputRetirement = done.promise;
+    // Install the receipt before user cancellation callbacks can reenter, and
+    // let sibling retirement start without waiting for this source's cleanup.
+    void Promise.resolve().then(() => Reflect.apply(CANCEL!, requestReader!, ["fetch batch request source retired"]))
+      .then(() => done.resolve(), () => {
+        // Source cleanup follows member indices for equal-severity ties.
+        noteCleanup(Infinity, failure("fetch batch request source cancellation refused", "internal_failure"));
+        done.resolve();
+      });
+  }
+
+  async function takeRequest(): Promise<{ index: number; request: BrowserFetchOptions } | undefined> {
+    const previous = requestTurn;
+    const ready = deferred<void>();
+    requestTurn = ready.promise;
+    try {
+      await previous;
+      if (stopped || requestEof) return;
+      const entry = await Reflect.apply(READ!, requestReader!, []) as ReadableStreamReadResult<BrowserFetchOptions>;
+      // A read may finish in the same turn as cancellation. Never admit it
+      // after the fence, nor inspect a body the scope never accepted.
+      if (stopped) return;
+      if (entry.done) { requestEof = true; return; }
+      if (next >= requestLimit) {
+        stop(failure("fetch batch request stream exceeds maxRequests"));
+        return;
+      }
+      return { index: next++, request: entry.value };
+    } catch {
+      if (!inputRetirement) stop(failure("fetch batch request source failed", "internal_failure"));
+      return;
+    } finally { ready.resolve(); }
+  }
 
   function ownedError(outcome: Failure): Error {
     const error = streamError(outcome);
@@ -445,6 +528,7 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
     stopped = outcome; // Admission fence precedes every host/user callback.
     results.fill(undefined as T);
     delivery?.stop();
+    retireRequests();
     for (const member of members) {
       void drain(member);
       try { Reflect.apply(ABORT!, member.controller, [ownedError(outcome)]); } catch { /* Preserve first cause. */ }
@@ -474,15 +558,19 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
     }, { highWaterMark: 0 });
   }
   async function worker(): Promise<void> {
-    while (!stopped && next < inputs.length) {
-      const index = next++;
+    while (!stopped) {
+      let entry = requestReader ? await takeRequest()
+        : next < inputs.length ? { index: next, request: inputs[next++] } : undefined;
+      if (!entry || stopped) break;
+      const { index } = entry;
       const member: Member = { index, ready: deferred<void>(), controller: new CONTROLLER!(), ended: false, retiring: false };
       members.add(member);
       let value!: T, consumed = false;
       try {
         try {
-          const raw: unknown = Reflect.apply(start, scope, [inputs[index]]);
-          inputs[index] = undefined as unknown as BrowserFetchOptions;
+          const raw: unknown = Reflect.apply(start, scope, [entry.request]);
+          entry = undefined;
+          if (!requestReader) inputs[index] = undefined as unknown as BrowserFetchOptions;
           if (thenable(raw)) {
             // A later handle would bypass the admission fence. Refuse it, but
             // keep ownership: drain retires whatever the promise admits.
@@ -552,16 +640,24 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
       if (Reflect.apply(ABORTED!, signal, [])) onAbort();
     } catch {
       detachSignal();
+      releaseRequests();
       return failure("fetch batch signal observation refused");
     }
   }
-  // Return the cancellation handle before executing user scope admission.
+  // An idle source error is decisive even when every worker is waiting to
+  // publish. Successful source closure is not permission to discard its queue.
+  if (requestClosed) void requestClosed.catch(() => {
+    if (!finished && !inputRetirement) stop(failure("fetch batch request source failed", "internal_failure"));
+  });
+  // Return the cancellation handle before executing source reads or admission.
   void Promise.resolve().then(async () => {
-    try { await Promise.all(Array.from({ length: Math.min(concurrency, inputs.length) }, () => worker().catch(() => {
+    try { await Promise.all(Array.from({ length: requestReader ? concurrency : Math.min(concurrency, inputs.length) }, () => worker().catch(() => {
       stop(failure("fetch batch worker failed", "internal_failure"));
     }))); }
     catch { stop(failure("fetch batch driver failed", "internal_failure")); await Promise.all([...members].map(drain)); }
+    if (inputRetirement) await inputRetirement;
     finished = true;
+    releaseRequests();
     detachSignal();
     inputs.length = 0;
     const cleanup = cleanupFailure?.outcome;
