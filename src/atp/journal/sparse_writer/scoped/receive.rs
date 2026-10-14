@@ -12,6 +12,10 @@ use std::task::Poll;
 #[path = "receive_resume.rs"]
 mod resume;
 
+#[path = "receive_integrity.rs"]
+mod integrity;
+use integrity::ReceiveIntegrity;
+
 struct ReceiveRequest {
     manifest: Arc<Manifest>,
     options: ScopedReceiveOptions,
@@ -32,6 +36,10 @@ impl ScopedSparseWriter {
     /// own buffering, the supplied manifest and existing writer metadata are
     /// separate memory costs; `max_chunks` bounds new ledger entries, not those
     /// caller-provided allocations. The source need not close at the body end.
+    /// Completed manifest chunks are checked before their completing batch is
+    /// written. Earlier fragments may already be staged; final on-disk content
+    /// verification remains mandatory. Resumption reconstructs crossing hashes
+    /// from the retained prefix before polling the replacement source.
     ///
     /// Construction is lazy and returns `InvalidInput` for an invalid chunk size
     /// without polling the source. The session retains its context. A terminal
@@ -141,16 +149,16 @@ impl ScopedSparseWriter {
     {
         let ReceiveRequest { manifest, options, expected, resume_offset } = request;
         let permit = self.reserve(cx).await?;
-        let preflight_manifest = Arc::clone(&manifest);
         let (mut permit, preflight) = self.receive_step(cx, permit, move |writer| {
-            prepare_receive(writer, &preflight_manifest, options, expected.as_ref(), resume_offset)
+            integrity::prepare_integrity(writer, manifest, options, expected.as_ref(), resume_offset)
         }).await?;
-        let length = match preflight {
-            Outcome::Ok(length) => length,
+        let mut integrity = match preflight {
+            Outcome::Ok(integrity) => integrity,
             Outcome::Err(error) => return Ok(Outcome::Err(error)),
             Outcome::Cancelled(reason) => return Ok(Outcome::Cancelled(reason)),
             Outcome::Panicked(payload) => return Ok(Outcome::Panicked(payload)),
         };
+        let length = integrity.length;
         let mut offset = resume_offset.unwrap_or(0);
         accepted.store(offset, Ordering::Relaxed);
         let limited = source.take(length - offset);
@@ -171,11 +179,16 @@ impl ScopedSparseWriter {
             };
             let size = chunk.bytes.len() as u64;
             let (returned, written) = self.receive_step(cx, permit, move |writer| {
+                if let Err(reason) = integrity.check_chunk(&chunk) {
+                    return writer.fail_verification(reason).map(|()| integrity);
+                }
                 writer.write_chunk_blocking(offset, &chunk.bytes, WriteOptions::default())
+                    .map(|_| integrity)
             }).await?;
             permit = returned;
             match written {
-                Outcome::Ok(_) => {
+                Outcome::Ok(checked) => {
+                    integrity = checked;
                     offset += size; // Take and the canonical chunk reader bound this by length.
                     accepted.store(offset, Ordering::Relaxed);
                 }
@@ -187,7 +200,11 @@ impl ScopedSparseWriter {
         // No EOF probe: following protocol bytes stay in the source. The same
         // admission permit covers ingress, fresh verification and publication.
         let (_permit, result) = self.receive_step(cx, permit, move |writer| {
-            match writer.verify_inner(&manifest, expected.as_ref()) {
+            let verification = match integrity.finish() {
+                Ok(()) => writer.verify_inner(&integrity.manifest, expected.as_ref()),
+                Err(reason) => writer.fail_verification(reason),
+            };
+            match verification {
                 Outcome::Ok(()) => writer.commit_with_fsync(File::sync_all),
                 Outcome::Err(error) => Outcome::Err(error),
                 Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
@@ -241,6 +258,9 @@ fn prepare_receive(
             {
                 return Err(invalid("receive object exceeds byte or chunk limit".to_owned()));
             }
+            // Final verification checks even optional hints. Reject impossible
+            // ranges and bad empty digests before any body or staging effects.
+            ReceiveIntegrity::validate_ranges(&object.chunk_boundaries, size).map_err(invalid)?;
             if object.content_hash.is_none() && !object.id.is_content_addressed() {
                 if expected.is_none() {
                     return Err(invalid("chunk-only receive requires a trusted commitment".to_owned()));
