@@ -39,6 +39,8 @@ pub struct BufReader<R> {
     buf: Box<[u8]>,
     pos: usize,
     cap: usize,
+    /// A substituted read buffer makes the source's progress unknowable.
+    read_buffer_replaced: bool,
 }
 
 impl<R> BufReader<R> {
@@ -57,6 +59,7 @@ impl<R> BufReader<R> {
             buf: vec![0u8; capacity].into_boxed_slice(),
             pos: 0,
             cap: 0,
+            read_buffer_replaced: false,
         }
     }
 
@@ -105,6 +108,43 @@ impl<R> BufReader<R> {
     }
 }
 
+impl<R: AsyncRead + Unpin> BufReader<R> {
+    fn check_read_buffer(&self) -> io::Result<()> {
+        if self.read_buffer_replaced {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "buffered reader replaced the read buffer it was given; endpoint effects are unknown",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Retain every in-place fill before interpreting the provider's status.
+    /// Both buffered entry points must use the same progress accounting.
+    fn poll_refill(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.check_read_buffer()?;
+        self.pos = 0;
+        self.cap = 0;
+        let start = self.buf.as_ptr();
+        let offered = self.buf.len();
+        let mut read_buf = ReadBuf::new(&mut self.buf);
+        let result = Pin::new(&mut self.inner).poll_read(cx, &mut read_buf);
+        if !super::transfer_session::filled_in_place(read_buf.filled(), start, offered) {
+            self.read_buffer_replaced = true;
+            return Poll::Ready(self.check_read_buffer());
+        }
+        self.cap = read_buf.filled().len();
+        match result {
+            // Return the original error, but keep any bytes already consumed
+            // from the source available through buffer() or the next read.
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending if self.cap == 0 => Poll::Pending,
+            Poll::Pending | Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+        }
+    }
+}
+
 impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -116,6 +156,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
         }
 
         let this = self.get_mut();
+        this.check_read_buffer()?;
 
         // If we have buffered data, copy from it
         if this.pos < this.cap {
@@ -133,15 +174,10 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
         }
 
         // Fill the internal buffer
-        this.pos = 0;
-        this.cap = 0;
-        let mut read_buf = ReadBuf::new(&mut this.buf);
-        match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
+        match this.poll_refill(cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-            Poll::Ready(Ok(())) => {
-                this.cap = read_buf.filled().len();
-            }
+            Poll::Ready(Ok(())) => {}
         }
 
         // Copy from the newly filled buffer
@@ -156,18 +192,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for BufReader<R> {
 impl<R: AsyncRead + Unpin> AsyncBufRead for BufReader<R> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<&[u8]>> {
         let this = self.get_mut();
+        this.check_read_buffer()?;
 
         // If buffer is empty, fill it
         if this.pos >= this.cap {
-            this.pos = 0;
-            this.cap = 0;
-            let mut read_buf = ReadBuf::new(&mut this.buf);
-            match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
+            match this.poll_refill(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => {
-                    this.cap = read_buf.filled().len();
-                }
+                Poll::Ready(Ok(())) => {}
             }
         }
 
