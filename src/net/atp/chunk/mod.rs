@@ -26,6 +26,7 @@ pub mod dedupe;
 pub mod delta_stream;
 pub mod media;
 pub mod profiles;
+pub mod reader;
 pub mod reassembly;
 pub mod reconcile;
 pub mod sparse_image;
