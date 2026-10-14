@@ -86,6 +86,18 @@ pub enum WritePriority {
     Critical = 3,
 }
 
+// Publication and cancellation are terminal decisions. A failed publication
+// attempt is intentionally sealed too: an error need not mean that the final
+// path is absent, and retrying must not silently reuse an old verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriterLifecycle {
+    Accepting,
+    Committing,
+    Committed,
+    Cancelling,
+    Cancelled,
+}
+
 /// Sparse writer state for tracking progress and consistency
 #[derive(Debug)]
 struct SparseWriterState {
@@ -113,6 +125,8 @@ struct SparseWriterState {
     last_write_at: Instant,
     /// Verification state
     verification_state: VerificationState,
+    /// Whether data mutation or a terminal operation is still admissible.
+    lifecycle: WriterLifecycle,
 }
 
 /// Metadata for individual chunks
@@ -147,6 +161,10 @@ pub enum VerificationState {
 
 /// Main sparse writer implementation
 pub struct SparseWriter {
+    // Serialize complete operations, not just individual state snapshots.
+    // None of the guarded paths may suspend: their private I/O helpers are
+    // synchronous, so a parking_lot guard never crosses an await point.
+    operation: Mutex<()>,
     /// Writer configuration
     config: SparseWriterConfig,
     /// Platform capabilities
@@ -207,9 +225,11 @@ impl SparseWriter {
             created_at: Instant::now(),
             last_write_at: Instant::now(),
             verification_state: VerificationState::Pending,
+            lifecycle: WriterLifecycle::Accepting,
         }));
 
         crate::types::outcome::Outcome::Ok(Self {
+            operation: Mutex::new(()),
             config,
             platform,
             path_manager,
@@ -221,10 +241,24 @@ impl SparseWriter {
         self.state.lock()
     }
 
+    fn require_accepting(state: &SparseWriterState) -> Result<(), SparseWriterError> {
+        if state.lifecycle != WriterLifecycle::Accepting {
+            return Err(SparseWriterError::WriteFailed(
+                "writer is sealed by a commit or cancellation attempt".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Set expected final size for preallocation.
     /// Reject sizes that would exclude an already-written chunk.
     pub fn set_expected_size(&self, size: u64) -> Result<(), SparseWriterError> {
+        let _operation = self.operation.lock();
         let mut state = self.lock_state();
+        Self::require_accepting(&state)?;
+        if state.expected_size == Some(size) {
+            return Ok(());
+        }
         if let Some(chunk) = state.written_chunks.values().find(|chunk| {
             chunk
                 .offset
@@ -236,6 +270,9 @@ impl SparseWriter {
                 size: chunk.size,
             });
         }
+        // Invalidate before preallocation: even a failed operation may have
+        // changed the staging inode. The previous manifest cannot authorize it.
+        state.verification_state = VerificationState::Pending;
         // Trigger preallocation if enabled and file is open
         if self.config.enable_preallocation && state.temp_file.is_some() {
             self.preallocate_internal(&mut state, size)?;
@@ -274,21 +311,28 @@ impl SparseWriter {
         };
         let sparse_range = SparseRange { start: offset, end };
 
+        let _operation = self.operation.lock();
         let mut state = self.lock_state();
+        if let Err(error) = Self::require_accepting(&state) {
+            return Outcome::Err(error);
+        }
         if state.expected_size.is_some_and(|expected| end > expected) {
             return Outcome::Err(SparseWriterError::InvalidRange {
                 offset,
                 size: chunk_size,
             });
         }
-        if let Err(error) = self.ensure_temp_file_open_locked(&mut state) {
-            return Outcome::Err(error);
-        }
         if state.range_tracker.overlaps(&sparse_range) {
             return Outcome::Err(SparseWriterError::OverlappingWrite {
                 offset,
                 size: chunk_size,
             });
+        }
+        // Reject side-effect-free requests above without disturbing evidence;
+        // invalidate before opening, preallocating, or partially writing data.
+        state.verification_state = VerificationState::Pending;
+        if let Err(error) = self.ensure_temp_file_open_locked(&mut state) {
+            return Outcome::Err(error);
         }
         let (hash, synced) = match self.write_chunk_locked(&mut state, offset, data, &options) {
             Ok(result) => result,
@@ -331,6 +375,10 @@ impl SparseWriter {
         _cx: &Cx,
         expected_manifest: &Manifest,
     ) -> Outcome<(), SparseWriterError> {
+        let _operation = self.operation.lock();
+        if let Err(error) = Self::require_accepting(&self.lock_state()) {
+            return Outcome::Err(error);
+        }
         if let Err(error) = expected_manifest.validate() {
             return self.fail_verification(format!("manifest validation failed: {error}"));
         }
@@ -486,49 +534,66 @@ impl SparseWriter {
         Outcome::ok(())
     }
 
-    /// Commit the written data atomically to final destination.
+    /// Commit the written data to the final destination using the configured policy.
     ///
     /// On Unix, durability-enabled policies sync the destination directory after
     /// publication. A sync error can occur after the destination becomes visible;
     /// callers must not interpret an error as proof that publication did not occur.
+    /// Once publication is attempted, this writer is sealed even on failure. Keep
+    /// its staging/destination evidence for recovery instead of retrying blindly.
+    /// Repeating a successful commit returns its path without publishing again.
+    /// `CopyAndVerify` retains its existing non-atomic visibility semantics.
     pub async fn commit(&self, _cx: &Cx) -> Outcome<PathBuf, SparseWriterError> {
+        let _operation = self.operation.lock();
         {
-            let state = self.lock_state();
+            let mut state = self.lock_state();
+            match state.lifecycle {
+                WriterLifecycle::Committed => return Outcome::ok(state.final_path.clone()),
+                WriterLifecycle::Accepting => {}
+                WriterLifecycle::Committing => {
+                    return Outcome::Err(SparseWriterError::CommitFailed(
+                        "previous commit did not settle successfully; inspect retained evidence"
+                            .to_owned(),
+                    ));
+                }
+                WriterLifecycle::Cancelling | WriterLifecycle::Cancelled => {
+                    return Outcome::Err(SparseWriterError::CommitFailed(
+                        "writer was cancelled".to_owned(),
+                    ));
+                }
+            }
             if !Self::is_complete_locked(&state) {
                 return Outcome::Err(SparseWriterError::IncompleteData);
             }
             if !matches!(state.verification_state, VerificationState::Verified { .. }) {
                 return Outcome::Err(SparseWriterError::NotVerified);
             }
+            // Seal before any durability/publication effect. An I/O error or
+            // unwind must never reopen the old verification for mutation/retry.
+            state.lifecycle = WriterLifecycle::Committing;
         }
 
-        // Apply fsync policy before commit
-        match self.apply_fsync_policy().await {
+        match self.apply_fsync_policy() {
             Outcome::Ok(()) => {}
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         }
 
-        // Perform atomic commit based on policy
-        let final_path = match self.atomic_commit().await {
+        let final_path = match self.atomic_commit() {
             Outcome::Ok(path) => path,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::cancelled(reason),
             Outcome::Panicked(payload) => return Outcome::panicked(payload),
         };
 
-        // Make the published destination durable before discarding staging data.
         if let Err(error) = self.sync_commit_destination(&final_path) {
             return Outcome::Err(error);
         }
-
-        // Clean up temp file
-        match self.cleanup_temp_file().await {
-            Ok(()) => {}
-            Err(e) => return Outcome::Err(e),
+        if let Err(error) = self.cleanup_temp_file() {
+            return Outcome::Err(error);
         }
-
+        self.lock_state().lifecycle = WriterLifecycle::Committed;
         Outcome::ok(final_path)
     }
 
@@ -562,21 +627,36 @@ impl SparseWriter {
         Ok(())
     }
 
-    /// Cancel the write operation and clean up
+    /// Cancel the write operation and clean up.
+    ///
+    /// Successful cancellation is idempotent and permanently seals the writer.
+    /// A failed cleanup may be retried, but a committed or unresolved publication
+    /// is never converted into cancellation or discarded by this operation.
     pub async fn cancel(&self, _cx: &Cx) -> Outcome<(), SparseWriterError> {
-        // Move temp file to quarantine if configured
-        if self.config.enable_quarantine {
-            match self.quarantine_temp_file("cancelled").await {
-                Ok(_) => {}
-                Err(e) => return Outcome::Err(e),
+        let _operation = self.operation.lock();
+        {
+            let mut state = self.lock_state();
+            match state.lifecycle {
+                WriterLifecycle::Cancelled => return Outcome::ok(()),
+                WriterLifecycle::Committed | WriterLifecycle::Committing => {
+                    return Outcome::Err(SparseWriterError::CommitFailed(
+                        "cannot cancel a committed or unresolved publication".to_owned(),
+                    ));
+                }
+                WriterLifecycle::Accepting | WriterLifecycle::Cancelling => {}
             }
-        } else {
-            match self.cleanup_temp_file().await {
-                Ok(_) => {}
-                Err(e) => return Outcome::Err(e),
-            }
+            state.lifecycle = WriterLifecycle::Cancelling;
+            state.verification_state = VerificationState::Pending;
         }
-
+        let cleanup = if self.config.enable_quarantine {
+            self.quarantine_temp_file("cancelled")
+        } else {
+            self.cleanup_temp_file()
+        };
+        if let Err(error) = cleanup {
+            return Outcome::Err(error);
+        }
+        self.lock_state().lifecycle = WriterLifecycle::Cancelled;
         Outcome::ok(())
     }
 
@@ -729,7 +809,7 @@ impl SparseWriter {
         Ok((hash, synced))
     }
 
-    async fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
+    fn apply_fsync_policy(&self) -> Outcome<(), SparseWriterError> {
         let mut state = self.lock_state();
         let verified = matches!(state.verification_state, VerificationState::Verified { .. });
 
@@ -780,7 +860,7 @@ impl SparseWriter {
         Outcome::ok(())
     }
 
-    async fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
+    fn atomic_commit(&self) -> Outcome<PathBuf, SparseWriterError> {
         let (temp_path, final_path) = {
             let mut state = self.lock_state();
             let temp_path = match state.temp_path.clone() {
@@ -845,27 +925,40 @@ impl SparseWriter {
         Outcome::ok(final_path)
     }
 
-    async fn cleanup_temp_file(&self) -> Result<(), SparseWriterError> {
+    fn cleanup_temp_file(&self) -> Result<(), SparseWriterError> {
         let mut state = self.lock_state();
 
-        if let Some(temp_path) = state.temp_path.take() {
-            std::fs::remove_file(&temp_path).ok(); // Ignore errors
+        if let Some(temp_path) = state.temp_path.as_ref() {
+            match std::fs::remove_file(temp_path) {
+                Ok(()) => {}
+                // Rename/link publication already consumed the staging name.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(SparseWriterError::CommitFailed(format!(
+                        "temporary file cleanup failed: {error}"
+                    )));
+                }
+            }
         }
 
+        state.temp_path = None;
         state.temp_file = None;
         Ok(())
     }
 
-    async fn quarantine_temp_file(&self, reason: &str) -> Result<(), SparseWriterError> {
+    fn quarantine_temp_file(&self, reason: &str) -> Result<(), SparseWriterError> {
         let mut state = self.lock_state();
 
-        if let Some(temp_path) = state.temp_path.take() {
+        if let Some(temp_path) = state.temp_path.as_ref() {
             let mut path_mgr = self.path_manager.lock();
             path_mgr
-                .quarantine_file(&temp_path, reason)
+                .quarantine_file(temp_path, reason)
                 .map_err(|e| SparseWriterError::TempPathCreation(e.to_string()))?;
         }
 
+        // Retain the original path and descriptor when quarantine fails so a
+        // sealed cancellation can retry cleanup without losing its evidence.
+        state.temp_path = None;
         state.temp_file = None;
         Ok(())
     }
@@ -1021,6 +1114,10 @@ pub enum SparseWriterError {
     #[error("Commit failed: {0}")]
     CommitFailed(String),
 }
+
+#[cfg(test)]
+#[path = "sparse_writer_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
