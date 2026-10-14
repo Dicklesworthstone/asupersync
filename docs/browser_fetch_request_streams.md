@@ -109,3 +109,61 @@ whose cancellation disconnects both the input connection and an active fetched
 peer. Scope/fetch-handle/task accounting and imported limits are explicit doubles;
 this is not full SDK, Rust/WASM or cross-browser certification. Set
 `ASUPERSYNC_FETCH_BATCH_SOURCE` to the pre-feature source for a negative control.
+
+## Joining an explicitly owned producer
+
+A raw native stream has no independent producer-completion receipt. For a
+multi-stage producer whose owned work outlives native EOF or cancellation, pass a
+`FetchBatchRequestSource` instead:
+
+```ts
+const requestSource = {
+  readable: requestDescriptors, // ReadableStream<BrowserFetchOptions>
+  closed: producer.closed,     // Promise<Outcome<void>> for ALL producer work
+  cancel: reason => producer.cancel(reason), // works while readable is locked
+};
+const admitted = streamMapFetches(scope, requestSource, consume, { concurrency: 4 });
+```
+
+Successful setup transfers exclusive reader ownership and responsibility for
+joining that source's `closed` receipt. Invalid/locked source refusal leaves
+cleanup with its caller. The source's readable, cancellation method and terminal
+promise are snapshotted before lock acquisition. Cancellation retains its
+original receiver; mutating source properties afterward does not replace the
+owned operation. A raw native stream's similarly named custom properties are
+not treated as a producer contract.
+
+Native EOF is not enough to settle the batch: it also waits for the producer's
+checked `closed` receipt. A successful producer receipt does not discard
+unconsumed native input. An idle producer failure immediately fences admission
+and retires active work, even if no request read is pending. Producer failure
+can still replace proposed success after native EOF; it cannot roll back
+already-delivered values or remote effects.
+
+On stop, the batch starts native-reader cancellation and the independent owner
+`cancel` method in parallel, and joins BOTH receipts plus producer `closed` and
+all admitted fetch work. The owner method must be idempotent, work while its
+readable is locked, and not await this downstream batch's own `closed`/`cancel`
+barrier. Native stream cancellation may already call the same underlying owner;
+source implementations must tolerate that. The batch cannot enforce truth of a
+producer's completion claim or force a nonsettling producer to retire.
+
+Typed producer terminal/cancellation Outcomes are validated and copied. A stream
+error's arbitrary `cause` is never accepted as a producer receipt. Genuine
+producer errors and panics participate in `panicked > cancelled > err`; expected
+producer cancellation during downstream retirement does not hide a consumer's
+application error. A source fault observed before retirement can be resolved to
+the producer's authoritative cancellation instead of a generic input error.
+Malformed or rejected receipts are `internal_failure`, not successful retirement.
+
+The additional lane is:
+
+```sh
+node --experimental-vm-modules --test scripts/test_browser_fetch_batch_source_owner.mjs
+```
+
+It includes independently gated native cancellation, owner cancellation and
+producer completion, typed failure propagation, callback snapshot/reentrancy
+checks, and two actual batch-driver stages connected through a native transform.
+The two-stage cases execute the upstream batch's real `closed`/`cancel` logic;
+the underlying scope/fetch/task adapters remain explicit doubles.

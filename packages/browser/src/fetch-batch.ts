@@ -25,8 +25,17 @@ export interface FetchBatchOptions {
   signal?: AbortSignal | null;
 }
 
-/** Array inputs retain their existing snapshot semantics. Stream inputs are owned. */
-export type FetchBatchRequests = readonly BrowserFetchOptions[] | ReadableStream<BrowserFetchOptions>;
+/** An owned producer with a cleanup receipt independent of native stream EOF. */
+export interface FetchBatchRequestSource {
+  readonly readable: ReadableStream<BrowserFetchOptions>;
+  /** Settles after all producer-owned work retires, including on cancellation. */
+  readonly closed: Promise<Outcome<void>>;
+  /** Idempotent; must work while readable is locked by the batch. */
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+/** Array snapshots, native request streams, or explicitly owned producers. */
+export type FetchBatchRequests = readonly BrowserFetchOptions[] | ReadableStream<BrowserFetchOptions> | FetchBatchRequestSource;
 
 export interface FetchBatchStreamOptions extends FetchBatchOptions {
   /** Stream-input admission limit; default 100,000. Arrays retain their fixed cap. */
@@ -89,9 +98,11 @@ function checked<T>(value: unknown): Outcome<T> {
         }
         break;
       }
-      case "panicked":
-        if (typeof outcome.message === "string") return Object.freeze({ outcome: "panicked", message: outcome.message });
+      case "panicked": {
+        const message = outcome.message;
+        if (typeof message === "string") return Object.freeze({ outcome: "panicked", message });
         break;
+      }
       case "cancelled": {
         const { kind, phase, origin_region, origin_task, timestamp_nanos, message, truncated } = outcome.cancellation;
         if (typeof kind === "string" && ["requested", "cancelling", "finalizing", "completed"].includes(phase)
@@ -125,6 +136,7 @@ function deferred<T>() {
 
 const STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const GET_READER = STREAM?.prototype.getReader;
+const STREAM_LOCKED = STREAM && Object.getOwnPropertyDescriptor(STREAM.prototype, "locked")?.get;
 const READER = typeof ReadableStreamDefaultReader === "undefined" ? undefined : ReadableStreamDefaultReader;
 const READ = READER?.prototype.read, CANCEL = READER?.prototype.cancel, RELEASE = READER?.prototype.releaseLock;
 const READER_CLOSED = READER && Object.getOwnPropertyDescriptor(READER.prototype, "closed")?.get;
@@ -238,6 +250,15 @@ export function tryMapFetches<T>(scope: FetchBatchScope, requests: readonly Brow
  * the batch before scope admission. Input/downstream queues are outside our
  * retained-work bound. Setup refusal unlocks without reading or cancelling.
  *
+ * A FetchBatchRequestSource additionally provides an independent typed closed
+ * receipt and idempotent cancel method. The batch joins that receipt even after
+ * native EOF, observes idle producer failures, and calls owner cancellation in
+ * parallel with native cancellation on stop. Producer failure severity is not
+ * inferred from arbitrary stream error.cause properties. Expected retirement
+ * cancellation does not invalidate a consumer's application error. The owner's
+ * contract must cover all producer work; a nonsettling receipt keeps closed
+ * pending. Methods/receipt are snapshotted before input ownership is acquired.
+ *
  * Drain results concurrently with closed; awaiting closed without reading a
  * nonempty result stream intentionally applies backpressure. Cancelling the
  * output (including ordinary async-iteration break or pipeTo failure) stops
@@ -344,6 +365,8 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   let inputs: BrowserFetchOptions[];
   let requestReader: ReadableStreamDefaultReader<BrowserFetchOptions> | undefined;
   let requestClosed: Promise<unknown> | undefined;
+  let requestOwner: { cancel: () => unknown; closed: Promise<Outcome<void>> } | undefined;
+  let sourceFault = false;
   let requestLimit: number = FETCH_BATCH_LIMITS.maxRequests;
   let requestEof = false;
   let requestTurn = Promise.resolve();
@@ -393,9 +416,22 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       return failure("fetch batch requires native stream readers and AbortController");
     }
     if (!arrayInput) {
+      let readable: unknown = requests;
+      try { Reflect.apply(STREAM_LOCKED!, requests, []); }
+      catch {
+        // Snapshot explicit owner properties before taking the native lock.
+        // A raw native stream never has its user-added properties inspected.
+        const owner = requests as FetchBatchRequestSource;
+        const stream = owner.readable, terminal = owner.closed, cancelOwner = owner.cancel;
+        if (typeof cancelOwner !== "function" || !thenable(terminal)) return failure("invalid owned fetch request source");
+        readable = stream;
+        requestOwner = { cancel: () => Reflect.apply(cancelOwner, owner, ["fetch batch request source retired"]),
+          closed: Promise.resolve(terminal).then(value => checked<void>(value),
+            () => failure("fetch batch request source terminal publication rejected", "internal_failure")) };
+      }
       // The intrinsic checks the native stream brand and refuses locked input.
       // Never call an arbitrary object's getReader method during admission.
-      requestReader = Reflect.apply(GET_READER!, requests, []) as ReadableStreamDefaultReader<BrowserFetchOptions>;
+      requestReader = Reflect.apply(GET_READER!, readable, []) as ReadableStreamDefaultReader<BrowserFetchOptions>;
       requestClosed = Promise.resolve(Reflect.apply(READER_CLOSED!, requestReader, []));
       void requestClosed.catch(() => {}); // Releasing on setup refusal rejects it.
     }
@@ -424,10 +460,24 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
     inputRetirement = done.promise;
     // Install the receipt before user cancellation callbacks can reenter, and
     // let sibling retirement start without waiting for this source's cleanup.
-    void Promise.resolve().then(() => Reflect.apply(CANCEL!, requestReader!, ["fetch batch request source retired"]))
-      .then(() => done.resolve(), () => {
+    const native = Promise.resolve().then(() => Reflect.apply(CANCEL!, requestReader!, ["fetch batch request source retired"]))
+      .then(() => undefined, () => failure("fetch batch request source cancellation refused", "internal_failure"));
+    const ownerCancel = requestOwner ? Promise.resolve().then(() => requestOwner!.cancel())
+      .then(value => checked<void>(value), () => failure("fetch batch request owner cancellation rejected", "internal_failure"))
+      : Promise.resolve(ok(undefined));
+    void Promise.all([native, ownerCancel, requestOwner?.closed ?? Promise.resolve(ok(undefined))])
+      .then(([nativeFailure, receipt, terminal]) => {
+        let issue = nativeFailure;
+        const refusal = !!nativeFailure || receipt.outcome === "err" || receipt.outcome === "panicked";
+        if (receipt.outcome === "err" || receipt.outcome === "panicked") {
+          if (!issue || severity(receipt) >= severity(issue)) issue = receipt;
+        }
+        if (terminal.outcome === "err" || terminal.outcome === "panicked"
+            || terminal.outcome === "cancelled" && (sourceFault || refusal)) {
+          if (!issue || severity(terminal) >= severity(issue)) issue = terminal;
+        }
         // Source cleanup follows member indices for equal-severity ties.
-        noteCleanup(Infinity, failure("fetch batch request source cancellation refused", "internal_failure"));
+        if (issue) noteCleanup(Infinity, issue);
         done.resolve();
       });
   }
@@ -450,7 +500,10 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       }
       return { index: next++, request: entry.value };
     } catch {
-      if (!inputRetirement) stop(failure("fetch batch request source failed", "internal_failure"));
+      if (!inputRetirement) {
+        sourceFault = true;
+        stop(failure("fetch batch request source failed", "internal_failure"));
+      }
       return;
     } finally { ready.resolve(); }
   }
@@ -647,7 +700,13 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
   // An idle source error is decisive even when every worker is waiting to
   // publish. Successful source closure is not permission to discard its queue.
   if (requestClosed) void requestClosed.catch(() => {
-    if (!finished && !inputRetirement) stop(failure("fetch batch request source failed", "internal_failure"));
+    if (!finished && !inputRetirement) {
+      sourceFault = true;
+      stop(failure("fetch batch request source failed", "internal_failure"));
+    }
+  });
+  if (requestOwner) void requestOwner.closed.then(terminal => {
+    if (!finished && !inputRetirement && terminal.outcome !== "ok") stop(terminal);
   });
   // Return the cancellation handle before executing source reads or admission.
   void Promise.resolve().then(async () => {
@@ -655,6 +714,8 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       stop(failure("fetch batch worker failed", "internal_failure"));
     }))); }
     catch { stop(failure("fetch batch driver failed", "internal_failure")); await Promise.all([...members].map(drain)); }
+    // Native EOF does not certify the producer's task/cleanup retirement.
+    if (requestOwner) await requestOwner.closed;
     if (inputRetirement) await inputRetirement;
     finished = true;
     releaseRequests();
