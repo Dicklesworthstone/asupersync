@@ -186,18 +186,28 @@ impl PlatformCapabilities {
         Self::detect_for_path(cx, ".").await
     }
 
-    /// Detect capabilities for a specific filesystem path
+    /// Detect capabilities for a specific filesystem path.
+    ///
+    /// This historical entry point performs synchronous host probes when polled.
+    /// Scoped sparse-writer construction dispatches the same implementation to
+    /// the region-owned blocking pool instead.
     pub async fn detect_for_path(
         _cx: &Cx,
         path: impl AsRef<Path>,
     ) -> Outcome<Self, CapabilityError> {
-        let path = path.as_ref();
+        Self::detect_for_path_blocking(path.as_ref())
+    }
+
+    // All probes are synchronous OS operations. Keep one implementation that
+    // can run directly in an owned blocking job, without polling futures or
+    // starting a nested executor on that worker.
+    pub(crate) fn detect_for_path_blocking(path: &Path) -> Outcome<Self, CapabilityError> {
 
         // Detect OS type
         let os_type = Self::detect_os_type();
 
         // Detect filesystem features
-        let filesystem = match Self::detect_filesystem_features(path).await {
+        let filesystem = match Self::detect_filesystem_features(path) {
             Outcome::Ok(fs) => fs,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -205,7 +215,7 @@ impl PlatformCapabilities {
         };
 
         // Detect I/O capabilities
-        let io_capabilities = match Self::detect_io_capabilities(&os_type, &filesystem).await {
+        let io_capabilities = match Self::detect_io_capabilities(&os_type, &filesystem) {
             Outcome::Ok(io) => io,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -213,7 +223,7 @@ impl PlatformCapabilities {
         };
 
         // Detect atomic operation support
-        let atomic_operations = match Self::detect_atomic_support(path, &os_type).await {
+        let atomic_operations = match Self::detect_atomic_support(path, &os_type) {
             Outcome::Ok(atomic) => atomic,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
@@ -257,7 +267,7 @@ impl PlatformCapabilities {
     }
 
     /// Detect filesystem-specific features
-    async fn detect_filesystem_features(
+    fn detect_filesystem_features(
         path: &Path,
     ) -> Outcome<FilesystemFeatures, CapabilityError> {
         // Get filesystem statistics
@@ -275,13 +285,13 @@ impl PlatformCapabilities {
         };
 
         // Test capabilities by attempting operations
-        let supports_preallocation = Self::test_preallocation_support(path).await;
-        let supports_atomic_rename = Self::test_atomic_rename_support(path).await;
-        let supports_hard_links = Self::test_hard_link_support(path).await;
-        let supports_sparse_files = Self::test_sparse_file_support(path).await;
-        let supports_hole_punching = Self::test_hole_punching_support(path).await;
-        let supports_cow = Self::test_cow_support(path).await;
-        let supports_reflinks = Self::test_reflink_support(path).await;
+        let supports_preallocation = Self::test_preallocation_support(path);
+        let supports_atomic_rename = Self::test_atomic_rename_support(path);
+        let supports_hard_links = Self::test_hard_link_support(path);
+        let supports_sparse_files = Self::test_sparse_file_support(path);
+        let supports_hole_punching = Self::test_hole_punching_support(path);
+        let supports_cow = Self::test_cow_support(path);
+        let supports_reflinks = Self::test_reflink_support(path);
 
         let max_file_size = Self::detect_max_file_size(&fs_type);
 
@@ -300,7 +310,7 @@ impl PlatformCapabilities {
     }
 
     /// Detect I/O capabilities
-    async fn detect_io_capabilities(
+    fn detect_io_capabilities(
         os_type: &OsType,
         filesystem: &FilesystemFeatures,
     ) -> Outcome<IoCapabilities, CapabilityError> {
@@ -327,7 +337,7 @@ impl PlatformCapabilities {
     }
 
     /// Detect atomic operation support
-    async fn detect_atomic_support(
+    fn detect_atomic_support(
         _path: &Path,
         os_type: &OsType,
     ) -> Outcome<AtomicSupport, CapabilityError> {
@@ -504,7 +514,7 @@ impl PlatformCapabilities {
     }
 
     #[allow(unsafe_code)]
-    async fn test_preallocation_support(path: &Path) -> bool {
+    fn test_preallocation_support(path: &Path) -> bool {
         let Some((test_file, file)) = Self::create_unique_probe_file(path, "prealloc") else {
             return false;
         };
@@ -528,7 +538,7 @@ impl PlatformCapabilities {
         }
     }
 
-    async fn test_atomic_rename_support(path: &Path) -> bool {
+    fn test_atomic_rename_support(path: &Path) -> bool {
         let Some((source_path, source_file)) = Self::create_unique_probe_file(path, "rename_src")
         else {
             return false;
@@ -559,7 +569,7 @@ impl PlatformCapabilities {
         renamed
     }
 
-    async fn test_hard_link_support(path: &Path) -> bool {
+    fn test_hard_link_support(path: &Path) -> bool {
         let Some((test_file1, file)) = Self::create_unique_probe_file(path, "hardlink_src") else {
             return false;
         };
@@ -575,7 +585,7 @@ impl PlatformCapabilities {
         linked
     }
 
-    async fn test_sparse_file_support(path: &Path) -> bool {
+    fn test_sparse_file_support(path: &Path) -> bool {
         let Some((test_file, file)) = Self::create_unique_probe_file(path, "sparse") else {
             return false;
         };
@@ -621,7 +631,7 @@ impl PlatformCapabilities {
     }
 
     #[allow(unsafe_code)]
-    async fn test_hole_punching_support(path: &Path) -> bool {
+    fn test_hole_punching_support(path: &Path) -> bool {
         #[cfg(target_os = "linux")]
         {
             use std::os::unix::io::AsRawFd;
@@ -650,12 +660,12 @@ impl PlatformCapabilities {
         }
     }
 
-    async fn test_cow_support(_path: &Path) -> bool {
+    fn test_cow_support(_path: &Path) -> bool {
         // Detect COW filesystem support
         false // Conservative default
     }
 
-    async fn test_reflink_support(_path: &Path) -> bool {
+    fn test_reflink_support(_path: &Path) -> bool {
         // Detect reflink support (BTRFS, XFS, etc.)
         false // Conservative default
     }
@@ -809,14 +819,9 @@ mod tests {
             std::fs::write(test_dir.join(name), contents).unwrap();
         }
 
-        let _ = futures_lite::future::block_on(PlatformCapabilities::test_preallocation_support(
-            &test_dir,
-        ));
-        let _ = futures_lite::future::block_on(PlatformCapabilities::test_atomic_rename_support(
-            &test_dir,
-        ));
-        let _ =
-            futures_lite::future::block_on(PlatformCapabilities::test_hard_link_support(&test_dir));
+        let _ = PlatformCapabilities::test_preallocation_support(&test_dir);
+        let _ = PlatformCapabilities::test_atomic_rename_support(&test_dir);
+        let _ = PlatformCapabilities::test_hard_link_support(&test_dir);
 
         for (name, contents) in sentinels {
             assert_eq!(std::fs::read(test_dir.join(name)).unwrap(), contents);

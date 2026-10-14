@@ -182,15 +182,27 @@ pub struct SparseWriter {
 }
 
 impl SparseWriter {
-    /// Create a new sparse writer for the given object
+    /// Create a new sparse writer for the given object.
+    ///
+    /// This historical entry point probes synchronously when polled. Native
+    /// runtime callers can use `ScopedSparseWriter::new` to own and offload the
+    /// entire construction, including destination-filesystem probes.
     pub async fn new(
-        cx: &Cx,
+        _cx: &Cx,
         object_id: ObjectId,
         final_path: impl AsRef<Path>,
         config: SparseWriterConfig,
     ) -> Outcome<Self, SparseWriterError> {
-        let final_path = final_path.as_ref().to_path_buf();
+        Self::new_blocking(object_id, final_path.as_ref().to_path_buf(), config)
+    }
 
+    // Shared by the historical constructor and the owned pool constructor.
+    // Do not await, spawn, or run an executor in this synchronous implementation.
+    fn new_blocking(
+        object_id: ObjectId,
+        final_path: PathBuf,
+        config: SparseWriterConfig,
+    ) -> Outcome<Self, SparseWriterError> {
         let destination_dir = final_path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -199,7 +211,7 @@ impl SparseWriter {
         // Detect capabilities for the destination filesystem. ATP transfers may
         // target a mounted volume whose sparse/preallocation/rename behavior
         // differs from the process working directory.
-        let platform = match PlatformCapabilities::detect_for_path(cx, destination_dir).await {
+        let platform = match PlatformCapabilities::detect_for_path_blocking(destination_dir) {
             crate::types::outcome::Outcome::Ok(caps) => Arc::new(caps),
             crate::types::outcome::Outcome::Err(e) => {
                 return crate::types::outcome::Outcome::Err(SparseWriterError::PlatformDetection(
