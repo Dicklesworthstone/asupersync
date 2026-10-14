@@ -33,10 +33,6 @@ use sha2::{Digest, Sha256};
 use crate::atp::object::{
     ContentId, ContentIdHasher, MetadataPolicy, Object, ObjectEdge, ObjectId, ObjectKind,
 };
-use crate::atp::safety::validate_portable_path_component;
-
-use super::metadata::{PathLinkKind, classify_path_link};
-use super::source_walk::collect_dir;
 
 /// Failure from a transport-agnostic streaming/walk helper.
 ///
@@ -256,90 +252,16 @@ pub async fn collect_entries(
 ///
 /// Symbolic links are emitted as leaves when preservation is enabled. Other
 /// reparse points and links disallowed by policy fail closed before traversal.
-/// Directory discovery uses bounded blocking-pool batches and an explicit
-/// traversal stack; returned entry paths remain sorted. Dropping the future
-/// prevents subsequent batches, but cannot preempt a running filesystem call.
+/// Root inspection and bounded directory batches observe ambient I/O authority
+/// and cancellation while waiting. This includes single-file and preserved-link
+/// roots. Cancellation masks are respected; a submitted filesystem operation
+/// may still finish after its wait is abandoned. Traversal is iterative and
+/// returned entry paths remain sorted. This is not an atomic filesystem snapshot.
 pub async fn collect_entries_with_policy(
     root: &Path,
     policy: &MetadataPolicy,
 ) -> Result<(String, bool, Vec<SourceEntry>), StreamingError> {
-    // Gate before classification: a preserved root symlink returns early and
-    // must not bypass authority merely because it needs no content read.
-    crate::cx::io_gate::require_ambient_io("fs")
-        .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
-    let root_link_kind = classify_path_link(root)
-        .await
-        .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
-
-    let root_name = match root.file_name() {
-        None => "transfer".to_string(),
-        Some(name) => name
-            .to_str()
-            .ok_or_else(|| {
-                StreamingError::new(format!(
-                    "{}: source file name is not valid Unicode",
-                    root.display()
-                ))
-            })?
-            .to_string(),
-    };
-    validate_portable_path_component(&root_name).map_err(|_| {
-        StreamingError::new(format!(
-            "{}: source file name is not portable: {root_name:?}",
-            root.display()
-        ))
-    })?;
-
-    match root_link_kind {
-        PathLinkKind::Symlink(_) if policy.preserve_symlinks => {
-            return Ok((
-                root_name.clone(),
-                false,
-                vec![SourceEntry {
-                    rel_path: root_name,
-                    abs_path: root.to_path_buf(),
-                }],
-            ));
-        }
-        PathLinkKind::Symlink(_) => {
-            return Err(StreamingError::new(format!(
-                "{}: source symlink rejected by metadata policy",
-                root.display()
-            )));
-        }
-        PathLinkKind::UnsupportedReparse => {
-            return Err(StreamingError::new(format!(
-                "{}: unsupported Windows reparse point",
-                root.display()
-            )));
-        }
-        PathLinkKind::NotLink => {}
-    }
-
-    let meta = crate::fs::metadata(root)
-        .await
-        .map_err(|e| StreamingError::new(format!("{}: {e}", root.display())))?;
-
-    if meta.is_file() {
-        return Ok((
-            root_name.clone(),
-            false,
-            vec![SourceEntry {
-                rel_path: root_name,
-                abs_path: root.to_path_buf(),
-            }],
-        ));
-    }
-    if meta.is_dir() {
-        let mut entries = Vec::new();
-        collect_dir(root, String::new(), policy, &mut entries).await?;
-        entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
-        return Ok((root_name, true, entries));
-    }
-    Err(StreamingError::new(format!(
-        "{}: not a regular file or directory",
-        root.display()
-    )))
+    super::source_root::collect_entries_with_policy(root, policy).await
 }
 
 /// Stream a file off disk, computing its size, content id, and plain SHA-256
