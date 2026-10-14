@@ -7,6 +7,9 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+mod skip_until;
+pub use skip_until::SkipUntilSession;
+
 /// Convenience methods for buffered readers such as
 /// [`BufReader`](crate::io::BufReader).
 ///
@@ -93,6 +96,20 @@ pub trait AsyncBufReadExt: AsyncBufRead {
             read: 0,
             max_len: Some(max_len),
         }
+    }
+
+    /// Creates an allocation-free bounded discard session for one delimiter.
+    ///
+    /// Retain the session across dropped `run()` waits to preserve its cumulative
+    /// byte allowance. The delimiter counts toward `max_bytes`. A size refusal
+    /// leaves continuation input unread; successful EOF alone is not a delimiter
+    /// boundary. Inspect `delimiter_found()` before reusing a framed connection.
+    /// Unlike `read_until`, this intentionally discards the accepted bytes.
+    fn skip_until_limited(&mut self, byte: u8, max_bytes: usize) -> SkipUntilSession<'_, Self>
+    where
+        Self: Unpin,
+    {
+        SkipUntilSession::new(self, byte, max_bytes)
     }
 
     /// Reads one line into `buf`; see [`read_line`].

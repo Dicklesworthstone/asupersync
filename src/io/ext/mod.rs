@@ -14,7 +14,7 @@ mod read_ext;
 mod seek_ext;
 mod write_ext;
 
-pub use buf_read_ext::{AsyncBufReadExt, FillBuf, ReadUntil, Split};
+pub use buf_read_ext::{AsyncBufReadExt, FillBuf, ReadUntil, SkipUntilSession, Split};
 
 pub use read_ext::{
     AsyncReadExt, AsyncReadVectoredExt, Read, ReadExact, ReadF32, ReadF32Le, ReadF64, ReadF64Le,

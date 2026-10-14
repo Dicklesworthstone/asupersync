@@ -56,6 +56,57 @@ they do not reset the limit. Keep the `Split` itself across dropped `next` waits
 Both bounded operations retain the existing cooperative refill budget, so an
 always-ready source does not monopolize one poll indefinitely.
 
+## Explicit allocation-free resynchronization
+
+When the protocol permits discarding the rest of an oversized record, use
+`skip_until_limited` to create a `SkipUntilSession` over the same reader:
+
+```rust
+use asupersync::io::AsyncBufRead;
+use asupersync::io::ext::AsyncBufReadExt;
+use std::io;
+
+async fn discard_remainder<R: AsyncBufRead + Unpin + ?Sized>(reader: &mut R) -> io::Result<()> {
+    let mut recovery = reader.skip_until_limited(b'\n', 64 * 1024);
+    recovery.run().await?;
+    if !recovery.delimiter_found() {
+        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "record delimiter missing"));
+    }
+    Ok(())
+}
+```
+
+The operation scans and consumes buffered slices without collecting the discarded
+record or allocating a scratch byte buffer. Its byte limit includes the delimiter
+but not the prefix already accepted by an earlier read or split. A delimiter is
+consumed exactly once; following-frame bytes remain in the reader. EOF is a
+separate observable result: successful discard does not prove a delimiter was
+found unless `delimiter_found()` is true.
+
+Keep the recovery session across dropped `run()` waits to retain its byte budget.
+`bytes_skipped()` is cumulative across waits and ordinary source errors; the
+returned success count is cumulative too. A new wait never resets the allowance.
+Do not construct a new session on each timeout unless the intention is to grant
+another allowance. Successful completion is memoized, and a size refusal is
+sticky with the first excess byte left unread. `into_inner()` deliberately
+returns the reader for closing or a caller-authorized further recovery attempt.
+
+Provider errors propagate unchanged. A provider panic propagates too, but leaves
+the session poisoned rather than silently retrying an unknown source position.
+Confirmed consumed bytes are only a lower bound after such a panic. There is no
+automatic rollback or resynchronization, and dropping the session itself loses
+its counter (not its already-performed consumption).
+
+This helper bounds total discarded bytes and refills per poll (32). It has no
+`Cx` observer, deadline, owned producer task, or forced-termination mechanism.
+The caller chooses cancellation by dropping its borrowing wait and is responsible
+for source closure when recovery fails. Upstream buffers and arbitrary provider
+work still retain their own limits. The focused additional tests are in
+`src/io/ext/buf_read_ext/skip_until/tests.rs`; they include a native duplex source
+that parks mid-discard, resumes on a later wait, and delivers the following record
+without waiting for the peer to close. Like the first bounded-read tests, they
+were authored without a Rust runner and are not executed-runtime evidence.
+
 ## Boundaries and validation
 
 These bounds cover retained record bytes, not a vector's allocated capacity,
