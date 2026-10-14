@@ -226,7 +226,8 @@ fn concurrent_managers_do_not_reconfigure_shared_directories() {
 #[cfg(unix)]
 #[test]
 fn scoped_receive_to_publication_preserves_destination_access_and_private_files() {
-    use crate::atp::journal::{ScopedReceiveOptions, ScopedSparseWriter, SparseWriterConfig};
+    use crate::atp::journal::sparse_writer::ScopedSparseWriter;
+    use crate::atp::journal::{ScopedReceiveOptions, SparseWriterConfig};
     use crate::atp::manifest::Manifest;
     use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
     use crate::cx::Cx;
