@@ -8684,6 +8684,8 @@ fn region_closed_metric_fires_on_close() {
 /// cancellation-Waker retirements (the three-lane unwind path) suppresses the
 /// completion observer too, and the region-close observation it carries is
 /// still delivered, as it was before observers were deferred past the unlock.
+/// It is delivered by `retire`, which every caller runs after releasing the
+/// runtime-state lock, never by the split itself (br-asupersync-909482).
 #[test]
 #[allow(clippy::significant_drop_tightening)]
 fn region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements() {
@@ -8703,6 +8705,13 @@ fn region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements
     let (_waiters, retirements) = state
         .task_completed(task)
         .into_waiters_and_retirements_without_observers();
+    let closed = metrics.closed.lock().len();
+    crate::assert_with_log!(
+        closed == 0,
+        "region_closed metric waits for the retirement, outside the lock",
+        0usize,
+        closed
+    );
     retirements.retire();
     let closed = metrics.closed.lock().len();
     crate::assert_with_log!(
@@ -8714,6 +8723,106 @@ fn region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements
     crate::test_complete!(
         "region_closed_metric_fires_on_an_unwind_completion_that_keeps_its_retirements"
     );
+}
+
+/// An unwind completion suppresses its observer, which also carries the
+/// task's monitor and link effects: its monitors used to never receive DOWN.
+/// The retirement delivers it after the lock is released (br-asupersync-909482).
+#[test]
+fn unwind_completion_delivers_down_to_monitors_when_retired() {
+    init_test("unwind_completion_delivers_down_to_monitors_when_retired");
+    let mut state = RuntimeState::new();
+    let root = state.create_root_region(Budget::INFINITE);
+    let watcher = insert_task(&mut state, root);
+    let target = insert_task(&mut state, root);
+    let slot = Arc::new(crate::monitor::MonitorSlot::default());
+    let applied = state.apply_watch_command(
+        crate::monitor::WatchCommand::Monitor {
+            watcher: watcher.into(),
+            watcher_region: root,
+            target: target.into(),
+            slot: Arc::clone(&slot),
+            attempts: 0,
+        },
+        None,
+    );
+    assert!(matches!(applied, crate::monitor::WatchApply::Done(None)));
+    state
+        .task_mut(target)
+        .expect("target")
+        .complete(Outcome::Panicked(crate::types::outcome::PanicPayload::new(
+            "panicked during scheduler bookkeeping",
+        )));
+    let (_waiters, retirements) = state
+        .task_completed(target)
+        .into_waiters_and_retirements_without_observers();
+    assert!(
+        slot.notice().is_none(),
+        "DOWN waits for the retirement, outside the lock"
+    );
+    retirements.retire();
+    let down = slot
+        .notice()
+        .expect("DOWN delivered when the retirements retire");
+    assert_eq!(down.monitored, target);
+    assert!(matches!(
+        down.reason,
+        crate::monitor::DownReason::Panicked(_)
+    ));
+    crate::test_complete!("unwind_completion_delivers_down_to_monitors_when_retired");
+}
+
+/// Under the Panic leak policy the completion unwinds out of its leak audit.
+/// The watches used to be resolved before that audit, so the unwind dropped the
+/// DOWN, and the unwind guard's re-completion found no watch left. They are now
+/// resolved after the audit, so the re-completion delivers it (br-asupersync-909482).
+#[test]
+fn panic_leak_policy_keeps_watches_for_the_unwind_re_completion() {
+    init_test("panic_leak_policy_keeps_watches_for_the_unwind_re_completion");
+    let (mut state, root, target, obligation) =
+        setup_leakable_obligation(ObligationLeakResponse::Panic);
+    let watcher = insert_task(&mut state, root);
+    let slot = Arc::new(crate::monitor::MonitorSlot::default());
+    let applied = state.apply_watch_command(
+        crate::monitor::WatchCommand::Monitor {
+            watcher: watcher.into(),
+            watcher_region: root,
+            target: target.into(),
+            slot: Arc::clone(&slot),
+            attempts: 0,
+        },
+        None,
+    );
+    assert!(matches!(applied, crate::monitor::WatchApply::Done(None)));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        complete_task_ok(&mut state, target);
+    }));
+    assert!(
+        unwound.is_err(),
+        "the Panic leak policy unwinds the completion"
+    );
+    assert_eq!(
+        state
+            .obligations
+            .get(obligation.arena_index())
+            .expect("obligation")
+            .state,
+        ObligationState::Leaked
+    );
+    assert!(
+        slot.notice().is_none(),
+        "the unwound completion delivered nothing"
+    );
+    // The unwind guard re-completes the task (worker.rs, three_lane.rs).
+    let (_waiters, retirements) = state
+        .task_completed(target)
+        .into_waiters_and_retirements_without_observers();
+    retirements.retire();
+    let down = slot
+        .notice()
+        .expect("the re-completion still finds the watch and delivers DOWN");
+    assert_eq!(down.monitored, target);
+    crate::test_complete!("panic_leak_policy_keeps_watches_for_the_unwind_re_completion");
 }
 
 #[test]

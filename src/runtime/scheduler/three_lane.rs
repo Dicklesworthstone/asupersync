@@ -4845,8 +4845,8 @@ impl PolledCompletionArtifacts {
 }
 
 /// Owned effects an unwind-guard ordered completion hands back for post-lock
-/// dispatch. Observers are structurally absent: unwind cleanup must never
-/// invoke user metrics providers or tracing subscribers.
+/// dispatch. The completion metric and trace are suppressed; the retirements
+/// deliver its lifecycle and monitor/link effects after the lock (909482).
 struct UnwindCompletionArtifacts {
     cancel_waker_retirements: crate::runtime::state::TaskCompletionRetirements,
     detached_record: Option<crate::record::task::TaskRecord>,

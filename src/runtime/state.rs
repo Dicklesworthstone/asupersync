@@ -733,18 +733,18 @@ impl TaskCompletionEffects {
 
     /// Extracts waiter ids while deliberately suppressing observer delivery.
     ///
-    /// This is reserved for panic-unwind cleanup guards or failed-start paths
-    /// that cannot release a caller-owned outer lock: those contexts must never
-    /// invoke user metrics providers or tracing subscribers. Suppression emits
-    /// no direct completion metric or completion debug/unknown trace and does
-    /// not increment the observer-panic counter because dispatch was never
-    /// attempted. The undispatched observer payload, including any final
-    /// metrics-provider handle, and detached cancellation-Waker targets are
+    /// This is reserved for failed-start paths and lab bookkeeping that cannot
+    /// release a caller-owned outer lock. Suppression emits no direct
+    /// completion metric or completion debug/unknown trace and does not
+    /// increment the observer-panic counter because dispatch was never
+    /// attempted. Lifecycle observations are still delivered inline, each
+    /// panic-contained, as they were before observers were deferred. The rest
+    /// of the observer payload, including any final metrics-provider handle and
+    /// monitor/link effects, and detached cancellation-Waker targets are
     /// deliberately leaked on this exceptional path because the caller may
     /// still own an outer runtime-state lock. Ordinary delivery uses
-    /// [`Self::into_parts`]; unwind paths that can later retire detached
-    /// cancellation Wakers use
-    /// [`Self::into_waiters_and_retirements_without_observers`].
+    /// [`Self::into_parts`]; unwind paths, which release the lock before they
+    /// retire, use [`Self::into_waiters_and_retirements_without_observers`].
     pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
         let Self {
             waiters,
@@ -760,43 +760,101 @@ impl TaskCompletionEffects {
     }
 
     /// Splits callback-free waiters from cancellation-Waker retirement for an
-    /// unwind path that still owns an outer runtime-state lock: lifecycle
-    /// observations are delivered inline, the rest of the payload leaks.
+    /// unwind path that still owns an outer runtime-state lock. The lifecycle
+    /// observations, the monitor/link effects and the final metrics-provider
+    /// handle ride the retirements: [`TaskCompletionRetirements::retire`]
+    /// delivers them after that lock is released. The task-completion metric
+    /// and trace stay suppressed.
     pub(crate) fn into_waiters_and_retirements_without_observers(
         self,
     ) -> (SmallVec<[TaskId; 4]>, TaskCompletionRetirements) {
         let Self {
             waiters,
             observer,
-            retired_cancel_wakers,
+            mut retired_cancel_wakers,
         } = self;
-        deliver_suppressed_lifecycle(observer);
+        retired_cancel_wakers.carry_suppressed(observer);
         (waiters, retired_cancel_wakers)
     }
 }
 
-/// Cancellation-Waker payloads detached during task completion.
+/// Cancellation-Waker payloads detached during task completion, plus the
+/// effects of a completion whose observer an unwind path suppressed.
 ///
 /// Call [`Self::retire`] only after releasing every outer runtime-state lock.
 #[must_use = "cancellation Wakers must be retired after releasing runtime-state locks"]
 pub(crate) struct TaskCompletionRetirements {
     targets: Option<SmallVec<[Arc<CancelWaker>; 4]>>,
+    /// Boxed: only unwind completions carry it (br-asupersync-909482).
+    suppressed: Option<Box<SuppressedCompletionEffects>>,
+}
+
+/// What a suppressed completion still owes once the lock is released: its
+/// region/obligation lifecycle observations, the DOWN notifications, exit
+/// signals and linked cancellations of its monitors and links, and the final
+/// metrics-provider handle, which may run a destructor.
+struct SuppressedCompletionEffects {
+    metrics: Option<Arc<dyn MetricsProvider>>,
+    lifecycle: Vec<LifecycleObserverEffect>,
+    watch_effects: Option<crate::monitor::WatchEffects>,
 }
 
 impl TaskCompletionRetirements {
     fn empty() -> Self {
         Self {
             targets: Some(SmallVec::new()),
+            suppressed: None,
         }
     }
 
     fn new(targets: SmallVec<[Arc<CancelWaker>; 4]>) -> Self {
         Self {
             targets: Some(targets),
+            suppressed: None,
+        }
+    }
+
+    /// Takes what a suppressed observer still owes. Runs under the caller's
+    /// runtime-state lock, so it only moves handles: no callback, Waker or
+    /// provider destructor runs here.
+    fn carry_suppressed(&mut self, mut observer: TaskCompletionObserver) {
+        let metrics = match observer.payload.take() {
+            Some(TaskCompletionObserverPayload::Completed { metrics, .. }) => Some(metrics),
+            Some(TaskCompletionObserverPayload::UnknownTask { .. }) | None => None,
+        };
+        let lifecycle = std::mem::take(&mut observer.lifecycle);
+        let watch_effects = observer.watch_effects.take();
+        drop(observer);
+        if metrics.is_some() || watch_effects.is_some() {
+            debug_assert!(self.suppressed.is_none());
+            self.suppressed = Some(Box::new(SuppressedCompletionEffects {
+                metrics,
+                lifecycle,
+                watch_effects,
+            }));
         }
     }
 
     pub(crate) fn retire(mut self) {
+        if let Some(suppressed) = self.suppressed.take() {
+            let SuppressedCompletionEffects {
+                metrics,
+                lifecycle,
+                watch_effects,
+            } = *suppressed;
+            // Each observation and the provider's retirement get their own
+            // unwind boundary, as in TaskCompletionObserver::dispatch. The
+            // observer-panic counter is not charged: dispatch was suppressed.
+            if let Some(metrics) = metrics {
+                for effect in lifecycle {
+                    contain_metrics_hook(|| effect.dispatch(&*metrics));
+                }
+                contain_metrics_hook(|| drop(metrics));
+            }
+            if let Some(effects) = watch_effects {
+                effects.dispatch();
+            }
+        }
         let mut targets = self.targets.take().unwrap_or_default();
         while let Some(target) = targets.pop() {
             if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -813,6 +871,11 @@ impl TaskCompletionRetirements {
 
 impl Drop for TaskCompletionRetirements {
     fn drop(&mut self) {
+        // Undelivered suppressed effects hold a provider handle and watch
+        // slots whose Wakers may run arbitrary destructors: leak them too.
+        if let Some(suppressed) = self.suppressed.take() {
+            std::mem::forget(suppressed);
+        }
         let Some(targets) = self.targets.take() else {
             return;
         };
@@ -8495,31 +8558,16 @@ impl RuntimeState {
         // still lives embedded (unified arm) — identical logical-time
         // observations either way.
         //
-        // Monitors and links (kpmoy5.6.1) are resolved first, while the
-        // outcome is still borrowed: the effects ride the completion observer
-        // and are delivered after the lock is released. No watch means one
-        // emptiness check.
-        let watch_effects = if self.task_watches.is_empty() {
-            None
-        } else {
-            let now = self
-                .timer_driver
+        // Monitors and links (kpmoy5.6.1) are resolved right after the leak
+        // audit, while the outcome is still borrowed (resolve_task_watches).
+        // Their timestamp is read here, before any shard lock: the clock may
+        // be user code.
+        let watch_now = (!self.task_watches.is_empty()).then(|| {
+            self.timer_driver
                 .as_ref()
-                .map_or(self.now, TimerDriverHandle::now);
-            let gateway = self.spawn_gateway.clone();
-            let effects =
-                self.task_watches
-                    .on_task_completed(task_id, close_outcome.as_ref(), now, gateway);
-            if let Some(effects) = effects.as_ref() {
-                self.down_history.extend(effects.down_deliveries());
-                if let Some(limit) = self.down_history_limit {
-                    while self.down_history.len() > limit {
-                        self.down_history.pop_front();
-                    }
-                }
-            }
-            effects
-        };
+                .map_or(self.now, TimerDriverHandle::now)
+        });
+        let watch_effects;
         let mut lifecycle = std::mem::take(&mut observer.lifecycle);
         match self.shard_tables.clone() {
             Some(shards) => {
@@ -8542,6 +8590,9 @@ impl RuntimeState {
                         owner,
                         completion,
                     );
+                    watch_effects = watch_now.and_then(|now| {
+                        self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
+                    });
                     self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                     self.abort_orphaned_obligations_for_holder(
                         &mut regions,
@@ -8577,6 +8628,9 @@ impl RuntimeState {
                     owner,
                     completion,
                 );
+                watch_effects = watch_now.and_then(|now| {
+                    self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
+                });
                 self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                 self.abort_orphaned_obligations_for_holder(
                     &mut regions,
@@ -8606,6 +8660,35 @@ impl RuntimeState {
             observer,
             retired_cancel_wakers,
         }
+    }
+
+    /// Resolves what a finished task's monitors and links owe (kpmoy5.6.1):
+    /// the effects ride the completion observer and are delivered after the
+    /// lock is released. Called after the leak audit: under the Panic leak
+    /// policy the audit unwinds, and the unwind guard's re-completion must
+    /// still find the watches, or their DOWN is lost while the lab history
+    /// records it (br-asupersync-909482). It takes no lock and reads no clock
+    /// (`now` is sampled by the caller), so the sharded walk may call it under
+    /// the shard-C guard.
+    fn resolve_task_watches(
+        &mut self,
+        task_id: TaskId,
+        outcome: Option<&Outcome<(), Error>>,
+        now: Time,
+    ) -> Option<crate::monitor::WatchEffects> {
+        let gateway = self.spawn_gateway.clone();
+        let effects = self
+            .task_watches
+            .on_task_completed(task_id, outcome, now, gateway);
+        if let Some(effects) = effects.as_ref() {
+            self.down_history.extend(effects.down_deliveries());
+            if let Some(limit) = self.down_history_limit {
+                while self.down_history.len() > limit {
+                    self.down_history.pop_front();
+                }
+            }
+        }
+        effects
     }
 
     /// Completion phase (Shard C): audits obligations still held by a task
@@ -12588,14 +12671,13 @@ pub(crate) mod spawn_observer_test_support {
     }
 }
 
-/// Runs a metrics hook that the runtime calls under its own lock, so a
-/// panicking provider cannot unwind through runtime bookkeeping. The payload
-/// is user data whose drop could panic again; it is leaked, as elsewhere here.
 /// Delivers the lifecycle observations (region close and drain, obligation
 /// metrics, leak and protocol logs, debt work) that a completion with suppressed
 /// observers carries, inline and each panic-contained, as they were delivered
 /// before they were deferred past the unlock (r29-e8 review of 6d9daa46c). The
 /// rest of the token then drops, leaking its payload as its `Drop` documents.
+/// Only for a suppression with no later unlock point; unwind paths carry these
+/// in their [`TaskCompletionRetirements`] instead.
 fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
     if let Some(TaskCompletionObserverPayload::Completed { metrics, .. }) =
         observer.payload.as_ref()
@@ -12607,6 +12689,9 @@ fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
     drop(observer);
 }
 
+/// Runs a metrics hook that the runtime calls under its own lock, so a
+/// panicking provider cannot unwind through runtime bookkeeping. The payload
+/// is user data whose drop could panic again; it is leaked, as elsewhere here.
 fn contain_metrics_hook(hook: impl FnOnce()) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
         std::mem::forget(payload);
