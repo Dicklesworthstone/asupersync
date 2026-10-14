@@ -32,6 +32,27 @@ export interface FetchBatch<T> {
   cancel(reason?: string): Promise<Outcome<void>>;
 }
 
+/** A completed, cleaned-up member; index still identifies its input request. */
+export interface FetchBatchResult<T> {
+  readonly index: number;
+  readonly value: T;
+}
+
+export interface FetchBatchStream<T> {
+  /** Completion-ordered results with backpressure, not an all-or-nothing array. */
+  readonly results: ReadableStream<FetchBatchResult<T>>;
+  /** Full consumer/cleanup barrier; consume results or cancel to reach it. */
+  readonly closed: Promise<Outcome<void>>;
+  /** Also releases workers waiting to deliver unread results. Idempotent. */
+  cancel(reason?: string): Promise<Outcome<void>>;
+}
+
+/** Private delivery seam: waiting to publish retains the worker's admission slot. */
+interface BatchDelivery<T> {
+  publish(index: number, value: T): Promise<void>;
+  stop(): void;
+}
+
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
 const ok = <T>(value: T): Outcome<T> => Object.freeze({ outcome: "ok", value });
 const failure = (message: string, code: "compatibility_rejected" | "internal_failure" = "compatibility_rejected"): Failure =>
@@ -186,10 +207,118 @@ export function tryMapFetches<T>(scope: FetchBatchScope, requests: readonly Brow
   return runFetchBatch<T>(scope, requests, consume, options, true);
 }
 
+/**
+ * Process a batch without retaining an array of every consumer result. Results
+ * arrive in completion order as { index, value }, after that member's body and
+ * terminal cleanup. A slow output reader holds admission slots: at most
+ * concurrency workers wait to deliver results. The native output has a zero
+ * high-water mark; one in-flight pull can still enqueue if its reader releases
+ * its lock. Payload byte size and caller/downstream queues are not bounded.
+ * The input array is still snapshotted (at most maxRequests entries).
+ *
+ * Drain results concurrently with closed; awaiting closed without reading a
+ * nonempty result stream intentionally applies backpressure. Cancelling the
+ * output (including ordinary async-iteration break or pipeTo failure) stops
+ * admission and joins active work. Native stream closure on cancel is NOT that
+ * barrier: await the cancellation promise or closed. A failure errors results
+ * only after drain, with the final Outcome in error.cause. Already delivered
+ * values/effects cannot be rolled back. Releasing a reader lock is not cancel.
+ *
+ * Otherwise shares mapFetches' consumer, parent-signal and ownership semantics.
+ * Consume/cancel each body inside consume; do not return live body resources.
+ */
+export function streamMapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+  consume: (response: FetchBatchResponse) => T | PromiseLike<T>,
+  options: FetchBatchOptions = {}): Outcome<FetchBatchStream<T>> {
+  return streamFetchBatch<T>(scope, requests, consume, options, false);
+}
+
+/** streamMapFetches with tryMapFetches' checked, explicit consumer Outcomes. */
+export function tryStreamMapFetches<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+  consume: (response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>,
+  options: FetchBatchOptions = {}): Outcome<FetchBatchStream<T>> {
+  return streamFetchBatch<T>(scope, requests, consume, options, true);
+}
+
+function streamFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
+  consume: ((response: FetchBatchResponse) => T | PromiseLike<T>)
+    | ((response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>),
+  options: FetchBatchOptions, consumerOutcomes: boolean): Outcome<FetchBatchStream<T>> {
+  if (!STREAM) return failure("streaming fetch batches require native ReadableStream");
+  const queue: { item: FetchBatchResult<T>; release: () => void }[] = [];
+  let controller!: ReadableStreamDefaultController<FetchBatchResult<T>>;
+  let demand: ReturnType<typeof deferred<void>> | undefined;
+  let stopped = false;
+  let batch: FetchBatch<T>;
+
+  function deliver(): void {
+    if (stopped || !demand || !queue.length) return;
+    const entry = queue.shift()!;
+    const waiting = demand;
+    demand = undefined;
+    // Only internal native-controller operations run here, never value hooks.
+    // A value is wrapped, so nested thenables are not promise-assimilated.
+    controller.enqueue(entry.item);
+    entry.release();
+    waiting.resolve();
+  }
+  const delivery: BatchDelivery<T> = {
+    publish(index, value) {
+      const accepted = deferred<void>();
+      if (stopped) accepted.resolve();
+      else {
+        queue.push({ item: Object.freeze({ index, value }), release: accepted.resolve });
+        deliver();
+      }
+      return accepted.promise;
+    },
+    stop() {
+      stopped = true;
+      for (const entry of queue) entry.release();
+      queue.length = 0;
+      // Pending reads observe the final, fully drained Outcome, not a guess
+      // made when the first error or cancellation was observed.
+    },
+  };
+  const results = new STREAM<FetchBatchResult<T>>({
+    start(value) { controller = value; },
+    pull() {
+      const waiting = deferred<void>();
+      demand = waiting;
+      deliver();
+      return waiting.promise;
+    },
+    async cancel() {
+      // Do not inspect/format arbitrary native cancellation reasons.
+      const outcome = await batch.cancel("fetch batch result stream cancelled");
+      if (outcome.outcome === "err" || outcome.outcome === "panicked") throw streamError(outcome);
+    },
+  }, { highWaterMark: 0 });
+  const admitted = runFetchBatch<T>(scope, requests, consume, options, consumerOutcomes, delivery);
+  if (admitted.outcome !== "ok") {
+    controller.close();
+    return admitted;
+  }
+  batch = admitted.value;
+  const closed = batch.result.then((outcome): Outcome<void> => {
+    delivery.stop();
+    // Native cancel closes the stream before its cleanup promise settles.
+    // That state must not prevent publishing the independent cleanup receipt.
+    try {
+      if (outcome.outcome === "ok") controller.close();
+      else controller.error(streamError(outcome));
+    } catch { /* Output already cancelled. */ }
+    demand?.resolve();
+    demand = undefined;
+    return outcome.outcome === "ok" ? ok(undefined) : outcome;
+  });
+  return ok(Object.freeze({ results, closed, cancel: batch.cancel }));
+}
+
 function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetchOptions[],
   consume: ((response: FetchBatchResponse) => T | PromiseLike<T>)
     | ((response: FetchBatchResponse) => Outcome<T> | PromiseLike<Outcome<T>>),
-  options: FetchBatchOptions, consumerOutcomes: boolean): Outcome<FetchBatch<T>> {
+  options: FetchBatchOptions, consumerOutcomes: boolean, delivery?: BatchDelivery<T>): Outcome<FetchBatch<T>> {
   let inputs: BrowserFetchOptions[];
   let start: FetchBatchScope["fetch"];
   let concurrency: number;
@@ -236,7 +365,7 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
   const completion = deferred<Outcome<readonly T[]>>();
   const settlement = completion.promise.then((outcome): Outcome<void> => outcome.outcome === "ok" ? ok(undefined) : outcome);
   const members = new Set<Member>();
-  const results: T[] = new Array(inputs.length);
+  const results: T[] = delivery ? [] : new Array(inputs.length);
   let next = 0, stopped: Failure | undefined, finished = false;
   let cleanupFailure: { index: number; outcome: Failure } | undefined;
   // Recognize only errors created by THIS batch. Reading arbitrary .cause
@@ -315,6 +444,7 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
     }
     stopped = outcome; // Admission fence precedes every host/user callback.
     results.fill(undefined as T);
+    delivery?.stop();
     for (const member of members) {
       void drain(member);
       try { Reflect.apply(ABORT!, member.controller, [ownedError(outcome)]); } catch { /* Preserve first cause. */ }
@@ -403,7 +533,10 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: readonly BrowserFetc
         await drain(member);
         members.delete(member);
       }
-      if (!stopped && consumed) results[index] = value;
+      if (!stopped && consumed) {
+        if (delivery) await delivery.publish(index, value);
+        else results[index] = value;
+      }
     }
   }
   const onAbort = () => stop(cancelled("fetch batch cancelled by signal"));
