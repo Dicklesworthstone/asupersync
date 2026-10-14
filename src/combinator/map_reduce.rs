@@ -2329,6 +2329,85 @@ mod tests {
         }
     }
 
+    /// Review r33-e8 of 9476ea562, end to end on the lab runtime: a sibling
+    /// at a LOWER input index that maps the engine's drain cancellation to
+    /// `Err` keeps that error as a diagnostic and does not replace the failure
+    /// that started the drain. Before 9476ea562 the lowest-index error, the
+    /// drained sibling's, was selected.
+    #[test]
+    fn executing_map_drained_lower_index_error_does_not_replace_the_trigger() {
+        let mut lab = LabRuntime::new(LabConfig::new(0x33_00e8).max_steps(4096));
+        let root = lab.state.create_root_region(Budget::INFINITE);
+        let trigger = Arc::new(crate::sync::Mutex::new(()));
+        let held_trigger = trigger.try_lock_owned().unwrap();
+        let (keep_sender, receiver) = crate::channel::mpsc::channel::<()>(1);
+        let receiver = Arc::new(parking_lot::Mutex::new(Some(receiver)));
+        let child_trigger = Arc::clone(&trigger);
+        let (parent, mut join) = lab
+            .state
+            .create_task(root, Budget::INFINITE, async move {
+                let cx = Cx::current().unwrap();
+                cx.scope()
+                    .map_reduce(
+                        &cx,
+                        executing_limits(2, 2),
+                        0..100,
+                        move |child, index| {
+                            let trigger = Arc::clone(&child_trigger);
+                            let receiver = Arc::clone(&receiver);
+                            async move {
+                                if index == 0 {
+                                    // Parked until the engine drains it, then
+                                    // reports its cancellation as an error.
+                                    let mut receiver = receiver.lock().take().unwrap();
+                                    match receiver.recv(&child).await {
+                                        Err(crate::channel::mpsc::RecvError::Cancelled) => {
+                                            Outcome::<usize, &str>::Err("drained receive")
+                                        }
+                                        other => panic!("the parked sibling is drained: {other:?}"),
+                                    }
+                                } else {
+                                    assert_eq!(
+                                        index, 1,
+                                        "admission stops at the bounded failure window"
+                                    );
+                                    drop(
+                                        crate::sync::OwnedMutexGuard::lock(trigger, &child)
+                                            .await
+                                            .unwrap(),
+                                    );
+                                    Outcome::Err("triggering map failure")
+                                }
+                            }
+                        },
+                        |left, right| left + right,
+                    )
+                    .await
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(parent, 0);
+        lab.run_until_idle();
+        // Witness: index 0 is parked on its receive, index 1 on the trigger.
+        assert_eq!(trigger.waiters(), 1);
+        assert_eq!(keep_sender.telemetry_snapshot(3301).recv_waiter_count, 1);
+        drop(held_trigger);
+        lab.run_until_idle();
+        let report = join.try_join().unwrap().unwrap();
+        assert_eq!(report.admitted, 2);
+        assert_eq!(report.completed, 2);
+        assert_eq!(report.stopped_by.as_ref().unwrap().0, 1);
+        assert!(matches!(
+            report.outcome,
+            Outcome::Err(MapReduceExecutionError::Map("triggering map failure"))
+        ));
+        assert_eq!(report.failure_index, Some(1));
+        assert!(matches!(
+            report.errors.as_slice(),
+            [(0, MapReduceExecutionError::Map("drained receive"))]
+        ));
+        assert_executing_lab_clean(&mut lab, root);
+    }
+
     #[test]
     fn executing_map_iteration_factory_and_reducer_panics_stop_admission() {
         for mode in ["iterator", "factory", "reducer"] {
