@@ -1,9 +1,11 @@
 //! Async directory reading.
 //!
-//! Phase 0 uses synchronous std::fs calls under async wrappers.
+//! Directory iteration is offloaded in bounded batches. Cached entries retain
+//! the original std handles; metadata and file-type queries are not cached.
 
 use crate::cx::io_gate::spawn_blocking_io;
 use crate::stream::Stream;
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,9 +15,16 @@ use std::task::{Context, Poll};
 
 use super::metadata::{FileType, Metadata};
 
+const READ_DIR_BATCH_SIZE: usize = 32;
+type EntryBuffer = VecDeque<io::Result<std::fs::DirEntry>>;
+
 /// Async directory entry iterator.
+///
+/// At most 32 entries are prefetched by one blocking job. Dropping a pending
+/// `next_entry` future leaves the job and its entries owned by this iterator.
 pub struct ReadDir {
     state: ReadDirState,
+    buffered: EntryBuffer,
 }
 
 impl std::fmt::Debug for ReadDir {
@@ -25,7 +34,7 @@ impl std::fmt::Debug for ReadDir {
 }
 
 type ReadDirFuture = dyn std::future::Future<
-        Output = io::Result<(Option<io::Result<std::fs::DirEntry>>, std::fs::ReadDir)>,
+        Output = io::Result<(EntryBuffer, Option<std::fs::ReadDir>)>,
     > + Send;
 
 enum ReadDirState {
@@ -34,8 +43,48 @@ enum ReadDirState {
     Done,
 }
 
+/// Preserve iterator order and errors, stopping after the first error so the
+/// caller can decide whether to continue. A full batch does not imply EOF.
+fn read_batch<T>(
+    inner: &mut impl Iterator<Item = io::Result<T>>,
+    mut buffered: VecDeque<io::Result<T>>,
+) -> (VecDeque<io::Result<T>>, bool) {
+    debug_assert!(buffered.is_empty());
+    for _ in 0..READ_DIR_BATCH_SIZE {
+        match inner.next() {
+            Some(entry) => {
+                let failed = entry.is_err();
+                buffered.push_back(entry);
+                if failed {
+                    return (buffered, false);
+                }
+            }
+            None => return (buffered, true),
+        }
+    }
+    (buffered, false)
+}
+
+fn read_dir_batch(
+    mut inner: std::fs::ReadDir,
+    buffered: EntryBuffer,
+) -> (EntryBuffer, Option<std::fs::ReadDir>) {
+    let (buffered, exhausted) = read_batch(&mut inner, buffered);
+    // Retire the iterator on the pool worker when EOF was observed. The std
+    // entries still own whatever handles their platform requires.
+    let remaining = if exhausted { None } else { Some(inner) };
+    (buffered, remaining)
+}
+
 impl ReadDir {
     /// Returns the next directory entry.
+    ///
+    /// # Cancel Safety
+    ///
+    /// Dropping this future before it returns an entry does not lose entries
+    /// while the `ReadDir` is retained. A pending batch stays in `self` and is
+    /// resumed by the next call. Dropping the iterator itself does not forcibly
+    /// preempt a filesystem operation already executing on a pool worker.
     pub async fn next_entry(&mut self) -> io::Result<Option<DirEntry>> {
         std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx))
             .await
@@ -45,18 +94,30 @@ impl ReadDir {
 
 /// Reads the contents of a directory.
 ///
+/// Opening and reading the first bounded batch share one blocking-pool job.
+/// Iteration errors are returned by `next_entry`, not mistaken for open errors.
+///
 /// # Errors
 ///
 /// Returns an error if the directory cannot be opened.
 ///
 /// # Cancel Safety
 ///
-/// This operation is cancel-safe in Phase 0.
+/// Dropping the future retires the opened iterator and any prefetched entries
+/// when its already-started blocking job finishes; no further job is submitted.
 pub async fn read_dir<P: AsRef<Path>>(path: P) -> io::Result<ReadDir> {
     let path = path.as_ref().to_owned();
-    let inner = spawn_blocking_io(move || std::fs::read_dir(path)).await?;
+    let (buffered, inner) = spawn_blocking_io(move || {
+        let inner = std::fs::read_dir(path)?;
+        Ok(read_dir_batch(
+            inner,
+            VecDeque::with_capacity(READ_DIR_BATCH_SIZE),
+        ))
+    })
+    .await?;
     Ok(ReadDir {
-        state: ReadDirState::Idle(inner),
+        state: inner.map_or(ReadDirState::Done, ReadDirState::Idle),
+        buffered,
     })
 }
 
@@ -101,36 +162,40 @@ impl DirEntry {
 impl Stream for ReadDir {
     type Item = io::Result<DirEntry>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.buffered.is_empty() && matches!(&this.state, ReadDirState::Done) {
+            return Poll::Ready(None);
+        }
+        // Prefetch must not let a newly restricted caller consume cached
+        // entries without the gate. Keep state intact so denial cannot discard
+        // entries or cancel an in-flight batch owned by this iterator.
+        if let Err(error) = crate::cx::io_gate::require_ambient_io("fs") {
+            return Poll::Ready(Some(Err(error)));
+        }
         loop {
-            match std::mem::replace(&mut self.state, ReadDirState::Done) {
-                ReadDirState::Idle(mut inner) => {
-                    let fut = Box::pin(spawn_blocking_io(move || {
-                        let next = inner.next();
-                        Ok((next, inner))
-                    }));
-                    self.state = ReadDirState::Pending(fut);
+            if let Some(entry) = this.buffered.pop_front() {
+                return Poll::Ready(Some(entry.map(|inner| DirEntry {
+                    inner: Arc::new(inner),
+                })));
+            }
+            match std::mem::replace(&mut this.state, ReadDirState::Done) {
+                ReadDirState::Idle(inner) => {
+                    let buffered = std::mem::take(&mut this.buffered);
+                    this.state = ReadDirState::Pending(Box::pin(spawn_blocking_io(move || {
+                        Ok(read_dir_batch(inner, buffered))
+                    })));
                 }
                 ReadDirState::Pending(mut fut) => match fut.as_mut().poll(cx) {
-                    Poll::Ready(Ok((Some(Ok(entry)), inner))) => {
-                        self.state = ReadDirState::Idle(inner);
-                        return Poll::Ready(Some(Ok(DirEntry {
-                            inner: Arc::new(entry),
-                        })));
-                    }
-                    Poll::Ready(Ok((Some(Err(err)), inner))) => {
-                        self.state = ReadDirState::Idle(inner);
-                        return Poll::Ready(Some(Err(err)));
-                    }
-                    Poll::Ready(Ok((None, _inner))) => {
-                        self.state = ReadDirState::Done;
-                        return Poll::Ready(None);
+                    Poll::Ready(Ok((buffered, inner))) => {
+                        this.buffered = buffered;
+                        this.state = inner.map_or(ReadDirState::Done, ReadDirState::Idle);
                     }
                     Poll::Ready(Err(err)) => {
                         return Poll::Ready(Some(Err(err)));
                     }
                     Poll::Pending => {
-                        self.state = ReadDirState::Pending(fut);
+                        this.state = ReadDirState::Pending(fut);
                         return Poll::Pending;
                     }
                 },
@@ -141,6 +206,10 @@ impl Stream for ReadDir {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "read_dir_batch_tests.rs"]
+mod batch_tests;
 
 #[cfg(test)]
 mod tests {
