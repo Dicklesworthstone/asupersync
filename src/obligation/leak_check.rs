@@ -639,10 +639,11 @@ impl LeakChecker {
                     }
                     Some(VarState::MayHold(_) | VarState::MayHoldAmbiguous) => {
                         // Only a path that already resolved the variable makes
-                        // this a double resolve. Reservations of different kinds
-                        // on each path (MayHoldAmbiguous) or a reservation on
-                        // only some paths still leave exactly one live
-                        // obligation to settle.
+                        // this a double resolve. With reservations of different
+                        // kinds on each path (MayHoldAmbiguous), every path holds
+                        // exactly one live obligation. With a reservation on
+                        // only some paths, the others commit nothing; that is
+                        // not reported either, as in v0.4.3.
                         if self.may_be_resolved.remove(var) {
                             self.push_diagnostic(
                                 DiagnosticCode::DoubleResolve,
@@ -1775,6 +1776,42 @@ mod tests {
         let is_clean = result.is_clean();
         crate::assert_with_log!(!is_clean, "not clean", false, is_clean);
         crate::test_complete!("double_resolve_after_branch_abort_detected");
+    }
+
+    /// Fresh-eyes review of 54136c00c (27bbrg C2-M1): the doubt that a
+    /// may-hold variable was already resolved survives an enclosing join. The
+    /// inner branch may commit v0; the outer arm that contains it leaves v0
+    /// may-hold without resolving it itself, so only the carried doubt
+    /// reports the final commit as a double resolve.
+    #[test]
+    fn double_resolve_doubt_survives_an_enclosing_branch() {
+        init_test("double_resolve_doubt_survives_an_enclosing_branch");
+        let body = Body::new(
+            "nested_branch_double_commit",
+            vec![
+                Instruction::Reserve {
+                    var: v(0),
+                    kind: ObligationKind::SendPermit,
+                },
+                Instruction::Branch {
+                    arms: vec![
+                        vec![Instruction::Branch {
+                            arms: vec![vec![Instruction::Commit { var: v(0) }], vec![]],
+                        }],
+                        vec![],
+                    ],
+                },
+                Instruction::Commit { var: v(0) },
+            ],
+        );
+
+        let mut checker = LeakChecker::new();
+        let result = checker.check(&body);
+        let len = result.double_resolves().len();
+        crate::assert_with_log!(len == 1, "double count", 1, len);
+        let leak_len = result.leaks().len();
+        crate::assert_with_log!(leak_len == 0, "no leaks", 0, leak_len);
+        crate::test_complete!("double_resolve_doubt_survives_an_enclosing_branch");
     }
 
     // ---- Resolve unheld ----------------------------------------------------
