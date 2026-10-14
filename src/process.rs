@@ -1110,6 +1110,36 @@ fn shutdown_exact_image_direction(
     }
 }
 
+/// Socket buffer size for the exact-image stdin and stdout pairs on macOS.
+///
+/// Darwin sizes AF_UNIX stream buffers from `net.local.stream.sendspace` and
+/// `net.local.stream.recvspace`, 8192 bytes by default, so a parent streaming
+/// bulk data into a child (raw video frames into an encoder's stdin) hands
+/// over every 8 KB and the socket becomes the bottleneck: a 3840x2160 NV12
+/// feed into ffmpeg ran at 15.6 fps with the default and 73.1 fps with 1 MB,
+/// same host and load, same output bytes. 4 MB and 16 MB were no faster.
+/// Linux starts at about 208 KB (`net.core.wmem_default`) and clamps requests
+/// to `wmem_max`, so it keeps its default (br-asupersync-u9dtoj).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const EXACT_IMAGE_STREAM_BUFFER_BYTES: usize = 1 << 20;
+
+/// On macOS, raises the send buffer of `writer` and the receive buffer of
+/// `reader`, the two ends of one exact-image stdio pair, to
+/// [`EXACT_IMAGE_STREAM_BUFFER_BYTES`].
+///
+/// Best effort: the size only affects throughput, so a host that refuses it
+/// (`kern.ipc.maxsockbuf` below 1 MB) still gets a working child with the
+/// default buffers.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn size_exact_image_stream(writer: &UnixStream, reader: &UnixStream) {
+    if cfg!(target_os = "macos") {
+        let _ =
+            socket2::SockRef::from(writer).set_send_buffer_size(EXACT_IMAGE_STREAM_BUFFER_BYTES);
+        let _ =
+            socket2::SockRef::from(reader).set_recv_buffer_size(EXACT_IMAGE_STREAM_BUFFER_BYTES);
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild, ProcessError> {
     use std::net::Shutdown;
@@ -1124,6 +1154,8 @@ fn spawn_exact_image_unix(command: &ExactImageCommand) -> Result<ExactImageChild
     let (parent_stdin, child_stdin) = UnixStream::pair()?;
     let (parent_stdout, child_stdout) = UnixStream::pair()?;
     let (parent_stderr, child_stderr) = UnixStream::pair()?;
+    size_exact_image_stream(&parent_stdin, &child_stdin);
+    size_exact_image_stream(&child_stdout, &parent_stdout);
     shutdown_exact_image_direction(&parent_stdin, Shutdown::Read)?;
     shutdown_exact_image_direction(&child_stdin, Shutdown::Write)?;
     shutdown_exact_image_direction(&parent_stdout, Shutdown::Write)?;
@@ -3736,6 +3768,97 @@ mod tests {
         assert!(
             stdout.contains("ASUPERSYNC_EXACT_IMAGE_CHILD:ordered-input:env=1"),
             "unexpected exact-image stdout: {stdout:?}"
+        );
+    }
+
+    /// FNV-1a over `bytes`: order-sensitive, so a dropped, duplicated or
+    /// reordered chunk changes it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn exact_image_test_digest(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        })
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_child_digest_helper() {
+        if std::env::var_os("ASUPERSYNC_EXACT_IMAGE_CHILD").as_deref() != Some(OsStr::new("digest"))
+        {
+            return;
+        }
+
+        let mut input = Vec::new();
+        std::io::stdin()
+            .read_to_end(&mut input)
+            .expect("read exact-image digest helper stdin");
+        println!(
+            "ASUPERSYNC_EXACT_IMAGE_DIGEST:{}:{:016x}",
+            input.len(),
+            exact_image_test_digest(&input)
+        );
+    }
+
+    /// The defect behind br-asupersync-u9dtoj only shows with multi-megabyte
+    /// writes, so this feeds three 4K NV12 frames (37 MB) through stdin.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn exact_image_stdin_carries_multi_megabyte_feed_complete_and_in_order() {
+        init_test("exact_image_stdin_carries_multi_megabyte_feed_complete_and_in_order");
+        let payload: Vec<u8> = (0..3 * 12_441_600_u32)
+            .map(|index| index.wrapping_mul(2_654_435_761).to_be_bytes()[0])
+            .collect();
+        let executable = std::env::current_exe().expect("resolve current test executable");
+        let mut command = ExactImageCommand::new(executable);
+        command
+            .args([
+                "--exact",
+                "process::tests::exact_image_child_digest_helper",
+                "--nocapture",
+            ])
+            .env("ASUPERSYNC_EXACT_IMAGE_CHILD", "digest");
+        let mut child = command.spawn().expect("spawn exact-image digest helper");
+
+        let mut stdin = child.take_stdin().expect("exact-image stdin");
+        let mut stdout = child.take_stdout().expect("exact-image stdout");
+        let mut stderr = child.take_stderr().expect("exact-image stderr");
+        // Darwin reports the send buffer's remaining room, so read it before
+        // any byte is queued.
+        #[cfg(target_os = "macos")]
+        {
+            let send = socket2::SockRef::from(&stdin.inner)
+                .send_buffer_size()
+                .expect("stdin send buffer size");
+            let recv = socket2::SockRef::from(&stdout.inner)
+                .recv_buffer_size()
+                .expect("stdout receive buffer size");
+            assert!(
+                send >= EXACT_IMAGE_STREAM_BUFFER_BYTES && recv >= EXACT_IMAGE_STREAM_BUFFER_BYTES,
+                "exact-image stdio kept small socket buffers: stdin send {send}, stdout receive {recv}"
+            );
+        }
+        stdin.write_all(&payload).expect("write exact-image stdin");
+        drop(stdin);
+        let mut stdout_bytes = Vec::new();
+        stdout
+            .read_to_end(&mut stdout_bytes)
+            .expect("read exact-image stdout");
+        let mut stderr_bytes = Vec::new();
+        stderr
+            .read_to_end(&mut stderr_bytes)
+            .expect("read exact-image stderr");
+        let status = child.wait().expect("wait exact-image digest helper");
+
+        assert!(status.success(), "child failed: {stderr_bytes:?}");
+        let stdout = String::from_utf8(stdout_bytes).expect("UTF-8 helper stdout");
+        let expected = format!(
+            "ASUPERSYNC_EXACT_IMAGE_DIGEST:{}:{:016x}",
+            payload.len(),
+            exact_image_test_digest(&payload)
+        );
+        assert!(
+            stdout.contains(&expected),
+            "expected {expected:?} in exact-image stdout: {stdout:?}"
         );
     }
 
