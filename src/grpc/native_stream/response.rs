@@ -165,9 +165,10 @@ impl ResponseHead {
             self.trailers = Some(metadata);
             self.ended = true;
             if first {
-                // Trailers-only custom metadata is trailing, not initial.
+                // Trailers-only custom metadata is trailing, not initial. It
+                // carries no message, so its (unchecked) encoding is not kept.
                 self.initial = Some(Metadata::new());
-                self.encoding = encoding;
+                self.encoding = None;
             }
         } else {
             self.initial = Some(metadata);
@@ -317,6 +318,10 @@ mod tests {
         headers.push(Header::new("grpc-encoding", "deflate"));
         headers.push(Header::new("grpc-status", "16"));
         state.headers(headers, true).unwrap();
+        assert!(
+            state.encoding.is_none(),
+            "an unchecked encoding is not kept"
+        );
         assert_eq!(state.terminal.unwrap().code(), Code::Unauthenticated);
     }
 }
