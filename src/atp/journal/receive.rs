@@ -1,8 +1,9 @@
 //! Ownership and results of exact-length, verified stream ingestion.
 //!
 //! Sessions are created by `sparse_writer::ScopedSparseWriter::receive_exact`
-//! or its explicitly pinned variant. The concrete driver lives with that
-//! writer; the session owns its source and pending operation between waits.
+//! or its explicitly pinned and suffix-restart variants. The concrete driver
+//! lives with that writer; the session owns its source and pending operation
+//! between waits.
 
 use super::sparse_writer::SparseWriterError;
 use crate::fs::scoped::ScopedFsError;
@@ -20,7 +21,8 @@ use std::task::{Context, Poll};
 pub struct ScopedReceiveOptions {
     /// Maximum declared object length accepted from the trusted manifest.
     pub max_bytes: u64,
-    /// Maximum number of payload chunks and new writer ledger entries.
+    /// Maximum total payload write receipts, including a retained prefix on
+    /// restart plus the ceiling-divided number of new suffix chunks.
     /// Zero permits only an empty object.
     pub max_chunks: u32,
     /// Payload buffer size, in `1..=1_048_576` bytes.
@@ -89,6 +91,8 @@ impl<R> std::fmt::Debug for ScopedReceive<R> {
 impl<R> ScopedReceive<R> {
     /// Bytes covered by successful, observed chunk-write receipts.
     ///
+    /// A suffix restart starts at zero until preflight succeeds, then includes
+    /// the revalidated prefix as well as newly observed successful writes.
     /// This is not a durability or completion receipt. An in-flight or failed
     /// write can have additional filesystem effects not represented here.
     #[must_use]
@@ -98,8 +102,9 @@ impl<R> ScopedReceive<R> {
 
     /// Recover the source once, only after successful verified publication.
     ///
-    /// Exactly the manifest's object length was consumed from `AsyncRead`; no
-    /// EOF probe or following protocol byte was requested. The source may have
+    /// Exactly the declared body (or remaining suffix on restart) was consumed
+    /// from `AsyncRead`; no EOF probe or following protocol byte was requested.
+    /// The source may have
     /// its own read-ahead buffer, which remains owned by the returned source.
     /// On terminal failure the source is dropped, not returned with ambiguous
     /// body progress for reuse.

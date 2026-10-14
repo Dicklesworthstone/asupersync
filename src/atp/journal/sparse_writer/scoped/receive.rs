@@ -12,6 +12,13 @@ use std::task::Poll;
 #[path = "receive_resume.rs"]
 mod resume;
 
+struct ReceiveRequest {
+    manifest: Arc<Manifest>,
+    options: ScopedReceiveOptions,
+    expected: Option<ManifestChunkCommitment>,
+    resume_offset: Option<u64>,
+}
+
 impl ScopedSparseWriter {
     /// Receive exactly the selected manifest object's bytes and publish them.
     ///
@@ -28,8 +35,9 @@ impl ScopedSparseWriter {
     ///
     /// Construction is lazy and returns `InvalidInput` for an invalid chunk size
     /// without polling the source. The session retains its context. A terminal
-    /// cancellation/error cannot be retried as a new body or on another context;
-    /// only abandonment of a borrowing wait is resumable.
+    /// cancellation/error is terminal for this session. Explicit suffix recovery
+    /// uses `checked_receive_offset` and `resume_exact_at` on the retained writer;
+    /// it never repolls the failed session or silently reconnects its source.
     pub fn receive_exact<R, Caps>(
         &self,
         cx: &Cx<Caps>,
@@ -41,7 +49,7 @@ impl ScopedSparseWriter {
         R: AsyncRead + Unpin + Send + 'static,
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.receive_session(cx, source, manifest, options, None)
+        self.receive_session(cx, source, manifest, options, None, None)
     }
 
     /// Receive and publish using an independently authenticated chunk commitment.
@@ -62,7 +70,7 @@ impl ScopedSparseWriter {
         R: AsyncRead + Unpin + Send + 'static,
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
-        self.receive_session(cx, source, manifest, options, Some(expected))
+        self.receive_session(cx, source, manifest, options, Some(expected), None)
     }
 
     fn receive_session<R, Caps>(
@@ -72,6 +80,7 @@ impl ScopedSparseWriter {
         manifest: Arc<Manifest>,
         options: ScopedReceiveOptions,
         expected: Option<ManifestChunkCommitment>,
+        resume_offset: Option<u64>,
     ) -> io::Result<ScopedReceive<R>>
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -86,7 +95,8 @@ impl ScopedSparseWriter {
         let progress = Arc::clone(&accepted);
         let work = Box::pin(async move {
             let mut source = source;
-            let outcome = writer.receive_body(&cx, &mut source, manifest, options, expected, progress).await?;
+            let request = ReceiveRequest { manifest, options, expected, resume_offset };
+            let outcome = writer.receive_body(&cx, &mut source, request, progress).await?;
             Ok(match outcome {
                 Outcome::Ok(path) => Outcome::Ok((source, path)),
                 Outcome::Err(error) => Outcome::Err(error),
@@ -122,19 +132,18 @@ impl ScopedSparseWriter {
         &self,
         cx: &Cx<Caps>,
         source: &mut R,
-        manifest: Arc<Manifest>,
-        options: ScopedReceiveOptions,
-        expected: Option<ManifestChunkCommitment>,
+        request: ReceiveRequest,
         accepted: Arc<AtomicU64>,
     ) -> ScopedReceiveResult<PathBuf>
     where
         R: AsyncRead + Unpin + Send,
         Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
     {
+        let ReceiveRequest { manifest, options, expected, resume_offset } = request;
         let permit = self.reserve(cx).await?;
         let preflight_manifest = Arc::clone(&manifest);
         let (mut permit, preflight) = self.receive_step(cx, permit, move |writer| {
-            prepare_receive(writer, &preflight_manifest, options, expected.as_ref())
+            prepare_receive(writer, &preflight_manifest, options, expected.as_ref(), resume_offset)
         }).await?;
         let length = match preflight {
             Outcome::Ok(length) => length,
@@ -142,10 +151,11 @@ impl ScopedSparseWriter {
             Outcome::Cancelled(reason) => return Ok(Outcome::Cancelled(reason)),
             Outcome::Panicked(payload) => return Ok(Outcome::Panicked(payload)),
         };
-        let limited = source.take(length);
+        let mut offset = resume_offset.unwrap_or(0);
+        accepted.store(offset, Ordering::Relaxed);
+        let limited = source.take(length - offset);
         let mut chunks = StreamChunkReader::new(limited, options.chunk_size)
             .map_err(ScopedReceiveError::Source)?;
-        let mut offset = 0_u64;
         while offset < length {
             let mut reading = pin!(chunks.next_chunk_with_cx(cx));
             let chunk = poll_fn(|task| {
@@ -193,6 +203,7 @@ fn prepare_receive(
     manifest: &Manifest,
     options: ScopedReceiveOptions,
     expected: Option<&ManifestChunkCommitment>,
+    resume_offset: Option<u64>,
 ) -> Outcome<u64, SparseWriterError> {
     let prepare = || -> Result<u64, SparseWriterError> {
         let invalid = |message: String| SparseWriterError::VerificationFailed(message);
@@ -204,7 +215,9 @@ fn prepare_receive(
         let length = {
             let state = writer.lock_state();
             SparseWriter::require_accepting(&state)?;
-            if state.temp_file.is_some() || state.temp_path.is_some() || !state.written_chunks.is_empty() {
+            if resume_offset.is_none()
+                && (state.temp_file.is_some() || state.temp_path.is_some() || !state.written_chunks.is_empty())
+            {
                 return Err(SparseWriterError::WriteFailed("receive requires a fresh writer".to_owned()));
             }
             let object = manifest.objects.get(&state.object_id)
@@ -216,7 +229,16 @@ fn prepare_receive(
                 return Err(invalid("receive requires a file object".to_owned()));
             }
             let size = object.size_bytes.ok_or_else(|| invalid("receive object size is required".to_owned()))?;
-            if size > options.max_bytes || size.div_ceil(options.chunk_size as u64) > u64::from(options.max_chunks) {
+            let start = resume_offset.unwrap_or(0);
+            if start > size || (resume_offset.is_some() && state.expected_size != Some(size)) {
+                return Err(invalid("receive resume size or offset mismatch".to_owned()));
+            }
+            let existing_chunks = u64::try_from(state.written_chunks.len())
+                .map_err(|_| invalid("receive chunk count overflow".to_owned()))?;
+            let new_chunks = (size - start).div_ceil(options.chunk_size as u64);
+            if size > options.max_bytes || existing_chunks.checked_add(new_chunks)
+                .is_none_or(|count| count > u64::from(options.max_chunks))
+            {
                 return Err(invalid("receive object exceeds byte or chunk limit".to_owned()));
             }
             if object.content_hash.is_none() && !object.id.is_content_addressed() {
@@ -228,12 +250,37 @@ fn prepare_receive(
             }
             size
         };
+        if let Some(offset) = resume_offset {
+            // The same admission slot remains held from this revalidation until
+            // the suffix and final publication settle. A previously observed
+            // offset is not a reservation and must never authorize skipping data.
+            if resume::checked_prefix(writer)? != offset {
+                return Err(invalid("receive resume offset differs from recorded prefix".to_owned()));
+            }
+            // Even a full prefix must pass this session's final verification.
+            // Cancellation before that job cannot leave an earlier manifest's
+            // successful evidence available for a separate plain commit.
+            writer.lock_state().verification_state =
+                crate::atp::journal::sparse_writer::VerificationState::Pending;
+        }
         writer.set_expected_size(length)?;
         Ok(length)
     };
     match prepare() {
         Ok(length) => Outcome::Ok(length),
-        Err(error) => Outcome::Err(error),
+        Err(error) => {
+            // A failed resumed expectation must not leave an older successful
+            // verification available to a later plain commit. Sealed terminal
+            // evidence is not rewritten by a refused attempt to reuse it.
+            if resume_offset.is_some() {
+                use crate::atp::journal::sparse_writer::{VerificationState, WriterLifecycle};
+                let mut state = writer.lock_state();
+                if state.lifecycle == WriterLifecycle::Accepting {
+                    state.verification_state = VerificationState::Failed { reason: error.to_string() };
+                }
+            }
+            Outcome::Err(error)
+        }
     }
 }
 
