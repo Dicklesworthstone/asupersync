@@ -227,5 +227,8 @@ pub use write::WriteAllSession;
 mod vectored;
 pub use vectored::WriteAllVectoredSession;
 
+mod read_vectored;
+pub use read_vectored::ReadExactVectoredSession;
+
 #[cfg(test)]
 mod tests;

@@ -20,6 +20,8 @@
 //! - `read_exact` is **not** cancel-safe (partial state is retained).
 //! - `ReadExactSession::run` retains the filled prefix and offset across future
 //!   drop and cooperative cancellation; keep the session to resume safely.
+//! - `ReadExactVectoredSession::run` retains the same progress across a caller's
+//!   scatter-buffer plan without concatenating destinations.
 //! - `read_to_end` is cancel-safe (collected bytes remain in the buffer).
 //! - `read_to_string` is **not** fully cancel-safe (bytes are preserved, but a partial UTF-8 sequence at the end may be lost if cancelled).
 //! - `read_line` is cancel-safe for bytes already appended to the `String`; a
@@ -31,6 +33,8 @@
 //! - `write_all` is **not** cancel-safe (partial writes may occur).
 //! - `WriteAllSession::run` retains the accepted offset across future drop and
 //!   cancellation, so retry sends only the remaining suffix, without duplication.
+//! - `WriteAllVectoredSession::run` retains slice and byte offsets for header/body
+//!   and other scatter/gather writes without concatenating the source payloads.
 //! - `WritePermit` is cancel-safe (uncommitted data is discarded on drop).
 //! - `flush` and `shutdown` are cancel-safe (can retry).
 //!
@@ -118,7 +122,9 @@ pub use split::{ReadHalf, SplitStream, WriteHalf, split};
 #[cfg(not(target_arch = "wasm32"))]
 pub use stdio::{Stderr, Stdin, Stdout, stderr, stdin, stdout};
 pub use stream_adapters::{ReaderStream, StreamReader};
-pub use transfer_session::{ReadExactSession, WriteAllSession};
+pub use transfer_session::{
+    ReadExactSession, ReadExactVectoredSession, WriteAllSession, WriteAllVectoredSession,
+};
 pub use write::{AsyncWrite, AsyncWriteVectored};
 pub use write_permit::WritePermit;
 
