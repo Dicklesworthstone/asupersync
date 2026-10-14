@@ -5,10 +5,11 @@
 //! async caller after at most 128 KiB or 64 read attempts; neither file content
 //! nor pending jobs accumulate. Both digest updates run on the pool worker.
 //!
-//! Cancellation is by dropping the hashing future, with the same soft boundary
-//! as `spawn_blocking_io`: an already-started filesystem syscall may finish, but
-//! its result is dropped and no later batch is submitted. The limits below bound
-//! bytes and read attempts, not the wall-clock duration of a filesystem syscall.
+//! Source jobs observe the initiating context's cancellation and the current
+//! caller's I/O authority while pending and between batches. Dropping the
+//! hashing future prevents subsequent batches. A submitted filesystem job may
+//! still finish and discard its result: this is not syscall preemption or
+//! region-drained retirement. The limits bound bytes/read attempts, not time.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -18,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::atp::object::{ContentId, ContentIdHasher, ObjectId};
 
+use super::source_io;
 use super::streaming::StreamingError;
 
 const MAX_BATCH_BYTES: usize = 128 * 1024;
@@ -84,15 +86,12 @@ pub(super) async fn hash_file_batched(
         )));
     }
     let owned_path = path.to_path_buf();
-    let mut state = crate::runtime::spawn_blocking_io(move || {
+    let mut state = source_io::run(path, "fs::File::open", move || {
         HashState::open(owned_path, chunk_size)?.read_batch()
     })
-    .await
-    .map_err(source_error)?;
+    .await?;
     while state.file.is_some() {
-        state = crate::runtime::spawn_blocking_io(move || state.read_batch())
-            .await
-            .map_err(source_error)?;
+        state = source_io::run(path, "fs::File::read", move || state.read_batch()).await?;
     }
     Ok(state.finish())
 }

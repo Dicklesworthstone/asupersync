@@ -13,6 +13,7 @@ pub mod mirror;
 pub mod multi_object;
 pub mod multisource;
 pub mod progress;
+mod source_io;
 mod source_walk;
 pub mod streaming;
 

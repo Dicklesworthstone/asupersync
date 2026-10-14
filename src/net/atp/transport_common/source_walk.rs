@@ -7,7 +7,8 @@
 //!
 //! This bounds entry inspections per job, not syscall or sorting wall time.
 //! Paths still require O(number of entries) storage, as does the public manifest.
-//! A running syscall cannot be preempted when the calling future is dropped.
+//! Jobs observe cancellation while pending and before subsequent batches, but
+//! a submitted filesystem call may still finish after its future is dropped.
 
 use std::fs::ReadDir;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,7 @@ use crate::atp::object::MetadataPolicy;
 use crate::atp::safety::validate_portable_path_component;
 
 use super::metadata::{PathLinkKind, classify_path_link_sync};
+use super::source_io;
 use super::streaming::{SourceEntry, StreamingError};
 
 const ENTRIES_PER_BATCH: usize = 32;
@@ -105,15 +107,12 @@ async fn read_children(dir: &Path, preserve_symlinks: bool) -> Result<Vec<Child>
     let owned_dir = dir.to_path_buf();
     // Keep StreamingError inside the result so child-scoped failures do not
     // acquire a second, parent-directory prefix. Pool/gate errors use dir.
-    let mut scan = crate::cx::io_gate::spawn_blocking_io(move || {
+    let mut scan = source_io::run(dir, "fs", move || {
         Ok(DirectoryScan::open(owned_dir, preserve_symlinks).and_then(DirectoryScan::advance))
     })
-    .await
-    .map_err(|e| source_error(dir, e))??;
+    .await??;
     while scan.inner.is_some() {
-        scan = crate::cx::io_gate::spawn_blocking_io(move || Ok(scan.advance()))
-            .await
-            .map_err(|e| source_error(dir, e))??;
+        scan = source_io::run(dir, "fs", move || Ok(scan.advance())).await??;
     }
     Ok(scan.children)
 }
