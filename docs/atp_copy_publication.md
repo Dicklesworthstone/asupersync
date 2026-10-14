@@ -78,3 +78,19 @@ Rust, Cargo, rustfmt and RCH are unavailable in the authoring environment.
 These Rust tests are **not compiled or executed** here. Exact source/blob and
 whitespace checks are structural checks, not native-runtime or release proof.
 Run the repository-authorized focused Rust and clippy lanes before deployment.
+
+## Excluding the final name from private acquisition
+
+The writer's path manager also reserves the final basename against exclusive
+temporary-file creation. A generated name is not automatically private: when
+the destination does not yet exist, `create_new` alone would accept that same
+name and expose staging payload before publication. Both original staging and
+publication-copy acquisition skip such a candidate before opening or tracking
+it, including conservative ASCII case-insensitive matches. Skipped candidates
+count toward the existing eight-attempt limit, and never become cleanup targets.
+
+Four additional authored Rust tests use deterministic candidate sequences to
+cover absent names, ASCII case variants, both staging roles, exhaustion, mixed
+existing-file collisions, cleanup ownership and unchanged capacity refusals.
+These tests also remain uncompiled and unexecuted here. This name exclusion is
+not general filesystem-alias resolution or protection from parent-path races.

@@ -1,6 +1,7 @@
 //! Temporary File and Path Management for Sparse Writer Operations
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,8 @@ pub struct TempPathManager {
     base_dir: PathBuf,
     /// Quarantine directory for failed operations
     quarantine_dir: PathBuf,
+    /// A final filename must never be acquired as private staging, even absent.
+    protected_file_name: Option<OsString>,
     /// Process-unique manager identifier included in generated names
     manager_id: u64,
     /// Counter for unique temp file generation
@@ -193,6 +196,18 @@ impl TempPathManager {
         Self::with_config(base_dir, TempManagementConfig::default())
     }
 
+    /// Prepare the normal manager while excluding this writer's final filename
+    /// from exclusive staging acquisition. Neither existence nor uniqueness
+    /// proves that an absent name is private rather than a public destination.
+    pub(crate) fn for_destination(final_path: &Path) -> Self {
+        let parent = final_path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut manager = Self::new(parent);
+        manager.protected_file_name = final_path.file_name().map(OsString::from);
+        manager
+    }
+
     /// Create with custom configuration
     pub fn with_config(base_dir: impl AsRef<Path>, config: TempManagementConfig) -> Self {
         let base_dir = base_dir.as_ref().to_path_buf();
@@ -201,6 +216,7 @@ impl TempPathManager {
         let manager = Self {
             base_dir,
             quarantine_dir,
+            protected_file_name: None,
             manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             counter: AtomicU64::new(1),
             active_temps: HashMap::new(),
@@ -266,15 +282,35 @@ impl TempPathManager {
         options.open(path)
     }
 
-    // Only the opener is replaceable in module tests. Production always uses
-    // the exclusive create above; no user callback runs in the writer path.
+    // The existing opener seam retains its semantics. Production always uses
+    // ordinary name generation and exclusive creation, without user callbacks.
     fn create_temp_file_with(
         &mut self,
         operation_id: &str,
+        open: impl FnMut(&Path) -> std::io::Result<fs::File>,
+    ) -> Result<(PathBuf, fs::File), TempFileCreationError> {
+        self.create_temp_file_from(
+            operation_id,
+            |manager| manager.next_temp_path(operation_id),
+            open,
+        )
+    }
+
+    // A separate candidate supplier makes destination collisions deterministic
+    // in tests without relying on a clock tick or changing the production names.
+    fn create_temp_file_from(
+        &mut self,
+        operation_id: &str,
+        mut next: impl FnMut(&Self) -> Result<PathBuf, TempManagementError>,
         mut open: impl FnMut(&Path) -> std::io::Result<fs::File>,
     ) -> Result<(PathBuf, fs::File), TempFileCreationError> {
         for _ in 0..8 {
-            let path = self.next_temp_path(operation_id).map_err(TempFileCreationError::Path)?;
+            let path = next(self).map_err(TempFileCreationError::Path)?;
+            if self.is_protected_destination(&path) {
+                // Check BEFORE the opener. create_new alone would happily
+                // create an absent final path and expose unfinished payload.
+                continue;
+            }
             match open(&path) {
                 Ok(file) => {
                     // Do not track unowned collision paths: stale cleanup must
@@ -290,6 +326,18 @@ impl TempPathManager {
             std::io::ErrorKind::AlreadyExists,
             "staging file creation exhausted eight name attempts",
         )))
+    }
+
+    fn is_protected_destination(&self, path: &Path) -> bool {
+        match (&self.protected_file_name, path.file_name()) {
+            (Some(protected), Some(candidate)) => {
+                // Generated names are ASCII. Conservatively exclude ASCII case
+                // variants too, including when the host filesystem folds case.
+                // This is not a general path-alias or parent-race confinement.
+                candidate.as_encoded_bytes().eq_ignore_ascii_case(protected.as_encoded_bytes())
+            }
+            _ => false,
+        }
     }
 
     /// Update the state of a temporary file
@@ -442,7 +490,7 @@ impl TempPathManager {
         Ok(cleaned_files)
     }
 
-    /// Get statistics about temporary file usage
+    /// Get statistics about temporary path usage
     pub fn get_stats(&self) -> TempPathStats {
         let active_count = self.active_temps.len();
         let total_size = self
@@ -853,3 +901,118 @@ mod tests {
 #[cfg(test)]
 #[path = "temp_directory_tests.rs"]
 mod directory_tests;
+
+#[cfg(test)]
+mod destination_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn absent_destination_is_skipped_before_open_for_both_staging_roles() {
+        for operation in ["original-object", "verified-publication"] {
+            for upper_case in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let final_path = root.path().join("atp_sparse.123.4.5.6.object.tmp");
+                let mut manager = TempPathManager::for_destination(&final_path);
+                let candidate = if upper_case {
+                    root.path().join("ATP_SPARSE.123.4.5.6.OBJECT.TMP")
+                } else {
+                    final_path.clone()
+                };
+                let private = root.path().join("private-copy.tmp");
+                let mut names = [candidate.clone(), private.clone()].into_iter();
+                let opens = Cell::new(0);
+                let (path, file) = manager.create_temp_file_from(
+                    operation,
+                    |_| Ok(names.next().expect("two candidates suffice")),
+                    |path| {
+                        opens.set(opens.get() + 1);
+                        assert_eq!(path, private);
+                        assert!(!final_path.exists());
+                        TempPathManager::open_new_file(path, Some(0o600))
+                    },
+                ).unwrap();
+                assert_eq!(opens.get(), 1);
+                assert_eq!(path, private);
+                assert!(!final_path.exists());
+                assert!(!candidate.exists());
+                assert!(manager.get_temp_info(&candidate).is_none());
+                assert_eq!(manager.list_active_temps(), vec![&private]);
+                assert_eq!(file.metadata().unwrap().len(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn eight_protected_candidates_exhaust_without_any_file_or_ownership() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("reserved.tmp");
+        let mut manager = TempPathManager::for_destination(&final_path);
+        let attempts = Cell::new(0);
+        let result = manager.create_temp_file_from(
+            "verified-publication",
+            |_| {
+                attempts.set(attempts.get() + 1);
+                Ok(final_path.clone())
+            },
+            |_| panic!("protected destination reached the opener"),
+        );
+        assert!(matches!(result, Err(TempFileCreationError::Open(error))
+            if error.kind() == std::io::ErrorKind::AlreadyExists));
+        assert_eq!(attempts.get(), 8);
+        assert!(manager.list_active_temps().is_empty());
+        assert!(!final_path.exists());
+        // Exclusion does not consume tracked-file capacity or disable normal use.
+        manager.config.max_active_temps = 1;
+        let (private, _file) = manager.create_temp_file("ordinary").unwrap();
+        assert_ne!(private, final_path);
+        assert_eq!(manager.list_active_temps().len(), 1);
+    }
+
+    #[test]
+    fn excluded_names_and_existing_collisions_never_become_cleanup_targets() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("destination.tmp");
+        let occupied = root.path().join("occupied.tmp");
+        let private = root.path().join("private.tmp");
+        fs::write(&occupied, b"not owned by the writer").unwrap();
+        let mut manager = TempPathManager::for_destination(&final_path);
+        let mut names = [final_path.clone(), occupied.clone(), private.clone()].into_iter();
+        let opens = Cell::new(0);
+        let (path, file) = manager.create_temp_file_from(
+            "original-object",
+            |_| Ok(names.next().expect("three candidates suffice")),
+            |path| {
+                opens.set(opens.get() + 1);
+                TempPathManager::open_new_file(path, Some(0o600))
+            },
+        ).unwrap();
+        assert_eq!(opens.get(), 2);
+        assert_eq!(path, private);
+        assert_eq!(manager.list_active_temps(), vec![&private]);
+        drop(file);
+        manager.active_temps.get_mut(&private).unwrap().created_at = UNIX_EPOCH;
+        let cleaned = manager.cleanup_stale_files().unwrap();
+        assert_eq!(cleaned.len(), 1);
+        assert_eq!(fs::read(occupied).unwrap(), b"not owned by the writer");
+        assert!(!final_path.exists());
+        assert!(manager.list_active_temps().is_empty());
+    }
+
+    #[test]
+    fn destination_reservation_preserves_capacity_refusal_and_default_manager_behavior() {
+        let root = tempfile::tempdir().unwrap();
+        let final_path = root.path().join("destination.tmp");
+        let mut manager = TempPathManager::for_destination(&final_path);
+        assert_eq!(manager.base_dir, root.path());
+        assert!(manager.is_protected_destination(&final_path));
+        manager.config.max_active_temps = 0;
+        assert!(matches!(manager.create_temp_file_with("original-object",
+            |_| panic!("zero capacity reached opener")),
+            Err(TempFileCreationError::Path(TempManagementError::TooManyTempFiles))));
+        assert!(manager.list_active_temps().is_empty());
+        assert!(!final_path.exists());
+        let ordinary = TempPathManager::new(root.path());
+        assert!(!ordinary.is_protected_destination(&final_path));
+    }
+}

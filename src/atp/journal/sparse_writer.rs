@@ -231,7 +231,7 @@ impl SparseWriter {
         };
 
         // Initialize path manager
-        let path_manager = Arc::new(Mutex::new(TempPathManager::new(destination_dir)));
+        let path_manager = Arc::new(Mutex::new(TempPathManager::for_destination(&final_path)));
 
         // Create initial state
         let state = Arc::new(Mutex::new(SparseWriterState {
