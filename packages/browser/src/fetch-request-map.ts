@@ -17,6 +17,11 @@ export interface FetchRequestMapOptions {
   maxInputs?: number;
 }
 
+export interface FetchRequestFlatMapOptions extends FetchRequestMapOptions {
+  /** Per-input descriptor cap, 1..1024. Default 64; empty arrays skip inputs. */
+  maxRequestsPerInput?: number;
+}
+
 export type FetchRequestMapper<T, R> = (value: T, index: number, signal: AbortSignal) => R | PromiseLike<R>;
 type Input<T> = ReadableStream<T> | FetchRequestMapSource<T>;
 type Request = BrowserFetchOptions | null;
@@ -113,8 +118,29 @@ export function tryMapFetchRequests<T>(source: Input<T>, mapper: FetchRequestMap
   return mapRequests(source, mapper, options, true);
 }
 
+/**
+ * Expand each input into a bounded array of requests, preserving input/array order.
+ * Snapshot and validate the entire descriptor list before emitting any member;
+ * never inspect request fields or use a caller-provided iterator. Empty arrays
+ * skip an input. Pull no further input until every current descriptor is emitted.
+ * Cancellation discards unadmitted descriptors without acquiring their bodies.
+ * Shares mapFetchRequests' mapper/producer join and non-rollback boundaries.
+ */
+export function flatMapFetchRequests<T>(source: Input<T>,
+  mapper: FetchRequestMapper<T, readonly BrowserFetchOptions[]>,
+  options: FetchRequestFlatMapOptions = {}): Outcome<FetchBatchRequestSource> {
+  return mapRequests(source, mapper, options, false, true);
+}
+
+/** Typed-Outcome variant of flatMapFetchRequests; successful empty arrays skip. */
+export function tryFlatMapFetchRequests<T>(source: Input<T>,
+  mapper: FetchRequestMapper<T, Outcome<readonly BrowserFetchOptions[]>>,
+  options: FetchRequestFlatMapOptions = {}): Outcome<FetchBatchRequestSource> {
+  return mapRequests(source, mapper, options, true, true);
+}
+
 function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>,
-  options: FetchRequestMapOptions, typed: boolean): Outcome<FetchBatchRequestSource> {
+  options: FetchRequestFlatMapOptions, typed: boolean, expand = false): Outcome<FetchBatchRequestSource> {
   if (!STREAM || !LOCKED || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED || !ABORT_CONTROLLER || !ABORT) {
     return fail("request mapping requires native stream readers and AbortController", "compatibility_rejected");
   }
@@ -122,11 +148,15 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let owner: FetchRequestMapSource<T> | undefined;
   let ownerCancel: FetchRequestMapSource<T>["cancel"] | undefined;
   let ownerClosed: Promise<Outcome<void>> | undefined;
-  let maxInputs: number;
+  let maxInputs: number, maxExpansion: number;
   try {
     maxInputs = options.maxInputs ?? 100_000;
     if (!Number.isSafeInteger(maxInputs) || maxInputs < 1 || typeof mapper !== "function") {
       return fail("request mapping requires a mapper and a positive safe maxInputs", "compatibility_rejected");
+    }
+    maxExpansion = expand ? options.maxRequestsPerInput ?? 64 : 1;
+    if (!Number.isSafeInteger(maxExpansion) || maxExpansion < 1 || maxExpansion > 1024) {
+      return fail("maxRequestsPerInput must be an integer in 1..1024", "compatibility_rejected");
     }
     let native = false;
     try { Reflect.apply(LOCKED, source, []); native = true; } catch { /* Try the explicit owner form. */ }
@@ -148,9 +178,11 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   let reader: ReadableStreamDefaultReader<T>;
   let controller!: ReadableStreamDefaultController<BrowserFetchOptions>;
   let stopped: Failure | undefined, ended = false, ending = false, inputFault = false;
+  let inputFailure: Failure | undefined;
   let active: Promise<void> | undefined;
   let retirement: Promise<void> | undefined;
   let finalizing = false, index = 0, consumerCancelled = false;
+  let requests: BrowserFetchOptions[] = [], nextRequest = 0;
 
   function note(outcome: Failure): void {
     if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
@@ -163,6 +195,13 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   function noteReceipt(outcome: Outcome<void>, expectedCancel: boolean): void {
     if (outcome.outcome !== "ok" && (outcome.outcome !== "cancelled" || !expectedCancel)) note(outcome);
   }
+  function noteSource(outcome: Outcome<void>): void {
+    // A native read rejection is only a provisional diagnosis. Replace THAT
+    // fallback with its checked producer receipt, not a different owner/mapper
+    // cause selected meanwhile. Never trust the native exception's .cause.
+    if (inputFailure && stopped === inputFailure && outcome.outcome !== "ok") stopped = outcome;
+    else noteReceipt(outcome, !!retirement && !inputFault);
+  }
   function finalize(): void {
     if (finalizing) return;
     finalizing = true;
@@ -170,7 +209,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     // native stream does not itself wait for its pending pull computation.
     void (async () => {
       await active;
-      if (ownerClosed) noteReceipt(await ownerClosed, !!retirement && !inputFault);
+      if (ownerClosed) noteSource(await ownerClosed);
       if (retirement) await retirement;
       ended = true;
       try { Reflect.apply(RELEASE!, reader, []); } catch { /* Already released. */ }
@@ -186,6 +225,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     if (ended) return completion.promise;
     note(outcome);
     ending = true; // Fence before any mapper/producer callback can re-enter.
+    requests = []; nextRequest = 0;
     if (!retirement) {
       // Install before invoking callbacks, which may re-enter cancel().
       retirement = Promise.all([
@@ -202,7 +242,8 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
   function sourceFault(): void {
     if (ending || ended) return;
     inputFault = true;
-    void stop(fail("request mapping input failed"));
+    inputFailure = fail("request mapping input failed");
+    void stop(inputFailure);
   }
   function pull(): Promise<void> | undefined {
     if (ending || ended) return;
@@ -210,6 +251,13 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     active = done.promise; // Install before invoking even a synchronous mapper.
     void (async () => {
       while (!ending && !ended) {
+        if (nextRequest < requests.length) {
+          const request = requests[nextRequest];
+          requests[nextRequest++] = undefined as unknown as BrowserFetchOptions;
+          if (nextRequest === requests.length) { requests = []; nextRequest = 0; }
+          controller.enqueue(request);
+          return;
+        }
         let item: ReadableStreamReadResult<T>;
         try { item = await Reflect.apply(READ!, reader, []); }
         catch { sourceFault(); return; }
@@ -220,7 +268,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
         try {
           value = await mapper(item.value, index++, control.signal);
           if (typed) {
-            const outcome = checked<Request>(value);
+            const outcome = checked<unknown>(value);
             if (outcome.outcome !== "ok") { void stop(outcome); return; }
             value = outcome.value;
           }
@@ -229,6 +277,28 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
           void stop(own ?? panic()); return;
         }
         if (ending || ended) return;
+        if (expand) {
+          try {
+            if (!Array.isArray(value)) throw new Error("not an array");
+            const count = value.length;
+            if (ending || ended) return;
+            if (!Number.isSafeInteger(count) || count < 0 || count > maxExpansion) throw new Error("expansion limit");
+            const snapshot: BrowserFetchOptions[] = [];
+            for (let n = 0; n < count; n++) {
+              const request: unknown = value[n];
+              if (ending || ended) return;
+              if (!request || typeof request !== "object" || Array.isArray(request)) throw new Error("not a request");
+              snapshot.push(request as BrowserFetchOptions);
+            }
+            // Indexed accessors may re-enter cancellation. Never install or
+            // publish their results after that ownership fence.
+            if (ending || ended) return;
+            requests = snapshot; nextRequest = 0;
+          } catch {
+            void stop(fail("request expansion requires a bounded array of request objects", "compatibility_rejected")); return;
+          }
+          continue;
+        }
         if (value === null) continue;
         if (!value || typeof value !== "object" || Array.isArray(value)) {
           void stop(fail("request mapper must return a request object or null", "compatibility_rejected")); return;
@@ -256,6 +326,7 @@ function mapRequests<T>(source: Input<T>, mapper: FetchRequestMapper<T, unknown>
     if (ownerClosed) void ownerClosed.then(outcome => {
       if (ended || outcome.outcome === "ok") return;
       if (outcome.outcome === "cancelled" && retirement && !inputFault) return;
+      noteSource(outcome);
       void stop(outcome);
     });
     return ok(Object.freeze({ readable, closed: completion.promise, cancel(reason = "request mapping cancelled by caller") {
