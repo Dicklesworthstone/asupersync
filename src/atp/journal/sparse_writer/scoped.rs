@@ -43,6 +43,7 @@ use std::pin::pin;
 use std::sync::Arc;
 
 mod finalize;
+mod receive;
 
 /// Runtime admission/retirement and the writer's actual outcome are separate.
 ///

@@ -10,6 +10,8 @@ pub mod commit_policy;
 pub mod delta_cas;
 pub mod platform_caps;
 pub mod range_tracker;
+#[cfg(not(target_arch = "wasm32"))]
+mod receive;
 pub mod recovery;
 pub mod sparse_writer;
 pub mod temp_management;
@@ -32,6 +34,8 @@ pub use delta_cas::{
 };
 pub use platform_caps::{FilesystemFeatures, PlatformCapabilities};
 pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
+#[cfg(not(target_arch = "wasm32"))]
+pub use receive::{ScopedReceive, ScopedReceiveError, ScopedReceiveOptions, ScopedReceiveResult};
 pub use recovery::{
     RecoveryContext, RecoveryError, RecoveryStats, load_recovered_or_create_bitmap,
     recover_journal_and_bitmap,
