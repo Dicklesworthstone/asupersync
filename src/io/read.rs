@@ -30,11 +30,21 @@ pub trait AsyncReadVectored: AsyncRead {
                 continue;
             }
 
+            let start = buf.as_ptr();
+            let offered = buf.len();
             let mut read_buf = ReadBuf::new(buf);
-            return match AsyncRead::poll_read(this.as_mut(), cx, &mut read_buf) {
-                Poll::Pending => Poll::Pending,
+            let result = AsyncRead::poll_read(this.as_mut(), cx, &mut read_buf);
+            let filled = read_buf.filled();
+            if !super::transfer_session::filled_in_place(filled, start, offered) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "scalar reader replaced the vectored destination buffer",
+                )));
+            }
+            return match result {
+                Poll::Pending if filled.is_empty() => Poll::Pending,
                 Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Pending | Poll::Ready(Ok(())) => Poll::Ready(Ok(filled.len())),
             };
         }
 
@@ -100,10 +110,17 @@ where
 }
 
 /// Take at most `limit` bytes from a reader.
+///
+/// In-place progress is charged even if the provider returns `Pending` or an
+/// error. A positive pending fill is returned as ready data; a provider error
+/// is preserved alongside any progress visible in the caller's `ReadBuf`.
+/// A provider panic or nonempty fill outside the offered storage makes further
+/// nonempty reads fail with `InvalidData`: unknown input cannot be read twice.
 #[derive(Debug)]
 pub struct Take<R> {
     inner: R,
     limit: u64,
+    poisoned: bool,
 }
 
 impl<R> Take<R> {
@@ -111,7 +128,11 @@ impl<R> Take<R> {
     #[inline]
     #[must_use]
     pub fn new(inner: R, limit: u64) -> Self {
-        Self { inner, limit }
+        Self {
+            inner,
+            limit,
+            poisoned: false,
+        }
     }
 
     /// Returns the remaining limit.
@@ -119,6 +140,17 @@ impl<R> Take<R> {
     #[must_use]
     pub const fn limit(&self) -> u64 {
         self.limit
+    }
+
+    fn check_read_state(&self) -> io::Result<()> {
+        if self.poisoned {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "bounded reader has unknown provider effects; further reads are refused",
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -134,32 +166,43 @@ where
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
 
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
+        this.check_read_state()?;
         if this.limit == 0 {
             return Poll::Ready(Ok(()));
         }
 
-        let max = std::cmp::min(buf.remaining() as u64, this.limit) as usize;
-        if max == 0 {
-            return Poll::Ready(Ok(()));
-        }
-
-        let filled_before = buf.filled().len();
-        {
+        let max = buf
+            .remaining()
+            .min(usize::try_from(this.limit).unwrap_or(usize::MAX));
+        // Arm before calling user code; unwinding must not silently readmit
+        // a provider whose source position may have changed without a count.
+        this.poisoned = true;
+        let (result, read) = {
             let unfilled = &mut buf.unfilled()[..max];
+            let start = unfilled.as_ptr();
             let mut limited = ReadBuf::new(unfilled);
-            match Pin::new(&mut this.inner).poll_read(cx, &mut limited) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
-                Poll::Ready(Ok(())) => {
-                    let n = limited.filled().len();
-                    buf.advance(n);
-                }
+            let result = Pin::new(&mut this.inner).poll_read(cx, &mut limited);
+            if !super::transfer_session::filled_in_place(limited.filled(), start, max) {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bounded reader replaced its limited destination buffer",
+                )));
             }
-        }
-        let read = buf.filled().len().saturating_sub(filled_before);
-        this.limit = this.limit.saturating_sub(read as u64);
+            (result, limited.filled().len())
+        };
+        // These updates precede every return, including errors. The provider
+        // has already consumed this prefix and it must not receive fresh quota.
+        buf.advance(read);
+        this.limit -= read as u64;
+        this.poisoned = false;
 
-        Poll::Ready(Ok(()))
+        match result {
+            Poll::Pending if read != 0 => Poll::Ready(Ok(())),
+            other => other,
+        }
     }
 }
 

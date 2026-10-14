@@ -77,6 +77,10 @@ mod copy_read_contract_tests;
 mod buf_reader_read_contract_tests;
 
 #[cfg(test)]
+#[path = "read_adapter_contract_tests.rs"]
+mod read_adapter_contract_tests;
+
+#[cfg(test)]
 mod tests {
     #![allow(
         clippy::pedantic,
