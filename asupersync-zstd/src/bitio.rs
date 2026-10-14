@@ -165,6 +165,15 @@ impl BitWriter {
         }
     }
 
+    /// An empty writer with room for `bytes` bytes of output.
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self {
+            out: Vec::with_capacity(bytes),
+            container: 0,
+            bits: 0,
+        }
+    }
+
     /// Appends the low `count` (at most [`MAX_READ_BITS`]) bits of `value`.
     pub fn add(&mut self, value: u64, count: u32) {
         debug_assert!(count <= MAX_READ_BITS, "write of {count} bits");
@@ -182,12 +191,39 @@ impl BitWriter {
         self.bits += count;
     }
 
-    /// Moves every complete byte of the container to the output.
+    /// Makes room for `bits` more bits (at most [`MAX_READ_BITS`]) added
+    /// with [`Self::push`], so a run of short fields needs one check.
+    pub fn reserve(&mut self, bits: u32) {
+        debug_assert!(bits <= MAX_READ_BITS, "reserve of {bits} bits");
+        if self.bits + bits > u64::BITS {
+            self.flush_bytes();
+        }
+    }
+
+    /// Appends the low `count` bits of `value` (1 to [`MAX_READ_BITS`]) into
+    /// room made by [`Self::reserve`].
+    pub fn push(&mut self, value: u64, count: u32) {
+        debug_assert!((1..=MAX_READ_BITS).contains(&count), "push of {count} bits");
+        debug_assert!(
+            self.bits + count <= u64::BITS,
+            "push past the reserved room"
+        );
+        debug_assert!(
+            value & !low_mask(count) == 0,
+            "{value} wider than {count} bits"
+        );
+        self.container |= value << self.bits;
+        self.bits += count;
+    }
+
+    /// Moves every complete byte of the container to the output. The whole
+    /// word is appended and the incomplete bytes cut off again, which is a
+    /// fixed-size copy instead of a variable one.
     fn flush_bytes(&mut self) {
         let whole = self.bits / 8;
-        let bytes = self.container.to_le_bytes();
-        self.out
-            .extend_from_slice(&bytes[..usize::try_from(whole).unwrap_or(0)]);
+        let len = self.out.len();
+        self.out.extend_from_slice(&self.container.to_le_bytes());
+        self.out.truncate(len + usize::try_from(whole).unwrap_or(0));
         self.container = self.container.checked_shr(whole * 8).unwrap_or(0);
         self.bits -= whole * 8;
     }
