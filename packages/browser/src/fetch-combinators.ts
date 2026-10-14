@@ -32,6 +32,9 @@ interface ResponseGroup {
 }
 
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
+// Match the native Outcome lattice. Expected loser cancellation is filtered by
+// drain(), but an observed owner cancellation must dominate an ordinary error.
+const severity = (outcome: Failure): number => outcome.outcome === "panicked" ? 3 : outcome.outcome === "cancelled" ? 2 : 1;
 const STREAM = typeof ReadableStream === "undefined" ? undefined : ReadableStream;
 const LOCKED = STREAM && Object.getOwnPropertyDescriptor(STREAM.prototype, "locked")?.get;
 const GET_READER = STREAM?.prototype.getReader;
@@ -222,15 +225,15 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Ou
       if (outcome.outcome !== "ok") {
         cleanupErrors.set(index, outcome);
         // Do not keep the selected body alive behind another slow loser.
-        for (let other = 0; other < members.length; other += 1) if (other !== index) void drain(other);
+        stop(outcome);
       }
       resolve(outcome);
     })();
     return member.draining;
   }
   function stop(outcome: Failure) {
-    if (finished || stopped) return;
-    stopped = outcome;
+    if (finished) return;
+    if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
     decide();
     for (let index = 0; index < members.length; index += 1) void drain(index);
   }
@@ -276,17 +279,20 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean): Ou
       ? Promise.resolve(ok(undefined)) : drain(index)));
     for (const index of selectedIndexes) {
       const terminal = members[index].terminal;
-      if (terminal && terminal.outcome !== "ok") stopped ??= terminal;
+      // A join includes drained members too. Their expected cancellation is
+      // cleanup, not a new owner failure; drain() already records refusals.
+      if (!members[index].draining && terminal && terminal.outcome !== "ok") stop(terminal);
     }
     if (stopped || cleanupErrors.size || (!join && !selectedIndexes.length)) {
       await Promise.all(members.map((_, index) => drain(index)));
-      // Never hide a cleanup panic behind an ordinary error or cancellation.
-      // Input order breaks same-severity ties, not completion timing.
-      const severity = (outcome: Failure) => outcome.outcome === "panicked" ? 3 : outcome.outcome === "err" ? 2 : 1;
+      // Compare cleanup with the initiating failure as well as other cleanup.
+      // Keep input-order cleanup ties, but never downgrade the stopped outcome.
       const cleanupFailure = [...cleanupErrors].sort(([a, x], [b, y]) => severity(y) - severity(x) || a - b)[0]?.[1];
+      const failure = cleanupFailure && (!stopped || severity(cleanupFailure) >= severity(stopped))
+        ? cleanupFailure : stopped;
       finished = true;
       release();
-      resolveResult(cleanupFailure ?? stopped ?? internal("fetch group ended without a response"));
+      resolveResult(failure ?? internal("fetch group ended without a response"));
     } else {
       const winners = selectedIndexes.map((index): FetchResponseWinner => {
         const member = members[index];
