@@ -2272,6 +2272,7 @@ async fn build_receiver_delta_state(
             baseline: None,
         });
     };
+    delta_manifest_validation::validate(manifest, delta_manifest)?;
     let sender_manifest = planner_manifest_from_wire(delta_manifest)?;
     if !config.enable_delta {
         return Ok(ReceiverDeltaState {
@@ -3907,6 +3908,7 @@ pub async fn send_path_with_options(
     })
 }
 
+mod delta_manifest_validation;
 mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
