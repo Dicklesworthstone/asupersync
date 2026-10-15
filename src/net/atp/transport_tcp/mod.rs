@@ -3638,6 +3638,7 @@ pub async fn send_path_with_options(
     mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+    sender_validation::validate_config(&config)?;
 
     let (root_name, is_directory, mut entries) =
         collect_entries_with_policy(source, &config.metadata_policy).await?;
