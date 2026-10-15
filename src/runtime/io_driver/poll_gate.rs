@@ -88,6 +88,11 @@ impl PollGate {
     /// None means this participant was woken, its timeout elapsed, or a
     /// nonblocking/browser turn encountered contention. It does NOT mean that
     /// another worker of this participant is driving its timers.
+    ///
+    /// Finite waits charge initial predicate-mutex contention and queued
+    /// ownership contention to the same budget. An uncontended acquisition
+    /// does not read the host clock. This does not bound the driver's later
+    /// mutation fence, backend callback or OS scheduling delay.
     pub(super) fn acquire(
         &self,
         woken: &AtomicBool,
@@ -95,16 +100,30 @@ impl PollGate {
     ) -> Option<(PollPermit<'_>, Option<Duration>)> {
         #[cfg(not(target_arch = "wasm32"))]
         let mut queued;
+        #[cfg(not(target_arch = "wasm32"))]
+        let mut started: Option<std::time::Instant> = None;
         #[cfg(target_arch = "wasm32")]
         let mut claimed = self.claimed.try_lock()?;
         #[cfg(not(target_arch = "wasm32"))]
-        let mut claimed = if timeout.is_some_and(|duration| duration.is_zero()) {
-            self.claimed.try_lock()?
-        } else {
-            self.claimed.lock()
+        let mut claimed = match self.claimed.try_lock() {
+            Some(claimed) => claimed,
+            None => match timeout {
+                Some(budget) if budget.is_zero() => return None,
+                Some(budget) => {
+                    // Start before waiting for the predicate, not afterwards:
+                    // a finite turn must not inherit an unbounded mutex wait.
+                    started = Some(std::time::Instant::now());
+                    self.claimed.try_lock_for(budget)?
+                }
+                None => self.claimed.lock(),
+            },
         };
         if claimed.available() {
             claimed.held = true;
+            #[cfg(not(target_arch = "wasm32"))]
+            let timeout = timeout.map(|budget| {
+                started.map_or(budget, |start| budget.saturating_sub(start.elapsed()))
+            });
             return Some((PollPermit(self), timeout));
         }
 
@@ -123,7 +142,9 @@ impl PollGate {
             if woken.swap(false, Ordering::AcqRel) {
                 return None;
             }
-            let start = std::time::Instant::now();
+            // Carry the original start through both contended phases. A
+            // notification or transition to the FIFO must not restart a budget.
+            let start = started.unwrap_or_else(std::time::Instant::now);
             queued = QueuedPoll {
                 gate: self,
                 changed: Arc::new(Condvar::new()),
@@ -421,5 +442,69 @@ mod ordered_tests {
         assert_eq!(*backend.0.lock(), expected);
         assert_eq!(owner._shared_owner.poll_gate.waiting_count(), 0);
         assert_eq!(owner.stats().unknown_tokens, 0);
+    }
+
+    #[test]
+    fn finite_budget_expires_while_the_predicate_mutex_stays_locked() {
+        for wake_pending in [false, true] {
+            let gate = Arc::new(PollGate::default());
+            let predicate = gate.claimed.lock();
+            let worker_gate = Arc::clone(&gate);
+            let woken = Arc::new(AtomicBool::new(wake_pending));
+            let worker_woken = Arc::clone(&woken);
+            let (sent, received) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                let claim = worker_gate
+                    .acquire(&worker_woken, Some(Duration::from_millis(10)));
+                let _ = sent.send(claim.is_none());
+                drop(claim);
+            });
+            // This guard stays held through receipt: a successful result cannot
+            // have come from an uncontended or merely queued ownership path.
+            let expired = received.recv_timeout(WATCHDOG);
+            drop(predicate); // Rescue old code before joining and asserting.
+            worker.join().unwrap();
+            assert_eq!(expired, Ok(true));
+            assert_eq!(gate.waiting_count(), 0, "no expired enrollment remains");
+            assert_eq!(woken.load(Ordering::Acquire), wake_pending);
+            assert!(gate.acquire(&woken, Some(Duration::ZERO)).is_some());
+        }
+    }
+
+    #[test]
+    fn expired_head_does_not_hold_up_a_live_successor() {
+        let gate = Arc::new(PollGate::default());
+        let owner = gate.lock();
+        let first_gate = Arc::clone(&gate);
+        let (first_tx, first_rx) = mpsc::channel();
+        let first = thread::spawn(move || {
+            let claim = first_gate
+                .acquire(&AtomicBool::new(false), Some(Duration::from_secs(1)));
+            let _ = first_tx.send(claim.is_none());
+            drop(claim);
+        });
+        let first_queued = enrolled(&gate, 1);
+        let second_gate = Arc::clone(&gate);
+        let (second_tx, second_rx) = mpsc::channel();
+        let second = thread::spawn(move || {
+            let claim = second_gate.acquire(&AtomicBool::new(false), Some(WATCHDOG * 2));
+            let _ = second_tx.send(claim.is_some());
+            drop(claim);
+        });
+        let both_queued = enrolled(&gate, 2);
+        // Hold ownership until the first claimant's own budget expires.
+        let expired = first_rx.recv_timeout(WATCHDOG);
+        let remaining = gate.waiting_count();
+        let still_waiting = matches!(second_rx.try_recv(), Err(mpsc::TryRecvError::Empty));
+        drop(owner);
+        let succeeded = second_rx.recv_timeout(WATCHDOG);
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(first_queued && both_queued);
+        assert_eq!(expired, Ok(true));
+        assert_eq!(remaining, 1);
+        assert!(still_waiting);
+        assert_eq!(succeeded, Ok(true));
+        assert_eq!(gate.waiting_count(), 0);
     }
 }
