@@ -1,0 +1,126 @@
+name: Reactor handoff regression
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/reactor-handoff.yml
+      - scripts/apply_reactor_handoff.py
+      - src/runtime/io_driver.rs
+      - src/runtime/scheduler/**
+  workflow_dispatch:
+
+# The preparation run creates unattached Git objects only, never commits or refs.
+# Reduce this to read once the tested runtime tree is published by the caller.
+permissions:
+  contents: write
+
+concurrency:
+  group: reactor-handoff-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: nightly-2026-07-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
+  CARGO_TERM_COLOR: never
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - name: Prepare candidate without modifying any remote ref
+        id: prepare
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! grep -q 'fn is_polling(&self)' src/runtime/io_driver.rs; then
+            python3 scripts/apply_reactor_handoff.py
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          fi
+          "$RCH_BIN" exec -- rustfmt --edition 2024 --config skip_children=true src/runtime/io_driver.rs src/runtime/scheduler/worker.rs src/runtime/scheduler/three_lane.rs src/runtime/scheduler/reactor_handoff_tests.rs
+          git diff --check
+          git diff --stat
+      - name: Handoff, parking handshake, and poll-error regressions
+        run: |
+          set -euo pipefail
+          "$RCH_BIN" exec -- cargo test -p asupersync --lib reactor_handoff_tests -- --test-threads=1 2>&1 | tee /tmp/reactor-handoff-tests.log
+      - name: Scheduler regression suite
+        run: |
+          set -euo pipefail
+          "$RCH_BIN" exec -- cargo test -p asupersync --lib runtime::scheduler -- --test-threads=1 2>&1 | tee /tmp/reactor-handoff-scheduler.log
+      - name: Shared I/O driver regression suite
+        run: |
+          set -euo pipefail
+          "$RCH_BIN" exec -- cargo test -p asupersync --lib runtime::io_driver -- --test-threads=1 2>&1 | tee /tmp/reactor-handoff-driver.log
+      - name: Formatting
+        run: '"$RCH_BIN" exec -- cargo fmt --all -- --check'
+      - name: Check all targets
+        run: '"$RCH_BIN" exec -- cargo check -p asupersync --all-targets'
+      - name: Clippy all targets
+        run: '"$RCH_BIN" exec -- cargo clippy -p asupersync --all-targets -- -D warnings'
+      - name: Export tested tree, without creating a commit or changing main
+        if: steps.prepare.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import subprocess
+          import urllib.request
+          from pathlib import Path
+
+          paths = [
+              'src/runtime/io_driver.rs',
+              'src/runtime/scheduler/worker.rs',
+              'src/runtime/scheduler/three_lane.rs',
+              'src/runtime/scheduler/reactor_handoff_tests.rs',
+          ]
+          changed = subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines()
+          if not set(changed) <= set(paths):
+              raise SystemExit(f'Refusing unexpected modifications: {changed}')
+          base = os.environ['GITHUB_SHA']
+          api = 'https://api.github.com/repos/' + os.environ['GITHUB_REPOSITORY']
+          def request(path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(api + path, data=data, headers={
+                  'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                  'Accept': 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              })
+              with urllib.request.urlopen(req, timeout=60) as response:
+                  return json.load(response)
+          base_tree = request('/git/commits/' + base)['tree']['sha']
+          entries = []
+          for path in paths:
+              sha = request('/git/blobs', {'encoding': 'base64', 'content': base64.b64encode(Path(path).read_bytes()).decode()})['sha']
+              entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': sha})
+          tree = request('/git/trees', {'base_tree': base_tree, 'tree': entries})['sha']
+          receipt = {'tested_base': base, 'tested_tree': tree, 'files': entries}
+          print('TESTED_REACTOR_HANDOFF_TREE=' + json.dumps(receipt, sort_keys=True), flush=True)
+          Path('/tmp/reactor-handoff-receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+              summary.write('### Tested reactor handoff tree\n```json\n' + json.dumps(receipt, indent=2) + '\n```\nNo commits or refs were created or updated by this job.\n')
+          PY
+      - name: Preserve verification logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reactor-handoff-verification-${{ github.run_id }}
+          path: /tmp/reactor-handoff-*
+          if-no-files-found: ignore
+          retention-days: 7

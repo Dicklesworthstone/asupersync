@@ -31,6 +31,10 @@ use std::task::Poll;
 
 #[path = "scoped/bounded.rs"]
 mod bounded;
+#[path = "scoped/directory.rs"]
+mod directory;
+
+pub use directory::{DirectoryReadLimits, ScopedDirEntry};
 
 /// Failure of region-owned filesystem work.
 #[derive(Debug)]

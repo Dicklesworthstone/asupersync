@@ -52,7 +52,7 @@ use crate::atp::safety::{
     validate_portable_relative_path,
 };
 use crate::net::atp::transport_common::codec::{
-    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
+    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
@@ -496,6 +496,13 @@ struct FrameTransport<S> {
     /// The payload codec both sides agreed on in the handshake, if any. Only
     /// then may data frames carry compressed chunks.
     chunk_codec: Option<CodecAccept>,
+    /// What the sender asked for, which decides the chunks it tries to
+    /// compress once a codec is agreed (br-asupersync-t1fblr.24).
+    compression: CompressionMode,
+    /// Chunks of a file the sender compresses at once
+    /// (br-asupersync-t1fblr.25).
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    compression_parallelism: usize,
 }
 
 impl<S> FrameTransport<S>
@@ -509,6 +516,8 @@ where
             rbuf: BytesMut::new(),
             decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
             chunk_codec: None,
+            compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -1160,6 +1169,7 @@ where
         .await
         .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
     let mut offset: u64 = 0;
+    let mut entry = EntryCompression::new(transport.compression, &path.to_string_lossy());
     loop {
         let n = file
             .read(buf)
@@ -1168,7 +1178,13 @@ where
         if n == 0 {
             break;
         }
-        let frame = chunk_frame(transport.chunk_codec.as_ref(), index, offset, &buf[..n])?;
+        let frame = chunk_frame(
+            transport.chunk_codec.as_ref(),
+            &mut entry,
+            index,
+            offset,
+            &buf[..n],
+        )?;
         with_transport_timeout(
             cx,
             config.idle_timeout,
@@ -1179,6 +1195,197 @@ where
         offset = offset.saturating_add(n as u64);
     }
     Ok(())
+}
+
+/// An entry whose chunks are not all sent yet, in
+/// [`send_full_entries_pipelined`].
+#[cfg(feature = "zstd")]
+struct OpenEntry {
+    /// The manifest size, reported as progress once the entry is sent.
+    size: u64,
+    /// Chunks queued in the pipeline so far.
+    queued: usize,
+    /// Chunks sent so far.
+    sent: usize,
+    /// The whole file has been read and queued.
+    read_all: bool,
+}
+
+/// The pipelined counterpart of [`send_full_entries_streaming`]'s loop, for a
+/// session that agreed on a codec (br-asupersync-t1fblr.25).
+///
+/// Chunks of consecutive files share one [`codec::ChunkPipeline`]: up to
+/// `compression_parallelism` compress at once on the runtime's blocking pool
+/// and go out in the order they were read, so a tree of small files
+/// compresses in parallel too. Memory is bounded by that many chunks in
+/// flight, raw and compressed, plus the one being read. Progress is reported
+/// as before: once per regular entry, in order, after its last chunk is sent.
+#[cfg(feature = "zstd")]
+async fn send_full_entries_pipelined<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    digests: &[EntryDigest],
+    config: &TransferConfig,
+    chunk_len: usize,
+    accept: CodecAccept,
+    on_progress: &mut impl FnMut(u64, u64),
+) -> Result<u64, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let total_bytes = digests
+        .iter()
+        .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
+    let mut sent_bytes = 0u64;
+    let mut pipeline = codec::ChunkPipeline::new(accept, transport.compression_parallelism);
+    // Buffers of chunks already sent, reused for the next reads.
+    let mut spare: Vec<Vec<u8>> = Vec::new();
+    let mut open: std::collections::VecDeque<OpenEntry> = std::collections::VecDeque::new();
+    // The entry being read and its decisions: only its outcomes still decide.
+    let mut current = u32::MAX;
+    let mut decisions = EntryCompression::new(CompressionMode::Off, "");
+    for (i, entry) in entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        if !matches!(metadatas[i].file_kind, FileKind::Regular)
+            || metadatas[i].hardlink_target.is_some()
+        {
+            continue;
+        }
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|e| TransportError::Source(format!("{}: {e}", entry.abs_path.display())))?;
+        current = index;
+        decisions = EntryCompression::new(transport.compression, &entry.abs_path.to_string_lossy());
+        open.push_back(OpenEntry {
+            size: digests[i].size,
+            queued: 0,
+            sent: 0,
+            read_all: false,
+        });
+        let mut offset: u64 = 0;
+        loop {
+            while pipeline.is_full() {
+                send_pipelined_chunk(
+                    cx,
+                    transport,
+                    config,
+                    &mut pipeline,
+                    current,
+                    &mut decisions,
+                    &mut open,
+                    &mut spare,
+                )
+                .await?;
+                report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+            }
+            let mut raw = spare.pop().unwrap_or_default();
+            raw.resize(chunk_len.max(1), 0);
+            let n = file.read(&mut raw).await.map_err(|e| {
+                TransportError::Source(format!("{}: {e}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                break;
+            }
+            raw.truncate(n);
+            pipeline.push(cx, &mut decisions, index, offset, raw);
+            offset = offset.saturating_add(n as u64);
+            if let Some(last) = open.back_mut() {
+                last.queued += 1;
+            }
+        }
+        if let Some(last) = open.back_mut() {
+            last.read_all = true;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    while !open.is_empty() {
+        if !send_pipelined_chunk(
+            cx,
+            transport,
+            config,
+            &mut pipeline,
+            current,
+            &mut decisions,
+            &mut open,
+            &mut spare,
+        )
+        .await?
+        {
+            break;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    on_progress(total_bytes, total_bytes);
+    Ok(total_bytes)
+}
+
+/// Sends the oldest chunk of `pipeline` once it is ready and counts it
+/// against its entry in `open`. `false` when the pipeline was empty.
+#[cfg(feature = "zstd")]
+async fn send_pipelined_chunk<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    config: &TransferConfig,
+    pipeline: &mut codec::ChunkPipeline,
+    current: u32,
+    decisions: &mut EntryCompression,
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    spare: &mut Vec<Vec<u8>>,
+) -> Result<bool, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let Some(chunk) = pipeline.next(current, decisions).await else {
+        return Ok(false);
+    };
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => TransportError::Cancelled,
+        other => TransportError::Frame(format!("compressing a chunk failed: {other}")),
+    })?;
+    let frame = match &chunk.compressed {
+        Some((record, payload)) => {
+            compressed_data_frame(chunk.index, chunk.offset, *record, payload)?
+        }
+        None => data_frame(chunk.index, chunk.offset, &chunk.raw)?,
+    };
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send data frame",
+        transport.send(&frame),
+    )
+    .await?;
+    // Chunks leave in the order they were read, so this one belongs to the
+    // oldest entry that still has chunks to send.
+    if let Some(entry) = open.iter_mut().find(|entry| entry.sent < entry.queued) {
+        entry.sent += 1;
+    }
+    spare.push(chunk.raw);
+    Ok(true)
+}
+
+/// Reports, in order, every leading entry of `open` that is read to the end
+/// with all its chunks sent, as [`send_full_entries_streaming`] does after
+/// each entry.
+#[cfg(feature = "zstd")]
+fn report_sent_entries(
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    sent_bytes: &mut u64,
+    total_bytes: u64,
+    on_progress: &mut impl FnMut(u64, u64),
+) {
+    while open
+        .front()
+        .is_some_and(|entry| entry.read_all && entry.sent == entry.queued)
+    {
+        if let Some(entry) = open.pop_front() {
+            *sent_bytes = sent_bytes.saturating_add(entry.size);
+            on_progress(*sent_bytes, total_bytes);
+        }
+    }
 }
 
 fn transfer_manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
@@ -1632,28 +1839,43 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
-/// An `ObjectData` frame for `chunk`. When the session negotiated a codec and
+/// An `ObjectData` frame for `chunk`, the bytes at `offset` of entry `index`.
+/// When the session negotiated a codec, `entry` decides to try, and
 /// compressing makes the chunk smaller, the payload carries the compressed
 /// chunk and the frame a [`codec::CHUNK_CODEC_EXTENSION`] record; otherwise
 /// the frame is byte-identical to [`data_frame`]'s.
 #[cfg(feature = "zstd")]
 fn chunk_frame(
     accept: Option<&CodecAccept>,
+    entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
 ) -> Result<Frame, TransportError> {
     if let Some((record, compressed)) =
-        accept.and_then(|accept| codec::compress_chunk(accept, chunk))
+        accept.and_then(|accept| entry.compress(accept, offset, chunk))
     {
-        let mut frame = data_frame(index, offset, &compressed)?;
-        frame
-            .header
-            .extensions
-            .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
-        return Ok(frame);
+        return compressed_data_frame(index, offset, record, &compressed);
     }
     data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed chunk at
+/// `offset` of entry `index`, with its [`codec::CHUNK_CODEC_EXTENSION`]
+/// record.
+#[cfg(feature = "zstd")]
+fn compressed_data_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, TransportError> {
+    let mut frame = data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
 }
 
 /// Without the `zstd` feature no codec is ever negotiated, so every chunk is
@@ -1661,6 +1883,7 @@ fn chunk_frame(
 #[cfg(not(feature = "zstd"))]
 fn chunk_frame(
     _accept: Option<&CodecAccept>,
+    _entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
@@ -1925,6 +2148,22 @@ async fn send_full_entries_streaming<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    #[cfg(feature = "zstd")]
+    if let Some(accept) = transport.chunk_codec {
+        let chunk_len = read_buf.len();
+        return send_full_entries_pipelined(
+            cx,
+            transport,
+            entries,
+            metadatas,
+            digests,
+            config,
+            chunk_len,
+            accept,
+            &mut on_progress,
+        )
+        .await;
+    }
     let total_bytes = digests
         .iter()
         .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
@@ -1998,8 +2237,12 @@ where
                 chunk.rel_path, chunk.entry_offset
             )));
         }
+        // Delta chunks are scattered, so each is decided on its own: by its
+        // entry's name, and at offset 0 by its first bytes.
+        let mut decisions = EntryCompression::new(transport.compression, &chunk.rel_path);
         let frame = chunk_frame(
             transport.chunk_codec.as_ref(),
+            &mut decisions,
             chunk.entry_index,
             chunk.entry_offset,
             &bytes,
@@ -2029,6 +2272,7 @@ async fn build_receiver_delta_state(
             baseline: None,
         });
     };
+    delta_manifest_validation::validate(manifest, delta_manifest)?;
     let sender_manifest = planner_manifest_from_wire(delta_manifest)?;
     if !config.enable_delta {
         return Ok(ReceiverDeltaState {
@@ -3107,12 +3351,23 @@ pub async fn send_path_filtered(
 
 /// Sender options beyond [`TransferConfig`], which is exhaustively
 /// constructible and so cannot gain fields without breaking its callers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendOptions {
     /// Bulk-data compression (br-asupersync-t1fblr.16). The default,
     /// [`CompressionMode::Off`], sends exactly the frames older senders send.
     pub compression: CompressionMode,
+    /// How many chunks of a file are compressed at once on the runtime's
+    /// blocking pool (br-asupersync-t1fblr.25; at least 1, default
+    /// [`codec::DEFAULT_COMPRESSION_PARALLELISM`]). It changes speed, never
+    /// what [`CompressionMode::Zstd`] sends.
+    pub compression_parallelism: usize,
+}
+
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SendOptions {
@@ -3121,6 +3376,7 @@ impl SendOptions {
     pub const fn new() -> Self {
         Self {
             compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -3130,6 +3386,237 @@ impl SendOptions {
         self.compression = compression;
         self
     }
+
+    /// These options compressing up to `chunks` chunks at once (0 counts as
+    /// 1).
+    #[must_use]
+    pub const fn with_compression_parallelism(mut self, chunks: usize) -> Self {
+        self.compression_parallelism = chunks;
+        self
+    }
+}
+
+/// Files hashed by one blocking task of the sender's first pass, at most
+/// (br-asupersync-dfdwyt).
+const HASH_BATCH_FILES: usize = 64;
+
+/// Bytes one first-pass hashing task reads, at most, plus one read. The
+/// task stops there even inside a file, which the next task resumes, so a
+/// dropped transfer stops reading within one task.
+const HASH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Entries whose metadata one blocking task of the first pass reads.
+const METADATA_BATCH_ENTRIES: usize = 1024;
+
+/// The size, content id and SHA-256 of one entry's content.
+type ContentDigest = (u64, ObjectId, [u8; 32]);
+
+/// The primary entry of each hardlinked inode seen so far.
+type HardlinkPrimaries = std::collections::HashMap<HardlinkIdentity, String>;
+
+/// What one hashing task returns: the finished digests, the next content
+/// job, and the file it stopped inside, if any.
+type HashTaskOutcome = (
+    Vec<(usize, ContentDigest)>,
+    usize,
+    Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+);
+
+/// Reads the policy-selected metadata of `entries` and detects hardlinks:
+/// the first entry (by sorted path) for an inode is the primary that carries
+/// the content, and later entries sharing it are sent content-free and
+/// `hard_link`ed on the receiver. `primaries` carries over between calls.
+/// Symlink metadata is validated as the receiver will.
+fn capture_entry_metadata_sync(
+    entries: &[(String, PathBuf)],
+    policy: &MetadataPolicy,
+    preserve_hardlinks: bool,
+    primaries: &mut HardlinkPrimaries,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    use crate::net::atp::transport_common::metadata::{
+        inode_key_if_regular_sync, read_entry_metadata_sync,
+    };
+    let mut metadatas = Vec::with_capacity(entries.len());
+    for (rel_path, abs_path) in entries {
+        let mut metadata = read_entry_metadata_sync(abs_path, policy)?;
+        if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) = inode_key_if_regular_sync(abs_path)? {
+                if let Some(primary) = primaries.get(&key) {
+                    metadata.hardlink_target = Some(primary.clone());
+                } else {
+                    primaries.insert(key, rel_path.clone());
+                }
+            }
+        }
+        validate_symlink_metadata_for_receive(rel_path, &metadata).map_err(|error| {
+            TransportError::Source(format!(
+                "{}: invalid symlink metadata: {error}",
+                abs_path.display()
+            ))
+        })?;
+        metadatas.push(metadata);
+    }
+    Ok(metadatas)
+}
+
+/// The metadata half of the sender's first pass (br-asupersync-dfdwyt), in
+/// blocking tasks of [`METADATA_BATCH_ENTRIES`] entries with a cancellation
+/// checkpoint between them.
+async fn capture_entry_metadata(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    config: &TransferConfig,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    let mut metadatas = Vec::with_capacity(entries.len());
+    let mut primaries = HardlinkPrimaries::new();
+    for batch in entries.chunks(METADATA_BATCH_ENTRIES) {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let policy = config.metadata_policy.clone();
+        let preserve_hardlinks = config.preserve_hardlinks;
+        let paths: Vec<(String, PathBuf)> = batch
+            .iter()
+            .map(|entry| (entry.rel_path.clone(), entry.abs_path.clone()))
+            .collect();
+        let (result, carried) = crate::runtime::spawn_blocking(move || {
+            let result =
+                capture_entry_metadata_sync(&paths, &policy, preserve_hardlinks, &mut primaries);
+            (result, primaries)
+        })
+        .await;
+        primaries = carried;
+        metadatas.extend(result?);
+    }
+    Ok(metadatas)
+}
+
+/// Paths the first pass opened, for tests that check which files it read.
+#[cfg(test)]
+static FIRST_PASS_OPENS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// One blocking task of the sender's first pass (br-asupersync-dfdwyt).
+///
+/// It hashes the content `jobs` from `next` on, resuming `open` (a file an
+/// earlier task stopped inside). It stops after [`HASH_BATCH_FILES`] files;
+/// after [`HASH_BATCH_BYTES`] bytes, possibly inside a file, which it returns
+/// open; or right after the file that takes `total` past `max`, so no later
+/// file is opened.
+fn hash_task(
+    jobs: &[(usize, PathBuf)],
+    mut next: usize,
+    mut open: Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+    buf: &mut [u8],
+    mut total: u64,
+    max: u64,
+) -> Result<HashTaskOutcome, StreamingError> {
+    use crate::net::atp::transport_common::streaming::SyncFileHash;
+
+    let mut done = Vec::new();
+    let mut read = 0u64;
+    while let Some((index, path)) = jobs.get(next) {
+        if done.len() >= HASH_BATCH_FILES || read >= HASH_BATCH_BYTES {
+            break;
+        }
+        let mut file = match open.take() {
+            Some(file) => file,
+            None => {
+                #[cfg(test)]
+                {
+                    if let Ok(mut opens) = FIRST_PASS_OPENS.lock() {
+                        opens.push(path.clone());
+                    }
+                }
+                SyncFileHash::open(path)?
+            }
+        };
+        let n = file.read_some(path, buf)?;
+        if n > 0 {
+            read = read.saturating_add(n as u64);
+            open = Some(file);
+            continue;
+        }
+        let digest = file.finish();
+        total = total.saturating_add(digest.0);
+        done.push((*index, digest));
+        next += 1;
+        if total > max {
+            break;
+        }
+    }
+    Ok((done, next, open))
+}
+
+/// The content half of the sender's first pass (br-asupersync-dfdwyt): the
+/// digest of every entry that carries content, `None` for the rest.
+///
+/// - Only regular files that are not hardlinks to a primary carry content,
+///   so a FIFO is never opened (it would block the sender).
+/// - Files are hashed in blocking tasks ([`hash_task`]) of at most
+///   [`HASH_BATCH_FILES`] files or [`HASH_BATCH_BYTES`] bytes, with a
+///   cancellation checkpoint between tasks.
+/// - As before, the transfer is refused with `TooLarge`, carrying the total
+///   through the end of the first file that takes it past
+///   `max_transfer_bytes`, before any later file is opened.
+///
+/// `buf` (the send phase's read buffer) is the tasks' read buffer.
+async fn hash_content_entries(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    config: &TransferConfig,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<Option<ContentDigest>>, TransportError> {
+    let jobs: std::sync::Arc<Vec<(usize, PathBuf)>> = std::sync::Arc::new(
+        entries
+            .iter()
+            .zip(metadatas)
+            .enumerate()
+            .filter(|(_, (_, metadata))| {
+                matches!(metadata.file_kind, FileKind::Regular)
+                    && metadata.hardlink_target.is_none()
+            })
+            .map(|(index, (entry, _))| (index, entry.abs_path.clone()))
+            .collect(),
+    );
+    let mut hashed: Vec<Option<ContentDigest>> = std::iter::repeat_with(|| None)
+        .take(entries.len())
+        .collect();
+    if jobs.is_empty() {
+        return Ok(hashed);
+    }
+    // The opens below are std::fs on the blocking pool: check the same gate
+    // crate::fs::File::open checks.
+    crate::cx::io_gate::require_ambient_io("fs::File::open")
+        .map_err(|error| TransportError::Source(format!("source hashing: {error}")))?;
+    let max = config.max_transfer_bytes;
+    let mut task_buf = std::mem::take(buf);
+    if task_buf.is_empty() {
+        task_buf = vec![0u8; config.chunk_size.max(1)];
+    }
+    let (mut total, mut next, mut open) = (0u64, 0usize, None);
+    while next < jobs.len() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let task_jobs = std::sync::Arc::clone(&jobs);
+        let mut moved_buf = std::mem::take(&mut task_buf);
+        let moved_open = open.take();
+        let (outcome, returned_buf) = crate::runtime::spawn_blocking(move || {
+            let outcome = hash_task(&task_jobs, next, moved_open, &mut moved_buf, total, max);
+            (outcome, moved_buf)
+        })
+        .await;
+        task_buf = returned_buf;
+        let (done, after, still_open) = outcome?;
+        for (index, digest) in done {
+            total = total.saturating_add(digest.0);
+            if total > max {
+                return Err(TransportError::TooLarge { size: total, max });
+            }
+            hashed[index] = Some(digest);
+        }
+        next = after;
+        open = still_open;
+    }
+    *buf = task_buf;
+    Ok(hashed)
 }
 
 /// Like [`send_path_filtered`], with [`SendOptions`].
@@ -3151,6 +3638,7 @@ pub async fn send_path_with_options(
     mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+    sender_validation::validate_config(&config)?;
 
     let (root_name, is_directory, mut entries) =
         collect_entries_with_policy(source, &config.metadata_policy).await?;
@@ -3170,72 +3658,37 @@ pub async fn send_path_with_options(
         None
     };
 
-    // First pass: stream each file off disk to compute its size, content id, and
-    // SHA-256 incrementally. `read_buf` is the only data-sized allocation and is
-    // reused across files, so peak memory is `chunk_size`, not the transfer size.
+    // First pass (br-asupersync-dfdwyt). Every awaited file operation is a
+    // blocking-pool handoff, and on a loaded host each one waits for a
+    // scheduler wakeup: a small file used to cost about five here (metadata,
+    // inode key, open, two reads). So metadata is read in blocking tasks of
+    // many entries, as the QUIC sender's pass 1 does (br-asupersync-i7pdxb),
+    // and content is hashed in blocking tasks of many files, each bounded in
+    // bytes, with a cancellation checkpoint between tasks. `read_buf` is the
+    // send phase's buffer and the hashing tasks'; peak memory stays one chunk
+    // per side.
     let mut read_buf = vec![0u8; config.chunk_size.max(1)];
+    let metadatas = capture_entry_metadata(cx, &entries, &config).await?;
+    let hashed = hash_content_entries(cx, &entries, &metadatas, &config, &mut read_buf).await?;
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
-    let mut metadatas: Vec<EntryMetadata> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
-    // Hardlink detection: the first entry (by sorted path) for a given inode is
-    // the primary that carries the content; later entries sharing the inode are
-    // hardlinks to it (sent content-free, `hard_link`ed on the receiver).
-    let mut hardlink_primary: std::collections::HashMap<HardlinkIdentity, String> =
-        std::collections::HashMap::new();
-    for entry in &entries {
-        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let mut metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
-            if let Some(key) =
-                crate::net::atp::transport_common::metadata::inode_key_if_regular(&entry.abs_path)
-                    .await?
-            {
-                if let Some(primary) = hardlink_primary.get(&key) {
-                    metadata.hardlink_target = Some(primary.clone());
-                } else {
-                    hardlink_primary.insert(key, entry.rel_path.clone());
-                }
-            }
-        }
-        validate_symlink_metadata_for_receive(&entry.rel_path, &metadata).map_err(|error| {
-            TransportError::Source(format!(
-                "{}: invalid symlink metadata: {error}",
-                entry.abs_path.display()
-            ))
-        })?;
-        // Only regular files carry content bytes. Symlinks (target in
-        // `metadata`), empty directories, special files (FIFO/socket/device),
-        // and hardlinks-to-a-primary are zero-content — crucially this avoids
-        // `hash_file_streaming` opening a FIFO, which would block the sender.
-        let zero_content =
-            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
-        let (size, content_id, content_sha256) = if zero_content {
-            // Emit the canonical empty-content digest so the receiver — which
-            // sees zero ObjectData frames for this entry — reconstructs the same
-            // digest.
-            let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+    for (entry, digest) in entries.iter().zip(hashed) {
+        // Zero-content entries carry the canonical empty-content digest, which
+        // the receiver, seeing no ObjectData frames for them, reconstructs.
+        let (size, content_id, content_sha256) = digest.unwrap_or_else(|| {
             (
                 0u64,
                 ObjectId::content(ContentId::from_bytes(b"")),
-                empty_sha,
+                Sha256::digest(b"").into(),
             )
-        } else {
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?
-        };
+        });
         total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > config.max_transfer_bytes {
-            return Err(TransportError::TooLarge {
-                size: total_bytes,
-                max: config.max_transfer_bytes,
-            });
-        }
         digests.push(EntryDigest {
             rel_path: entry.rel_path.clone(),
             size,
             content_id,
             content_sha256,
         });
-        metadatas.push(metadata);
     }
 
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
@@ -3304,6 +3757,8 @@ pub async fn send_path_with_options(
         },
     )?;
     let offer = codec::local_offer(options.compression, config.chunk_size);
+    transport.compression = options.compression;
+    transport.compression_parallelism = options.compression_parallelism;
     if let Some(offer) = &offer {
         hello
             .header
@@ -3369,6 +3824,7 @@ pub async fn send_path_with_options(
         });
     }
     let delta_request: DeltaObjectRequest = parse_json(&request_frame)?;
+    sender_validation::validate_request(&manifest, &delta_request)?;
 
     // Bulk data, entry by entry — second streaming pass. For a delta request,
     // only receiver-missing chunks are re-read and framed. Otherwise this is the
@@ -3439,14 +3895,7 @@ pub async fn send_path_with_options(
     )
     .await;
 
-    if !receipt.committed {
-        return Err(TransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
+    sender_validation::validate_receipt(&manifest, bytes_sent, &receipt)?;
 
     Ok(SendReport {
         transfer_id,
@@ -3459,6 +3908,9 @@ pub async fn send_path_with_options(
         peer,
     })
 }
+
+mod delta_manifest_validation;
+mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
     let mut hasher = Sha256::new();
@@ -5499,12 +5951,39 @@ mod tests {
         receiver_decode: Option<DecodeCapability>,
         tamper: Option<Tamper>,
     ) -> OptionsTransfer {
-        const DEADLINE: Duration = Duration::from_secs(60);
         let source = root.join("payload.bin");
         std::fs::write(&source, payload).expect("write the source file");
         let dest = root.join("inbox");
         std::fs::create_dir_all(&dest).expect("create the destination");
+        let (sent, received, wire_bytes, _) =
+            run_options_transfer(source, &dest, options, receiver_decode, tamper);
+        OptionsTransfer {
+            sent,
+            received,
+            wire_bytes,
+            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
+        }
+    }
 
+    /// One transfer of `source` (a file or a directory) into `dest` over real
+    /// TCP: the sender result, the receiver result, the bytes the receiver
+    /// read off the socket, and every progress tick the sender reported.
+    #[cfg(feature = "zstd")]
+    fn run_options_transfer(
+        source: std::path::PathBuf,
+        dest: &Path,
+        options: SendOptions,
+        receiver_decode: Option<DecodeCapability>,
+        tamper: Option<Tamper>,
+    ) -> (
+        Result<SendReport, TransportError>,
+        Result<ReceiveReport, TransportError>,
+        u64,
+        Vec<(u64, u64)>,
+    ) {
+        const DEADLINE: Duration = Duration::from_secs(60);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sender_ticks = std::sync::Arc::clone(&ticks);
         let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
         let sender = std::thread::spawn(move || {
             let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
@@ -5521,7 +6000,12 @@ mod tests {
                     "sender",
                     &FilterSet::new(),
                     options,
-                    |_, _| {},
+                    move |sent, total| {
+                        sender_ticks
+                            .lock()
+                            .expect("progress ticks")
+                            .push((sent, total));
+                    },
                 )
                 .await
             }))
@@ -5529,7 +6013,7 @@ mod tests {
 
         let wire = std::sync::Arc::new(AtomicU64::new(0));
         let read = std::sync::Arc::clone(&wire);
-        let dest_dir = dest.clone();
+        let dest_dir = dest.to_path_buf();
         let runtime = crate::runtime::RuntimeBuilder::multi_thread()
             .build()
             .expect("receiver runtime");
@@ -5577,12 +6061,8 @@ mod tests {
             .await
         }));
         let sent = sender.join().expect("sender thread");
-        OptionsTransfer {
-            sent,
-            received,
-            wire_bytes: wire.load(Ordering::Acquire),
-            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
-        }
+        let ticks = ticks.lock().expect("progress ticks").clone();
+        (sent, received, wire.load(Ordering::Acquire), ticks)
     }
 
     /// Text-like bytes: words from a small vocabulary, several chunks long.
@@ -5682,7 +6162,8 @@ mod tests {
                     })
                     .collect();
                 let raw = data_frame(0, 0, &chunk).unwrap().to_wire_bytes().unwrap();
-                let frame = chunk_frame(Some(&accept), 0, 0, &chunk).unwrap();
+                let mut entry = EntryCompression::new(CompressionMode::Zstd, "chunk.bin");
+                let frame = chunk_frame(Some(&accept), &mut entry, 0, 0, &chunk).unwrap();
                 if frame
                     .header
                     .extensions
@@ -5700,6 +6181,213 @@ mod tests {
             }
         }
         assert!(compressed_frames > 10, "some chunks were compressed");
+    }
+
+    /// Runs the sender's batched first pass (br-asupersync-dfdwyt) over
+    /// `root`, as send_path_with_options does: the walk, the one-task
+    /// metadata capture, then batched hashing.
+    fn first_pass(
+        root: &Path,
+        config: &TransferConfig,
+    ) -> (
+        Vec<SourceEntry>,
+        Vec<EntryMetadata>,
+        Result<Vec<Option<ContentDigest>>, TransportError>,
+    ) {
+        crate::util::future::block_on(async {
+            let cx = Cx::for_testing();
+            let (_, _, entries) = collect_entries_with_policy(root, &config.metadata_policy)
+                .await
+                .expect("walk the tree");
+            let metadatas = capture_entry_metadata(&cx, &entries, config)
+                .await
+                .expect("capture metadata");
+            let mut buf = vec![0_u8; config.chunk_size.max(1)];
+            let hashed = hash_content_entries(&cx, &entries, &metadatas, config, &mut buf).await;
+            (entries, metadatas, hashed)
+        })
+    }
+
+    /// The batched first pass gives every content entry the digest of its
+    /// bytes, across both batch bounds (more than HASH_BATCH_FILES files, one
+    /// file past HASH_BATCH_BYTES), and none to zero-content entries: a
+    /// symlink and the second name of a hardlink (br-asupersync-dfdwyt).
+    #[test]
+    fn the_batched_first_pass_hashes_every_content_entry_once() {
+        let root = canonical_test_root("atp-tcp-first-pass").join("tree");
+        let mut files: Vec<(String, Vec<u8>)> = (0..150_usize)
+            .map(|index| {
+                let len = (index * 37) % 1_500;
+                let bytes = (0..len)
+                    .map(|byte| u8::try_from((byte * 31 + index) % 251).unwrap())
+                    .collect();
+                (format!("d{}/f{index:03}.bin", index % 4), bytes)
+            })
+            .collect();
+        let big: Vec<u8> = (0..(9 << 20)).map(|byte| (byte % 253) as u8).collect();
+        files.push(("big.bin".to_string(), big));
+        for (rel, bytes) in &files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, bytes).expect("write a tree file");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("big.bin", root.join("link")).expect("symlink");
+            std::fs::hard_link(root.join("d0/f000.bin"), root.join("zz_alias.bin"))
+                .expect("hardlink");
+        }
+        let config = TransferConfig {
+            preserve_hardlinks: true,
+            ..TransferConfig::default()
+        };
+        let (entries, metadatas, hashed) = first_pass(&root, &config);
+        let hashed = hashed.expect("hash the tree");
+        let expected: std::collections::HashMap<&str, &Vec<u8>> = files
+            .iter()
+            .map(|(rel, bytes)| (rel.as_str(), bytes))
+            .collect();
+        let mut failures = Vec::new();
+        for ((entry, metadata), digest) in entries.iter().zip(&metadatas).zip(&hashed) {
+            let rel = entry.rel_path.as_str();
+            match (expected.get(rel), digest) {
+                (Some(bytes), Some((size, content_id, sha))) => {
+                    let want_sha: [u8; 32] = Sha256::digest(bytes).into();
+                    if *size != bytes.len() as u64
+                        || *sha != want_sha
+                        || *content_id != ObjectId::content(ContentId::from_bytes(bytes))
+                    {
+                        failures.push(format!("{rel}: wrong digest"));
+                    }
+                }
+                (Some(_), None) => failures.push(format!("{rel}: not hashed")),
+                (None, Some(_)) => failures.push(format!("{rel}: zero-content entry hashed")),
+                (None, None) => {}
+            }
+            if rel == "zz_alias.bin" && metadata.hardlink_target.as_deref() != Some("d0/f000.bin") {
+                failures.push(format!(
+                    "{rel}: hardlink target {:?}",
+                    metadata.hardlink_target
+                ));
+            }
+        }
+        let hashed_count = hashed.iter().filter(|digest| digest.is_some()).count();
+        if hashed_count != files.len() {
+            failures.push(format!(
+                "{hashed_count} entries hashed for {} files",
+                files.len()
+            ));
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The batched first pass refuses an oversized tree at the first file
+    /// that takes the running total past max_transfer_bytes, with that total,
+    /// as the per-file pass did. That file lies in the second hashing batch.
+    #[test]
+    fn the_batched_first_pass_refuses_an_oversized_tree_at_the_crossing_file() {
+        let root = canonical_test_root("atp-tcp-first-pass-limit").join("tree");
+        for index in 0..200_usize {
+            let path = root.join(format!("f{index:03}.bin"));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, vec![7_u8; 600]).expect("write a file");
+        }
+        let config = TransferConfig {
+            max_transfer_bytes: 600 * 100 + 1,
+            ..TransferConfig::default()
+        };
+        let (_, _, hashed) = first_pass(&root, &config);
+        assert!(
+            matches!(
+                hashed,
+                Err(TransportError::TooLarge {
+                    size: 60_600,
+                    max: 60_001
+                })
+            ),
+            "{hashed:?}"
+        );
+        // The pass opened exactly the files through the crossing one
+        // (f000..=f100) and none after it.
+        let mut opened: Vec<String> = FIRST_PASS_OPENS
+            .lock()
+            .expect("open log")
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .collect();
+        opened.sort();
+        let expected: Vec<String> = (0..=100_usize)
+            .map(|index| format!("f{index:03}.bin"))
+            .collect();
+        assert_eq!(opened, expected);
+    }
+
+    /// A first-pass hashing task reads at most HASH_BATCH_BYTES (plus one
+    /// read) even inside one large file, and the next tasks resume that file
+    /// where it stopped, so a dropped transfer stops reading within one task.
+    /// The resumed digest equals a direct one (br-asupersync-dfdwyt).
+    #[test]
+    fn a_hashing_task_stops_inside_a_large_file_and_the_next_resumes_it() {
+        use crate::net::atp::transport_common::streaming::SyncFileHash;
+
+        let root = canonical_test_root("atp-tcp-first-pass-bound");
+        std::fs::create_dir_all(&root).expect("create root");
+        let large: Vec<u8> = (0..(20_usize << 20))
+            .map(|byte| u8::try_from((byte * 7 + byte / 4099) % 251).unwrap())
+            .collect();
+        std::fs::write(root.join("large.bin"), &large).expect("write the large file");
+        std::fs::write(root.join("small.bin"), b"small").expect("write the small file");
+        let jobs = vec![(0, root.join("large.bin")), (1, root.join("small.bin"))];
+        let mut buf = vec![0_u8; 1 << 20];
+
+        let (done, next, open) =
+            hash_task(&jobs, 0, None, &mut buf, 0, u64::MAX).expect("first task");
+        assert!(done.is_empty(), "the first task finished a file: {done:?}");
+        assert_eq!(next, 0, "the first task moved past the large file");
+        let open: SyncFileHash = open.expect("the first task returns the large file open");
+        let first_task_bytes = open.size();
+        assert!(
+            (HASH_BATCH_BYTES..=HASH_BATCH_BYTES + (1 << 20)).contains(&first_task_bytes),
+            "the first task read {first_task_bytes} bytes"
+        );
+
+        let (mut digests, mut next, mut open) = (Vec::new(), next, Some(open));
+        let mut tasks = 1;
+        while next < jobs.len() {
+            let (done, after, still_open) =
+                hash_task(&jobs, next, open.take(), &mut buf, 0, u64::MAX).expect("next task");
+            digests.extend(done);
+            next = after;
+            open = still_open;
+            tasks += 1;
+        }
+        assert_eq!(
+            tasks, 3,
+            "20 MiB in 8 MiB tasks, the small file in the last"
+        );
+        let large_sha: [u8; 32] = Sha256::digest(&large).into();
+        assert_eq!(
+            digests,
+            vec![
+                (
+                    0,
+                    (
+                        large.len() as u64,
+                        ObjectId::content(ContentId::from_bytes(&large)),
+                        large_sha,
+                    ),
+                ),
+                (
+                    1,
+                    (
+                        5,
+                        ObjectId::content(ContentId::from_bytes(b"small")),
+                        Sha256::digest(b"small").into(),
+                    ),
+                ),
+            ]
+        );
     }
 
     /// With the default options a sender makes no offer, so its handshake is
@@ -5796,6 +6484,145 @@ mod tests {
             run.wire_bytes > payload.len() as u64,
             "{} wire bytes",
             run.wire_bytes
+        );
+    }
+
+    /// Chunks compressed one at a time or four at a time on the blocking
+    /// pool arrive the same: both runs of a multi-chunk file commit its exact
+    /// bytes and cross the wire compressed (br-asupersync-t1fblr.25). Six
+    /// chunks keep the unoptimized build's compression work small next to
+    /// the wall-clock-bounded tests that run beside it.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn parallel_compression_delivers_the_file_in_order() {
+        let payload = compressible_payload(5, 5 * DEFAULT_CHUNK_SIZE + 333);
+        let len = payload.len() as u64;
+        for parallelism in [1, 4] {
+            let run = transfer_with_options(
+                &canonical_test_root(&format!("atp-tcp-zstd-parallel-{parallelism}")),
+                &payload,
+                SendOptions::new()
+                    .with_compression(CompressionMode::Zstd)
+                    .with_compression_parallelism(parallelism),
+                None,
+            );
+            assert_delivered(&run, &payload, "parallel");
+            assert!(
+                run.wire_bytes < len / 4,
+                "parallelism {parallelism}: {} wire bytes for {len}",
+                run.wire_bytes
+            );
+        }
+        assert_eq!(SendOptions::new().compression_parallelism, 4);
+    }
+
+    /// A tree of many small files, an empty one, noise and a multi-chunk
+    /// file shares one compression pipeline across files: every file
+    /// arrives byte-for-byte, the tree crosses compressed, and progress is
+    /// still one tick per file, carrying that file's size, then the total
+    /// (br-asupersync-t1fblr.25).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_compressed_tree_arrives_whole_with_one_progress_tick_per_file() {
+        let root = canonical_test_root("atp-tcp-zstd-tree");
+        let tree = root.join("tree");
+        let mut files: Vec<(String, Vec<u8>)> = (0..24_u64)
+            .map(|seed| {
+                let len = usize::try_from(3_000 + seed * 700).unwrap();
+                (
+                    format!("dir{}/file{seed:02}.txt", seed % 3),
+                    compressible_payload(seed + 10, len),
+                )
+            })
+            .collect();
+        files.push(("empty.txt".to_string(), Vec::new()));
+        let mut state = 17_u64;
+        let noise = (0..20_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state.to_be_bytes()[0]
+            })
+            .collect();
+        files.push(("noise.bin".to_string(), noise));
+        files.push((
+            "big/log.txt".to_string(),
+            compressible_payload(99, 2 * DEFAULT_CHUNK_SIZE + 77),
+        ));
+        for (rel, bytes) in &files {
+            let path = tree.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, bytes).expect("write a tree file");
+        }
+        let dest = root.join("inbox");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+        let (sent, received, wire, ticks) = run_options_transfer(
+            tree,
+            &dest,
+            SendOptions::new()
+                .with_compression(CompressionMode::Zstd)
+                .with_compression_parallelism(4),
+            None,
+            None,
+        );
+        assert!(sent.is_ok(), "sender failed: {:?}", sent.err());
+        assert!(received.is_ok(), "receiver failed: {:?}", received.err());
+        for (rel, bytes) in &files {
+            let committed = std::fs::read(dest.join("tree").join(rel)).expect("committed file");
+            assert!(committed == *bytes, "{rel} differs");
+        }
+        let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+        assert!(wire < total / 2, "{wire} wire bytes for {total}");
+        // One tick per file, each adding that file's size, then the total.
+        assert_eq!(ticks.len(), files.len() + 1, "{ticks:?}");
+        assert_eq!(ticks.last(), Some(&(total, total)));
+        let mut steps: Vec<u64> = ticks[..files.len()]
+            .iter()
+            .scan(0, |previous, &(done, all)| {
+                assert_eq!(all, total);
+                assert!(done >= *previous, "progress went back: {ticks:?}");
+                let step = done - *previous;
+                *previous = done;
+                Some(step)
+            })
+            .collect();
+        let mut sizes: Vec<u64> = files.iter().map(|(_, bytes)| bytes.len() as u64).collect();
+        steps.sort_unstable();
+        sizes.sort_unstable();
+        assert_eq!(steps, sizes);
+    }
+
+    /// Auto compresses what pays and skips what is already compressed: a
+    /// compressible file shrinks as it does under Zstd, while the same bytes
+    /// behind a gzip signature cross raw (br-asupersync-t1fblr.24).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn auto_compresses_text_and_sends_signed_formats_raw() {
+        let payload = compressible_payload(4, 2 * DEFAULT_CHUNK_SIZE + 5);
+        let auto = SendOptions::new().with_compression(CompressionMode::Auto);
+        let text = transfer_with_options(
+            &canonical_test_root("atp-tcp-auto-text"),
+            &payload,
+            auto,
+            None,
+        );
+        assert_delivered(&text, &payload, "auto text");
+        let len = payload.len() as u64;
+        assert!(
+            text.wire_bytes < len / 4,
+            "auto text: {} wire bytes for {len}",
+            text.wire_bytes
+        );
+        let mut gzip = payload;
+        gzip[..2].copy_from_slice(&[0x1F, 0x8B]);
+        let signed =
+            transfer_with_options(&canonical_test_root("atp-tcp-auto-gzip"), &gzip, auto, None);
+        assert_delivered(&signed, &gzip, "auto gzip");
+        assert!(
+            signed.wire_bytes > len,
+            "auto gzip: {} wire bytes for {len}",
+            signed.wire_bytes
         );
     }
 

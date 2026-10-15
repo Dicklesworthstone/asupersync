@@ -81,3 +81,48 @@ pub struct JournalRestoreRequest {
     /// Explicit object, receipt and payload-buffer limits.
     pub limits: JournalRestoreLimits,
 }
+
+/// Owned inputs for a durable checkpoint of an existing sparse writer.
+///
+/// Journal ownership moves into the region-owned filesystem job and is returned
+/// in its report. The caller must maintain single-writer ownership of the journal
+/// directory. Existing journal/payload formats and final-verification rules remain.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCheckpointRequest {
+    /// Journal opened with the trusted signing key; no concurrent directory writer.
+    pub journal: AppendJournal,
+    /// Stable application-selected transfer identifier, not a filesystem path.
+    pub transfer_id: String,
+    /// Trusted expected graph binding this writer's file identity, root and length.
+    /// A checkpoint does not itself authenticate the complete object's content.
+    pub manifest: std::sync::Arc<crate::atp::manifest::Manifest>,
+    /// Same object/receipt bounds used to admit subsequent physical restoration.
+    pub limits: JournalRestoreLimits,
+    /// Application-supplied journal timestamp, using its existing clock convention.
+    /// Ordering and deduplication use record sequences, not this timestamp.
+    pub timestamp: u64,
+}
+
+/// Confirmed local checkpoint, not a peer acknowledgment or publication receipt.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct JournalCheckpoint {
+    /// Staging source to retain in the application's trusted recovery catalog.
+    /// Later writes, explicit cancellation or publication can change its availability.
+    pub source_path: std::path::PathBuf,
+    /// Authenticated progress observed after the journal's successful sync barrier.
+    pub summary: TransferResumeSummary,
+}
+
+/// Journal ownership and the checkpoint's actual outcome are independent.
+///
+/// Ordinary domain refusal returns the journal, including its fenced state after
+/// uncertain storage. An outer gateway failure or abandoned result instead drops
+/// the owner; reopen existing journal files before inferring progress or retrying.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCheckpointReport {
+    /// Original journal owner, with all observed effects and failure state retained.
+    pub journal: AppendJournal,
+    /// Checkpoint result. Failure does not imply that no records reached storage.
+    pub outcome: crate::types::Outcome<JournalCheckpoint, sparse_writer::SparseWriterError>,
+}

@@ -57,7 +57,29 @@ impl std::error::Error for DecodeError {}
 
 /// Resource limits for decoding untrusted input. There is no unbounded
 /// decode entry point.
+///
+/// Build them with [`Self::new`] and the `with_*` methods. The struct is
+/// `#[non_exhaustive]`, so later limits can be added without breaking
+/// callers, and a struct literal does not compile outside this crate:
+///
+/// ```compile_fail,E0639
+/// let limits = asupersync_zstd::DecodeLimits {
+///     max_output: 1 << 20,
+///     max_window: 1 << 20,
+///     require_content_size: true,
+///     allow_skippable_frames: false,
+/// };
+/// ```
+///
+/// ```
+/// let limits = asupersync_zstd::DecodeLimits::new(1 << 20)
+///     .with_max_window(1 << 20)
+///     .with_require_content_size(true)
+///     .with_allow_skippable_frames(false);
+/// assert_eq!(limits.max_window, 1 << 20);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DecodeLimits {
     /// The most bytes decoding may produce in total.
     pub max_output: usize,
@@ -76,6 +98,7 @@ impl DecodeLimits {
 
     /// Limits allowing at most `max_output` bytes, with an 8 MiB window,
     /// optional content size and skippable frames allowed.
+    #[must_use]
     pub const fn new(max_output: usize) -> Self {
         Self {
             max_output,
@@ -83,6 +106,29 @@ impl DecodeLimits {
             require_content_size: false,
             allow_skippable_frames: true,
         }
+    }
+
+    /// These limits with the largest accepted frame window set to
+    /// `max_window` bytes.
+    #[must_use]
+    pub const fn with_max_window(mut self, max_window: usize) -> Self {
+        self.max_window = max_window;
+        self
+    }
+
+    /// These limits refusing (`true`) or accepting frames that do not declare
+    /// their content size.
+    #[must_use]
+    pub const fn with_require_content_size(mut self, require: bool) -> Self {
+        self.require_content_size = require;
+        self
+    }
+
+    /// These limits skipping (`true`) or refusing skippable frames.
+    #[must_use]
+    pub const fn with_allow_skippable_frames(mut self, allow: bool) -> Self {
+        self.allow_skippable_frames = allow;
+        self
     }
 }
 
@@ -430,6 +476,42 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    /// Each builder sets exactly its own limit and keeps the others.
+    #[test]
+    fn builders_set_one_limit_each() {
+        let base = DecodeLimits::new(10);
+        assert_eq!(
+            base,
+            DecodeLimits {
+                max_output: 10,
+                max_window: DecodeLimits::DEFAULT_MAX_WINDOW,
+                require_content_size: false,
+                allow_skippable_frames: true,
+            }
+        );
+        assert_eq!(
+            base.with_max_window(1024),
+            DecodeLimits {
+                max_window: 1024,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_require_content_size(true),
+            DecodeLimits {
+                require_content_size: true,
+                ..base
+            }
+        );
+        assert_eq!(
+            base.with_allow_skippable_frames(false),
+            DecodeLimits {
+                allow_skippable_frames: false,
+                ..base
+            }
+        );
     }
 
     #[test]

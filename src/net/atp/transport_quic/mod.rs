@@ -104,6 +104,7 @@ use crate::net::atp::protocol::session::TransferNonce;
 #[cfg(any(feature = "tls", test))]
 use crate::net::atp::protocol::session::{PeerId, SessionId};
 use crate::net::atp::quic::AtpTransportMetrics;
+use crate::net::atp::transport_common::codec::{self, CodecOffer, CompressionMode};
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 #[cfg(any(feature = "tls", test))]
 use crate::net::atp::transport_common::metadata::read_entry_metadata;
@@ -1331,6 +1332,69 @@ impl QuicReceiveOptions {
             ));
         }
         Ok(())
+    }
+}
+
+/// Sender-only options for ATP-over-QUIC ([`send_path_with_options`]).
+///
+/// Separate from [`QuicConfig`], which callers construct exhaustively. The
+/// defaults send exactly what [`send_path`] sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuicSendOptions {
+    compression: CompressionMode,
+    compression_parallelism: usize,
+}
+
+impl Default for QuicSendOptions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl QuicSendOptions {
+    /// Options with the defaults: no compression.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
+        }
+    }
+
+    /// These options compressing up to `chunks` source-stream chunks at once
+    /// on the runtime's blocking pool (br-asupersync-t1fblr.25; 0 counts as
+    /// 1, default [`codec::DEFAULT_COMPRESSION_PARALLELISM`]). It changes
+    /// speed, never what [`CompressionMode::Zstd`] sends.
+    #[must_use]
+    pub const fn with_compression_parallelism(mut self, chunks: usize) -> Self {
+        self.compression_parallelism = chunks;
+        self
+    }
+
+    /// How many source-stream chunks this sender compresses at once.
+    #[must_use]
+    pub const fn compression_parallelism(&self) -> usize {
+        self.compression_parallelism
+    }
+
+    /// Whether the sender offers to compress the reliable source stream
+    /// (br-asupersync-t1fblr.29).
+    ///
+    /// With [`CompressionMode::Zstd`] (and the `zstd` feature) the hello
+    /// carries a zstd offer. A receiver that accepts it gets the source stream
+    /// as a run of data frames, each compressed when that makes it smaller. An
+    /// older receiver never reads the offer, so the stream stays raw. Transfers
+    /// over the RaptorQ datagram lanes are never compressed.
+    #[must_use]
+    pub const fn with_compression(mut self, compression: CompressionMode) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// The compression this sender offers.
+    #[must_use]
+    pub const fn compression(&self) -> CompressionMode {
+        self.compression
     }
 }
 
@@ -8119,8 +8183,9 @@ fn send_native_sender_hello(
     source_stream: Option<StreamId>,
     total_bytes: u64,
     delta_transfer_nonce: Option<TransferNonce>,
+    codec_offer: Option<&CodecOffer>,
 ) -> Result<(), QuicTransportError> {
-    let frame = json_frame(
+    let mut frame = json_frame(
         FrameType::Handshake,
         &sender_hello_with_source_stream(
             peer_id,
@@ -8131,6 +8196,14 @@ fn send_native_sender_hello(
             delta_transfer_nonce,
         ),
     )?;
+    // A compression offer rides in a frame-header extension, which receivers
+    // that predate it never read (br-asupersync-t1fblr.29).
+    if let Some(offer) = codec_offer {
+        frame
+            .header
+            .extensions
+            .insert(codec::CODEC_OFFER_EXTENSION, offer.to_bytes());
+    }
     control.send(cx, conn, &frame)
 }
 
@@ -9152,6 +9225,7 @@ where
         symbol_auth_enabled,
         offered_source_stream,
         prepared.manifest.total_bytes,
+        None,
         None,
     )?;
     drive_peer(NativeSenderDrivePoint::HelloSent, conn)?;
@@ -11298,6 +11372,33 @@ pub async fn send_path_with_limiter_report(
     config: QuicConfig,
     peer_id: &str,
 ) -> Result<QuicSendOutcome, QuicTransportError> {
+    send_path_outcome(cx, addr, source, config, peer_id, QuicSendOptions::new()).await
+}
+
+/// [`send_path`] with sender-only options: with
+/// [`QuicSendOptions::with_compression`], a receiver that accepts gets the
+/// reliable source stream compressed (br-asupersync-t1fblr.29).
+pub async fn send_path_with_options(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicSendOptions,
+) -> Result<SendReport, QuicTransportError> {
+    send_path_outcome(cx, addr, source, config, peer_id, options)
+        .await
+        .map(|outcome| outcome.report)
+}
+
+async fn send_path_outcome(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicSendOptions,
+) -> Result<QuicSendOutcome, QuicTransportError> {
     cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
     config.validate()?;
     trace_config_summary(cx, "send_path", &config, peer_id, None);
@@ -11310,12 +11411,13 @@ pub async fn send_path_with_limiter_report(
     #[cfg(feature = "tls")]
     {
         let (report, limiter) =
-            native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id).await?;
+            native_link::send_prepared_over_udp(cx, addr, &prepared, &config, peer_id, options)
+                .await?;
         Ok(QuicSendOutcome { report, limiter })
     }
     #[cfg(not(feature = "tls"))]
     {
-        let _ = (addr, prepared);
+        let _ = (addr, prepared, options);
         Err(QuicTransportError::Config(
             "ATP-over-QUIC send requires the `tls` feature for the native QUIC/TLS-1.3 \
              handshake; there is no insecure transport path"
