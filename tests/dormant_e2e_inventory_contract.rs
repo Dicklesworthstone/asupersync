@@ -593,8 +593,10 @@ fn top_level_source_orphans_never_increase() {
 /// `src/lab/runtime/production_strict.rs`, a finished module nothing declared, hid in
 /// it until asupersync-bi2462.96. Ratchet: this number may only go down
 /// (asupersync-bi2462.141). When nested orphans are wired in or archived, lower it in
-/// the same commit. Never raise it.
-const MAX_NESTED_SOURCE_ORPHANS: usize = 65;
+/// the same commit. Never raise it. 65 -> 59: bi2462.141 phase 1 deleted six superseded
+/// islands (net/atp/{bonding,protocol}.rs, net/atp/sink/{mod,writer}.rs,
+/// atp/{adaptive_raptorq,cas}.rs).
+const MAX_NESTED_SOURCE_ORPHANS: usize = 59;
 
 /// Repository-relative, `/`-separated `.rs` files under `dir`.
 fn rust_files_under(dir: &str) -> Vec<String> {

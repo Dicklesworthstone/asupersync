@@ -1632,7 +1632,15 @@ fn test_function() {
     // production) dials a loopback std::net::TcpStream with connect_timeout
     // and wraps it with TcpStream::from_std for its stalled-write harness.
     // No scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 838;
+    // 838 -> 809 (2026-10-14, asupersync-bi2462.141 phase 1): the never-compiled
+    // islands net/atp/sink/writer.rs (21 sites) and atp/adaptive_raptorq.rs
+    // (5 sites) were deleted; no module ever declared them. The other 3 left
+    // atp/journal/sparse_writer.rs (two std::fs::OpenOptions, one File::open)
+    // when the atp journal series split it; the snapshot follows those moves
+    // (sparse_writer/copy_commit.rs, transport_common/file_hash.rs,
+    // append_journal/compaction.rs). No scanner exemption or detection
+    // pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 809;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

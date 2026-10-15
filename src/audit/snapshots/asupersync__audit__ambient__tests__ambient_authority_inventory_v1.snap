@@ -45,8 +45,8 @@ expression: inventory
 1	Io	atp/cache/storage.rs	std::fs::write(
 2	Io	atp/journal/append_journal.rs	File::open(
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions
-3	Io	atp/journal/sparse_writer.rs	File::open(
-2	Io	atp/journal/sparse_writer.rs	std::fs::OpenOptions
+1	Io	atp/journal/sparse_writer.rs	File::open(
+1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(
 1	Io	atp/mailbox/relay.rs	TcpStream::
 1	Io	atp/mailbox/storage.rs	std::fs::read(
 1	Io	atp/mailbox/storage.rs	std::fs::write(
@@ -100,11 +100,10 @@ expression: inventory
 1	Io	net/atp/sdk/native_live/service.rs	TcpListener::
 1	Io	net/atp/sdk/session.rs	std::net::TcpStream
 1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream
-2	Io	net/atp/sink/writer.rs	std::fs::read(
+1	Io	net/atp/transport_common/file_hash.rs	File::open(
 2	Io	net/atp/transport_common/metadata.rs	std::fs::File::open
 7	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions
-1	Io	net/atp/transport_common/streaming.rs	File::open(
 4	Io	net/atp/transport_quic/mod.rs	File::open(
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::create
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::open
@@ -152,7 +151,7 @@ expression: inventory
 1	Io	trace/integrity.rs	File::open(
 1	Io	trace/recovery.rs	File::open(
 2	Io	web/static_files.rs	std::fs::OpenOptions
-1	Output	atp/journal/append_journal.rs	eprintln!(
+1	Output	atp/journal/append_journal/compaction.rs	eprintln!(
 2	Output	channel/verification_suite.rs	eprintln!(
 10	Output	channel/verification_suite.rs	println!(
 2	Output	decoding.rs	eprintln!(
@@ -194,7 +193,6 @@ expression: inventory
 1	Time	atp/adapter/masque.rs	SystemTime::now()
 13	Time	atp/adapter/tcptls.rs	SystemTime::now()
 10	Time	atp/adapter/webtransport.rs	SystemTime::now()
-5	Time	atp/adaptive_raptorq.rs	SystemTime::now()
 2	Time	atp/cache/mod.rs	SystemTime::now()
 2	Time	atp/cache/policy.rs	SystemTime::now()
 1	Time	atp/cache/trust.rs	std::time::SystemTime::now()
@@ -204,7 +202,7 @@ expression: inventory
 2	Time	atp/grant/mod.rs	SystemTime::now()
 5	Time	atp/grant/pairing.rs	SystemTime::now()
 3	Time	atp/grant/storage.rs	SystemTime::now()
-1	Time	atp/journal/append_journal.rs	SystemTime::now()
+1	Time	atp/journal/append_journal/compaction.rs	SystemTime::now()
 1	Time	atp/journal/commit_policy.rs	std::time::SystemTime::now()
 3	Time	atp/journal/sparse_writer.rs	Instant::now()
 4	Time	atp/journal/temp_management.rs	SystemTime::now()
@@ -270,8 +268,6 @@ expression: inventory
 4	Time	net/atp/quic/transfer_brain.rs	Instant::now()
 2	Time	net/atp/sdk/diagnostics.rs	SystemTime::now()
 2	Time	net/atp/sdk/object.rs	SystemTime::now()
-9	Time	net/atp/sink/writer.rs	Instant::now()
-10	Time	net/atp/sink/writer.rs	SystemTime::now()
 4	Time	net/atp/transport_quic/mod.rs	Instant::now()
 68	Time	net/atp/transport_quic/native_link.rs	Instant::now()
 17	Time	net/atp/transport_rq/mod.rs	Instant::now()
@@ -384,10 +380,7 @@ expression: inventory
 1	Io	atp/journal/append_journal.rs	File::open(	let file = match File::open(file_path) {
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions	match std::fs::OpenOptions::new()
 1	Io	atp/journal/sparse_writer.rs	File::open(	File::open(parent)
-1	Io	atp/journal/sparse_writer.rs	File::open(	File::open(path).map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
-1	Io	atp/journal/sparse_writer.rs	File::open(	let mut file = match File::open(&temp_path) {
-1	Io	atp/journal/sparse_writer.rs	std::fs::OpenOptions	let file = std::fs::OpenOptions::new()
-1	Io	atp/journal/sparse_writer.rs	std::fs::OpenOptions	std::fs::OpenOptions::new()
+1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(	File::open(path)
 1	Io	atp/mailbox/relay.rs	TcpStream::	let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|err| {
 1	Io	atp/mailbox/storage.rs	std::fs::read(	std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
 1	Io	atp/mailbox/storage.rs	std::fs::write(	if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
@@ -459,14 +452,12 @@ expression: inventory
 1	Io	net/atp/sdk/native_live/service.rs	TcpListener::	TcpListener::bind(address),
 1	Io	net/atp/sdk/session.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
 1	Io	net/atp/sdk/transfer.rs	std::net::TcpStream	std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(250)).map(|_| ())
-1	Io	net/atp/sink/writer.rs	std::fs::read(	let payload = std::fs::read(&path).map_err(|error| WriteError::Internal {
-1	Io	net/atp/sink/writer.rs	std::fs::read(	match std::fs::read(file_path) {
+1	Io	net/atp/transport_common/file_hash.rs	File::open(	file: Some(File::open(path)?),
 1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open	crate::runtime::spawn_blocking_io(move || std::fs::File::open(parent)?.sync_all()).await
 1	Io	net/atp/transport_common/metadata.rs	std::fs::File::open	std::fs::File::open(out_path)
 1	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut file = std::fs::OpenOptions::new()
 6	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
-1	Io	net/atp/transport_common/streaming.rs	File::open(	let mut file = crate::fs::File::open(path)
 2	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(abs_path).await.map_err(|err| {
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
@@ -536,7 +527,7 @@ expression: inventory
 1	Io	trace/recovery.rs	File::open(	let mut reader = BufReader::new(File::open(path)?).take(limits.max_input_bytes);
 1	Io	web/static_files.rs	std::fs::OpenOptions	std::fs::OpenOptions::new()
 1	Io	web/static_files.rs	std::fs::OpenOptions	std::fs::OpenOptions::new().read(true).open(path)
-1	Output	atp/journal/append_journal.rs	eprintln!(	eprintln!(
+1	Output	atp/journal/append_journal/compaction.rs	eprintln!(	eprintln!();
 2	Output	channel/verification_suite.rs	eprintln!(	eprintln!();
 1	Output	channel/verification_suite.rs	println!(	println!(
 9	Output	channel/verification_suite.rs	println!(	println!();
@@ -615,10 +606,6 @@ expression: inventory
 1	Time	atp/adapter/webtransport.rs	SystemTime::now()	let session_duration = SystemTime::now()
 1	Time	atp/adapter/webtransport.rs	SystemTime::now()	negotiated_at: SystemTime::now(),
 4	Time	atp/adapter/webtransport.rs	SystemTime::now()	self.stats.last_updated = SystemTime::now();
-1	Time	atp/adaptive_raptorq.rs	SystemTime::now()	expected_completion: SystemTime::now() + decision.roi.expected_time_saved,
-2	Time	atp/adaptive_raptorq.rs	SystemTime::now()	let now = SystemTime::now();
-1	Time	atp/adaptive_raptorq.rs	SystemTime::now()	measured_at: SystemTime::now(),
-1	Time	atp/adaptive_raptorq.rs	SystemTime::now()	started_at: SystemTime::now(),
 1	Time	atp/cache/mod.rs	SystemTime::now()	entry.last_accessed = SystemTime::now();
 1	Time	atp/cache/mod.rs	SystemTime::now()	let now = SystemTime::now();
 1	Time	atp/cache/policy.rs	SystemTime::now()	let start_time = SystemTime::now();
@@ -640,7 +627,7 @@ expression: inventory
 1	Time	atp/grant/pairing.rs	SystemTime::now()	requested_at: SystemTime::now(),
 1	Time	atp/grant/storage.rs	SystemTime::now()	let now = SystemTime::now();
 2	Time	atp/grant/storage.rs	SystemTime::now()	updated_record.storage_metadata.updated_at = SystemTime::now();
-1	Time	atp/journal/append_journal.rs	SystemTime::now()	SystemTime::now()
+1	Time	atp/journal/append_journal/compaction.rs	SystemTime::now()	SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
 1	Time	atp/journal/commit_policy.rs	std::time::SystemTime::now()	let timestamp = std::time::SystemTime::now()
 1	Time	atp/journal/sparse_writer.rs	Instant::now()	created_at: Instant::now(),
 1	Time	atp/journal/sparse_writer.rs	Instant::now()	last_write_at: Instant::now(),
@@ -803,21 +790,6 @@ expression: inventory
 1	Time	net/atp/quic/transfer_brain.rs	Instant::now()	timestamp: Instant::now(),
 2	Time	net/atp/sdk/diagnostics.rs	SystemTime::now()	let timestamp_nanos = SystemTime::now()
 2	Time	net/atp/sdk/object.rs	SystemTime::now()	let nanos = SystemTime::now()
-1	Time	net/atp/sink/writer.rs	Instant::now()	active.last_progress_report = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let chunk_started = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let chunking_started = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let end_time = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let finalizing_started = Instant::now();
-2	Time	net/atp/sink/writer.rs	Instant::now()	let start_time = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let transferring_started = Instant::now();
-1	Time	net/atp/sink/writer.rs	Instant::now()	let verifying_started = Instant::now();
-1	Time	net/atp/sink/writer.rs	SystemTime::now()	.map(|chunks| TransferProof::from_chunk_proofs(transfer_id, chunks, SystemTime::now()));
-2	Time	net/atp/sink/writer.rs	SystemTime::now()	SystemTime::now(),
-1	Time	net/atp/sink/writer.rs	SystemTime::now()	cancelled_at: SystemTime::now(),
-2	Time	net/atp/sink/writer.rs	SystemTime::now()	completed_at: SystemTime::now(),
-2	Time	net/atp/sink/writer.rs	SystemTime::now()	expires_at: SystemTime::now() + Duration::from_secs(86400),
-1	Time	net/atp/sink/writer.rs	SystemTime::now()	if resume_token.expires_at < SystemTime::now() {
-1	Time	net/atp/sink/writer.rs	SystemTime::now()	timestamp: SystemTime::now(),
 3	Time	net/atp/transport_quic/mod.rs	Instant::now()	let started_at = Instant::now();
 1	Time	net/atp/transport_quic/mod.rs	Instant::now()	started_at: Instant::now(),
 1	Time	net/atp/transport_quic/native_link.rs	Instant::now()	.map(|deadline| deadline.saturating_duration_since(Instant::now()));

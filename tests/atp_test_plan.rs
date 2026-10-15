@@ -50,7 +50,7 @@ fn test_critical_path_modules_have_test_requirements() {
         "src/atp/object.rs",
         "src/atp/manifest.rs",
         "src/atp/verifier.rs",
-        "src/net/atp/protocol.rs",
+        "src/net/atp/protocol/mod.rs",
         "src/atp/sdk.rs",
     ];
 
