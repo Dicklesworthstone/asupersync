@@ -119,7 +119,7 @@ expression: inventory
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(
 1	Io	net/atp/transport_tcp/mod.rs	File::create(
-6	Io	net/atp/transport_tcp/mod.rs	File::open(
+7	Io	net/atp/transport_tcp/mod.rs	File::open(
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions
 1	Io	net/dns/resolver.rs	TcpStream::
@@ -494,7 +494,7 @@ expression: inventory
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(	std::fs::write(&member.write_path, &staged[start..end])?;
 1	Io	net/atp/transport_tcp/mod.rs	File::create(	let file = crate::fs::File::create(staging_path).await?;
-2	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
+3	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&path)
 3	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::	with_transport_timeout(cx, config.idle_timeout, , TcpStream::connect(addr))

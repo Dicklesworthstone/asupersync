@@ -1632,7 +1632,12 @@ fn test_function() {
     // production) dials a loopback std::net::TcpStream with connect_timeout
     // and wraps it with TcpStream::from_std for its stalled-write harness.
     // No scanner exemption or detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 838;
+    // 838 -> 839 (br-asupersync-t1fblr.25, 2026-10-14): the ATP TCP sender's
+    // pipelined path (send_full_entries_pipelined) opens each source file
+    // with crate::fs::File::open, the same authority and line text as
+    // send_file_streaming's open. No scanner exemption or detection pattern
+    // changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 839;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
