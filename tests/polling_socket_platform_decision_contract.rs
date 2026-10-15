@@ -729,7 +729,7 @@ fn source_anchors_preserve_nontrivial_platform_scope() {
             &[
                 "socket.set_reuse_address(true)",
                 "socket.set_reuse_port(true)",
-                "socket.set_only_v6(true)",
+                "socket.set_only_v6(only_v6)",
                 "socket.set_nonblocking(true)",
             ][..],
         ),

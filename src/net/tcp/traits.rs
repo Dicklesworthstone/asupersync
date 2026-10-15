@@ -162,7 +162,8 @@ pub struct TcpListenerBuilder<A> {
     backlog: Option<u32>,
     reuse_addr: bool,
     reuse_port: bool,
-    only_v6: bool,
+    /// `None` keeps the OS default for IPv6 sockets.
+    only_v6: Option<bool>,
 }
 
 impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
@@ -173,7 +174,7 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
             backlog: None,
             reuse_addr: false,
             reuse_port: false,
-            only_v6: false,
+            only_v6: None,
         }
     }
 
@@ -199,9 +200,16 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
     }
 
     /// Set IPV6_V6ONLY option for IPv6 sockets.
+    ///
+    /// Without a call the operating system's default applies, and it differs
+    /// (Linux defaults to dual-stack, Windows to IPv6-only). `false` requests a
+    /// dual-stack socket and `true` an IPv6-only one; a platform that cannot
+    /// honor the request makes `bind` fail instead of ignoring it. Only the
+    /// unspecified address `[::]` can be dual-stack: a socket bound to a
+    /// specific IPv6 address serves IPv6 alone either way.
     #[must_use]
     pub fn only_v6(mut self, enable: bool) -> Self {
-        self.only_v6 = enable;
+        self.only_v6 = Some(enable);
         self
     }
 
@@ -258,8 +266,10 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
                     }
                 }
 
-                if addr.is_ipv6() && self.only_v6 {
-                    if let Err(e) = socket.set_only_v6(true) {
+                if addr.is_ipv6()
+                    && let Some(only_v6) = self.only_v6
+                {
+                    if let Err(e) = socket.set_only_v6(only_v6) {
                         last_err = Some(e);
                         continue;
                     }
@@ -414,5 +424,30 @@ mod tests {
         assert_eq!(builder.backlog, Some(256));
         assert!(builder.reuse_addr);
         assert!(builder.reuse_port);
+    }
+
+    /// asupersync-7tg3di finding 6: `only_v6(false)` reaches the socket, like
+    /// `only_v6(true)`. It used to be dropped, so the OS default stayed. On
+    /// Linux that default is already dual-stack, so the old code passes here;
+    /// the bug showed where the default is IPv6-only (Windows, FreeBSD). The
+    /// wildcard address is the one where the option matters: binding a
+    /// specific IPv6 address such as `[::1]` makes Linux set it.
+    #[cfg(unix)]
+    #[test]
+    fn only_v6_reaches_the_socket_in_both_directions() {
+        futures_lite::future::block_on(async {
+            for only_v6 in [true, false] {
+                let Ok(listener) = TcpListenerBuilder::new("[::]:0")
+                    .only_v6(only_v6)
+                    .bind()
+                    .await
+                else {
+                    // No IPv6 on this host.
+                    return;
+                };
+                let socket = socket2::SockRef::from(&listener);
+                assert_eq!(socket.only_v6().expect("IPV6_V6ONLY"), only_v6);
+            }
+        });
     }
 }
