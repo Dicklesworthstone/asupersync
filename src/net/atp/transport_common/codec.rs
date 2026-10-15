@@ -602,6 +602,192 @@ pub fn decompress_chunk(
     Err(ChunkCodecError::NotNegotiated)
 }
 
+/// How many chunks a sender compresses at once by default
+/// (br-asupersync-t1fblr.25).
+pub const DEFAULT_COMPRESSION_PARALLELISM: usize = 4;
+
+/// One chunk as the sender emits it: its entry and offset, its raw bytes,
+/// and its compressed form when compression was tried and paid.
+#[cfg(feature = "zstd")]
+pub(crate) struct PipelinedChunk {
+    pub(crate) index: u32,
+    pub(crate) offset: u64,
+    pub(crate) raw: Vec<u8>,
+    pub(crate) compressed: Option<(ChunkCodec, Vec<u8>)>,
+}
+
+/// A raw chunk and what [`compress_chunk`] made of it.
+#[cfg(feature = "zstd")]
+type CompressedChunk = (Vec<u8>, Option<(ChunkCodec, Vec<u8>)>);
+
+#[cfg(feature = "zstd")]
+enum PipelineSlot {
+    /// Decided at push time: `tried` says whether the outcome feeds the
+    /// entry's decisions.
+    Ready { chunk: PipelinedChunk, tried: bool },
+    /// Compressing on the blocking pool.
+    Running {
+        index: u32,
+        offset: u64,
+        handle: crate::runtime::spawn_blocking::DrainedBlockingHandle<CompressedChunk>,
+    },
+}
+
+/// Compresses chunks up to `depth` at a time on the runtime's blocking pool
+/// and hands them back in the order they came in (br-asupersync-t1fblr.25).
+/// Chunks of consecutive entries share the pipeline, so a tree of small
+/// files compresses in parallel too.
+///
+/// Each chunk is one independent zstd frame, so the bytes sent do not depend
+/// on `depth` under [`CompressionMode::Zstd`]. Under [`CompressionMode::Auto`]
+/// a chunk's outcome reaches its entry's decisions when it leaves the
+/// pipeline while that entry is still being read, so a decision sees the
+/// outcomes of the chunks at least `depth` places earlier, the same with or
+/// without a pool.
+///
+/// The jobs are owned by the caller's region ([`Cx::spawn_blocking_drained`]):
+/// dropping the pipeline cancels the queued ones and its region waits for the
+/// running ones, so nothing is detached. Without a blocking pool or spawn
+/// authority (the lab runtime, a test `Cx`), chunks are compressed inline.
+#[cfg(feature = "zstd")]
+pub(crate) struct ChunkPipeline {
+    accept: CodecAccept,
+    depth: usize,
+    slots: std::collections::VecDeque<PipelineSlot>,
+    /// Chunks handed to the blocking pool, for tests.
+    #[cfg(test)]
+    pooled: usize,
+}
+
+#[cfg(feature = "zstd")]
+impl ChunkPipeline {
+    /// A pipeline compressing for `accept`, at most `depth` (at least 1)
+    /// chunks at once.
+    pub(crate) fn new(accept: CodecAccept, depth: usize) -> Self {
+        Self {
+            accept,
+            depth: depth.max(1),
+            slots: std::collections::VecDeque::new(),
+            #[cfg(test)]
+            pooled: 0,
+        }
+    }
+
+    /// Whether `depth` chunks are queued: take one with [`Self::next`] before
+    /// pushing another.
+    pub(crate) fn is_full(&self) -> bool {
+        self.slots.len() >= self.depth
+    }
+
+    /// Queues `raw`, the bytes at `offset` of entry `index`. When `entry` (that
+    /// entry's decisions) decides to try, the chunk is compressed on the
+    /// blocking pool (inline without one); otherwise it stays raw.
+    pub(crate) fn push(
+        &mut self,
+        cx: &crate::cx::Cx,
+        entry: &mut EntryCompression,
+        index: u32,
+        offset: u64,
+        raw: Vec<u8>,
+    ) {
+        if !entry.should_try(offset, &raw) {
+            self.slots.push_back(PipelineSlot::Ready {
+                chunk: PipelinedChunk {
+                    index,
+                    offset,
+                    raw,
+                    compressed: None,
+                },
+                tried: false,
+            });
+            return;
+        }
+        let accept = self.accept;
+        // The chunk waits in a slot the job takes it from: a refused spawn
+        // never ran the job, so the chunk is still there to compress inline.
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(raw)));
+        let job_slot = std::sync::Arc::clone(&slot);
+        let spawned = cx.spawn_blocking_drained(move |_| {
+            let raw = job_slot.lock().take().unwrap_or_default();
+            let compressed = compress_chunk(&accept, &raw);
+            (raw, compressed)
+        });
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                {
+                    self.pooled += 1;
+                }
+                self.slots.push_back(PipelineSlot::Running {
+                    index,
+                    offset,
+                    handle,
+                });
+            }
+            Err(_) => {
+                let raw = slot.lock().take().unwrap_or_default();
+                let compressed = compress_chunk(&accept, &raw);
+                self.slots.push_back(PipelineSlot::Ready {
+                    chunk: PipelinedChunk {
+                        index,
+                        offset,
+                        raw,
+                        compressed,
+                    },
+                    tried: true,
+                });
+            }
+        }
+    }
+
+    /// The oldest queued chunk, once it is ready, or `None` when the pipeline
+    /// is empty. A tried chunk of entry `current` records its outcome in
+    /// `entry`, that entry's decisions; outcomes of earlier entries no longer
+    /// decide anything.
+    pub(crate) async fn next(
+        &mut self,
+        current: u32,
+        entry: &mut EntryCompression,
+    ) -> Option<Result<PipelinedChunk, crate::runtime::JoinError>> {
+        let (chunk, tried) = match self.slots.front_mut()? {
+            PipelineSlot::Ready { .. } => match self.slots.pop_front() {
+                Some(PipelineSlot::Ready { chunk, tried }) => (chunk, tried),
+                _ => return None,
+            },
+            PipelineSlot::Running {
+                index,
+                offset,
+                handle,
+            } => {
+                let (index, offset) = (*index, *offset);
+                // A dropped wait leaves the slot queued, so a later call
+                // resumes the same join.
+                let joined = handle.join().await;
+                self.slots.pop_front();
+                match joined {
+                    Ok((raw, compressed)) => (
+                        PipelinedChunk {
+                            index,
+                            offset,
+                            raw,
+                            compressed,
+                        },
+                        true,
+                    ),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+        };
+        if tried && chunk.index == current {
+            entry.record(
+                chunk.raw.len(),
+                chunk.compressed.as_ref().map(|(_, payload)| payload.len()),
+            );
+        }
+        Some(Ok(chunk))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -884,6 +1070,161 @@ mod tests {
             let mut entry = EntryCompression::new(CompressionMode::Auto, "log.bin");
             assert!(entry.compress(&accept, 0, &gzip_head).is_none());
             assert!(entry.compress(&accept, 65_536, &text).is_none());
+        }
+
+        /// Chunks of different kinds and sizes, so pool jobs finish out of
+        /// order: text, noise every third chunk.
+        fn mixed_chunks() -> Vec<Vec<u8>> {
+            let mut state = 5_u64;
+            (0..12_usize)
+                .map(|index| {
+                    let len = 4096 + (index % 4) * 60_000;
+                    if index % 3 == 2 {
+                        (0..len)
+                            .map(|_| {
+                                state = state
+                                    .wrapping_mul(6_364_136_223_846_793_005)
+                                    .wrapping_add(1_442_695_040_888_963_407);
+                                state.to_be_bytes()[0]
+                            })
+                            .collect()
+                    } else {
+                        b"asupersync transfer protocol "
+                            .iter()
+                            .copied()
+                            .cycle()
+                            .take(len)
+                            .collect()
+                    }
+                })
+                .collect()
+        }
+
+        /// The entry chunk `position` belongs to: entries of four chunks.
+        fn entry_of(position: usize) -> u32 {
+            u32::try_from(position / 4).unwrap()
+        }
+
+        /// Runs `chunks` through a pipeline of `depth`, four chunks per
+        /// entry, taking one out whenever it is full. Returns what came out,
+        /// in order, and how many chunks went to the blocking pool.
+        async fn run_pipeline(
+            cx: &crate::cx::Cx,
+            accept: CodecAccept,
+            depth: usize,
+            chunks: Vec<Vec<u8>>,
+        ) -> (Vec<PipelinedChunk>, usize) {
+            let mut entry = EntryCompression::new(CompressionMode::Zstd, "data.bin");
+            let mut pipeline = ChunkPipeline::new(accept, depth);
+            let mut out = Vec::new();
+            let (mut offset, mut current) = (0_u64, 0_u32);
+            for (position, chunk) in chunks.into_iter().enumerate() {
+                if pipeline.is_full() {
+                    let next = pipeline.next(current, &mut entry).await;
+                    out.push(next.expect("a queued chunk").expect("joined"));
+                }
+                if entry_of(position) != current {
+                    current = entry_of(position);
+                    offset = 0;
+                    entry = EntryCompression::new(CompressionMode::Zstd, "data.bin");
+                }
+                let len = u64::try_from(chunk.len()).unwrap();
+                pipeline.push(cx, &mut entry, current, offset, chunk);
+                assert!(pipeline.slots.len() <= depth, "at most {depth} in flight");
+                offset += len;
+            }
+            while let Some(next) = pipeline.next(current, &mut entry).await {
+                out.push(next.expect("joined"));
+            }
+            (out, pipeline.pooled)
+        }
+
+        /// Every chunk came back in order, with its entry and offset, and with
+        /// the bytes sequential compression gives.
+        fn assert_sequential(accept: &CodecAccept, chunks: &[Vec<u8>], out: &[PipelinedChunk]) {
+            assert_eq!(out.len(), chunks.len());
+            let mut offset = 0_u64;
+            for (position, (chunk, got)) in chunks.iter().zip(out).enumerate() {
+                if position % 4 == 0 {
+                    offset = 0;
+                }
+                assert_eq!(got.index, entry_of(position), "chunk {position}");
+                assert_eq!(got.offset, offset, "chunk {position}");
+                assert_eq!(&got.raw, chunk, "chunk {position}");
+                assert_eq!(
+                    got.compressed,
+                    compress_chunk(accept, chunk),
+                    "chunk {position}"
+                );
+                offset += u64::try_from(chunk.len()).unwrap();
+            }
+            assert!(out.iter().any(|chunk| chunk.compressed.is_some()));
+            assert!(out.iter().any(|chunk| chunk.compressed.is_none()));
+        }
+
+        /// On a runtime with a blocking pool every chunk compresses there,
+        /// at most `depth` at once, and comes back in order and identical to
+        /// sequential compression (br-asupersync-t1fblr.25).
+        #[test]
+        fn the_pipeline_compresses_on_the_blocking_pool_in_order() {
+            let accept = session();
+            let chunks = mixed_chunks();
+            let input = chunks.clone();
+            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+                .build()
+                .expect("runtime");
+            let (out, pooled) = runtime.block_on(runtime.handle().spawn(async move {
+                let cx = crate::cx::Cx::current().expect("task cx");
+                run_pipeline(&cx, accept, 3, input).await
+            }));
+            assert_eq!(pooled, chunks.len(), "every chunk went to the pool");
+            assert_sequential(&accept, &chunks, &out);
+        }
+
+        /// Without spawn authority (a test Cx) the pipeline compresses inline,
+        /// with the same result.
+        #[test]
+        fn without_a_pool_the_pipeline_compresses_inline() {
+            let accept = session();
+            let chunks = mixed_chunks();
+            let cx = crate::cx::Cx::for_testing();
+            let (out, pooled) =
+                futures_lite::future::block_on(run_pipeline(&cx, accept, 3, chunks.clone()));
+            assert_eq!(pooled, 0);
+            assert_sequential(&accept, &chunks, &out);
+        }
+
+        /// Dropping a pipeline with jobs in flight detaches nothing: the
+        /// region owns the jobs, so the runtime's teardown finishes within
+        /// its bound once they retire.
+        #[test]
+        fn dropping_a_busy_pipeline_detaches_nothing() {
+            let accept = session();
+            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
+                .build()
+                .expect("runtime");
+            let pooled = runtime.block_on(runtime.handle().spawn(async move {
+                let cx = crate::cx::Cx::current().expect("task cx");
+                let mut entry = EntryCompression::new(CompressionMode::Zstd, "data.bin");
+                let mut pipeline = ChunkPipeline::new(accept, 4);
+                let text: Vec<u8> = b"asupersync transfer protocol "
+                    .iter()
+                    .copied()
+                    .cycle()
+                    .take(256 * 1024)
+                    .collect();
+                for index in 0..4_u64 {
+                    pipeline.push(&cx, &mut entry, 0, index * 256 * 1024, text.clone());
+                }
+                let pooled = pipeline.pooled;
+                drop(pipeline);
+                pooled
+            }));
+            assert_eq!(pooled, 4);
+            assert!(
+                runtime.shutdown_timeout(std::time::Duration::from_secs(60)),
+                "teardown waits out the dropped jobs and completes"
+            );
         }
 
         #[test]

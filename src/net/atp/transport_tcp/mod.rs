@@ -499,6 +499,10 @@ struct FrameTransport<S> {
     /// What the sender asked for, which decides the chunks it tries to
     /// compress once a codec is agreed (br-asupersync-t1fblr.24).
     compression: CompressionMode,
+    /// Chunks of a file the sender compresses at once
+    /// (br-asupersync-t1fblr.25).
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    compression_parallelism: usize,
 }
 
 impl<S> FrameTransport<S>
@@ -513,6 +517,7 @@ where
             decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
             chunk_codec: None,
             compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -1192,6 +1197,197 @@ where
     Ok(())
 }
 
+/// An entry whose chunks are not all sent yet, in
+/// [`send_full_entries_pipelined`].
+#[cfg(feature = "zstd")]
+struct OpenEntry {
+    /// The manifest size, reported as progress once the entry is sent.
+    size: u64,
+    /// Chunks queued in the pipeline so far.
+    queued: usize,
+    /// Chunks sent so far.
+    sent: usize,
+    /// The whole file has been read and queued.
+    read_all: bool,
+}
+
+/// The pipelined counterpart of [`send_full_entries_streaming`]'s loop, for a
+/// session that agreed on a codec (br-asupersync-t1fblr.25).
+///
+/// Chunks of consecutive files share one [`codec::ChunkPipeline`]: up to
+/// `compression_parallelism` compress at once on the runtime's blocking pool
+/// and go out in the order they were read, so a tree of small files
+/// compresses in parallel too. Memory is bounded by that many chunks in
+/// flight, raw and compressed, plus the one being read. Progress is reported
+/// as before: once per regular entry, in order, after its last chunk is sent.
+#[cfg(feature = "zstd")]
+async fn send_full_entries_pipelined<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    digests: &[EntryDigest],
+    config: &TransferConfig,
+    chunk_len: usize,
+    accept: CodecAccept,
+    on_progress: &mut impl FnMut(u64, u64),
+) -> Result<u64, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let total_bytes = digests
+        .iter()
+        .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
+    let mut sent_bytes = 0u64;
+    let mut pipeline = codec::ChunkPipeline::new(accept, transport.compression_parallelism);
+    // Buffers of chunks already sent, reused for the next reads.
+    let mut spare: Vec<Vec<u8>> = Vec::new();
+    let mut open: std::collections::VecDeque<OpenEntry> = std::collections::VecDeque::new();
+    // The entry being read and its decisions: only its outcomes still decide.
+    let mut current = u32::MAX;
+    let mut decisions = EntryCompression::new(CompressionMode::Off, "");
+    for (i, entry) in entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        if !matches!(metadatas[i].file_kind, FileKind::Regular)
+            || metadatas[i].hardlink_target.is_some()
+        {
+            continue;
+        }
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|e| TransportError::Source(format!("{}: {e}", entry.abs_path.display())))?;
+        current = index;
+        decisions = EntryCompression::new(transport.compression, &entry.abs_path.to_string_lossy());
+        open.push_back(OpenEntry {
+            size: digests[i].size,
+            queued: 0,
+            sent: 0,
+            read_all: false,
+        });
+        let mut offset: u64 = 0;
+        loop {
+            while pipeline.is_full() {
+                send_pipelined_chunk(
+                    cx,
+                    transport,
+                    config,
+                    &mut pipeline,
+                    current,
+                    &mut decisions,
+                    &mut open,
+                    &mut spare,
+                )
+                .await?;
+                report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+            }
+            let mut raw = spare.pop().unwrap_or_default();
+            raw.resize(chunk_len.max(1), 0);
+            let n = file.read(&mut raw).await.map_err(|e| {
+                TransportError::Source(format!("{}: {e}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                break;
+            }
+            raw.truncate(n);
+            pipeline.push(cx, &mut decisions, index, offset, raw);
+            offset = offset.saturating_add(n as u64);
+            if let Some(last) = open.back_mut() {
+                last.queued += 1;
+            }
+        }
+        if let Some(last) = open.back_mut() {
+            last.read_all = true;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    while !open.is_empty() {
+        if !send_pipelined_chunk(
+            cx,
+            transport,
+            config,
+            &mut pipeline,
+            current,
+            &mut decisions,
+            &mut open,
+            &mut spare,
+        )
+        .await?
+        {
+            break;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    on_progress(total_bytes, total_bytes);
+    Ok(total_bytes)
+}
+
+/// Sends the oldest chunk of `pipeline` once it is ready and counts it
+/// against its entry in `open`. `false` when the pipeline was empty.
+#[cfg(feature = "zstd")]
+async fn send_pipelined_chunk<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    config: &TransferConfig,
+    pipeline: &mut codec::ChunkPipeline,
+    current: u32,
+    decisions: &mut EntryCompression,
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    spare: &mut Vec<Vec<u8>>,
+) -> Result<bool, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let Some(chunk) = pipeline.next(current, decisions).await else {
+        return Ok(false);
+    };
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => TransportError::Cancelled,
+        other => TransportError::Frame(format!("compressing a chunk failed: {other}")),
+    })?;
+    let frame = match &chunk.compressed {
+        Some((record, payload)) => {
+            compressed_data_frame(chunk.index, chunk.offset, *record, payload)?
+        }
+        None => data_frame(chunk.index, chunk.offset, &chunk.raw)?,
+    };
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send data frame",
+        transport.send(&frame),
+    )
+    .await?;
+    // Chunks leave in the order they were read, so this one belongs to the
+    // oldest entry that still has chunks to send.
+    if let Some(entry) = open.iter_mut().find(|entry| entry.sent < entry.queued) {
+        entry.sent += 1;
+    }
+    spare.push(chunk.raw);
+    Ok(true)
+}
+
+/// Reports, in order, every leading entry of `open` that is read to the end
+/// with all its chunks sent, as [`send_full_entries_streaming`] does after
+/// each entry.
+#[cfg(feature = "zstd")]
+fn report_sent_entries(
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    sent_bytes: &mut u64,
+    total_bytes: u64,
+    on_progress: &mut impl FnMut(u64, u64),
+) {
+    while open
+        .front()
+        .is_some_and(|entry| entry.read_all && entry.sent == entry.queued)
+    {
+        if let Some(entry) = open.pop_front() {
+            *sent_bytes = sent_bytes.saturating_add(entry.size);
+            on_progress(*sent_bytes, total_bytes);
+        }
+    }
+}
+
 fn transfer_manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
     let default_metadata = EntryMetadata::default();
     let mut pairs = manifest
@@ -1659,14 +1855,27 @@ fn chunk_frame(
     if let Some((record, compressed)) =
         accept.and_then(|accept| entry.compress(accept, offset, chunk))
     {
-        let mut frame = data_frame(index, offset, &compressed)?;
-        frame
-            .header
-            .extensions
-            .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
-        return Ok(frame);
+        return compressed_data_frame(index, offset, record, &compressed);
     }
     data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed chunk at
+/// `offset` of entry `index`, with its [`codec::CHUNK_CODEC_EXTENSION`]
+/// record.
+#[cfg(feature = "zstd")]
+fn compressed_data_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, TransportError> {
+    let mut frame = data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
 }
 
 /// Without the `zstd` feature no codec is ever negotiated, so every chunk is
@@ -1939,6 +2148,22 @@ async fn send_full_entries_streaming<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    #[cfg(feature = "zstd")]
+    if let Some(accept) = transport.chunk_codec {
+        let chunk_len = read_buf.len();
+        return send_full_entries_pipelined(
+            cx,
+            transport,
+            entries,
+            metadatas,
+            digests,
+            config,
+            chunk_len,
+            accept,
+            &mut on_progress,
+        )
+        .await;
+    }
     let total_bytes = digests
         .iter()
         .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
@@ -3125,12 +3350,23 @@ pub async fn send_path_filtered(
 
 /// Sender options beyond [`TransferConfig`], which is exhaustively
 /// constructible and so cannot gain fields without breaking its callers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendOptions {
     /// Bulk-data compression (br-asupersync-t1fblr.16). The default,
     /// [`CompressionMode::Off`], sends exactly the frames older senders send.
     pub compression: CompressionMode,
+    /// How many chunks of a file are compressed at once on the runtime's
+    /// blocking pool (br-asupersync-t1fblr.25; at least 1, default
+    /// [`codec::DEFAULT_COMPRESSION_PARALLELISM`]). It changes speed, never
+    /// what [`CompressionMode::Zstd`] sends.
+    pub compression_parallelism: usize,
+}
+
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SendOptions {
@@ -3139,6 +3375,7 @@ impl SendOptions {
     pub const fn new() -> Self {
         Self {
             compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -3146,6 +3383,14 @@ impl SendOptions {
     #[must_use]
     pub const fn with_compression(mut self, compression: CompressionMode) -> Self {
         self.compression = compression;
+        self
+    }
+
+    /// These options compressing up to `chunks` chunks at once (0 counts as
+    /// 1).
+    #[must_use]
+    pub const fn with_compression_parallelism(mut self, chunks: usize) -> Self {
+        self.compression_parallelism = chunks;
         self
     }
 }
@@ -3323,6 +3568,7 @@ pub async fn send_path_with_options(
     )?;
     let offer = codec::local_offer(options.compression, config.chunk_size);
     transport.compression = options.compression;
+    transport.compression_parallelism = options.compression_parallelism;
     if let Some(offer) = &offer {
         hello
             .header
@@ -5518,12 +5764,39 @@ mod tests {
         receiver_decode: Option<DecodeCapability>,
         tamper: Option<Tamper>,
     ) -> OptionsTransfer {
-        const DEADLINE: Duration = Duration::from_secs(60);
         let source = root.join("payload.bin");
         std::fs::write(&source, payload).expect("write the source file");
         let dest = root.join("inbox");
         std::fs::create_dir_all(&dest).expect("create the destination");
+        let (sent, received, wire_bytes, _) =
+            run_options_transfer(source, &dest, options, receiver_decode, tamper);
+        OptionsTransfer {
+            sent,
+            received,
+            wire_bytes,
+            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
+        }
+    }
 
+    /// One transfer of `source` (a file or a directory) into `dest` over real
+    /// TCP: the sender result, the receiver result, the bytes the receiver
+    /// read off the socket, and every progress tick the sender reported.
+    #[cfg(feature = "zstd")]
+    fn run_options_transfer(
+        source: std::path::PathBuf,
+        dest: &Path,
+        options: SendOptions,
+        receiver_decode: Option<DecodeCapability>,
+        tamper: Option<Tamper>,
+    ) -> (
+        Result<SendReport, TransportError>,
+        Result<ReceiveReport, TransportError>,
+        u64,
+        Vec<(u64, u64)>,
+    ) {
+        const DEADLINE: Duration = Duration::from_secs(60);
+        let ticks = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sender_ticks = std::sync::Arc::clone(&ticks);
         let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
         let sender = std::thread::spawn(move || {
             let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
@@ -5540,7 +5813,12 @@ mod tests {
                     "sender",
                     &FilterSet::new(),
                     options,
-                    |_, _| {},
+                    move |sent, total| {
+                        sender_ticks
+                            .lock()
+                            .expect("progress ticks")
+                            .push((sent, total));
+                    },
                 )
                 .await
             }))
@@ -5548,7 +5826,7 @@ mod tests {
 
         let wire = std::sync::Arc::new(AtomicU64::new(0));
         let read = std::sync::Arc::clone(&wire);
-        let dest_dir = dest.clone();
+        let dest_dir = dest.to_path_buf();
         let runtime = crate::runtime::RuntimeBuilder::multi_thread()
             .build()
             .expect("receiver runtime");
@@ -5596,12 +5874,8 @@ mod tests {
             .await
         }));
         let sent = sender.join().expect("sender thread");
-        OptionsTransfer {
-            sent,
-            received,
-            wire_bytes: wire.load(Ordering::Acquire),
-            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
-        }
+        let ticks = ticks.lock().expect("progress ticks").clone();
+        (sent, received, wire.load(Ordering::Acquire), ticks)
     }
 
     /// Text-like bytes: words from a small vocabulary, several chunks long.
@@ -5817,6 +6091,112 @@ mod tests {
             "{} wire bytes",
             run.wire_bytes
         );
+    }
+
+    /// Chunks compressed one at a time or four at a time on the blocking
+    /// pool arrive the same: both runs of a multi-chunk file commit its exact
+    /// bytes and cross the wire compressed (br-asupersync-t1fblr.25). Six
+    /// chunks keep the unoptimized build's compression work small next to
+    /// the wall-clock-bounded tests that run beside it.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn parallel_compression_delivers_the_file_in_order() {
+        let payload = compressible_payload(5, 5 * DEFAULT_CHUNK_SIZE + 333);
+        let len = payload.len() as u64;
+        for parallelism in [1, 4] {
+            let run = transfer_with_options(
+                &canonical_test_root(&format!("atp-tcp-zstd-parallel-{parallelism}")),
+                &payload,
+                SendOptions::new()
+                    .with_compression(CompressionMode::Zstd)
+                    .with_compression_parallelism(parallelism),
+                None,
+            );
+            assert_delivered(&run, &payload, "parallel");
+            assert!(
+                run.wire_bytes < len / 4,
+                "parallelism {parallelism}: {} wire bytes for {len}",
+                run.wire_bytes
+            );
+        }
+        assert_eq!(SendOptions::new().compression_parallelism, 4);
+    }
+
+    /// A tree of many small files, an empty one, noise and a multi-chunk
+    /// file shares one compression pipeline across files: every file
+    /// arrives byte-for-byte, the tree crosses compressed, and progress is
+    /// still one tick per file, carrying that file's size, then the total
+    /// (br-asupersync-t1fblr.25).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn a_compressed_tree_arrives_whole_with_one_progress_tick_per_file() {
+        let root = canonical_test_root("atp-tcp-zstd-tree");
+        let tree = root.join("tree");
+        let mut files: Vec<(String, Vec<u8>)> = (0..24_u64)
+            .map(|seed| {
+                let len = usize::try_from(3_000 + seed * 700).unwrap();
+                (
+                    format!("dir{}/file{seed:02}.txt", seed % 3),
+                    compressible_payload(seed + 10, len),
+                )
+            })
+            .collect();
+        files.push(("empty.txt".to_string(), Vec::new()));
+        let mut state = 17_u64;
+        let noise = (0..20_000)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state.to_be_bytes()[0]
+            })
+            .collect();
+        files.push(("noise.bin".to_string(), noise));
+        files.push((
+            "big/log.txt".to_string(),
+            compressible_payload(99, 2 * DEFAULT_CHUNK_SIZE + 77),
+        ));
+        for (rel, bytes) in &files {
+            let path = tree.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, bytes).expect("write a tree file");
+        }
+        let dest = root.join("inbox");
+        std::fs::create_dir_all(&dest).expect("create the destination");
+        let (sent, received, wire, ticks) = run_options_transfer(
+            tree,
+            &dest,
+            SendOptions::new()
+                .with_compression(CompressionMode::Zstd)
+                .with_compression_parallelism(4),
+            None,
+            None,
+        );
+        assert!(sent.is_ok(), "sender failed: {:?}", sent.err());
+        assert!(received.is_ok(), "receiver failed: {:?}", received.err());
+        for (rel, bytes) in &files {
+            let committed = std::fs::read(dest.join("tree").join(rel)).expect("committed file");
+            assert!(committed == *bytes, "{rel} differs");
+        }
+        let total: u64 = files.iter().map(|(_, bytes)| bytes.len() as u64).sum();
+        assert!(wire < total / 2, "{wire} wire bytes for {total}");
+        // One tick per file, each adding that file's size, then the total.
+        assert_eq!(ticks.len(), files.len() + 1, "{ticks:?}");
+        assert_eq!(ticks.last(), Some(&(total, total)));
+        let mut steps: Vec<u64> = ticks[..files.len()]
+            .iter()
+            .scan(0, |previous, &(done, all)| {
+                assert_eq!(all, total);
+                assert!(done >= *previous, "progress went back: {ticks:?}");
+                let step = done - *previous;
+                *previous = done;
+                Some(step)
+            })
+            .collect();
+        let mut sizes: Vec<u64> = files.iter().map(|(_, bytes)| bytes.len() as u64).collect();
+        steps.sort_unstable();
+        sizes.sort_unstable();
+        assert_eq!(steps, sizes);
     }
 
     /// Auto compresses what pays and skips what is already compressed: a
