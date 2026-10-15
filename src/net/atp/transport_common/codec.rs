@@ -1195,7 +1195,7 @@ mod tests {
             let chunks = mixed_chunks();
             let cx = crate::cx::Cx::for_testing();
             let (out, pooled) =
-                futures_lite::future::block_on(run_pipeline(&cx, accept, 3, chunks.clone()));
+                crate::util::future::block_on(run_pipeline(&cx, accept, 3, chunks.clone()));
             assert_eq!(pooled, 0);
             assert_sequential(&accept, &chunks, &out);
         }
