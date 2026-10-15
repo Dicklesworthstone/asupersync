@@ -3121,4 +3121,112 @@ mod tests {
             vec![1, 2, 3, 4, 5, 6, 7, 8]
         );
     }
+
+    // --- Compressed source stream (br-asupersync-t1fblr.29) ---
+
+    #[cfg(feature = "zstd")]
+    fn source_stream_accept() -> CodecAccept {
+        let offer = codec::local_offer(codec::CompressionMode::Zstd, 64 * 1024).expect("offer");
+        let local = codec::local_decode_capability(QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK);
+        codec::negotiate(&local, &offer).expect("accept")
+    }
+
+    /// A compressible chunk travels compressed, an incompressible one raw,
+    /// and both come back as the chunk.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn source_stream_chunk_frames_compress_when_smaller_and_round_trip() {
+        let accept = source_stream_accept();
+        let text = b"compressed source stream chunk ".repeat(2048);
+        let mut state = 7_u64;
+        let noise: Vec<u8> = (0..4096)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1_442_695_040_888_963_407);
+                state.to_be_bytes()[0]
+            })
+            .collect();
+        for (chunk, compressed) in [(&text[..], true), (&noise[..], false)] {
+            let frame = source_stream_chunk_frame(&accept, 3, 1000, chunk).expect("frame");
+            let record = frame
+                .header
+                .extensions
+                .contains_key(&codec::CHUNK_CODEC_EXTENSION);
+            assert_eq!(record, compressed);
+            let wire = frame.to_wire_bytes().expect("wire");
+            if compressed {
+                assert!(wire.len() < chunk.len() / 4, "{} bytes", wire.len());
+            }
+            let mut scratch = Vec::new();
+            let remaining = u64::try_from(chunk.len()).unwrap();
+            let raw = source_stream_frame_chunk(&frame, &accept, 3, 1000, remaining, &mut scratch)
+                .expect("chunk");
+            assert_eq!(raw, chunk);
+        }
+    }
+
+    /// A frame that is not the chunk due, runs past its entry, carries
+    /// nothing, is not a data frame, or does not decode to its declared length
+    /// is refused before anything is written.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn hostile_source_stream_frames_are_refused() {
+        let accept = source_stream_accept();
+        let text = b"compressed source stream chunk ".repeat(2048);
+        let frame = source_stream_chunk_frame(&accept, 3, 1000, &text).expect("frame");
+        let len = u64::try_from(text.len()).unwrap();
+        let raw = source_stream_data_frame(3, 1000, &text).expect("raw frame");
+        let empty = source_stream_data_frame(3, 1000, &[]).expect("empty frame");
+        let short = Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, vec![0; 11])
+            .expect("short frame");
+        let other = Frame::empty(FrameType::ObjectComplete).expect("other frame");
+        let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
+        let bomb_payload = asupersync_zstd::encode_all(&vec![0; 1 << 20], &params);
+        let mut bomb = source_stream_data_frame(3, 1000, &bomb_payload).expect("bomb frame");
+        bomb.header.extensions.insert(
+            codec::CHUNK_CODEC_EXTENSION,
+            codec::ChunkCodec::new(codec::WireCodec::Zstd, 100).to_bytes(),
+        );
+        // Every case runs, so a failure names each frame that got through.
+        let mut failures = Vec::new();
+        for (frame, index, offset, remaining, expected) in [
+            (&frame, 4, 1000, len, "expected entry 4 at 1000"),
+            (&frame, 3, 0, len, "expected entry 3 at 0"),
+            (&frame, 3, 1000, len - 1, "exceeds the limit"),
+            (&raw, 3, 1000, len - 1, "where the entry lacks"),
+            (&empty, 3, 1000, len, "an empty chunk"),
+            (&short, 3, 1000, len, "12-byte header"),
+            (&other, 3, 1000, len, "ObjectData was due"),
+            (&bomb, 3, 1000, len, "does not decode"),
+        ] {
+            let mut scratch = Vec::new();
+            match source_stream_frame_chunk(frame, &accept, index, offset, remaining, &mut scratch)
+            {
+                Ok(chunk) => failures.push(format!("{expected}: accepted {} bytes", chunk.len())),
+                Err(error) if !error.to_string().contains(expected) => {
+                    failures.push(format!("{expected}: {error}"));
+                }
+                Err(_) => {}
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// Without the `zstd` feature every source-stream frame is raw.
+    #[cfg(not(feature = "zstd"))]
+    #[test]
+    fn source_stream_chunk_frames_are_raw_without_zstd() {
+        let offer = codec::CodecOffer::new(codec::WireCodec::Zstd.bit(), 16, 64 * 1024);
+        let local = codec::DecodeCapability::new(codec::WireCodec::Zstd.bit(), 20, 1 << 20);
+        let accept = codec::negotiate(&local, &offer).expect("accept");
+        let frame = source_stream_chunk_frame(&accept, 0, 0, &[7; 4096]).expect("frame");
+        assert!(
+            !frame
+                .header
+                .extensions
+                .contains_key(&codec::CHUNK_CODEC_EXTENSION)
+        );
+        assert_eq!(&frame.payload()[12..], &[7; 4096][..]);
+    }
 }

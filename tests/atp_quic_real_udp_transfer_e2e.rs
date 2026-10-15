@@ -31,6 +31,10 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use asupersync::atp::object::MetadataPolicy;
 use asupersync::cx::Cx;
+#[cfg(feature = "zstd")]
+use asupersync::net::atp::transport_common::CompressionMode;
+#[cfg(feature = "zstd")]
+use asupersync::net::atp::transport_quic::native_link::set_receiver_ignores_codec_offers_for_testing;
 use asupersync::net::atp::transport_quic::native_link::{
     QuicClientTls, QuicServerTls, bind_server_endpoint, receive_on_endpoint,
     receive_on_endpoint_with_options, set_receiver_member_path_delay_for_testing,
@@ -39,6 +43,8 @@ use asupersync::net::atp::transport_quic::{
     DEFAULT_MAX_BLOCK_SIZE, DEFAULT_SYMBOL_SIZE, QuicConfig, QuicReceiveOptions,
     QuicTransportError, ReceiveReport, SendReport, send_path,
 };
+#[cfg(feature = "zstd")]
+use asupersync::net::atp::transport_quic::{QuicSendOptions, send_path_with_options};
 use asupersync::net::quic_native::handshake_driver::{ATP_QUIC_ALPN, client_config, server_config};
 use asupersync::observability::{LogCollector, LogLevel};
 use asupersync::security::SecurityContext;
@@ -46,6 +52,8 @@ use futures_lite::future::{block_on, zip};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime, pem::PemObject};
 use rustls::time_provider::TimeProvider;
 use rustls::{ClientConfig, RootCertStore};
+#[cfg(feature = "zstd")]
+use std::sync::atomic::AtomicU64;
 
 // Canonical CA + leaf chain (P-256), leaf has SAN DNS:localhost / IP:127.0.0.1
 // and the serverAuth EKU rustls-webpki requires; the client trusts the CA, so
@@ -1122,6 +1130,182 @@ fn real_udp_quic_good_transport_auth_uses_reliable_source_stream() {
         "committed bytes must match the source"
     );
     assert_no_staging_residue(dst.path());
+}
+
+/// A clean UDP forwarder between the sender and the receiver. It counts the
+/// bytes the sender sends: what crossed the wire, compressed or not.
+#[cfg(feature = "zstd")]
+struct CountingUdpProxy {
+    addr: SocketAddr,
+    sent: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "zstd")]
+impl CountingUdpProxy {
+    fn spawn(server_addr: SocketAddr) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind counting proxy");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("proxy read timeout");
+        let addr = socket.local_addr().expect("proxy local addr");
+        let sent = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (thread_sent, thread_stop) = (Arc::clone(&sent), Arc::clone(&stop));
+        let handle = thread::spawn(move || {
+            let mut client = None;
+            let mut buf = vec![0_u8; 65_536];
+            while !thread_stop.load(Ordering::Relaxed) {
+                let Ok((len, from)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if from == server_addr {
+                    if let Some(client) = client {
+                        let _ = socket.send_to(&buf[..len], client);
+                    }
+                } else {
+                    client = Some(from);
+                    thread_sent.fetch_add(len as u64, Ordering::Relaxed);
+                    let _ = socket.send_to(&buf[..len], server_addr);
+                }
+            }
+        });
+        Self {
+            addr,
+            sent,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(feature = "zstd")]
+impl Drop for CountingUdpProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// A transfer through a [`CountingUdpProxy`], with sender options; returns the
+/// bytes the sender put on the wire.
+#[cfg(feature = "zstd")]
+fn run_counted_transfer(
+    send_cfg: QuicConfig,
+    recv_cfg: QuicConfig,
+    source: &Path,
+    dest_dir: &Path,
+    options: QuicSendOptions,
+) -> (
+    Result<SendReport, QuicTransportError>,
+    Result<ReceiveReport, QuicTransportError>,
+    u64,
+) {
+    block_on(async {
+        let cx = Cx::for_testing();
+        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let server_endpoint = bind_server_endpoint(&cx, listen)
+            .await
+            .expect("bind server endpoint");
+        let proxy = CountingUdpProxy::spawn(server_endpoint.local_addr());
+        let (send, recv) = zip(
+            send_path_with_options(
+                &cx,
+                proxy.addr,
+                source,
+                send_cfg,
+                "atp-quic-client",
+                options,
+            ),
+            receive_on_endpoint(&cx, server_endpoint, dest_dir, &recv_cfg, "atp-quic-server"),
+        )
+        .await;
+        (send, recv, proxy.sent.load(Ordering::Relaxed))
+    })
+}
+
+/// zstd over the reliable source stream (br-asupersync-t1fblr.29).
+/// - A receiver that accepts the offer gets compressible data in a fraction
+///   of its size.
+/// - A receiver that ignores the offer, as one that predates compression
+///   does, gets the stream raw.
+/// - A sender that makes no offer sends it raw too.
+/// In every case the committed file equals the source, verified on its raw
+/// bytes, and the reports count raw bytes.
+#[cfg(feature = "zstd")]
+#[test]
+fn real_udp_quic_source_stream_compresses_with_zstd() {
+    let words = [
+        "region ",
+        "obligation ",
+        "cancel ",
+        "scope ",
+        "budget ",
+        "trace\n",
+    ];
+    let mut state = 11_u64;
+    let mut payload = Vec::with_capacity(1 << 20);
+    while payload.len() < 1 << 20 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        payload.extend_from_slice(
+            words[usize::try_from(state >> 61).unwrap() % words.len()].as_bytes(),
+        );
+    }
+    payload.truncate(1 << 20);
+    let len = payload.len() as u64;
+    let zstd = QuicSendOptions::new().with_compression(CompressionMode::Zstd);
+    let mut wire = Vec::new();
+    for (label, options, receiver_ignores_offer) in [
+        ("accepted", zstd, false),
+        ("ignored", zstd, true),
+        ("not offered", QuicSendOptions::new(), false),
+    ] {
+        let src = tempfile::tempdir().expect("src dir");
+        let dst = tempfile::tempdir().expect("dst dir");
+        let source = src.path().join("compressible.txt");
+        std::fs::write(&source, &payload).expect("write source");
+        let mut cfg = transport_authenticated_configs();
+        cfg.send.round0_loss_target = 0.001;
+        cfg.recv.round0_loss_target = 0.001;
+        set_receiver_ignores_codec_offers_for_testing(receiver_ignores_offer);
+        let (send, recv, sent) =
+            run_counted_transfer(cfg.send, cfg.recv, &source, dst.path(), options);
+        set_receiver_ignores_codec_offers_for_testing(false);
+        let send = send.unwrap_or_else(|error| panic!("{label}: send failed: {error}"));
+        let recv = recv.unwrap_or_else(|error| panic!("{label}: receive failed: {error}"));
+        assert!(recv.committed, "{label}: receiver must commit");
+        assert!(
+            send.receipt.committed && send.receipt.sha_ok && send.receipt.merkle_ok,
+            "{label}"
+        );
+        assert_eq!(send.bytes_sent, len, "{label}: the report counts raw bytes");
+        assert_eq!(
+            recv.bytes_received, len,
+            "{label}: the report counts raw bytes"
+        );
+        assert_eq!(
+            send.symbols_sent, 0,
+            "{label}: the source stream carried everything"
+        );
+        assert!(
+            std::fs::read(dst.path().join("compressible.txt")).expect("read committed") == payload,
+            "{label}: committed bytes must match the source"
+        );
+        assert_no_staging_residue(dst.path());
+        wire.push((label, sent));
+    }
+    let (compressed, ignored, plain) = (wire[0].1, wire[1].1, wire[2].1);
+    assert!(
+        compressed < len / 3,
+        "accepted: {compressed} wire bytes for {len}"
+    );
+    assert!(ignored > len, "ignored: {ignored} wire bytes for {len}");
+    assert!(plain > len, "not offered: {plain} wire bytes for {len}");
 }
 
 #[test]
