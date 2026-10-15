@@ -3,6 +3,7 @@
 //! This supplements, never replaces, final on-disk authentication. Resumed
 //! receives seed a crossing digest from the checked local prefix on the pool.
 
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::atp::manifest::ChunkBoundary;
 use crate::net::atp::chunk::reader::StreamChunk;

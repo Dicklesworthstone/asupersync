@@ -456,7 +456,7 @@ mod construction_tests {
                 let (retained, weak) = mpsc::channel();
                 let destination = directory.path().join("file");
                 let (id, _) = manifest(b"");
-                let mut creating = Box::pin(ScopedSparseWriter::create_with(&child, move || {
+                let mut creating = Box::pin(ScopedSparseWriter::create_with(child, move || {
                     assert_ne!(std::thread::current().id(), caller_thread);
                     let ambient = Cx::current().unwrap();
                     assert_eq!(ambient.region_id(), expected_region);

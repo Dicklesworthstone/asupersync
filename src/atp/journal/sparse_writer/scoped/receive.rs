@@ -1,5 +1,6 @@
 //! Exact-length stream ingestion using the existing chunk reader and file owner.
 
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::atp::journal::{ScopedReceive, ScopedReceiveError, ScopedReceiveOptions, ScopedReceiveResult};
 use crate::io::{AsyncRead, AsyncReadExt};

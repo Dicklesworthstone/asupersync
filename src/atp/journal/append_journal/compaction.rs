@@ -6,6 +6,7 @@
 //! copies and refuse contradictory ones. This is single-writer host filesystem
 //! code, not a concurrent-writer lock or a cryptographic log-completeness proof.
 
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::io;

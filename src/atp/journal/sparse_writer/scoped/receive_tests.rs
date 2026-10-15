@@ -61,9 +61,10 @@ impl AsyncRead for Source {
     fn poll_read(self: Pin<&mut Self>, task: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         this.probe.polls.fetch_add(1, Ordering::SeqCst);
-        if this.panic_at.is_some_and(|at| this.position >= at) {
-            panic!("source poll panic witness");
-        }
+        assert!(
+            this.panic_at.is_none_or(|at| this.position < at),
+            "source poll panic witness"
+        );
         if this.pause_at.is_some_and(|at| this.position >= at) && !this.probe.released.load(Ordering::SeqCst) {
             *this.probe.wake.lock() = Some(task.waker().clone());
             this.probe.parked.store(true, Ordering::SeqCst);
@@ -379,7 +380,7 @@ fn explicit_context_cancellation_wakes_a_parked_source_and_releases_admission() 
             let path = directory.path().join("file");
             let writer = writer(&cx, id, path.clone(), CommitPolicy::AtomicRename).await;
             let (mut source, probe) = Source::new(b"abcdefgh", 1); source.pause_at = Some(2);
-            let mut session = writer.receive_exact(&child, source, manifest, options()).unwrap();
+            let mut session = writer.receive_exact(child, source, manifest, options()).unwrap();
             reach_pause(&mut session, &probe).await;
             child.cancel_with(CancelKind::User, Some("parked receive"));
             let result = crate::time::timeout(cx.now(), Duration::from_secs(5), session.wait()).await.unwrap();
@@ -551,12 +552,12 @@ fn dropped_pool_step_keeps_admission_until_its_actual_write_retires() {
             let (id, _) = manifest(b"data");
             let writer = writer(&cx, id, path.clone(), CommitPolicy::AtomicRename).await;
             writer.set_expected_size(&cx, 4).await.unwrap().unwrap();
-            let permit = writer.reserve(&child).await.unwrap();
+            let permit = writer.reserve(child).await.unwrap();
             let (started, mut start) = oneshot::channel();
             let (release, wait_release) = mpsc::channel();
             // Supplemental test of the exact helper used by ingress. The gate
             // is inside the real pool closure, before its real filesystem write.
-            let mut step = Box::pin(writer.receive_step(&child, permit, move |core| {
+            let mut step = Box::pin(writer.receive_step(child, permit, move |core| {
                 let worker = Cx::current().unwrap();
                 started.send_blocking(worker).unwrap();
                 wait_release.recv_timeout(Duration::from_secs(10)).unwrap();

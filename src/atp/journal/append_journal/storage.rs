@@ -1,5 +1,6 @@
 //! Failure-aware journal storage. A failed frame is not a retryable buffer.
 
+#[allow(clippy::wildcard_imports)]
 use super::*;
 
 /// Own the buffer until its complete storage result is known. `BufWriter`'s

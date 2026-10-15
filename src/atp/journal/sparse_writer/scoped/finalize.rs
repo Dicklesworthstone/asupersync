@@ -444,7 +444,7 @@ mod tests {
             let child = region.cx();
             let (verified, mut verification) = oneshot::channel();
             let (release, wait) = mpsc::channel();
-            let mut finalizing = Box::pin(writer.verify_publish_with(&child, manifest, None, move |core| {
+            let mut finalizing = Box::pin(writer.verify_publish_with(child, manifest, None, move |core| {
                 verified.send_blocking(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(10)).unwrap();
                 core.commit_with_fsync(File::sync_all)
@@ -492,11 +492,12 @@ mod tests {
                     assert!(matches!(result, Ok(Outcome::Err(SparseWriterError::SyncFailed(error)))
                         if error == "injected final barrier failure"));
                 }
-                let state = writer.writer.lock_state();
-                assert_eq!(state.lifecycle, WriterLifecycle::Committing);
-                assert!(state.temp_file.is_some());
-                assert_eq!(std::fs::read(state.temp_path.as_ref().unwrap()).unwrap(), b"abcdefgh");
-                drop(state);
+                {
+                    let state = writer.writer.lock_state();
+                    assert_eq!(state.lifecycle, WriterLifecycle::Committing);
+                    assert!(state.temp_file.is_some());
+                    assert_eq!(std::fs::read(state.temp_path.as_ref().unwrap()).unwrap(), b"abcdefgh");
+                }
                 assert!(!path.exists());
                 assert_eq!(writer.admission.available_permits(), 1);
                 assert!(matches!(writer.verify_and_commit(&cx, manifest).await,
@@ -524,7 +525,7 @@ mod tests {
             let child = region.cx();
             child.cancel_with(CancelKind::User, Some("before finalization"));
             let expected = ManifestChunkCommitment::from_manifest(&manifest).unwrap();
-            assert!(matches!(writer.verify_and_commit_with_chunk_commitment(&child, manifest, expected).await,
+            assert!(matches!(writer.verify_and_commit_with_chunk_commitment(child, manifest, expected).await,
                 Err(ScopedFsError::Checkpoint(_))));
             assert_eq!(writer.admission.available_permits(), 1);
             assert_eq!(writer.get_stats(&cx).await.unwrap().unwrap().verification_state, VerificationState::Pending);
@@ -651,7 +652,7 @@ mod tests {
             let child = region.cx();
             let (started, mut start) = oneshot::channel();
             let (release, wait) = mpsc::channel();
-            let mut syncing = Box::pin(writer.sync_staging_with(&child, move |file| {
+            let mut syncing = Box::pin(writer.sync_staging_with(child, move |file| {
                 started.send_blocking(()).unwrap();
                 wait.recv_timeout(Duration::from_secs(10)).unwrap();
                 file.sync_all()
@@ -700,7 +701,7 @@ mod tests {
             let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
             let child = region.cx();
             child.cancel_with(CancelKind::User, Some("before sync"));
-            assert!(matches!(writer.sync_all(&child).await, Err(ScopedFsError::Checkpoint(_))));
+            assert!(matches!(writer.sync_all(child).await, Err(ScopedFsError::Checkpoint(_))));
             assert!(writer.writer.lock_state().temp_file.is_none());
             assert_eq!(writer.admission.available_permits(), 1);
             region.close().await.unwrap();

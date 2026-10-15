@@ -1,5 +1,6 @@
 //! Rebuild private staging from authenticated journal evidence and actual bytes.
 
+#[allow(clippy::wildcard_imports)]
 use super::*;
 use crate::atp::journal::{
     AppendJournal, JournalRecord, JournalRestoreLimits, JournalRestoreRequest, TransferResumeChunk,

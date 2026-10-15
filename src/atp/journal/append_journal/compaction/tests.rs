@@ -147,7 +147,7 @@ fn partial_copy_errors_and_panics_keep_originals_and_fence_the_instance() {
                 count.set(count.get() + 1);
                 if count.get() == 2 {
                     file.write_all(&[1, 2]).unwrap();
-                    if panic { panic!("partial snapshot panic"); }
+                    assert!(!panic, "partial snapshot panic");
                     return Err(JournalError::WriteFailure("partial snapshot witness".to_owned()));
                 }
                 write_entry(file, entry)

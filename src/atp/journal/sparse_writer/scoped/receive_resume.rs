@@ -576,7 +576,7 @@ mod tests {
                 writer.write_chunk(&cx, 0, b"abcd".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
                 let (mut input, probe) = source(b"efghNEXT", None);
                 input.pause_at = Some(2);
-                let mut receive = writer.resume_exact_at(&child, input, Arc::clone(&manifest), options(), 4).unwrap();
+                let mut receive = writer.resume_exact_at(child, input, Arc::clone(&manifest), options(), 4).unwrap();
                 reach_pause(&mut receive, &probe).await;
                 child.cancel_with(crate::types::CancelKind::User, Some("resumed read cancelled"));
                 let result = crate::time::timeout(cx.now(), Duration::from_secs(5), receive.wait()).await.unwrap();
