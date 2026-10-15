@@ -84,6 +84,58 @@ crates.io and GitHub; `v0.5.0` release evidence is recorded in `asupersync-v5fn1
 
 ## [Unreleased]
 
+### ATP zstd: the native QUIC source stream, `CompressionMode::Auto` and parallel compression (feature `zstd`)
+
+ATP-over-QUIC compresses too. `transport_quic::send_path_with_options` takes a
+`QuicSendOptions` built with `with_compression(CompressionMode::Zstd)`. When
+the receiver accepts the offer, the reliable source stream switches to a
+framed mode: one `ObjectData` frame per chunk, compressed when that makes it
+smaller. The receiver checks each frame's entry, offset and length before it
+writes anything. Receivers and senders that predate this see the raw stream
+as before. RaptorQ datagram lanes are not compressed.
+(`br-asupersync-t1fblr.29`.)
+
+`CompressionMode::Auto`, on TCP and QUIC, offers zstd as `Zstd` does, but
+does not spend effort where it cannot pay:
+- An entry whose name or first bytes mark an already-compressed format
+  (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is sent raw.
+- A chunk that saves less than a twentieth of its size makes the next 1, 2,
+  4, ... up to 64 chunks of that entry go raw before the next try.
+- The decisions are deterministic.
+
+A goodput rule that weighs link speed against compression speed is still to
+come. (`br-asupersync-t1fblr.24`.)
+
+Senders compress chunks in parallel on the runtime's blocking pool, up to
+`compression_parallelism` at once, and send them in order. The default is 4,
+and both `SendOptions` and `QuicSendOptions` have the setting. Chunks of
+consecutive files share one pipeline, so a tree of small files compresses in
+parallel too. The setting never changes what `CompressionMode::Zstd` sends.
+Delta chunks on TCP are still compressed one at a time.
+(`br-asupersync-t1fblr.25`.)
+
+### Performance — the ATP TCP sender batches its first pass
+
+The TCP sender's first pass (metadata, hardlink detection, content hashing)
+now runs in blocking tasks of many entries. Before, it made about five
+blocking-pool handoffs per file. Each hashing task reads at most 8 MiB, so a
+cancelled send stops reading within one task. On a 2104-file source tree
+over loopback, the sender's CPU time fell by about a third and its context
+switches by about half. One ordering change: a tree that both exceeds
+`max_transfer_bytes` and contains an invalid symlink now always fails on the
+symlink, where it used to fail on whichever came first.
+(`br-asupersync-dfdwyt`.)
+
+### Fixed — no `recursion_depth_exceeding_limit` from the ATP QUIC sessions
+
+Proving the native QUIC send and receive sessions `Send` nested deep enough
+to trip `recursion_depth_exceeding_limit`. That future-incompatibility
+warning is an error in later rustc releases, and it fired in builds of the
+`atp` binary. The QUIC link now boxes its flush, inbound pump and retransmit
+futures, and the source-stream send, receive and commit steps, one
+allocation per call. The proof stays shallow in any crate that spawns these
+sessions. (`br-asupersync-c2unfu`.)
+
 ## [v0.6.0] - 2026-10-14
 
 About 2,900 commits since v0.5.0. The theme is **durability**: ATP transfers now
