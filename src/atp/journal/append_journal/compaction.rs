@@ -44,24 +44,63 @@ pub(super) fn write_entry(file: &mut File, entry: &JournalEntry) -> Result<(), J
 
 impl AppendJournal {
     pub(super) fn read_storage_history(&self, frontier: Option<u64>) -> Outcome<StorageHistory, JournalError> {
-        let mut generations = match self.discover_generations() {
+        let generations = match self.discover_storage_generations(frontier) {
             Ok(generations) => generations,
             Err(error) => return Outcome::Err(error),
         };
-        if let Some(frontier) = frontier {
-            generations.retain(|generation| *generation <= frontier);
+        self.read_generation_history(generations)
+    }
+
+    // Keep actual directory entries attached to discovery until their canonical
+    // spelling and regular-file kind are checked. Parsing only a number and
+    // reconstructing a different path can silently omit a terminal generation.
+    fn discover_storage_generations(&self, frontier: Option<u64>) -> Result<Vec<u64>, JournalError> {
+        let entries = std::fs::read_dir(&self.config.base_dir)
+            .map_err(|error| JournalError::DirectoryRead(error.to_string()))?;
+        let mut generations = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(|error| JournalError::DirectoryRead(error.to_string()))?;
+            let name = entry.file_name();
+            let Some(generation) = name.to_str().and_then(parse_journal_generation) else {
+                continue; // Unrelated files are not journal generations.
+            };
+            if frontier.is_some_and(|frontier| generation > frontier) {
+                continue; // An existing reader does not advance its read frontier.
+            }
+            if name.as_os_str() != std::ffi::OsStr::new(&journal_file_name(generation)) {
+                return Err(JournalError::Deserialization(format!(
+                    "noncanonical journal filename for generation {generation}",
+                )));
+            }
+            let kind = entry.file_type()
+                .map_err(|error| JournalError::ReadFailure(error.to_string()))?;
+            // Do not follow links (including dangling links), block opening a
+            // FIFO, or interpret a directory/device/socket as empty history.
+            // This is a discovery check, not protection against later path races.
+            if !kind.is_file() {
+                return Err(JournalError::ReadFailure(format!(
+                    "journal generation {generation} is not a regular directory entry",
+                )));
+            }
+            generations.push(generation);
         }
+        generations.sort_unstable();
+        // Canonical numeric spellings are unique; aliases are refused, not deduped.
+        Ok(generations)
+    }
+
+    // The production caller supplies the just-discovered ordered generations.
+    // Keeping the read boundary separate makes disappearance-after-listing
+    // testable without deleting files or depending on a scheduling race.
+    fn read_generation_history(&self, generations: Vec<u64>) -> Outcome<StorageHistory, JournalError> {
         let latest = generations.last().copied().unwrap_or(0);
         let mut history = StorageHistory {
             entries: BTreeMap::new(), generations, damaged: HashSet::new(), base_bytes: 0,
         };
         for generation in &history.generations {
             let path = journal_file_path(&self.config.base_dir, *generation);
-            match path.try_exists() {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => return Outcome::Err(JournalError::ReadFailure(error.to_string())),
-            }
+            // Every enumerated generation must be read successfully. A missing
+            // path is missing evidence, never permission to reuse an older prefix.
             let (entries, damaged) = match self.read_entries_from_file(&path) {
                 Outcome::Ok(result) => result,
                 Outcome::Err(error) => return Outcome::Err(error),
@@ -270,3 +309,176 @@ impl AppendJournal {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod discovery_tests {
+    #[allow(clippy::wildcard_imports)]
+    use super::*;
+
+    fn config(base: &Path) -> JournalConfig {
+        JournalConfig {
+            base_dir: base.to_owned(),
+            force_sync: false,
+            max_journal_size: u64::MAX,
+            max_generations: 0,
+            ..JournalConfig::default()
+        }
+    }
+
+    fn key() -> AuthKey { AuthKey::from_seed(42) }
+
+    fn accepted() -> JournalRecord {
+        JournalRecord::Accept {
+            transfer_id: "discovery".to_owned(), peer_id: "peer".to_owned(),
+            timestamp: 1, auth_tag: AuthenticationTag::zero(),
+        }
+    }
+
+    fn cancelled() -> JournalRecord {
+        JournalRecord::Cancellation {
+            transfer_id: "discovery".to_owned(), reason: "terminal evidence".to_owned(),
+            timestamp: 2, auth_tag: AuthenticationTag::zero(),
+        }
+    }
+
+    fn fixture(path: &Path, records: &[(u64, JournalRecord)]) -> Vec<u8> {
+        let mut file = OpenOptions::new().create_new(true).write(true).open(path).unwrap();
+        for (sequence, record) in records {
+            let entry = JournalEntry::try_new(*sequence, record.clone().with_signature(&key())).unwrap();
+            write_entry(&mut file, &entry).unwrap();
+        }
+        file.sync_all().unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn noncanonical_generations_cannot_hide_terminal_records_or_alias_a_real_generation() {
+        for alias in ["journal_gen_1.dat", "journal_gen_0000001.dat"] {
+            for canonical_exists in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let base = directory.path();
+                let original = fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+                let terminal = fixture(&base.join(alias), &[(1, cancelled())]);
+                if canonical_exists {
+                    fixture(&journal_file_path(base, 1), &[]);
+                }
+                assert!(matches!(AppendJournal::new(config(base), key()),
+                    Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("noncanonical")));
+                assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+                assert_eq!(std::fs::read(base.join(alias)).unwrap(), terminal);
+                if canonical_exists {
+                    assert!(std::fs::read(journal_file_path(base, 1)).unwrap().is_empty());
+                } else {
+                    assert!(!journal_file_path(base, 1).exists());
+                }
+                assert!(!journal_file_path(base, 2).exists());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_symlinks_are_refused_without_following_or_repairing_them() {
+        for kind in ["dangling", "regular-target", "self-loop"] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path();
+            let original = fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+            let target = base.join("separate-evidence");
+            let target_bytes = if kind == "regular-target" {
+                Some(fixture(&target, &[(1, cancelled())]))
+            } else { None };
+            let link = journal_file_path(base, 1);
+            let selected = if kind == "self-loop" { link.clone() } else { target.clone() };
+            std::os::unix::fs::symlink(&selected, &link).unwrap();
+            assert!(matches!(AppendJournal::new(config(base), key()),
+                Outcome::Err(JournalError::ReadFailure(reason)) if reason.contains("regular")));
+            assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read_link(link).unwrap(), selected);
+            if let Some(bytes) = target_bytes { assert_eq!(std::fs::read(target).unwrap(), bytes); }
+            else { assert!(!target.exists()); }
+            assert!(!journal_file_path(base, 2).exists());
+        }
+    }
+
+    #[test]
+    fn a_directory_named_as_a_generation_is_not_opened_as_a_journal() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let original = fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+        std::fs::create_dir(journal_file_path(base, 1)).unwrap();
+        assert!(matches!(AppendJournal::new(config(base), key()),
+            Outcome::Err(JournalError::ReadFailure(reason)) if reason.contains("regular")));
+        assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+        assert!(journal_file_path(base, 1).is_dir());
+        assert!(!journal_file_path(base, 2).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_named_as_a_generation_is_refused_during_discovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+        let _socket = std::os::unix::net::UnixListener::bind(journal_file_path(base, 1)).unwrap();
+        assert!(matches!(AppendJournal::new(config(base), key()),
+            Outcome::Err(JournalError::ReadFailure(reason)) if reason.contains("regular")));
+        assert!(!journal_file_path(base, 2).exists());
+    }
+
+    #[test]
+    fn disappearance_after_discovery_is_not_a_successful_partial_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let original = fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+        let journal = AppendJournal::new(config(base), key()).unwrap();
+        // Pass the exact snapshot a scan would return before generation 1 was
+        // lost. No timed race or destructive fixture operation is necessary.
+        assert!(matches!(journal.read_generation_history(vec![0, 1]),
+            Outcome::Err(JournalError::FileOpen(_))));
+        assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+        assert!(!journal_file_path(base, 1).exists());
+    }
+
+    #[test]
+    fn compaction_discovery_failure_fences_the_writer_without_retiring_evidence() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let mut journal = AppendJournal::new(config(base), key()).unwrap();
+        journal.append(accepted()).unwrap();
+        journal.append(cancelled()).unwrap();
+        journal.flush().unwrap();
+        let original = std::fs::read(journal_file_path(base, 0)).unwrap();
+        let alias = base.join("journal_gen_1.dat");
+        let alias_bytes = fixture(&alias, &[(2, accepted())]);
+        assert!(matches!(journal.compact(),
+            Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("noncanonical")));
+        assert!(journal.get_resume_summary("discovery").is_err());
+        assert!(journal.append(accepted()).is_err());
+        assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+        assert_eq!(std::fs::read(alias).unwrap(), alias_bytes);
+        assert!(!journal_file_path(base, 1).exists());
+    }
+
+    #[test]
+    fn bounded_frontier_and_identical_snapshot_copies_keep_their_existing_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        fixture(&journal_file_path(base, 0), &[(0, accepted())]);
+        let original_reader = AppendJournal::new(config(base), key()).unwrap();
+        let high = 1_u64 << 40;
+        fixture(&journal_file_path(base, high), &[(0, accepted()), (1, cancelled())]);
+        fixture(&base.join("journal_gen_1.dat.backup"), &[(2, accepted())]);
+        std::fs::create_dir(base.join("not-a-journal")).unwrap();
+        assert_eq!(original_reader.read_all_entries_from_disk().unwrap().len(), 1);
+        let recovered = AppendJournal::new(config(base), key()).unwrap();
+        assert_eq!(recovered.get_stats().generation, high);
+        assert_eq!(recovered.read_all_entries_from_disk().unwrap().len(), 2);
+        assert!(matches!(recovered.get_resume_summary("discovery").unwrap().status,
+            TransferResumeStatus::Cancelled { reason } if reason == "terminal evidence"));
+        // An older frontier stays scoped even if a later generation is invalid.
+        fixture(&base.join("journal_gen_2.dat"), &[(2, accepted())]);
+        assert_eq!(original_reader.read_all_entries_from_disk().unwrap().len(), 1);
+        assert!(AppendJournal::new(config(base), key()).is_err());
+    }
+}
