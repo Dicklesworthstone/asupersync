@@ -218,3 +218,252 @@ fn pending_pinned_attempt_is_retained_and_not_busy_polled() {
     assert_eq!(polls.load(Ordering::Relaxed), 2);
     assert_eq!(drops.load(Ordering::Relaxed), 1);
 }
+
+// Keep these tests in the retry module so they use the same cfg(test) context
+// constructor as the cancellation primitives, without a test-internals feature.
+use super::RetryIf;
+use crate::cx::Cx;
+use crate::types::CancelKind;
+use std::future::poll_fn;
+use std::sync::atomic::AtomicBool;
+
+#[test]
+fn cancellation_published_by_an_attempt_skips_predicate_and_budget() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let budget = RetryBudget::new(RetryTokenBucket::new(3, 0.0, Time::ZERO));
+    let predicates = AtomicU32::new(0);
+    let calls = AtomicU32::new(0);
+    let mut operation = Box::pin(
+        retry(
+            RetryPolicy::immediate(10),
+            RetryIf(|_: &&str, _| {
+                predicates.fetch_add(1, Ordering::Relaxed);
+                true
+            }),
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                let context = context.clone();
+                poll_fn(move |_| {
+                    context.cancel_fast(CancelKind::User);
+                    Poll::Ready(Outcome::<(), &str>::Err("interrupted attempt"))
+                })
+            },
+        )
+        .with_budget(budget.clone()),
+    );
+
+    assert!(matches!(
+        operation.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(RetryResult::Cancelled(reason)) if reason.kind == CancelKind::User
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(predicates.load(Ordering::Relaxed), 0);
+    assert_eq!(budget.available(), 3);
+}
+
+#[test]
+fn cancellation_from_a_predicate_does_not_spend_a_retry_token() {
+    for decision in [false, true] {
+        let context = Cx::for_testing();
+        let _current = Cx::set_current(Some(context.clone()));
+        let budget = RetryBudget::new(RetryTokenBucket::new(3, 0.0, Time::ZERO));
+        let calls = AtomicU32::new(0);
+        let predicates = AtomicU32::new(0);
+        let mut operation = Box::pin(
+            retry(
+                RetryPolicy::immediate(10),
+                RetryIf(|_: &&str, _| {
+                    predicates.fetch_add(1, Ordering::Relaxed);
+                    context.cancel_fast(CancelKind::User);
+                    decision
+                }),
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    ready(Outcome::<(), &str>::Err("transient"))
+                },
+            )
+            .with_budget(budget.clone()),
+        );
+
+        assert!(matches!(
+            operation.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+            Poll::Ready(RetryResult::Cancelled(_))
+        ));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(predicates.load(Ordering::Relaxed), 1);
+        assert_eq!(budget.available(), 3);
+    }
+}
+
+#[test]
+fn cancellation_after_a_cooperative_yield_does_not_start_another_attempt() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let calls = AtomicU32::new(0);
+    let mut operation = Box::pin(retry(
+        RetryPolicy::immediate(MAX_READY_ATTEMPTS_PER_POLL * 3),
+        AlwaysRetry,
+        || {
+            calls.fetch_add(1, Ordering::Relaxed);
+            ready(Outcome::<(), &str>::Err("unavailable"))
+        },
+    ));
+    let (_, waker) = counting_waker();
+    let mut task = Context::from_waker(&waker);
+    assert!(operation.as_mut().poll(&mut task).is_pending());
+    assert_eq!(calls.load(Ordering::Relaxed), MAX_READY_ATTEMPTS_PER_POLL);
+
+    context.cancel_fast(CancelKind::User);
+    assert!(matches!(
+        operation.as_mut().poll(&mut task),
+        Poll::Ready(RetryResult::Cancelled(_))
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), MAX_READY_ATTEMPTS_PER_POLL);
+}
+
+struct DrainingAttempt {
+    context: Cx,
+    polls: Arc<AtomicUsize>,
+    drops: Arc<AtomicUsize>,
+    terminal: Arc<AtomicBool>,
+    _pin: PhantomPinned,
+}
+
+impl Future for DrainingAttempt {
+    type Output = Outcome<(), &'static str>;
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.as_ref().get_ref();
+        match this.polls.fetch_add(1, Ordering::Relaxed) {
+            0 | 1 => Poll::Pending,
+            2 => {
+                assert!(this.context.checkpoint().is_err());
+                this.terminal.store(true, Ordering::Relaxed);
+                Poll::Ready(Outcome::Cancelled(
+                    this.context.cancel_reason().expect("cancellation was published"),
+                ))
+            }
+            _ => panic!("drained future was polled after completion"),
+        }
+    }
+}
+
+impl Drop for DrainingAttempt {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn cancellation_keeps_polling_a_pending_child_until_it_drains() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let drops = Arc::new(AtomicUsize::new(0));
+    let terminal = Arc::new(AtomicBool::new(false));
+    let mut operation = Box::pin(retry(RetryPolicy::immediate(10), AlwaysRetry, || {
+        DrainingAttempt {
+            context: context.clone(),
+            polls: Arc::clone(&polls),
+            drops: Arc::clone(&drops),
+            terminal: Arc::clone(&terminal),
+            _pin: PhantomPinned,
+        }
+    }));
+    let mut task = Context::from_waker(Waker::noop());
+
+    assert!(operation.as_mut().poll(&mut task).is_pending());
+    context.cancel_fast(CancelKind::User);
+    assert!(operation.as_mut().poll(&mut task).is_pending());
+    assert_eq!(polls.load(Ordering::Relaxed), 2);
+    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    assert!(!terminal.load(Ordering::Relaxed));
+    assert!(matches!(
+        operation.as_mut().poll(&mut task),
+        Poll::Ready(RetryResult::Cancelled(_))
+    ));
+    assert_eq!(polls.load(Ordering::Relaxed), 3);
+    assert!(terminal.load(Ordering::Relaxed));
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn a_successful_attempt_still_wins_its_race_with_cancellation() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let mut operation = Box::pin(retry(RetryPolicy::immediate(10), AlwaysRetry, || {
+        let context = context.clone();
+        poll_fn(move |_| {
+            context.cancel_fast(CancelKind::User);
+            Poll::Ready(Outcome::<u32, &str>::Ok(42))
+        })
+    }));
+
+    assert!(matches!(
+        operation.as_mut().poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(RetryResult::Ok(42))
+    ));
+}
+
+#[test]
+fn cancelling_one_caller_preserves_the_shared_budget_for_another() {
+    let budget = RetryBudget::new(RetryTokenBucket::new(3, 0.0, Time::ZERO));
+    {
+        let context = Cx::for_testing();
+        let _current = Cx::set_current(Some(context.clone()));
+        let cancelled = retry(RetryPolicy::immediate(10), AlwaysRetry, || {
+            let context = context.clone();
+            poll_fn(move |_| {
+                context.cancel_fast(CancelKind::User);
+                Poll::Ready(Outcome::<(), &str>::Err("caller cancelled"))
+            })
+        })
+        .with_budget(budget.clone());
+        assert!(matches!(
+            futures_lite::future::block_on(cancelled),
+            RetryResult::Cancelled(_)
+        ));
+    }
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context));
+    let calls = AtomicU32::new(0);
+    let another = retry(RetryPolicy::immediate(10), AlwaysRetry, || {
+        calls.fetch_add(1, Ordering::Relaxed);
+        ready(Outcome::<(), &str>::Err("dependency unavailable"))
+    })
+    .with_budget(budget.clone());
+    let RetryResult::Failed(error) = futures_lite::future::block_on(another) else {
+        panic!("the independent caller has no cancellation request");
+    };
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+    assert_eq!(error.attempts, 4);
+    assert_eq!(budget.available(), 0);
+}
+
+#[test]
+fn a_bounded_mask_defers_cancellation_at_retry_admission() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let calls = AtomicU32::new(0);
+    let budget = RetryBudget::new(RetryTokenBucket::new(1, 0.0, Time::ZERO));
+    let mut operation = Box::pin(
+        retry(RetryPolicy::immediate(2), AlwaysRetry, || {
+            let attempt = calls.fetch_add(1, Ordering::Relaxed);
+            ready(if attempt == 0 {
+                Outcome::Err("retry while masked")
+            } else {
+                Outcome::Ok(42)
+            })
+        })
+        .with_budget(budget.clone()),
+    );
+    context.cancel_fast(CancelKind::User);
+    let result = context.masked(|| {
+        operation.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+    });
+    assert!(matches!(result, Poll::Ready(RetryResult::Ok(42))));
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(budget.available(), 0);
+    assert!(context.checkpoint().is_err(), "the mask did not erase cancellation");
+}

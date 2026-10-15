@@ -2,6 +2,30 @@
 
 use super::*;
 
+// Re-read at admission boundaries: both the attempt and the retry predicate
+// are user code and can publish cancellation during their invocation. Use a
+// checkpoint rather than the raw flag so bounded cancellation masks still work.
+fn retry_cancel_reason() -> Option<CancelReason> {
+    Cx::current().and_then(|current| {
+        current
+            .checkpoint()
+            .is_err()
+            .then(|| current.cancel_reason().unwrap_or_default())
+    })
+}
+
+/// # Scheduling and cancellation
+///
+/// At most 64 immediately-ready attempts are processed per poll. When another
+/// retry is admitted after that batch, the future wakes its caller and yields
+/// before starting the next attempt. Terminal outcomes do not add a yield.
+/// This is a cooperative bound: user callbacks, polls, and destructors must
+/// themselves return.
+///
+/// After a failed attempt drains, unmasked cancellation takes precedence over
+/// its error. Cancellation is checked before and after the retry predicate,
+/// before consuming a shared retry-budget token. An in-flight attempt is never
+/// force-dropped, and a successful or panicked outcome is still returned as-is.
 impl<F, Fut, P, Pred, T, E> Future for Retry<F, Fut, P, Pred>
 where
     F: FnMut() -> Fut,
@@ -17,13 +41,7 @@ where
             // Check cancellation from the context
             // WARNING: We must NOT force-drop the inner future if we are in Polling state,
             // because asupersync requires futures to be drained to Outcome::Cancelled.
-            let cancel_reason = Cx::current().and_then(|c| {
-                if c.checkpoint().is_err() {
-                    Some(c.cancel_reason().unwrap_or_default())
-                } else {
-                    None
-                }
-            });
+            let cancel_reason = retry_cancel_reason();
 
             let mut this = self.as_mut().project();
 
@@ -74,11 +92,7 @@ where
                         Poll::Ready(()) => {
                             // A Sleep also completes early when its task is
                             // cancelled; that must not start another attempt.
-                            if let Some(r) = Cx::current().and_then(|c| {
-                                c.checkpoint()
-                                    .is_err()
-                                    .then(|| c.cancel_reason().unwrap_or_default())
-                            }) {
+                            if let Some(r) = retry_cancel_reason() {
                                 this.inner.set(RetryInner::Completed);
                                 return Poll::Ready(RetryResult::Cancelled(r));
                             }
@@ -98,12 +112,26 @@ where
                                     return Poll::Ready(RetryResult::Ok(val));
                                 }
                                 Outcome::Err(e) => {
+                                    // The attempt has drained to a terminal
+                                    // error. Cancellation now stops admission;
+                                    // it must not invoke a retry callback or
+                                    // consume a shared dependency's token.
+                                    if let Some(reason) =
+                                        retry_cancel_reason().or(cancel_reason)
+                                    {
+                                        this.inner.set(RetryInner::Completed);
+                                        return Poll::Ready(RetryResult::Cancelled(reason));
+                                    }
                                     let attempt = this.state.attempt;
-                                    // Check predicate, then the shared budget
-                                    // (only a retry that would happen takes a
-                                    // token).
-                                    if this.predicate.should_retry(&e, attempt)
-                                        && this.state.has_attempts_remaining()
+                                    let should_retry = this.predicate.should_retry(&e, attempt)
+                                        && this.state.has_attempts_remaining();
+                                    // A predicate can itself request cancel,
+                                    // including when it declines the retry.
+                                    if let Some(reason) = retry_cancel_reason() {
+                                        this.inner.set(RetryInner::Completed);
+                                        return Poll::Ready(RetryResult::Cancelled(reason));
+                                    }
+                                    if should_retry
                                         && this.budget.as_ref().is_none_or(|budget| {
                                             budget.try_acquire(retry_clock_now())
                                         })
