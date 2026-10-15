@@ -1637,7 +1637,14 @@ fn test_function() {
     // with crate::fs::File::open, the same authority and line text as
     // send_file_streaming's open. No scanner exemption or detection pattern
     // changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 839;
+    // 839 -> 840 (br-asupersync-dfdwyt, 2026-10-14): transport_common/
+    // streaming.rs gains SyncFileHash::open, which opens a source file with
+    // std::fs::File::open inside a blocking-pool task so the TCP sender's
+    // first pass hashes a batch of files per handoff, after the same
+    // io_gate::require_ambient_io check crate::fs::File::open makes. Same
+    // authority as hash_file_streaming's open of the same path. No scanner
+    // exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 840;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

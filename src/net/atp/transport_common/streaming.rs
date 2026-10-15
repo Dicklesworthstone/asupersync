@@ -466,6 +466,83 @@ pub async fn hash_file_streaming(
     Ok((size, content_id, content_sha256))
 }
 
+/// One source file's digest in progress, for a caller on the blocking pool
+/// (br-asupersync-dfdwyt).
+///
+/// It hashes what [`hash_file_streaming`] hashes. A caller can finish many
+/// small files in one pool task, and spread a large one over several tasks
+/// with a bounded number of bytes each, so a dropped transfer stops reading
+/// within one task.
+pub(crate) struct SyncFileHash {
+    file: std::fs::File,
+    sha: Sha256,
+    cid: ContentIdHasher,
+    size: u64,
+}
+
+impl SyncFileHash {
+    /// Opens `path` for hashing. The caller checks the ambient-I/O gate
+    /// first, as [`crate::fs::File::open`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamingError`] if the file cannot be opened.
+    pub(crate) fn open(path: &Path) -> Result<Self, StreamingError> {
+        let file = std::fs::File::open(path)
+            .map_err(|e| StreamingError::new(format!("{}: {e}", path.display())))?;
+        Ok(Self {
+            file,
+            sha: Sha256::new(),
+            cid: ContentId::streaming(),
+            size: 0,
+        })
+    }
+
+    /// Reads up to `buf.len()` more bytes of the file at `path` and hashes
+    /// them: `Ok(0)` at the end of the file. A read interrupted by a signal
+    /// is retried.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StreamingError`] if a read fails.
+    pub(crate) fn read_some(
+        &mut self,
+        path: &Path,
+        buf: &mut [u8],
+    ) -> Result<usize, StreamingError> {
+        use std::io::Read;
+
+        loop {
+            match self.file.read(buf) {
+                Ok(n) => {
+                    self.sha.update(&buf[..n]);
+                    self.cid.update(&buf[..n]);
+                    self.size = self.size.saturating_add(n as u64);
+                    return Ok(n);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(StreamingError::new(format!("{}: {e}", path.display()))),
+            }
+        }
+    }
+
+    /// Bytes hashed so far.
+    #[cfg(test)]
+    pub(crate) const fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The size, content id and SHA-256 of the bytes read.
+    pub(crate) fn finish(self) -> (u64, ObjectId, [u8; 32]) {
+        let content_sha256: [u8; 32] = self.sha.finalize().into();
+        (
+            self.size,
+            ObjectId::content(self.cid.finalize()),
+            content_sha256,
+        )
+    }
+}
+
 /// Incremental receive-side state for one staged manifest entry.
 ///
 /// Transports use this while writing incoming chunks to disk. It keeps only

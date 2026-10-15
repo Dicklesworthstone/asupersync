@@ -3395,6 +3395,229 @@ impl SendOptions {
     }
 }
 
+/// Files hashed by one blocking task of the sender's first pass, at most
+/// (br-asupersync-dfdwyt).
+const HASH_BATCH_FILES: usize = 64;
+
+/// Bytes one first-pass hashing task reads, at most, plus one read. The
+/// task stops there even inside a file, which the next task resumes, so a
+/// dropped transfer stops reading within one task.
+const HASH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Entries whose metadata one blocking task of the first pass reads.
+const METADATA_BATCH_ENTRIES: usize = 1024;
+
+/// The size, content id and SHA-256 of one entry's content.
+type ContentDigest = (u64, ObjectId, [u8; 32]);
+
+/// The primary entry of each hardlinked inode seen so far.
+type HardlinkPrimaries = std::collections::HashMap<HardlinkIdentity, String>;
+
+/// What one hashing task returns: the finished digests, the next content
+/// job, and the file it stopped inside, if any.
+type HashTaskOutcome = (
+    Vec<(usize, ContentDigest)>,
+    usize,
+    Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+);
+
+/// Reads the policy-selected metadata of `entries` and detects hardlinks:
+/// the first entry (by sorted path) for an inode is the primary that carries
+/// the content, and later entries sharing it are sent content-free and
+/// `hard_link`ed on the receiver. `primaries` carries over between calls.
+/// Symlink metadata is validated as the receiver will.
+fn capture_entry_metadata_sync(
+    entries: &[(String, PathBuf)],
+    policy: &MetadataPolicy,
+    preserve_hardlinks: bool,
+    primaries: &mut HardlinkPrimaries,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    use crate::net::atp::transport_common::metadata::{
+        inode_key_if_regular_sync, read_entry_metadata_sync,
+    };
+    let mut metadatas = Vec::with_capacity(entries.len());
+    for (rel_path, abs_path) in entries {
+        let mut metadata = read_entry_metadata_sync(abs_path, policy)?;
+        if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) = inode_key_if_regular_sync(abs_path)? {
+                if let Some(primary) = primaries.get(&key) {
+                    metadata.hardlink_target = Some(primary.clone());
+                } else {
+                    primaries.insert(key, rel_path.clone());
+                }
+            }
+        }
+        validate_symlink_metadata_for_receive(rel_path, &metadata).map_err(|error| {
+            TransportError::Source(format!(
+                "{}: invalid symlink metadata: {error}",
+                abs_path.display()
+            ))
+        })?;
+        metadatas.push(metadata);
+    }
+    Ok(metadatas)
+}
+
+/// The metadata half of the sender's first pass (br-asupersync-dfdwyt), in
+/// blocking tasks of [`METADATA_BATCH_ENTRIES`] entries with a cancellation
+/// checkpoint between them.
+async fn capture_entry_metadata(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    config: &TransferConfig,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    let mut metadatas = Vec::with_capacity(entries.len());
+    let mut primaries = HardlinkPrimaries::new();
+    for batch in entries.chunks(METADATA_BATCH_ENTRIES) {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let policy = config.metadata_policy.clone();
+        let preserve_hardlinks = config.preserve_hardlinks;
+        let paths: Vec<(String, PathBuf)> = batch
+            .iter()
+            .map(|entry| (entry.rel_path.clone(), entry.abs_path.clone()))
+            .collect();
+        let (result, carried) = crate::runtime::spawn_blocking(move || {
+            let result =
+                capture_entry_metadata_sync(&paths, &policy, preserve_hardlinks, &mut primaries);
+            (result, primaries)
+        })
+        .await;
+        primaries = carried;
+        metadatas.extend(result?);
+    }
+    Ok(metadatas)
+}
+
+/// Paths the first pass opened, for tests that check which files it read.
+#[cfg(test)]
+static FIRST_PASS_OPENS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// One blocking task of the sender's first pass (br-asupersync-dfdwyt).
+///
+/// It hashes the content `jobs` from `next` on, resuming `open` (a file an
+/// earlier task stopped inside). It stops after [`HASH_BATCH_FILES`] files;
+/// after [`HASH_BATCH_BYTES`] bytes, possibly inside a file, which it returns
+/// open; or right after the file that takes `total` past `max`, so no later
+/// file is opened.
+fn hash_task(
+    jobs: &[(usize, PathBuf)],
+    mut next: usize,
+    mut open: Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+    buf: &mut [u8],
+    mut total: u64,
+    max: u64,
+) -> Result<HashTaskOutcome, StreamingError> {
+    use crate::net::atp::transport_common::streaming::SyncFileHash;
+
+    let mut done = Vec::new();
+    let mut read = 0u64;
+    while let Some((index, path)) = jobs.get(next) {
+        if done.len() >= HASH_BATCH_FILES || read >= HASH_BATCH_BYTES {
+            break;
+        }
+        let mut file = match open.take() {
+            Some(file) => file,
+            None => {
+                #[cfg(test)]
+                {
+                    if let Ok(mut opens) = FIRST_PASS_OPENS.lock() {
+                        opens.push(path.clone());
+                    }
+                }
+                SyncFileHash::open(path)?
+            }
+        };
+        let n = file.read_some(path, buf)?;
+        if n > 0 {
+            read = read.saturating_add(n as u64);
+            open = Some(file);
+            continue;
+        }
+        let digest = file.finish();
+        total = total.saturating_add(digest.0);
+        done.push((*index, digest));
+        next += 1;
+        if total > max {
+            break;
+        }
+    }
+    Ok((done, next, open))
+}
+
+/// The content half of the sender's first pass (br-asupersync-dfdwyt): the
+/// digest of every entry that carries content, `None` for the rest.
+///
+/// - Only regular files that are not hardlinks to a primary carry content,
+///   so a FIFO is never opened (it would block the sender).
+/// - Files are hashed in blocking tasks ([`hash_task`]) of at most
+///   [`HASH_BATCH_FILES`] files or [`HASH_BATCH_BYTES`] bytes, with a
+///   cancellation checkpoint between tasks.
+/// - As before, the transfer is refused with `TooLarge`, carrying the total
+///   through the end of the first file that takes it past
+///   `max_transfer_bytes`, before any later file is opened.
+///
+/// `buf` (the send phase's read buffer) is the tasks' read buffer.
+async fn hash_content_entries(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    config: &TransferConfig,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<Option<ContentDigest>>, TransportError> {
+    let jobs: std::sync::Arc<Vec<(usize, PathBuf)>> = std::sync::Arc::new(
+        entries
+            .iter()
+            .zip(metadatas)
+            .enumerate()
+            .filter(|(_, (_, metadata))| {
+                matches!(metadata.file_kind, FileKind::Regular)
+                    && metadata.hardlink_target.is_none()
+            })
+            .map(|(index, (entry, _))| (index, entry.abs_path.clone()))
+            .collect(),
+    );
+    let mut hashed: Vec<Option<ContentDigest>> = std::iter::repeat_with(|| None)
+        .take(entries.len())
+        .collect();
+    if jobs.is_empty() {
+        return Ok(hashed);
+    }
+    // The opens below are std::fs on the blocking pool: check the same gate
+    // crate::fs::File::open checks.
+    crate::cx::io_gate::require_ambient_io("fs::File::open")
+        .map_err(|error| TransportError::Source(format!("source hashing: {error}")))?;
+    let max = config.max_transfer_bytes;
+    let mut task_buf = std::mem::take(buf);
+    if task_buf.is_empty() {
+        task_buf = vec![0u8; config.chunk_size.max(1)];
+    }
+    let (mut total, mut next, mut open) = (0u64, 0usize, None);
+    while next < jobs.len() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let task_jobs = std::sync::Arc::clone(&jobs);
+        let mut moved_buf = std::mem::take(&mut task_buf);
+        let moved_open = open.take();
+        let (outcome, returned_buf) = crate::runtime::spawn_blocking(move || {
+            let outcome = hash_task(&task_jobs, next, moved_open, &mut moved_buf, total, max);
+            (outcome, moved_buf)
+        })
+        .await;
+        task_buf = returned_buf;
+        let (done, after, still_open) = outcome?;
+        for (index, digest) in done {
+            total = total.saturating_add(digest.0);
+            if total > max {
+                return Err(TransportError::TooLarge { size: total, max });
+            }
+            hashed[index] = Some(digest);
+        }
+        next = after;
+        open = still_open;
+    }
+    *buf = task_buf;
+    Ok(hashed)
+}
+
 /// Like [`send_path_filtered`], with [`SendOptions`].
 ///
 /// With [`CompressionMode::Zstd`] (and the `zstd` cargo feature) the sender
@@ -3433,72 +3656,37 @@ pub async fn send_path_with_options(
         None
     };
 
-    // First pass: stream each file off disk to compute its size, content id, and
-    // SHA-256 incrementally. `read_buf` is the only data-sized allocation and is
-    // reused across files, so peak memory is `chunk_size`, not the transfer size.
+    // First pass (br-asupersync-dfdwyt). Every awaited file operation is a
+    // blocking-pool handoff, and on a loaded host each one waits for a
+    // scheduler wakeup: a small file used to cost about five here (metadata,
+    // inode key, open, two reads). So metadata is read in blocking tasks of
+    // many entries, as the QUIC sender's pass 1 does (br-asupersync-i7pdxb),
+    // and content is hashed in blocking tasks of many files, each bounded in
+    // bytes, with a cancellation checkpoint between tasks. `read_buf` is the
+    // send phase's buffer and the hashing tasks'; peak memory stays one chunk
+    // per side.
     let mut read_buf = vec![0u8; config.chunk_size.max(1)];
+    let metadatas = capture_entry_metadata(cx, &entries, &config).await?;
+    let hashed = hash_content_entries(cx, &entries, &metadatas, &config, &mut read_buf).await?;
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
-    let mut metadatas: Vec<EntryMetadata> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
-    // Hardlink detection: the first entry (by sorted path) for a given inode is
-    // the primary that carries the content; later entries sharing the inode are
-    // hardlinks to it (sent content-free, `hard_link`ed on the receiver).
-    let mut hardlink_primary: std::collections::HashMap<HardlinkIdentity, String> =
-        std::collections::HashMap::new();
-    for entry in &entries {
-        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let mut metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
-            if let Some(key) =
-                crate::net::atp::transport_common::metadata::inode_key_if_regular(&entry.abs_path)
-                    .await?
-            {
-                if let Some(primary) = hardlink_primary.get(&key) {
-                    metadata.hardlink_target = Some(primary.clone());
-                } else {
-                    hardlink_primary.insert(key, entry.rel_path.clone());
-                }
-            }
-        }
-        validate_symlink_metadata_for_receive(&entry.rel_path, &metadata).map_err(|error| {
-            TransportError::Source(format!(
-                "{}: invalid symlink metadata: {error}",
-                entry.abs_path.display()
-            ))
-        })?;
-        // Only regular files carry content bytes. Symlinks (target in
-        // `metadata`), empty directories, special files (FIFO/socket/device),
-        // and hardlinks-to-a-primary are zero-content — crucially this avoids
-        // `hash_file_streaming` opening a FIFO, which would block the sender.
-        let zero_content =
-            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
-        let (size, content_id, content_sha256) = if zero_content {
-            // Emit the canonical empty-content digest so the receiver — which
-            // sees zero ObjectData frames for this entry — reconstructs the same
-            // digest.
-            let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+    for (entry, digest) in entries.iter().zip(hashed) {
+        // Zero-content entries carry the canonical empty-content digest, which
+        // the receiver, seeing no ObjectData frames for them, reconstructs.
+        let (size, content_id, content_sha256) = digest.unwrap_or_else(|| {
             (
                 0u64,
                 ObjectId::content(ContentId::from_bytes(b"")),
-                empty_sha,
+                Sha256::digest(b"").into(),
             )
-        } else {
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?
-        };
+        });
         total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > config.max_transfer_bytes {
-            return Err(TransportError::TooLarge {
-                size: total_bytes,
-                max: config.max_transfer_bytes,
-            });
-        }
         digests.push(EntryDigest {
             rel_path: entry.rel_path.clone(),
             size,
             content_id,
             content_sha256,
         });
-        metadatas.push(metadata);
     }
 
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
@@ -5994,6 +6182,213 @@ mod tests {
             }
         }
         assert!(compressed_frames > 10, "some chunks were compressed");
+    }
+
+    /// Runs the sender's batched first pass (br-asupersync-dfdwyt) over
+    /// `root`, as send_path_with_options does: the walk, the one-task
+    /// metadata capture, then batched hashing.
+    fn first_pass(
+        root: &Path,
+        config: &TransferConfig,
+    ) -> (
+        Vec<SourceEntry>,
+        Vec<EntryMetadata>,
+        Result<Vec<Option<ContentDigest>>, TransportError>,
+    ) {
+        crate::util::future::block_on(async {
+            let cx = Cx::for_testing();
+            let (_, _, entries) = collect_entries_with_policy(root, &config.metadata_policy)
+                .await
+                .expect("walk the tree");
+            let metadatas = capture_entry_metadata(&cx, &entries, config)
+                .await
+                .expect("capture metadata");
+            let mut buf = vec![0_u8; config.chunk_size.max(1)];
+            let hashed = hash_content_entries(&cx, &entries, &metadatas, config, &mut buf).await;
+            (entries, metadatas, hashed)
+        })
+    }
+
+    /// The batched first pass gives every content entry the digest of its
+    /// bytes, across both batch bounds (more than HASH_BATCH_FILES files, one
+    /// file past HASH_BATCH_BYTES), and none to zero-content entries: a
+    /// symlink and the second name of a hardlink (br-asupersync-dfdwyt).
+    #[test]
+    fn the_batched_first_pass_hashes_every_content_entry_once() {
+        let root = canonical_test_root("atp-tcp-first-pass").join("tree");
+        let mut files: Vec<(String, Vec<u8>)> = (0..150_usize)
+            .map(|index| {
+                let len = (index * 37) % 1_500;
+                let bytes = (0..len)
+                    .map(|byte| u8::try_from((byte * 31 + index) % 251).unwrap())
+                    .collect();
+                (format!("d{}/f{index:03}.bin", index % 4), bytes)
+            })
+            .collect();
+        let big: Vec<u8> = (0..(9 << 20)).map(|byte| (byte % 253) as u8).collect();
+        files.push(("big.bin".to_string(), big));
+        for (rel, bytes) in &files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, bytes).expect("write a tree file");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("big.bin", root.join("link")).expect("symlink");
+            std::fs::hard_link(root.join("d0/f000.bin"), root.join("zz_alias.bin"))
+                .expect("hardlink");
+        }
+        let config = TransferConfig {
+            preserve_hardlinks: true,
+            ..TransferConfig::default()
+        };
+        let (entries, metadatas, hashed) = first_pass(&root, &config);
+        let hashed = hashed.expect("hash the tree");
+        let expected: std::collections::HashMap<&str, &Vec<u8>> = files
+            .iter()
+            .map(|(rel, bytes)| (rel.as_str(), bytes))
+            .collect();
+        let mut failures = Vec::new();
+        for ((entry, metadata), digest) in entries.iter().zip(&metadatas).zip(&hashed) {
+            let rel = entry.rel_path.as_str();
+            match (expected.get(rel), digest) {
+                (Some(bytes), Some((size, content_id, sha))) => {
+                    let want_sha: [u8; 32] = Sha256::digest(bytes).into();
+                    if *size != bytes.len() as u64
+                        || *sha != want_sha
+                        || *content_id != ObjectId::content(ContentId::from_bytes(bytes))
+                    {
+                        failures.push(format!("{rel}: wrong digest"));
+                    }
+                }
+                (Some(_), None) => failures.push(format!("{rel}: not hashed")),
+                (None, Some(_)) => failures.push(format!("{rel}: zero-content entry hashed")),
+                (None, None) => {}
+            }
+            if rel == "zz_alias.bin" && metadata.hardlink_target.as_deref() != Some("d0/f000.bin") {
+                failures.push(format!(
+                    "{rel}: hardlink target {:?}",
+                    metadata.hardlink_target
+                ));
+            }
+        }
+        let hashed_count = hashed.iter().filter(|digest| digest.is_some()).count();
+        if hashed_count != files.len() {
+            failures.push(format!(
+                "{hashed_count} entries hashed for {} files",
+                files.len()
+            ));
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+
+    /// The batched first pass refuses an oversized tree at the first file
+    /// that takes the running total past max_transfer_bytes, with that total,
+    /// as the per-file pass did. That file lies in the second hashing batch.
+    #[test]
+    fn the_batched_first_pass_refuses_an_oversized_tree_at_the_crossing_file() {
+        let root = canonical_test_root("atp-tcp-first-pass-limit").join("tree");
+        for index in 0..200_usize {
+            let path = root.join(format!("f{index:03}.bin"));
+            std::fs::create_dir_all(path.parent().expect("parent")).expect("create dirs");
+            std::fs::write(&path, vec![7_u8; 600]).expect("write a file");
+        }
+        let config = TransferConfig {
+            max_transfer_bytes: 600 * 100 + 1,
+            ..TransferConfig::default()
+        };
+        let (_, _, hashed) = first_pass(&root, &config);
+        assert!(
+            matches!(
+                hashed,
+                Err(TransportError::TooLarge {
+                    size: 60_600,
+                    max: 60_001
+                })
+            ),
+            "{hashed:?}"
+        );
+        // The pass opened exactly the files through the crossing one
+        // (f000..=f100) and none after it.
+        let mut opened: Vec<String> = FIRST_PASS_OPENS
+            .lock()
+            .expect("open log")
+            .iter()
+            .filter_map(|path| path.strip_prefix(&root).ok())
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .collect();
+        opened.sort();
+        let expected: Vec<String> = (0..=100_usize)
+            .map(|index| format!("f{index:03}.bin"))
+            .collect();
+        assert_eq!(opened, expected);
+    }
+
+    /// A first-pass hashing task reads at most HASH_BATCH_BYTES (plus one
+    /// read) even inside one large file, and the next tasks resume that file
+    /// where it stopped, so a dropped transfer stops reading within one task.
+    /// The resumed digest equals a direct one (br-asupersync-dfdwyt).
+    #[test]
+    fn a_hashing_task_stops_inside_a_large_file_and_the_next_resumes_it() {
+        use crate::net::atp::transport_common::streaming::SyncFileHash;
+
+        let root = canonical_test_root("atp-tcp-first-pass-bound");
+        std::fs::create_dir_all(&root).expect("create root");
+        let large: Vec<u8> = (0..(20_usize << 20))
+            .map(|byte| u8::try_from((byte * 7 + byte / 4099) % 251).unwrap())
+            .collect();
+        std::fs::write(root.join("large.bin"), &large).expect("write the large file");
+        std::fs::write(root.join("small.bin"), b"small").expect("write the small file");
+        let jobs = vec![(0, root.join("large.bin")), (1, root.join("small.bin"))];
+        let mut buf = vec![0_u8; 1 << 20];
+
+        let (done, next, open) =
+            hash_task(&jobs, 0, None, &mut buf, 0, u64::MAX).expect("first task");
+        assert!(done.is_empty(), "the first task finished a file: {done:?}");
+        assert_eq!(next, 0, "the first task moved past the large file");
+        let open: SyncFileHash = open.expect("the first task returns the large file open");
+        let first_task_bytes = open.size();
+        assert!(
+            (HASH_BATCH_BYTES..=HASH_BATCH_BYTES + (1 << 20)).contains(&first_task_bytes),
+            "the first task read {first_task_bytes} bytes"
+        );
+
+        let (mut digests, mut next, mut open) = (Vec::new(), next, Some(open));
+        let mut tasks = 1;
+        while next < jobs.len() {
+            let (done, after, still_open) =
+                hash_task(&jobs, next, open.take(), &mut buf, 0, u64::MAX).expect("next task");
+            digests.extend(done);
+            next = after;
+            open = still_open;
+            tasks += 1;
+        }
+        assert_eq!(
+            tasks, 3,
+            "20 MiB in 8 MiB tasks, the small file in the last"
+        );
+        let large_sha: [u8; 32] = Sha256::digest(&large).into();
+        assert_eq!(
+            digests,
+            vec![
+                (
+                    0,
+                    (
+                        large.len() as u64,
+                        ObjectId::content(ContentId::from_bytes(&large)),
+                        large_sha,
+                    ),
+                ),
+                (
+                    1,
+                    (
+                        5,
+                        ObjectId::content(ContentId::from_bytes(b"small")),
+                        Sha256::digest(b"small").into(),
+                    ),
+                ),
+            ]
+        );
     }
 
     /// With the default options a sender makes no offer, so its handshake is

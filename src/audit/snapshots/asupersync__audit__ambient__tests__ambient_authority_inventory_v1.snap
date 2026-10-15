@@ -105,6 +105,7 @@ expression: inventory
 7	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/streaming.rs	File::open(
+1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open
 4	Io	net/atp/transport_quic/mod.rs	File::open(
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::create
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::open
@@ -467,6 +468,7 @@ expression: inventory
 6	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_common/streaming.rs	File::open(	let mut file = crate::fs::File::open(path)
+1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open	let file = std::fs::File::open(path)
 2	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(abs_path).await.map_err(|err| {
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
