@@ -31,6 +31,25 @@ impl StorageHistory {
     fn latest_generation(&self) -> u64 {
         self.generations.last().copied().unwrap_or(0)
     }
+
+    // Legacy retention may leave a nonzero first sequence. Within the retained
+    // interval, however, a missing sequence could be a cancellation or commit
+    // boundary. Copies in another generation may fill a gap; invented records
+    // and a sorted map cannot. Check neighboring keys, not the numeric extent.
+    fn validate_sequence_span(&self) -> Result<(), JournalError> {
+        let mut previous: Option<u64> = None;
+        for sequence in self.entries.keys().copied() {
+            if let Some(previous) = previous
+                && previous.checked_add(1) != Some(sequence)
+            {
+                return Err(JournalError::Deserialization(format!(
+                    "journal sequence gap after {previous} before {sequence}",
+                )));
+            }
+            previous = Some(sequence);
+        }
+        Ok(())
+    }
 }
 
 fn same_entry(a: &JournalEntry, b: &JournalEntry) -> bool {
@@ -109,7 +128,19 @@ impl AppendJournal {
             };
             if damaged { history.damaged.insert(*generation); }
             let mut file_bytes = 0_u64;
+            let mut previous_sequence: Option<u64> = None;
             for entry in entries {
+                // The writer and snapshots emit strictly increasing sequences.
+                // Identical copies across generations are expected; duplicates
+                // or reversed frames WITHIN one generation are not snapshots.
+                // Reject before BTreeMap sorting/deduplication can conceal them.
+                if previous_sequence.is_some_and(|previous| entry.sequence <= previous) {
+                    return Outcome::Err(JournalError::Deserialization(format!(
+                        "journal generation {generation} has non-increasing sequence {}",
+                        entry.sequence,
+                    )));
+                }
+                previous_sequence = Some(entry.sequence);
                 file_bytes = match file_bytes.checked_add(20 + u64::from(entry.entry_size)) {
                     Some(bytes) => bytes,
                     None => return Outcome::Err(JournalError::Deserialization(
@@ -135,6 +166,9 @@ impl AppendJournal {
                     )),
                 }
             }
+        }
+        if let Err(error) = history.validate_sequence_span() {
+            return Outcome::Err(error);
         }
         Outcome::Ok(history)
     }
@@ -480,5 +514,126 @@ mod discovery_tests {
         fixture(&base.join("journal_gen_2.dat"), &[(2, accepted())]);
         assert_eq!(original_reader.read_all_entries_from_disk().unwrap().len(), 1);
         assert!(AppendJournal::new(config(base), key()).is_err());
+    }
+
+    #[test]
+    fn reordered_and_duplicate_frames_cannot_be_normalized_into_valid_history() {
+        let orders: &[&[u64]] = &[
+            &[0, 1, 2], &[0, 2, 1], &[1, 0, 2], &[1, 2, 0],
+            &[2, 0, 1], &[2, 1, 0], &[0, 1, 1, 2],
+        ];
+        for order in orders {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path();
+            let records: Vec<_> = order.iter().map(|sequence| {
+                (*sequence, if *sequence == 2 { cancelled() } else { accepted() })
+            }).collect();
+            let original = fixture(&journal_file_path(base, 0), &records);
+            let recovered = AppendJournal::new(config(base), key());
+            if *order == &[0_u64, 1, 2][..] {
+                assert_eq!(recovered.unwrap().read_all_entries_from_disk().unwrap().len(), 3);
+            } else {
+                assert!(matches!(recovered,
+                    Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("non-increasing")));
+            }
+            assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+            assert!(!journal_file_path(base, 1).exists());
+        }
+    }
+
+    #[test]
+    fn missing_interior_sequences_refuse_even_with_valid_signed_ordered_frames() {
+        for split in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path();
+            let first = if split { vec![(0, accepted())] }
+                else { vec![(0, accepted()), (2, cancelled())] };
+            let original = fixture(&journal_file_path(base, 0), &first);
+            let last = if split {
+                Some(fixture(&journal_file_path(base, 9), &[(2, cancelled())]))
+            } else { None };
+            assert!(matches!(AppendJournal::new(config(base), key()),
+                Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("sequence gap")));
+            assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+            if let Some(last) = last { assert_eq!(std::fs::read(journal_file_path(base, 9)).unwrap(), last); }
+            assert!(!journal_file_path(base, 10).exists());
+        }
+    }
+
+    #[test]
+    fn other_generations_can_fill_snapshot_gaps_without_duplicate_replay() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let original = fixture(&journal_file_path(base, 0), &[
+            (0, accepted()), (1, accepted()), (2, accepted()), (3, cancelled()),
+        ]);
+        fixture(&journal_file_path(base, 1), &[(0, accepted()), (2, accepted())]);
+        let mut recovered = AppendJournal::new(config(base), key()).unwrap();
+        assert_eq!(recovered.get_stats().sequence, 4);
+        assert_eq!(recovered.read_all_entries_from_disk().unwrap().len(), 4);
+        assert!(matches!(recovered.get_resume_summary("discovery").unwrap().status,
+            TransferResumeStatus::Cancelled { .. }));
+        let other = JournalRecord::Accept {
+            transfer_id: "independent".to_owned(), peer_id: "peer".to_owned(),
+            timestamp: 4, auth_tag: AuthenticationTag::zero(),
+        };
+        assert_eq!(recovered.append(other).unwrap(), 4);
+        recovered.flush().unwrap();
+        assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+        drop(recovered);
+        let mut reopened = AppendJournal::new(config(base), key()).unwrap();
+        assert_eq!(reopened.read_all_entries_from_disk().unwrap().len(), 5);
+        reopened.compact().unwrap();
+        drop(reopened);
+        let reopened = AppendJournal::new(config(base), key()).unwrap();
+        assert_eq!(reopened.read_all_entries_from_disk().unwrap().len(), 6);
+        assert!(matches!(reopened.get_resume_summary("discovery").unwrap().status,
+            TransferResumeStatus::Cancelled { .. }));
+        assert_eq!(reopened.get_transfer_entries("independent").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn nonzero_retained_origins_and_high_sequence_boundaries_do_not_expand_the_span() {
+        for origin in [17, 1_u64 << 40, u64::MAX - 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let base = directory.path();
+            fixture(&journal_file_path(base, 0), &[(origin, accepted()), (origin + 1, cancelled())]);
+            let recovered = AppendJournal::new(config(base), key()).unwrap();
+            assert_eq!(recovered.get_stats().sequence, origin + 2);
+            assert_eq!(recovered.read_all_entries_from_disk().unwrap().len(), 2);
+        }
+        let directory = tempfile::tempdir().unwrap();
+        fixture(&journal_file_path(directory.path(), 0), &[(0, accepted()), (u64::MAX, cancelled())]);
+        assert!(matches!(AppendJournal::new(config(directory.path()), key()),
+            Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("sequence gap")));
+        let directory = tempfile::tempdir().unwrap();
+        fixture(&journal_file_path(directory.path(), 0), &[(u64::MAX, accepted())]);
+        assert!(matches!(AppendJournal::new(config(directory.path()), key()),
+            Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("exhausted")));
+    }
+
+    #[test]
+    fn reordered_snapshot_discovered_after_open_cannot_authorize_retention() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = directory.path();
+        let original = fixture(&journal_file_path(base, 0), &[(0, accepted()), (1, cancelled())]);
+        let snapshot_path = journal_file_path(base, 1);
+        fixture(&snapshot_path, &[(0, accepted()), (1, cancelled())]);
+        let mut journal = AppendJournal::new(config(base), key()).unwrap();
+        let mut reversed = Vec::new();
+        for (sequence, record) in [(1, cancelled()), (0, accepted())] {
+            let entry = JournalEntry::try_new(sequence, record.with_signature(&key())).unwrap();
+            storage::write_frame(&mut reversed, &entry.encode()).unwrap();
+        }
+        // Fault only a test-owned snapshot after the real reader has opened it.
+        // The original generation remains available and is never deleted here.
+        std::fs::write(&snapshot_path, &reversed).unwrap();
+        assert!(matches!(journal.compact(),
+            Outcome::Err(JournalError::Deserialization(reason)) if reason.contains("non-increasing")));
+        assert!(journal.storage_failed);
+        assert!(journal.get_resume_summary("discovery").is_err());
+        assert_eq!(std::fs::read(journal_file_path(base, 0)).unwrap(), original);
+        assert_eq!(std::fs::read(snapshot_path).unwrap(), reversed);
+        assert!(!journal_file_path(base, 2).exists());
     }
 }
