@@ -450,12 +450,13 @@ impl NativeTransferClient {
                 report.source_sha256 = Some(digest);
                 match checkpoint(cx) {
                     Err(error) => Err(error),
-                    Ok(()) => transport_quic::send_path(
+                    Ok(()) => transport_quic::send_path_with_options(
                         cx,
                         remote,
                         &spool.path,
                         admission.shared.config.clone(),
                         &admission.shared.peer_label,
+                        admission.shared.send_options,
                     )
                     .await
                     .map_err(NativeTransferError::from)

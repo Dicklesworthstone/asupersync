@@ -33,6 +33,14 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(feature = "zstd")]
+use {
+    asupersync::net::atp::sdk::native::NativeUploadOptions,
+    asupersync::net::atp::transport_common::CompressionMode,
+    asupersync::net::atp::transport_quic::QuicSendOptions,
+    std::sync::{Arc, atomic::AtomicBool},
+    std::thread::JoinHandle,
+};
 
 // Public fixture key, not a production credential. The CA/leaf chain is shared
 // with the existing native handshake and transfer suites; leaf SAN is localhost
@@ -494,6 +502,221 @@ fn native_sdk_rejected_spawn_retires_sender_and_receiver_admission() {
         let rebound = UdpSocket::bind(address).expect("failed spawn retires captured listener");
         drop(rebound);
     });
+}
+
+/// A UDP relay between a native sender and its receiver that counts the
+/// bytes the sender puts on the wire, compressed or not.
+#[cfg(feature = "zstd")]
+struct CountingProxy {
+    addr: std::net::SocketAddr,
+    sent: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+#[cfg(feature = "zstd")]
+impl CountingProxy {
+    fn spawn(receiver: std::net::SocketAddr) -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("bind counting proxy");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("proxy read timeout");
+        let addr = socket.local_addr().expect("proxy local addr");
+        let sent = Arc::new(AtomicU64::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (thread_sent, thread_stop) = (Arc::clone(&sent), Arc::clone(&stop));
+        let handle = std::thread::spawn(move || {
+            let mut sender = None;
+            let mut buf = vec![0_u8; 65_536];
+            while !thread_stop.load(Ordering::Relaxed) {
+                let Ok((len, from)) = socket.recv_from(&mut buf) else {
+                    continue;
+                };
+                if from == receiver {
+                    if let Some(sender) = sender {
+                        let _ = socket.send_to(&buf[..len], sender);
+                    }
+                } else {
+                    sender = Some(from);
+                    thread_sent.fetch_add(len as u64, Ordering::Relaxed);
+                    let _ = socket.send_to(&buf[..len], receiver);
+                }
+            }
+        });
+        Self {
+            addr,
+            sent,
+            stop,
+            handle: Some(handle),
+        }
+    }
+}
+
+#[cfg(feature = "zstd")]
+impl Drop for CountingProxy {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// How [`counted_transfer`] sends.
+#[cfg(feature = "zstd")]
+#[derive(Clone, Copy, Debug)]
+enum Route {
+    SendPath,
+    SpawnSendPath,
+    /// `send_buffer` with the source's bytes, spooled beside the source.
+    Upload,
+}
+
+/// A transfer from a client made with `options`, through a
+/// [`CountingProxy`]; returns both reports and the sender's wire bytes.
+#[cfg(feature = "zstd")]
+async fn counted_transfer(
+    source: PathBuf,
+    destination: PathBuf,
+    options: QuicSendOptions,
+    route: Route,
+) -> (SendReport, ReceiveReport, u64) {
+    let cx = Cx::current().expect("native root context");
+    let timeout = Duration::from_secs(20);
+    let mut send_config = sender_config("localhost", timeout);
+    send_config.chunk_size = 64 * 1024;
+    let mut receive_config = receiver_config(timeout);
+    receive_config.chunk_size = 64 * 1024;
+    let sender = AtpSdk::new_in_process(SessionConfig {
+        local_peer: PeerId::from_label("native-sdk-compressing-sender"),
+        max_concurrent_transfers: 1,
+        ..SessionConfig::default()
+    })
+    .native_transfers_with_send_options(send_config, options)
+    .expect("explicit native client configuration");
+    assert_eq!(sender.send_options(), options);
+    let receiver_client = native_client("native-sdk-receiver", receive_config, 1);
+    let receiver = receiver_client
+        .bind_receiver(
+            &cx,
+            "127.0.0.1:0".parse().unwrap(),
+            destination,
+            QuicReceiveOptions::default(),
+        )
+        .await
+        .expect("bind actual receiver before advertising its address");
+    let proxy = CountingProxy::spawn(receiver.local_addr());
+    let (sent, received) = match route {
+        Route::SendPath => {
+            zip(
+                sender.send_path(&cx, proxy.addr, &source),
+                receiver.receive(&cx),
+            )
+            .await
+        }
+        Route::SpawnSendPath => {
+            let scope = cx.scope();
+            let mut receive = receiver.spawn(&cx, &scope).expect("admit receiver child");
+            let mut send = sender
+                .spawn_send_path(&cx, &scope, proxy.addr, source)
+                .expect("admit sender child");
+            let (sent, received) = zip(send.join(&cx), receive.join(&cx)).await;
+            (
+                sent.expect("sender must reach canonical join"),
+                received.expect("receiver must reach canonical join"),
+            )
+        }
+        Route::Upload => {
+            let data = std::fs::read(&source).unwrap();
+            let spool = source.with_file_name("spool");
+            std::fs::create_dir(&spool).unwrap();
+            let name = source.file_name().unwrap().to_str().unwrap();
+            let (upload, received) = zip(
+                sender.send_buffer(
+                    &cx,
+                    proxy.addr,
+                    NativeUploadOptions::new(spool, name),
+                    &data,
+                ),
+                receiver.receive(&cx),
+            )
+            .await;
+            assert!(upload.cleanup_error.is_none(), "{upload:?}");
+            let sent = upload
+                .outcome
+                .unwrap_or_else(|error| panic!("upload: {error:?}"));
+            (Ok(sent), received)
+        }
+    };
+    let sent = sent.expect("actual sender must receive verified commit proof");
+    let received = received.expect("actual receiver must publish verified files");
+    assert!(sent.receipt.committed && sent.receipt.sha_ok && sent.receipt.merkle_ok);
+    assert!(received.committed);
+    (sent, received, proxy.sent.load(Ordering::Relaxed))
+}
+
+/// A client made with send options sends with them (br-asupersync-t1fblr.18).
+/// Offering zstd, a compressible file crosses the wire in a fraction of its
+/// size, through send_path, spawn_send_path and an upload. The default
+/// client sends it raw. Every run commits the exact bytes, and both reports
+/// count raw bytes.
+#[cfg(feature = "zstd")]
+#[test]
+fn native_sdk_send_options_compress_the_source_stream() {
+    let words = [
+        "region ",
+        "obligation ",
+        "cancel ",
+        "scope ",
+        "budget ",
+        "trace\n",
+    ];
+    let mut state = 7_u64;
+    let mut text = Vec::with_capacity(256 * 1024);
+    while text.len() < 256 * 1024 {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        text.extend_from_slice(
+            words[usize::try_from(state >> 61).unwrap() % words.len()].as_bytes(),
+        );
+    }
+    text.truncate(256 * 1024);
+    let len = u64::try_from(text.len()).unwrap();
+    let zstd = QuicSendOptions::new().with_compression(CompressionMode::Zstd);
+    let mut wire = Vec::new();
+    for (label, options, route) in [
+        ("zstd, send_path", zstd, Route::SendPath),
+        ("zstd, spawn_send_path", zstd, Route::SpawnSendPath),
+        ("zstd, upload", zstd, Route::Upload),
+        ("default options", QuicSendOptions::new(), Route::SendPath),
+    ] {
+        let root = fixture("compress");
+        let source = root.join("words.txt");
+        std::fs::write(&source, &text).unwrap();
+        let destination = root.join("received");
+        let receive_root = destination.clone();
+        let (sent, received, on_wire) =
+            run_native(2, counted_transfer(source, receive_root, options, route));
+        assert_eq!(sent.bytes_sent, len, "{label}: reports count raw bytes");
+        assert_eq!(
+            received.bytes_received, len,
+            "{label}: reports count raw bytes"
+        );
+        assert_content(&received, &destination, "words.txt", &text);
+        wire.push((label, on_wire));
+    }
+    // Every route that offered zstd, so a failure names all of them.
+    let uncompressed: Vec<_> = wire[..3]
+        .iter()
+        .filter(|(_, on_wire)| *on_wire >= len / 3)
+        .collect();
+    assert!(
+        uncompressed.is_empty(),
+        "not compressed, as (route, wire bytes) for {len}: {uncompressed:?}"
+    );
+    let (label, on_wire) = wire[3];
+    assert!(on_wire > len, "{label}: {on_wire} wire bytes for {len}");
 }
 
 #[path = "atp_native_sdk/uploads.rs"]

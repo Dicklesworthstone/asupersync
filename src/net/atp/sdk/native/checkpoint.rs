@@ -705,12 +705,13 @@ impl NativeTransferClient {
             })?;
         // Cancellation during intent persistence cannot start network work.
         checkpoint(cx)?;
-        let outcome = transport_quic::send_path(
+        let outcome = transport_quic::send_path_with_options(
             cx,
             remote,
             &source,
             lease.admission.shared.config.clone(),
             &lease.admission.shared.peer_label,
+            lease.admission.shared.send_options,
         )
         .await
         .map_err(NativeTransferError::from)

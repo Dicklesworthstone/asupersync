@@ -22,7 +22,8 @@ use crate::net::atp::transport_quic::native_link::{
     bind_server_endpoint, receive_on_endpoint_with_options,
 };
 use crate::net::atp::transport_quic::{
-    self, QuicConfig, QuicReceiveOptions, QuicTransportError, ReceiveReport, SendReport,
+    self, QuicConfig, QuicReceiveOptions, QuicSendOptions, QuicTransportError, ReceiveReport,
+    SendReport,
 };
 use crate::net::quic_native::QuicUdpEndpoint;
 use crate::runtime::{SpawnError, TaskHandle};
@@ -75,6 +76,7 @@ pub enum NativeTransferError {
 #[derive(Debug)]
 struct NativeShared {
     config: QuicConfig,
+    send_options: QuicSendOptions,
     peer_label: String,
     limit: usize,
     active: AtomicUsize,
@@ -158,12 +160,39 @@ impl AtpSdk {
     /// receipt is returned as an error, never automatically retried: the
     /// remote may already have committed the files.
     ///
+    /// Sends use the default [`QuicSendOptions`] (no compression); see
+    /// [`Self::native_transfers_with_send_options`].
+    ///
     /// # Errors
     /// Refuses daemon delegation, zero limits, and invalid transport config
     /// before opening sockets or inspecting a source/destination path.
     pub fn native_transfers(
         &self,
+        config: QuicConfig,
+    ) -> Result<NativeTransferClient, NativeTransferError> {
+        self.native_transfers_with_send_options(config, QuicSendOptions::new())
+    }
+
+    /// [`Self::native_transfers`], with `send_options` for every send the
+    /// client makes: [`NativeTransferClient::send_path`],
+    /// [`NativeTransferClient::spawn_send_path`], uploads and checkpointed
+    /// sends.
+    ///
+    /// This is how an SDK sender compresses (br-asupersync-t1fblr.18):
+    /// `QuicSendOptions::new().with_compression(CompressionMode::Zstd)`, or
+    /// `CompressionMode::Auto`, offers zstd for the reliable source stream.
+    /// A receiver built with the `zstd` feature accepts the offer; an older
+    /// receiver ignores it and the stream stays raw. Without the `zstd`
+    /// feature the sender makes no offer. Receipts, hashes and reported
+    /// byte counts stay on raw bytes either way.
+    /// `SessionConfig::enable_compression` is not read here.
+    ///
+    /// # Errors
+    /// As [`Self::native_transfers`].
+    pub fn native_transfers_with_send_options(
+        &self,
         mut config: QuicConfig,
+        send_options: QuicSendOptions,
     ) -> Result<NativeTransferClient, NativeTransferError> {
         if !matches!(self.mode, SdkMode::InProcess) {
             return Err(NativeTransferError::UnsupportedMode);
@@ -191,6 +220,7 @@ impl AtpSdk {
         Ok(NativeTransferClient {
             shared: Arc::new(NativeShared {
                 config,
+                send_options,
                 // A diagnostic label only. It grants no peer authority.
                 peer_label: hex::encode(self.default_config.local_peer.as_bytes()),
                 limit,
@@ -211,6 +241,12 @@ impl NativeTransferClient {
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.shared.limit
+    }
+
+    /// The sender options every send of this client uses.
+    #[must_use]
+    pub fn send_options(&self) -> QuicSendOptions {
+        self.shared.send_options
     }
 
     fn admit(&self) -> Result<NativeAdmission, NativeTransferError> {
@@ -273,12 +309,13 @@ impl NativeTransferClient {
         source: &Path,
         admission: NativeAdmission,
     ) -> Result<SendReport, NativeTransferError> {
-        let report = transport_quic::send_path(
+        let report = transport_quic::send_path_with_options(
             cx,
             remote,
             source,
             admission.shared.config.clone(),
             &admission.shared.peer_label,
+            admission.shared.send_options,
         )
         .await?;
         committed_send(report)
