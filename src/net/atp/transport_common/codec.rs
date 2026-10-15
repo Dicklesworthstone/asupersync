@@ -292,10 +292,12 @@ pub enum CompressionMode {
     /// cargo feature this behaves as [`Self::Off`].
     Zstd,
     /// Offer zstd as [`Self::Zstd`] does, but spend no effort where it does
-    /// not pay: entries that are already compressed are sent raw, and so is
-    /// data that keeps failing to compress (see [`EntryCompression`];
-    /// br-asupersync-t1fblr.24). Without the `zstd` cargo feature this
-    /// behaves as [`Self::Off`].
+    /// not pay (br-asupersync-t1fblr.24). An entry whose name or first bytes
+    /// mark an already-compressed format (zstd, gzip, xz, zip, JPEG, PNG,
+    /// MP4, ...) is sent raw. A chunk that saves less than a twentieth of its
+    /// size sends the next 1, 2, 4, ... up to 64 chunks of that entry raw
+    /// before the next try. The decisions are deterministic. Without the
+    /// `zstd` cargo feature this behaves as [`Self::Off`].
     Auto,
 }
 
@@ -360,9 +362,10 @@ const MAX_RAW_RUN: u32 = 64;
 ///   saves at least a twentieth ends the backoff.
 ///
 /// The decisions depend only on the entry's name, its bytes and the order of
-/// its chunks, so a transfer makes the same ones every time.
+/// its chunks, so a transfer makes the same ones every time. Crate-private:
+/// its inputs will grow with the goodput rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EntryCompression {
+pub(crate) struct EntryCompression {
     mode: CompressionMode,
     /// The entry is an already-compressed format.
     skip: bool,
@@ -376,7 +379,7 @@ impl EntryCompression {
     /// The decisions for the entry named `name` (a path; only its extension
     /// is read) under `mode`.
     #[must_use]
-    pub fn new(mode: CompressionMode, name: &str) -> Self {
+    pub(crate) fn new(mode: CompressionMode, name: &str) -> Self {
         Self {
             mode,
             skip: mode == CompressionMode::Auto && has_compressed_extension(name),
@@ -386,8 +389,10 @@ impl EntryCompression {
     }
 
     /// Whether to try compressing `chunk`, the entry's bytes at `offset`.
-    /// After a `true`, report the outcome with [`Self::record`].
-    pub fn should_try(&mut self, offset: u64, chunk: &[u8]) -> bool {
+    /// After a `true`, report the outcome with [`Self::record`]. Only
+    /// compressing builds (`zstd`) decide anything.
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(crate) fn should_try(&mut self, offset: u64, chunk: &[u8]) -> bool {
         match self.mode {
             CompressionMode::Off => false,
             CompressionMode::Zstd => true,
@@ -409,7 +414,8 @@ impl EntryCompression {
 
     /// Records how a tried chunk of `raw_len` bytes fared: compressed to
     /// `compressed_len` bytes, or `None` when it went raw.
-    pub fn record(&mut self, raw_len: usize, compressed_len: Option<usize>) {
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(crate) fn record(&mut self, raw_len: usize, compressed_len: Option<usize>) {
         if self.mode != CompressionMode::Auto {
             return;
         }
@@ -425,7 +431,7 @@ impl EntryCompression {
     /// [`compress_chunk`] for the entry's bytes at `offset`, when these
     /// decisions say to try.
     #[cfg(feature = "zstd")]
-    pub fn compress(
+    pub(crate) fn compress(
         &mut self,
         accept: &CodecAccept,
         offset: u64,

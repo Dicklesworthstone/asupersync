@@ -1233,6 +1233,7 @@ fn run_counted_transfer(
 /// - A receiver that ignores the offer, as one that predates compression
 ///   does, gets the stream raw.
 /// - A sender that makes no offer sends it raw too.
+/// - Auto compresses this text entry as Zstd does (t1fblr.24).
 /// In every case the committed file equals the source, verified on its raw
 /// bytes, and the reports count raw bytes.
 #[cfg(feature = "zstd")]
@@ -1259,15 +1260,23 @@ fn real_udp_quic_source_stream_compresses_with_zstd() {
     payload.truncate(1 << 20);
     let len = payload.len() as u64;
     let zstd = QuicSendOptions::new().with_compression(CompressionMode::Zstd);
+    let auto = QuicSendOptions::new().with_compression(CompressionMode::Auto);
     let mut wire = Vec::new();
-    for (label, options, receiver_ignores_offer) in [
-        ("accepted", zstd, false),
-        ("ignored", zstd, true),
-        ("not offered", QuicSendOptions::new(), false),
+    for (label, options, receiver_ignores_offer, name) in [
+        ("accepted", zstd, false, "compressible.txt"),
+        ("ignored", zstd, true, "compressible.txt"),
+        (
+            "not offered",
+            QuicSendOptions::new(),
+            false,
+            "compressible.txt",
+        ),
+        ("auto", auto, false, "compressible.txt"),
+        ("auto, a .png entry", auto, false, "compressible.png"),
     ] {
         let src = tempfile::tempdir().expect("src dir");
         let dst = tempfile::tempdir().expect("dst dir");
-        let source = src.path().join("compressible.txt");
+        let source = src.path().join(name);
         std::fs::write(&source, &payload).expect("write source");
         let mut cfg = transport_authenticated_configs();
         cfg.send.round0_loss_target = 0.001;
@@ -1293,19 +1302,27 @@ fn real_udp_quic_source_stream_compresses_with_zstd() {
             "{label}: the source stream carried everything"
         );
         assert!(
-            std::fs::read(dst.path().join("compressible.txt")).expect("read committed") == payload,
+            std::fs::read(dst.path().join(name)).expect("read committed") == payload,
             "{label}: committed bytes must match the source"
         );
         assert_no_staging_residue(dst.path());
         wire.push((label, sent));
     }
     let (compressed, ignored, plain) = (wire[0].1, wire[1].1, wire[2].1);
+    let (auto, auto_png) = (wire[3].1, wire[4].1);
     assert!(
         compressed < len / 3,
         "accepted: {compressed} wire bytes for {len}"
     );
     assert!(ignored > len, "ignored: {ignored} wire bytes for {len}");
     assert!(plain > len, "not offered: {plain} wire bytes for {len}");
+    // Auto compresses a text entry as Zstd does, and sends an entry named as
+    // an already-compressed format raw (br-asupersync-t1fblr.24).
+    assert!(auto < len / 3, "auto: {auto} wire bytes for {len}");
+    assert!(
+        auto_png > len,
+        "auto, a .png entry: {auto_png} wire bytes for {len}"
+    );
 }
 
 #[test]

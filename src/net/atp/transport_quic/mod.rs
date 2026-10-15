@@ -1339,9 +1339,16 @@ impl QuicReceiveOptions {
 ///
 /// Separate from [`QuicConfig`], which callers construct exhaustively. The
 /// defaults send exactly what [`send_path`] sends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QuicSendOptions {
     compression: CompressionMode,
+    compression_parallelism: usize,
+}
+
+impl Default for QuicSendOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl QuicSendOptions {
@@ -1350,7 +1357,24 @@ impl QuicSendOptions {
     pub const fn new() -> Self {
         Self {
             compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
+    }
+
+    /// These options compressing up to `chunks` source-stream chunks at once
+    /// on the runtime's blocking pool (br-asupersync-t1fblr.25; 0 counts as
+    /// 1, default [`codec::DEFAULT_COMPRESSION_PARALLELISM`]). It changes
+    /// speed, never what [`CompressionMode::Zstd`] sends.
+    #[must_use]
+    pub const fn with_compression_parallelism(mut self, chunks: usize) -> Self {
+        self.compression_parallelism = chunks;
+        self
+    }
+
+    /// How many source-stream chunks this sender compresses at once.
+    #[must_use]
+    pub const fn compression_parallelism(&self) -> usize {
+        self.compression_parallelism
     }
 
     /// Whether the sender offers to compress the reliable source stream

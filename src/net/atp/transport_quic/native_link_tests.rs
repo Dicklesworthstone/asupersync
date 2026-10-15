@@ -3,6 +3,7 @@ mod tests {
     use super::*;
     use crate::bytes::Bytes;
     use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::atp::transport_common::codec::CompressionMode;
     use crate::net::quic_native::{DEFAULT_MAX_PACKET_BYTES, StreamDirection};
 
     fn established_native_test_conn() -> NativeQuicConnection {
@@ -3148,7 +3149,9 @@ mod tests {
             })
             .collect();
         for (chunk, compressed) in [(&text[..], true), (&noise[..], false)] {
-            let frame = source_stream_chunk_frame(&accept, 3, 1000, chunk).expect("frame");
+            let mut entry = EntryCompression::new(CompressionMode::Zstd, "chunk.bin");
+            let frame =
+                source_stream_chunk_frame(&accept, &mut entry, 3, 1000, chunk).expect("frame");
             let record = frame
                 .header
                 .extensions
@@ -3166,6 +3169,36 @@ mod tests {
         }
     }
 
+    /// Source-stream frames follow the entry's compression decisions
+    /// (br-asupersync-t1fblr.24): Auto sends a ".png" entry and a
+    /// gzip-signed entry raw and compresses text; Zstd compresses all three.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn source_stream_frames_follow_the_entry_decisions() {
+        let accept = source_stream_accept();
+        let text = b"compressed source stream chunk ".repeat(2048);
+        let mut gzip = text.clone();
+        gzip[..2].copy_from_slice(&[0x1F, 0x8B]);
+        let compressed = |mode, name: &str, chunk: &[u8]| {
+            let mut entry = EntryCompression::new(mode, name);
+            source_stream_chunk_frame(&accept, &mut entry, 0, 0, chunk)
+                .expect("frame")
+                .header
+                .extensions
+                .contains_key(&codec::CHUNK_CODEC_EXTENSION)
+        };
+        assert!(compressed(CompressionMode::Auto, "dir/log.txt", &text));
+        assert!(!compressed(CompressionMode::Auto, "dir/photo.png", &text));
+        assert!(!compressed(CompressionMode::Auto, "dir/log.txt", &gzip));
+        for (name, chunk) in [
+            ("dir/log.txt", &text),
+            ("dir/photo.png", &text),
+            ("dir/log.txt", &gzip),
+        ] {
+            assert!(compressed(CompressionMode::Zstd, name, chunk), "{name}");
+        }
+    }
+
     /// A frame that is not the chunk due, runs past its entry, carries
     /// nothing, is not a data frame, or does not decode to its declared length
     /// is refused before anything is written.
@@ -3174,7 +3207,8 @@ mod tests {
     fn hostile_source_stream_frames_are_refused() {
         let accept = source_stream_accept();
         let text = b"compressed source stream chunk ".repeat(2048);
-        let frame = source_stream_chunk_frame(&accept, 3, 1000, &text).expect("frame");
+        let mut entry = EntryCompression::new(CompressionMode::Zstd, "chunk.bin");
+        let frame = source_stream_chunk_frame(&accept, &mut entry, 3, 1000, &text).expect("frame");
         let len = u64::try_from(text.len()).unwrap();
         let raw = source_stream_data_frame(3, 1000, &text).expect("raw frame");
         let empty = source_stream_data_frame(3, 1000, &[]).expect("empty frame");
@@ -3220,7 +3254,9 @@ mod tests {
         let offer = codec::CodecOffer::new(codec::WireCodec::Zstd.bit(), 16, 64 * 1024);
         let local = codec::DecodeCapability::new(codec::WireCodec::Zstd.bit(), 20, 1 << 20);
         let accept = codec::negotiate(&local, &offer).expect("accept");
-        let frame = source_stream_chunk_frame(&accept, 0, 0, &[7; 4096]).expect("frame");
+        let mut entry = EntryCompression::new(CompressionMode::Zstd, "chunk.bin");
+        let frame =
+            source_stream_chunk_frame(&accept, &mut entry, 0, 0, &[7; 4096]).expect("frame");
         assert!(
             !frame
                 .header

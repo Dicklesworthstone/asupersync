@@ -75,7 +75,7 @@ use crate::net::atp::protocol::codec::AtpFrameCodec;
 use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
-use crate::net::atp::transport_common::codec::{self, CodecAccept, CodecOffer};
+use crate::net::atp::transport_common::codec::{self, CodecAccept, CodecOffer, EntryCompression};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -8430,6 +8430,7 @@ async fn send_native_source_stream_entries_pumped(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     chunk_codec: Option<&CodecAccept>,
+    options: super::QuicSendOptions,
 ) -> Result<u64, QuicTransportError> {
     let max_chunk = link
         .max_app_payload
@@ -8448,6 +8449,12 @@ async fn send_native_source_stream_entries_pumped(
     // Logical (raw) bytes: what the manifest totals, compressed or not.
     let mut streamed = 0u64;
     let mut queued_since_flush = 0u64;
+    // Framed chunks compress on the blocking pool, up to
+    // `compression_parallelism` at once, and go out in order; consecutive
+    // entries share the pipeline (t1fblr.25).
+    #[cfg(feature = "zstd")]
+    let mut pipeline = chunk_codec
+        .map(|accept| codec::ChunkPipeline::new(*accept, options.compression_parallelism()));
 
     for entry in &prepared.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -8461,6 +8468,10 @@ async fn send_native_source_stream_entries_pumped(
             })?;
         let mut hasher = Sha256::new();
         let mut read = 0u64;
+        // The entry's decisions (t1fblr.24): only outcomes of its own chunks
+        // still decide.
+        let mut decisions =
+            EntryCompression::new(options.compression(), &entry.abs_path.to_string_lossy());
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let n = file.read(&mut buf).await.map_err(|err| {
@@ -8493,27 +8504,58 @@ async fn send_native_source_stream_entries_pumped(
                     )
                     .await?;
                 }
-                Some(accept) => {
-                    let frame =
-                        source_stream_chunk_frame(accept, entry.index, read - n_u64, &buf[..n])?;
-                    let wire = frame
-                        .to_wire_bytes()
-                        .map_err(|error| QuicTransportError::Frame(error.to_string()))?;
-                    // The frame goes out in write-sized pieces, so each write
-                    // still fits the receiver's window, however small.
-                    for bytes in wire.chunks(piece) {
-                        queue_source_stream_bytes(
+                #[cfg(feature = "zstd")]
+                Some(_) => {
+                    if let Some(pipeline) = pipeline.as_mut() {
+                        pipeline.push(
                             cx,
-                            link,
-                            control,
-                            early,
-                            stream,
-                            config,
-                            bytes,
-                            &mut queued_since_flush,
-                        )
-                        .await?;
+                            &mut decisions,
+                            entry.index,
+                            read - n_u64,
+                            buf[..n].to_vec(),
+                        );
+                        while pipeline.is_full() {
+                            let Some(chunk) = pipeline.next(entry.index, &mut decisions).await
+                            else {
+                                break;
+                            };
+                            let frame = pipelined_chunk_frame(chunk)?;
+                            queue_source_stream_frame(
+                                cx,
+                                link,
+                                control,
+                                early,
+                                stream,
+                                config,
+                                &frame,
+                                piece,
+                                &mut queued_since_flush,
+                            )
+                            .await?;
+                        }
                     }
+                }
+                #[cfg(not(feature = "zstd"))]
+                Some(accept) => {
+                    let frame = source_stream_chunk_frame(
+                        accept,
+                        &mut decisions,
+                        entry.index,
+                        read - n_u64,
+                        &buf[..n],
+                    )?;
+                    queue_source_stream_frame(
+                        cx,
+                        link,
+                        control,
+                        early,
+                        stream,
+                        config,
+                        &frame,
+                        piece,
+                        &mut queued_since_flush,
+                    )
+                    .await?;
                 }
             }
             streamed = streamed.saturating_add(n_u64);
@@ -8532,6 +8574,27 @@ async fn send_native_source_stream_entries_pumped(
                 entry.abs_path.display(),
                 entry.sha256_hex
             )));
+        }
+    }
+    // The chunks still compressing go out after the last entry is read. Their
+    // outcomes no longer decide anything, so they record into a throwaway.
+    #[cfg(feature = "zstd")]
+    if let Some(pipeline) = pipeline.as_mut() {
+        let mut finished = EntryCompression::new(options.compression(), "");
+        while let Some(chunk) = pipeline.next(u32::MAX, &mut finished).await {
+            let frame = pipelined_chunk_frame(chunk)?;
+            queue_source_stream_frame(
+                cx,
+                link,
+                control,
+                early,
+                stream,
+                config,
+                &frame,
+                piece,
+                &mut queued_since_flush,
+            )
+            .await?;
         }
     }
 
@@ -8600,28 +8663,93 @@ fn source_stream_codec_chunk(config: &QuicConfig) -> usize {
 }
 
 /// The `ObjectData` frame for the source-stream chunk at `offset` of entry
-/// `index`: the chunk compressed when that makes the frame smaller, with a
-/// [`codec::CHUNK_CODEC_EXTENSION`] record, and raw otherwise. The payload is
-/// the TCP transport's: a 4-byte entry index, an 8-byte offset, then the
-/// chunk.
+/// `index`: the chunk compressed when `entry` decides to try and that makes
+/// the frame smaller, with a [`codec::CHUNK_CODEC_EXTENSION`] record, and raw
+/// otherwise. The payload is the TCP transport's: a 4-byte entry index, an
+/// 8-byte offset, then the chunk. With `zstd` the sender goes through
+/// [`codec::ChunkPipeline`] instead; tests build single frames with this.
+#[cfg(any(test, not(feature = "zstd")))]
 fn source_stream_chunk_frame(
     accept: &CodecAccept,
+    entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
 ) -> Result<Frame, QuicTransportError> {
     #[cfg(feature = "zstd")]
-    if let Some((record, compressed)) = codec::compress_chunk(accept, chunk) {
-        let mut frame = source_stream_data_frame(index, offset, &compressed)?;
-        frame
-            .header
-            .extensions
-            .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
-        return Ok(frame);
+    if let Some((record, compressed)) = entry.compress(accept, offset, chunk) {
+        return source_stream_compressed_frame(index, offset, record, &compressed);
     }
     #[cfg(not(feature = "zstd"))]
-    let _ = accept;
+    let _ = (accept, entry);
     source_stream_data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed source-stream
+/// chunk at `offset` of entry `index`, with its
+/// [`codec::CHUNK_CODEC_EXTENSION`] record.
+#[cfg(feature = "zstd")]
+fn source_stream_compressed_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    let mut frame = source_stream_data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
+}
+
+/// The frame for a chunk leaving the compression pipeline.
+#[cfg(feature = "zstd")]
+fn pipelined_chunk_frame(
+    chunk: Result<codec::PipelinedChunk, crate::runtime::JoinError>,
+) -> Result<Frame, QuicTransportError> {
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => QuicTransportError::Cancelled,
+        other => QuicTransportError::Source(format!("compressing a chunk failed: {other}")),
+    })?;
+    match &chunk.compressed {
+        Some((record, payload)) => {
+            source_stream_compressed_frame(chunk.index, chunk.offset, *record, payload)
+        }
+        None => source_stream_data_frame(chunk.index, chunk.offset, &chunk.raw),
+    }
+}
+
+/// Queues `frame` on the source stream in write-sized pieces, so each write
+/// still fits the receiver's window, however small.
+async fn queue_source_stream_frame(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+    stream: StreamId,
+    config: &QuicConfig,
+    frame: &Frame,
+    piece: usize,
+    queued_since_flush: &mut u64,
+) -> Result<(), QuicTransportError> {
+    let wire = frame
+        .to_wire_bytes()
+        .map_err(|error| QuicTransportError::Frame(error.to_string()))?;
+    for bytes in wire.chunks(piece.max(1)) {
+        queue_source_stream_bytes(
+            cx,
+            link,
+            control,
+            early,
+            stream,
+            config,
+            bytes,
+            queued_since_flush,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 fn source_stream_data_frame(
@@ -8968,6 +9096,7 @@ async fn run_sender_session(
                 prepared,
                 config,
                 chunk_codec.as_ref(),
+                options,
             )
             .await?;
             if bytes_streamed != manifest.total_bytes {
@@ -10977,6 +11106,10 @@ async fn receive_compressed_source_stream_entries(
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
     // A compressed chunk is never larger than its raw chunk, so a frame holds
     // at most the 12-byte chunk header, one codec chunk and its header slack.
+    // The 256 bytes of slack also bound the frame's header extensions: a
+    // sender that attached more than about 240 bytes of them to data frames
+    // would be refused here (fail closed), so a new extension on data frames
+    // must raise this bound for receivers first.
     let max_frame = u64::from(accept.max_chunk_raw).saturating_add(12 + 256);
     let mut frames = AtpFrameCodec::with_max_frame_size(max_frame);
     let mut pending = BytesMut::new();
