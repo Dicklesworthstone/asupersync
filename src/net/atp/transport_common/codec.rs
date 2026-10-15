@@ -291,6 +291,156 @@ pub enum CompressionMode {
     /// whenever that makes it smaller, and raw otherwise. Without the `zstd`
     /// cargo feature this behaves as [`Self::Off`].
     Zstd,
+    /// Offer zstd as [`Self::Zstd`] does, but spend no effort where it does
+    /// not pay: entries that are already compressed are sent raw, and so is
+    /// data that keeps failing to compress (see [`EntryCompression`];
+    /// br-asupersync-t1fblr.24). Without the `zstd` cargo feature this
+    /// behaves as [`Self::Off`].
+    Auto,
+}
+
+/// File-name extensions of formats that are already compressed.
+const COMPRESSED_EXTENSIONS: [&str; 29] = [
+    "zst", "gz", "tgz", "xz", "txz", "bz2", "lz4", "br", "zip", "7z", "rar", "jar", "apk", "jpg",
+    "jpeg", "png", "gif", "webp", "avif", "heic", "mp4", "m4v", "mov", "webm", "mkv", "mp3", "ogg",
+    "opus", "flac",
+];
+
+/// Whether `name`'s extension names an already-compressed format.
+fn has_compressed_extension(name: &str) -> bool {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    file.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && COMPRESSED_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+    })
+}
+
+/// Whether `head`, the first bytes of an entry, starts with the signature of
+/// an already-compressed format: zstd, gzip, xz, bzip2, lz4, zip, 7z, JPEG,
+/// PNG, GIF, WebP, ISO base media (MP4, MOV, HEIC, AVIF), Matroska/WebM, Ogg,
+/// FLAC or ID3-tagged MP3.
+fn has_compressed_signature(head: &[u8]) -> bool {
+    const PREFIXES: [&[u8]; 14] = [
+        &[0x28, 0xB5, 0x2F, 0xFD],
+        &[0x1F, 0x8B],
+        &[0xFD, b'7', b'z', b'X', b'Z', 0x00],
+        b"BZh",
+        &[0x04, 0x22, 0x4D, 0x18],
+        &[b'P', b'K', 0x03, 0x04],
+        &[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C],
+        &[0xFF, 0xD8, 0xFF],
+        &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+        b"GIF8",
+        &[0x1A, 0x45, 0xDF, 0xA3],
+        b"OggS",
+        b"fLaC",
+        b"ID3",
+    ];
+    PREFIXES.iter().any(|prefix| head.starts_with(prefix))
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP".as_slice()))
+        || head.get(4..8) == Some(b"ftyp".as_slice())
+}
+
+/// The longest run of chunks [`CompressionMode::Auto`] sends raw before it
+/// tries an entry's data again.
+const MAX_RAW_RUN: u32 = 64;
+
+/// Which chunks of one entry a sender tries to compress
+/// (br-asupersync-t1fblr.24).
+///
+/// Under [`CompressionMode::Zstd`] every chunk is tried, and under
+/// [`CompressionMode::Off`] none. Under [`CompressionMode::Auto`]:
+/// - an entry whose name or first bytes mark an already-compressed format
+///   (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is never tried;
+/// - a tried chunk that saves less than a twentieth of its size is a miss.
+///   After the first miss the next chunk goes raw, after the second the next
+///   two, then four, and so on up to 64, before the next try. A chunk that
+///   saves at least a twentieth ends the backoff.
+///
+/// The decisions depend only on the entry's name, its bytes and the order of
+/// its chunks, so a transfer makes the same ones every time.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryCompression {
+    mode: CompressionMode,
+    /// The entry is an already-compressed format.
+    skip: bool,
+    /// Chunks still to send raw before the next try.
+    raw_left: u32,
+    /// The raw run that follows the next miss (0 before any miss).
+    run: u32,
+}
+
+impl EntryCompression {
+    /// The decisions for the entry named `name` (a path; only its extension
+    /// is read) under `mode`.
+    #[must_use]
+    pub fn new(mode: CompressionMode, name: &str) -> Self {
+        Self {
+            mode,
+            skip: mode == CompressionMode::Auto && has_compressed_extension(name),
+            raw_left: 0,
+            run: 0,
+        }
+    }
+
+    /// Whether to try compressing `chunk`, the entry's bytes at `offset`.
+    /// After a `true`, report the outcome with [`Self::record`].
+    pub fn should_try(&mut self, offset: u64, chunk: &[u8]) -> bool {
+        match self.mode {
+            CompressionMode::Off => false,
+            CompressionMode::Zstd => true,
+            CompressionMode::Auto => {
+                if offset == 0 && has_compressed_signature(chunk) {
+                    self.skip = true;
+                }
+                if self.skip {
+                    return false;
+                }
+                if self.raw_left > 0 {
+                    self.raw_left -= 1;
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    /// Records how a tried chunk of `raw_len` bytes fared: compressed to
+    /// `compressed_len` bytes, or `None` when it went raw.
+    pub fn record(&mut self, raw_len: usize, compressed_len: Option<usize>) {
+        if self.mode != CompressionMode::Auto {
+            return;
+        }
+        let saved = compressed_len.map_or(0, |len| raw_len.saturating_sub(len));
+        if saved > 0 && saved >= raw_len / 20 {
+            self.run = 0;
+        } else {
+            self.run = (self.run * 2).clamp(1, MAX_RAW_RUN);
+            self.raw_left = self.run;
+        }
+    }
+
+    /// [`compress_chunk`] for the entry's bytes at `offset`, when these
+    /// decisions say to try.
+    #[cfg(feature = "zstd")]
+    pub fn compress(
+        &mut self,
+        accept: &CodecAccept,
+        offset: u64,
+        raw: &[u8],
+    ) -> Option<(ChunkCodec, Vec<u8>)> {
+        if !self.should_try(offset, raw) {
+            return None;
+        }
+        let compressed = compress_chunk(accept, raw);
+        self.record(
+            raw.len(),
+            compressed.as_ref().map(|(_, payload)| payload.len()),
+        );
+        compressed
+    }
 }
 
 /// Why a compressed chunk was refused.
@@ -345,7 +495,7 @@ pub fn local_decode_capability(max_chunk_raw: u32) -> DecodeCapability {
 pub fn local_offer(mode: CompressionMode, chunk_size: usize) -> Option<CodecOffer> {
     match mode {
         CompressionMode::Off => None,
-        CompressionMode::Zstd => {
+        CompressionMode::Zstd | CompressionMode::Auto => {
             #[cfg(feature = "zstd")]
             {
                 let max_chunk_raw = u32::try_from(chunk_size).ok()?;
@@ -540,6 +690,105 @@ mod tests {
         assert_eq!(CompressionMode::default(), CompressionMode::Off);
     }
 
+    /// Auto never tries an entry whose name or first bytes mark a compressed
+    /// format; Zstd tries everything and Off nothing.
+    #[test]
+    fn auto_skips_already_compressed_entries() {
+        let text = b"plain text, plain text, plain text".as_slice();
+        let tries = |mode, name: &str, offset, chunk: &[u8]| {
+            EntryCompression::new(mode, name).should_try(offset, chunk)
+        };
+        for name in [
+            "photo.JPG",
+            "dir/backup.tar.gz",
+            "dir\\logs.zst",
+            "clip.mp4",
+            "a.b.flac",
+        ] {
+            assert!(!tries(CompressionMode::Auto, name, 0, text), "{name}");
+            assert!(tries(CompressionMode::Zstd, name, 0, text), "{name}");
+        }
+        for name in [
+            "notes.txt",
+            "Makefile",
+            ".gz",
+            "gz",
+            "archive.gz.txt",
+            "dir.zip/a.rs",
+        ] {
+            assert!(tries(CompressionMode::Auto, name, 0, text), "{name}");
+        }
+        let mut webp = b"RIFF\x10\x00\x00\x00WEBPVP8 ".to_vec();
+        webp.extend_from_slice(text);
+        let mut mp4 = b"\x00\x00\x00\x18ftypisom".to_vec();
+        mp4.extend_from_slice(text);
+        let signatures: [&[u8]; 6] = [
+            &[0x1F, 0x8B, 0x08, 0x00, 0x00],
+            &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00],
+            b"PK\x03\x04 a zip entry",
+            &[0x28, 0xB5, 0x2F, 0xFD, 0x24],
+            &webp,
+            &mp4,
+        ];
+        for head in signatures {
+            assert!(
+                !tries(CompressionMode::Auto, "data.bin", 0, head),
+                "{head:?}"
+            );
+            // A signature counts only at the start of the entry.
+            assert!(
+                tries(CompressionMode::Auto, "data.bin", 1, head),
+                "{head:?}"
+            );
+            assert!(
+                tries(CompressionMode::Zstd, "data.bin", 0, head),
+                "{head:?}"
+            );
+        }
+        let mut gzip = EntryCompression::new(CompressionMode::Auto, "data.bin");
+        assert!(!gzip.should_try(0, &[0x1F, 0x8B, 0x08]));
+        assert!(!gzip.should_try(4096, text), "the whole entry stays raw");
+        assert!(!tries(CompressionMode::Off, "notes.txt", 0, text));
+    }
+
+    /// The chunks Auto tries over `outcomes`, where `outcomes(i)` is the
+    /// compressed size of a tried 1000-byte chunk `i` (`None`: sent raw).
+    fn auto_tries(chunks: u64, outcomes: impl Fn(u64) -> Option<usize>) -> Vec<u64> {
+        let mut entry = EntryCompression::new(CompressionMode::Auto, "data.bin");
+        let mut tried = Vec::new();
+        for index in 0..chunks {
+            if entry.should_try(index * 1000, b"chunk") {
+                tried.push(index);
+                entry.record(1000, outcomes(index));
+            }
+        }
+        tried
+    }
+
+    /// Misses double the raw run up to 64 chunks; a chunk that saves a
+    /// twentieth ends the backoff, and one that saves less is a miss.
+    #[test]
+    fn auto_backs_off_from_data_that_does_not_compress() {
+        assert_eq!(
+            auto_tries(200, |_| None),
+            [0, 2, 5, 10, 19, 36, 69, 134, 199]
+        );
+        // Saving 40 of 1000 bytes is a miss; 50 is not.
+        assert_eq!(auto_tries(11, |_| Some(960)), [0, 2, 5, 10]);
+        assert_eq!(auto_tries(5, |_| Some(950)), [0, 1, 2, 3, 4]);
+        // Compressible data after a miss is tried at once after the next hit.
+        assert_eq!(
+            auto_tries(12, |index| (index >= 5).then_some(100)),
+            [0, 2, 5, 6, 7, 8, 9, 10, 11]
+        );
+        // Zstd tries every chunk whatever happens.
+        let mut zstd = EntryCompression::new(CompressionMode::Zstd, "photo.jpg");
+        for index in 0..10 {
+            assert!(zstd.should_try(index, &[0xFF, 0xD8, 0xFF]));
+            zstd.record(1000, None);
+        }
+    }
+
     #[cfg(not(feature = "zstd"))]
     #[test]
     fn without_the_feature_nothing_is_offered_or_accepted() {
@@ -582,6 +831,59 @@ mod tests {
             )
             .unwrap();
             assert_eq!(out, raw);
+        }
+
+        /// Auto offers what Zstd offers, compresses text, and stops trying
+        /// noise and named or signed compressed formats.
+        #[test]
+        fn auto_compresses_where_it_pays() {
+            assert_eq!(
+                local_offer(CompressionMode::Auto, 256 * 1024),
+                local_offer(CompressionMode::Zstd, 256 * 1024)
+            );
+            let accept = session();
+            let text: Vec<u8> = b"asupersync transfer protocol "
+                .iter()
+                .copied()
+                .cycle()
+                .take(64 * 1024)
+                .collect();
+            let mut state = 3_u64;
+            let noise: Vec<u8> = (0..64 * 1024)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    state.to_be_bytes()[0]
+                })
+                .collect();
+            let compressed = |mode, name: &str, data: &[u8]| -> Vec<bool> {
+                let mut entry = EntryCompression::new(mode, name);
+                (0..8_u64)
+                    .map(|index| entry.compress(&accept, index * 65_536, data).is_some())
+                    .collect()
+            };
+            assert_eq!(
+                compressed(CompressionMode::Auto, "log.txt", &text),
+                [true; 8]
+            );
+            assert_eq!(
+                compressed(CompressionMode::Auto, "log.txt", &noise),
+                [false; 8]
+            );
+            assert_eq!(
+                compressed(CompressionMode::Auto, "log.png", &text),
+                [false; 8]
+            );
+            assert_eq!(
+                compressed(CompressionMode::Zstd, "log.png", &text),
+                [true; 8]
+            );
+            let mut gzip_head = vec![0x1F, 0x8B];
+            gzip_head.extend_from_slice(&text[2..]);
+            let mut entry = EntryCompression::new(CompressionMode::Auto, "log.bin");
+            assert!(entry.compress(&accept, 0, &gzip_head).is_none());
+            assert!(entry.compress(&accept, 65_536, &text).is_none());
         }
 
         #[test]

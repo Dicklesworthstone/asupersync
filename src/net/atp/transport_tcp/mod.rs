@@ -52,7 +52,7 @@ use crate::atp::safety::{
     validate_portable_relative_path,
 };
 use crate::net::atp::transport_common::codec::{
-    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
+    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
@@ -496,6 +496,9 @@ struct FrameTransport<S> {
     /// The payload codec both sides agreed on in the handshake, if any. Only
     /// then may data frames carry compressed chunks.
     chunk_codec: Option<CodecAccept>,
+    /// What the sender asked for, which decides the chunks it tries to
+    /// compress once a codec is agreed (br-asupersync-t1fblr.24).
+    compression: CompressionMode,
 }
 
 impl<S> FrameTransport<S>
@@ -509,6 +512,7 @@ where
             rbuf: BytesMut::new(),
             decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
             chunk_codec: None,
+            compression: CompressionMode::Off,
         }
     }
 
@@ -1160,6 +1164,7 @@ where
         .await
         .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
     let mut offset: u64 = 0;
+    let mut entry = EntryCompression::new(transport.compression, &path.to_string_lossy());
     loop {
         let n = file
             .read(buf)
@@ -1168,7 +1173,13 @@ where
         if n == 0 {
             break;
         }
-        let frame = chunk_frame(transport.chunk_codec.as_ref(), index, offset, &buf[..n])?;
+        let frame = chunk_frame(
+            transport.chunk_codec.as_ref(),
+            &mut entry,
+            index,
+            offset,
+            &buf[..n],
+        )?;
         with_transport_timeout(
             cx,
             config.idle_timeout,
@@ -1632,19 +1643,21 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
-/// An `ObjectData` frame for `chunk`. When the session negotiated a codec and
+/// An `ObjectData` frame for `chunk`, the bytes at `offset` of entry `index`.
+/// When the session negotiated a codec, `entry` decides to try, and
 /// compressing makes the chunk smaller, the payload carries the compressed
 /// chunk and the frame a [`codec::CHUNK_CODEC_EXTENSION`] record; otherwise
 /// the frame is byte-identical to [`data_frame`]'s.
 #[cfg(feature = "zstd")]
 fn chunk_frame(
     accept: Option<&CodecAccept>,
+    entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
 ) -> Result<Frame, TransportError> {
     if let Some((record, compressed)) =
-        accept.and_then(|accept| codec::compress_chunk(accept, chunk))
+        accept.and_then(|accept| entry.compress(accept, offset, chunk))
     {
         let mut frame = data_frame(index, offset, &compressed)?;
         frame
@@ -1661,6 +1674,7 @@ fn chunk_frame(
 #[cfg(not(feature = "zstd"))]
 fn chunk_frame(
     _accept: Option<&CodecAccept>,
+    _entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
@@ -1998,8 +2012,12 @@ where
                 chunk.rel_path, chunk.entry_offset
             )));
         }
+        // Delta chunks are scattered, so each is decided on its own: by its
+        // entry's name, and at offset 0 by its first bytes.
+        let mut decisions = EntryCompression::new(transport.compression, &chunk.rel_path);
         let frame = chunk_frame(
             transport.chunk_codec.as_ref(),
+            &mut decisions,
             chunk.entry_index,
             chunk.entry_offset,
             &bytes,
@@ -3304,6 +3322,7 @@ pub async fn send_path_with_options(
         },
     )?;
     let offer = codec::local_offer(options.compression, config.chunk_size);
+    transport.compression = options.compression;
     if let Some(offer) = &offer {
         hello
             .header
@@ -5682,7 +5701,8 @@ mod tests {
                     })
                     .collect();
                 let raw = data_frame(0, 0, &chunk).unwrap().to_wire_bytes().unwrap();
-                let frame = chunk_frame(Some(&accept), 0, 0, &chunk).unwrap();
+                let mut entry = EntryCompression::new(CompressionMode::Zstd, "chunk.bin");
+                let frame = chunk_frame(Some(&accept), &mut entry, 0, 0, &chunk).unwrap();
                 if frame
                     .header
                     .extensions
@@ -5796,6 +5816,39 @@ mod tests {
             run.wire_bytes > payload.len() as u64,
             "{} wire bytes",
             run.wire_bytes
+        );
+    }
+
+    /// Auto compresses what pays and skips what is already compressed: a
+    /// compressible file shrinks as it does under Zstd, while the same bytes
+    /// behind a gzip signature cross raw (br-asupersync-t1fblr.24).
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn auto_compresses_text_and_sends_signed_formats_raw() {
+        let payload = compressible_payload(4, 2 * DEFAULT_CHUNK_SIZE + 5);
+        let auto = SendOptions::new().with_compression(CompressionMode::Auto);
+        let text = transfer_with_options(
+            &canonical_test_root("atp-tcp-auto-text"),
+            &payload,
+            auto,
+            None,
+        );
+        assert_delivered(&text, &payload, "auto text");
+        let len = payload.len() as u64;
+        assert!(
+            text.wire_bytes < len / 4,
+            "auto text: {} wire bytes for {len}",
+            text.wire_bytes
+        );
+        let mut gzip = payload;
+        gzip[..2].copy_from_slice(&[0x1F, 0x8B]);
+        let signed =
+            transfer_with_options(&canonical_test_root("atp-tcp-auto-gzip"), &gzip, auto, None);
+        assert_delivered(&signed, &gzip, "auto gzip");
+        assert!(
+            signed.wire_bytes > len,
+            "auto gzip: {} wire bytes for {len}",
+            signed.wire_bytes
         );
     }
 
