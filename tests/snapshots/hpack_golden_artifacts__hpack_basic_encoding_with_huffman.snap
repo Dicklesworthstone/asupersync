@@ -1,0 +1,51 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Basic GET request headers with Huffman",
+  "headers": [
+    {
+      "name": ":method",
+      "value": "GET"
+    },
+    {
+      "name": ":path",
+      "value": "/"
+    },
+    {
+      "name": ":scheme",
+      "value": "https"
+    },
+    {
+      "name": ":authority",
+      "value": "example.com"
+    }
+  ],
+  "config": {
+    "use_huffman": true,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    130,
+    132,
+    135,
+    65,
+    136,
+    47,
+    145,
+    211,
+    93,
+    5,
+    92,
+    135,
+    167
+  ],
+  "encoded_size": 13,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}

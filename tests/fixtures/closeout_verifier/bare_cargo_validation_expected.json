@@ -1,0 +1,90 @@
+{
+  "commit": "badc0ffee",
+  "current_date": "2026-05-10",
+  "fixture_path": "tests/fixtures/closeout_verifier/bare_cargo_validation.json",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-10T08:35:00Z",
+  "non_mutating": true,
+  "overall_status": "fail",
+  "rows": [
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main",
+        "expected_commit": "badc0ffee",
+        "observed_commit": "badc0ffee"
+      },
+      "row_id": "main_pushed",
+      "status": "pass",
+      "summary": "origin/main points at the closeout commit"
+    },
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main origin/master",
+        "expected_commit": "badc0ffee",
+        "origin_main": "badc0ffee",
+        "origin_master": "badc0ffee"
+      },
+      "row_id": "master_synced",
+      "status": "pass",
+      "summary": "origin/master is synced to origin/main at the closeout commit"
+    },
+    {
+      "evidence": {
+        "bead_id": "asupersync-bare-cargo",
+        "command": "br show asupersync-bare-cargo --json",
+        "observed_status": "closed"
+      },
+      "row_id": "bead_closed",
+      "status": "pass",
+      "summary": "bead asupersync-bare-cargo is closed"
+    },
+    {
+      "evidence": {
+        "expected_commit": "badc0ffee",
+        "matched_message_ids": [
+          1007
+        ],
+        "thread_id": "asupersync-bare-cargo"
+      },
+      "row_id": "closeout_mail",
+      "status": "pass",
+      "summary": "closeout mail found for the slice"
+    },
+    {
+      "evidence": {
+        "active_reservations": [],
+        "agent": "GentleCitadel"
+      },
+      "row_id": "reservations_released",
+      "status": "pass",
+      "summary": "no active closeout-owner reservations remain"
+    },
+    {
+      "evidence": {
+        "bare_cargo_validation_segments": [
+          "Validation: cargo test passed. Released reservations."
+        ],
+        "closeout_validation_reported": null,
+        "mail_mentions_validation": true
+      },
+      "remediation": "rerun and report Cargo validation through rch exec -- env CARGO_TARGET_DIR=... cargo ...",
+      "row_id": "validation_reported",
+      "status": "fail",
+      "summary": "validation evidence reports bare Cargo instead of rch exec"
+    }
+  ],
+  "schema_version": "closeout-verifier-v1",
+  "slice_id": "asupersync-bare-cargo",
+  "slice_mode": "bead-backed",
+  "summary": {
+    "fail": 1,
+    "pass": 5,
+    "warn": 0
+  }
+}

@@ -1,0 +1,1047 @@
+//! Obligation record for the runtime.
+//!
+//! Obligations represent resources that must be resolved (commit, abort, etc.)
+//! before their owning region can close. They implement the two-phase pattern.
+
+use crate::tracing_compat::{error, info, trace};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
+use core::fmt;
+use serde::{Deserialize, Serialize};
+use std::backtrace::Backtrace;
+use std::sync::Arc;
+
+/// Source location captured at obligation acquisition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    /// Source file path.
+    pub file: &'static str,
+    /// 1-based line number.
+    pub line: u32,
+    /// 1-based column number.
+    pub column: u32,
+}
+
+impl SourceLocation {
+    /// Returns the sentinel value for an unknown source location.
+    #[must_use]
+    pub const fn unknown() -> Self {
+        Self {
+            file: "<unknown>",
+            line: 0,
+            column: 0,
+        }
+    }
+
+    /// Builds a source location from a `std::panic::Location`.
+    #[must_use]
+    pub fn from_panic_location(location: &'static std::panic::Location<'static>) -> Self {
+        Self {
+            file: location.file(),
+            line: location.line(),
+            column: location.column(),
+        }
+    }
+}
+
+impl fmt::Display for SourceLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+    }
+}
+
+/// The kind of obligation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum ObligationKind {
+    /// A send permit for a channel.
+    SendPermit,
+    /// An acknowledgement for a received message.
+    Ack,
+    /// A lease for a remote resource.
+    Lease,
+    /// A pending I/O operation.
+    IoOp,
+    /// A semaphore permit that must be released.
+    SemaphorePermit,
+    /// An open database transaction that must be committed or rolled back.
+    ///
+    /// The flagship application of the obligation model outside channels
+    /// (br-asupersync-server-stack-hardening-eeexl1.5): an open transaction is
+    /// a tracked, typed obligation, so a transaction dropped or cancelled
+    /// without an explicit `commit` deterministically rolls back during drain
+    /// rather than lingering.
+    Transaction,
+}
+
+impl ObligationKind {
+    /// Returns a short string for tracing and diagnostics.
+    #[inline]
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SendPermit => "send_permit",
+            Self::Ack => "ack",
+            Self::Lease => "lease",
+            Self::IoOp => "io_op",
+            Self::SemaphorePermit => "semaphore_permit",
+            Self::Transaction => "transaction",
+        }
+    }
+}
+
+impl fmt::Display for ObligationKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The reason an obligation was aborted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObligationAbortReason {
+    /// Aborted due to cancellation.
+    Cancel,
+    /// Aborted due to an error.
+    Error,
+    /// Explicitly aborted by the caller.
+    Explicit,
+}
+
+impl ObligationAbortReason {
+    /// Returns a short string for tracing and diagnostics.
+    #[inline]
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cancel => "cancel",
+            Self::Error => "error",
+            Self::Explicit => "explicit",
+        }
+    }
+}
+
+impl fmt::Display for ObligationAbortReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Terminal lifecycle transition for an obligation.
+///
+/// This is the shared transition vocabulary used by the runtime record and
+/// ledger. It keeps the state target and abort reason coupled so callers cannot
+/// accidentally record an `Aborted` state without its reason, or attach an abort
+/// reason to a non-abort terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObligationResolution {
+    /// The obligation was committed successfully.
+    Commit,
+    /// The obligation was aborted for the given reason.
+    Abort(ObligationAbortReason),
+    /// The holder completed without resolving the obligation.
+    Leak,
+}
+
+impl ObligationResolution {
+    /// Returns the terminal state represented by this resolution.
+    #[inline]
+    #[must_use]
+    pub const fn state(self) -> ObligationState {
+        match self {
+            Self::Commit => ObligationState::Committed,
+            Self::Abort(_) => ObligationState::Aborted,
+            Self::Leak => ObligationState::Leaked,
+        }
+    }
+
+    /// Returns the abort reason associated with this resolution, if any.
+    #[inline]
+    #[must_use]
+    pub const fn abort_reason(self) -> Option<ObligationAbortReason> {
+        match self {
+            Self::Abort(reason) => Some(reason),
+            Self::Commit | Self::Leak => None,
+        }
+    }
+}
+
+impl fmt::Display for ObligationResolution {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Commit => f.write_str("commit"),
+            Self::Abort(reason) => write!(f, "abort({reason})"),
+            Self::Leak => f.write_str("leak"),
+        }
+    }
+}
+
+/// The state of an obligation.
+///
+/// Implements `inv.obligation.linear` (#18): each obligation transitions from
+/// Reserved to exactly one of {Committed, Aborted, Leaked}. No re-reservation.
+///
+/// State transitions:
+/// ```text
+/// Reserved ──► Committed
+///    │
+///    ├────────► Aborted
+///    │
+///    └────────► Leaked (error: holder completed without resolving)
+/// ```
+///
+/// All terminal states (Committed, Aborted, Leaked) are absorbing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ObligationState {
+    /// Obligation is reserved but not yet resolved.
+    /// Blocks region close until resolved.
+    Reserved,
+    /// Obligation was committed (successful resolution).
+    /// The effect took place (e.g., message was sent).
+    Committed,
+    /// Obligation was aborted (clean cancellation).
+    /// No data loss, resources released.
+    Aborted,
+    /// ERROR: Obligation was leaked (holder completed without resolving).
+    /// This indicates a bug in user code or library.
+    /// In lab mode: triggers panic. In prod mode: log and attempt recovery.
+    Leaked,
+}
+
+impl ObligationState {
+    /// Returns true if the obligation is in a terminal state.
+    #[inline]
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Committed | Self::Aborted | Self::Leaked)
+    }
+
+    /// Returns true if the obligation is resolved (not pending).
+    /// Note: Leaked counts as resolved (it's terminal, just not successful).
+    #[inline]
+    #[must_use]
+    pub const fn is_resolved(self) -> bool {
+        self.is_terminal()
+    }
+
+    /// Returns true if the obligation was successfully resolved (not leaked).
+    #[inline]
+    #[must_use]
+    pub const fn is_success(self) -> bool {
+        matches!(self, Self::Committed | Self::Aborted)
+    }
+
+    /// Returns true if the obligation leaked (error state).
+    #[inline]
+    #[must_use]
+    pub const fn is_leaked(self) -> bool {
+        matches!(self, Self::Leaked)
+    }
+}
+
+/// Internal record for an obligation in the runtime.
+#[derive(Debug)]
+pub struct ObligationRecord {
+    /// Unique identifier for this obligation.
+    pub id: ObligationId,
+    /// The kind of obligation.
+    pub kind: ObligationKind,
+    /// The task holding this obligation.
+    pub holder: TaskId,
+    /// The region that owns this obligation.
+    pub region: RegionId,
+    /// Current state.
+    pub state: ObligationState,
+    /// Optional description for debugging.
+    pub description: Option<String>,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: SourceLocation,
+    /// Optional backtrace captured at acquisition (debug-only).
+    pub acquire_backtrace: Option<Arc<Backtrace>>,
+    /// Time when the obligation was reserved.
+    pub reserved_at: Time,
+    /// Time when the obligation was resolved.
+    pub resolved_at: Option<Time>,
+    /// Reason for abort, if applicable.
+    pub abort_reason: Option<ObligationAbortReason>,
+}
+
+impl ObligationRecord {
+    /// Creates a new obligation record.
+    #[must_use]
+    pub fn new(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+    ) -> Self {
+        Self::new_with_context(
+            id,
+            kind,
+            holder,
+            region,
+            reserved_at,
+            SourceLocation::unknown(),
+            None,
+        )
+    }
+
+    /// Creates a new obligation record with acquisition context.
+    #[must_use]
+    pub fn new_with_context(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+        acquired_at: SourceLocation,
+        acquire_backtrace: Option<Arc<Backtrace>>,
+    ) -> Self {
+        trace!(
+            obligation_id = ?id,
+            kind = %kind,
+            holder_task = ?holder,
+            owning_region = ?region,
+            reserved_at = ?reserved_at,
+            acquired_at = %acquired_at,
+            "obligation reserved"
+        );
+        Self {
+            id,
+            kind,
+            holder,
+            region,
+            state: ObligationState::Reserved,
+            description: None,
+            acquired_at,
+            acquire_backtrace,
+            reserved_at,
+            resolved_at: None,
+            abort_reason: None,
+        }
+    }
+
+    /// Creates an obligation with a description.
+    #[must_use]
+    pub fn with_description(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+        description: impl Into<String>,
+    ) -> Self {
+        Self::with_description_and_context(
+            id,
+            kind,
+            holder,
+            region,
+            reserved_at,
+            description,
+            SourceLocation::unknown(),
+            None,
+        )
+    }
+
+    /// Creates an obligation with a description and acquisition context.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_description_and_context(
+        id: ObligationId,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        reserved_at: Time,
+        description: impl Into<String>,
+        acquired_at: SourceLocation,
+        acquire_backtrace: Option<Arc<Backtrace>>,
+    ) -> Self {
+        let desc = description.into();
+        trace!(
+            obligation_id = ?id,
+            kind = %kind,
+            holder_task = ?holder,
+            owning_region = ?region,
+            reserved_at = ?reserved_at,
+            description = %desc,
+            acquired_at = %acquired_at,
+            "obligation reserved"
+        );
+        Self {
+            id,
+            kind,
+            holder,
+            region,
+            state: ObligationState::Reserved,
+            description: Some(desc),
+            acquired_at,
+            acquire_backtrace,
+            reserved_at,
+            resolved_at: None,
+            abort_reason: None,
+        }
+    }
+
+    /// Returns true if the obligation is still pending.
+    #[inline]
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        matches!(self.state, ObligationState::Reserved)
+    }
+
+    /// Applies a terminal lifecycle transition without emitting a trace.
+    ///
+    /// The runtime's `ObligationTable` settles records through this while the
+    /// runtime lock is held and returns the facts to its caller, which emits
+    /// the lifecycle events after the lock is released (br-asupersync-8texo0).
+    /// An event emitted here would reach a tracing subscriber under that lock.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub(crate) fn resolve(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
+        assert!(self.is_pending(), "obligation already resolved");
+        self.state = resolution.state();
+        self.resolved_at = Some(now);
+        self.abort_reason = resolution.abort_reason();
+        now.duration_since(self.reserved_at)
+    }
+
+    /// Applies a terminal lifecycle transition and emits the matching trace.
+    ///
+    /// This is crate-visible so the central runtime ledger can use the same
+    /// record transition primitive for token-based, ID-based, and leak paths.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub(crate) fn resolve_with(&mut self, now: Time, resolution: ObligationResolution) -> u64 {
+        let duration_held = self.resolve(now, resolution);
+        match resolution {
+            ObligationResolution::Commit => {
+                info!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    duration_held_ns = duration_held,
+                    "obligation committed"
+                );
+            }
+            ObligationResolution::Abort(_) => {
+                info!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    abort_reason = ?self.abort_reason,
+                    duration_held_ns = duration_held,
+                    "obligation aborted"
+                );
+            }
+            ObligationResolution::Leak => {
+                error!(
+                    obligation_id = ?self.id,
+                    kind = %self.kind,
+                    holder_task = ?self.holder,
+                    owning_region = ?self.region,
+                    duration_held_ns = duration_held,
+                    description = ?self.description,
+                    "OBLIGATION LEAKED: holder completed without resolving obligation"
+                );
+            }
+        }
+        duration_held
+    }
+
+    /// Commits the obligation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub fn commit(&mut self, now: Time) -> u64 {
+        self.resolve_with(now, ObligationResolution::Commit)
+    }
+
+    /// Aborts the obligation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub fn abort(&mut self, now: Time, reason: ObligationAbortReason) -> u64 {
+        self.resolve_with(now, ObligationResolution::Abort(reason))
+    }
+
+    /// Marks the obligation as leaked.
+    ///
+    /// Called by the runtime when it detects that an obligation holder
+    /// completed without resolving the obligation. This is an error state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if already resolved.
+    pub fn mark_leaked(&mut self, now: Time) -> u64 {
+        self.resolve_with(now, ObligationResolution::Leak)
+    }
+
+    /// Returns true if this obligation leaked.
+    #[must_use]
+    pub const fn is_leaked(&self) -> bool {
+        self.state.is_leaked()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::util::ArenaIndex;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn test_ids() -> (ObligationId, TaskId, RegionId) {
+        (
+            ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            RegionId::from_arena(ArenaIndex::new(0, 1)),
+        )
+    }
+
+    #[test]
+    fn obligation_state_predicates() {
+        init_test("obligation_state_predicates");
+        let reserved_terminal = ObligationState::Reserved.is_terminal();
+        crate::assert_with_log!(
+            !reserved_terminal,
+            "reserved terminal",
+            false,
+            reserved_terminal
+        );
+        let committed_terminal = ObligationState::Committed.is_terminal();
+        crate::assert_with_log!(
+            committed_terminal,
+            "committed terminal",
+            true,
+            committed_terminal
+        );
+        let aborted_terminal = ObligationState::Aborted.is_terminal();
+        crate::assert_with_log!(aborted_terminal, "aborted terminal", true, aborted_terminal);
+        let leaked_terminal = ObligationState::Leaked.is_terminal();
+        crate::assert_with_log!(leaked_terminal, "leaked terminal", true, leaked_terminal);
+
+        let reserved_resolved = ObligationState::Reserved.is_resolved();
+        crate::assert_with_log!(
+            !reserved_resolved,
+            "reserved resolved",
+            false,
+            reserved_resolved
+        );
+        let committed_resolved = ObligationState::Committed.is_resolved();
+        crate::assert_with_log!(
+            committed_resolved,
+            "committed resolved",
+            true,
+            committed_resolved
+        );
+        let aborted_resolved = ObligationState::Aborted.is_resolved();
+        crate::assert_with_log!(aborted_resolved, "aborted resolved", true, aborted_resolved);
+        let leaked_resolved = ObligationState::Leaked.is_resolved();
+        crate::assert_with_log!(leaked_resolved, "leaked resolved", true, leaked_resolved);
+
+        let reserved_success = ObligationState::Reserved.is_success();
+        crate::assert_with_log!(
+            !reserved_success,
+            "reserved success",
+            false,
+            reserved_success
+        );
+        let committed_success = ObligationState::Committed.is_success();
+        crate::assert_with_log!(
+            committed_success,
+            "committed success",
+            true,
+            committed_success
+        );
+        let aborted_success = ObligationState::Aborted.is_success();
+        crate::assert_with_log!(aborted_success, "aborted success", true, aborted_success);
+        let leaked_success = ObligationState::Leaked.is_success();
+        crate::assert_with_log!(!leaked_success, "leaked success", false, leaked_success);
+
+        let reserved_leaked = ObligationState::Reserved.is_leaked();
+        crate::assert_with_log!(!reserved_leaked, "reserved leaked", false, reserved_leaked);
+        let committed_leaked = ObligationState::Committed.is_leaked();
+        crate::assert_with_log!(
+            !committed_leaked,
+            "committed leaked",
+            false,
+            committed_leaked
+        );
+        let aborted_leaked = ObligationState::Aborted.is_leaked();
+        crate::assert_with_log!(!aborted_leaked, "aborted leaked", false, aborted_leaked);
+        let leaked_leaked = ObligationState::Leaked.is_leaked();
+        crate::assert_with_log!(leaked_leaked, "leaked leaked", true, leaked_leaked);
+        crate::test_complete!("obligation_state_predicates");
+    }
+
+    #[test]
+    fn obligation_lifecycle_commit() {
+        init_test("obligation_lifecycle_commit");
+        let (oid, tid, rid) = test_ids();
+        let reserved_at = Time::from_nanos(10);
+        let mut ob = ObligationRecord::new(oid, ObligationKind::SendPermit, tid, rid, reserved_at);
+
+        let pending = ob.is_pending();
+        crate::assert_with_log!(pending, "pending", true, pending);
+        let leaked = ob.is_leaked();
+        crate::assert_with_log!(!leaked, "leaked", false, leaked);
+        crate::assert_with_log!(
+            ob.state == ObligationState::Reserved,
+            "state",
+            ObligationState::Reserved,
+            ob.state
+        );
+
+        let duration = ob.commit(Time::from_nanos(25));
+        let pending = ob.is_pending();
+        crate::assert_with_log!(!pending, "pending", false, pending);
+        let leaked = ob.is_leaked();
+        crate::assert_with_log!(!leaked, "leaked", false, leaked);
+        crate::assert_with_log!(
+            ob.state == ObligationState::Committed,
+            "state",
+            ObligationState::Committed,
+            ob.state
+        );
+        crate::assert_with_log!(duration == 15, "duration", 15, duration);
+        let resolved = ob.resolved_at;
+        crate::assert_with_log!(
+            resolved == Some(Time::from_nanos(25)),
+            "resolved_at",
+            Some(Time::from_nanos(25)),
+            resolved
+        );
+        crate::test_complete!("obligation_lifecycle_commit");
+    }
+
+    #[test]
+    fn obligation_lifecycle_abort() {
+        init_test("obligation_lifecycle_abort");
+        let (oid, tid, rid) = test_ids();
+        let reserved_at = Time::from_nanos(100);
+        let mut ob = ObligationRecord::new(oid, ObligationKind::Ack, tid, rid, reserved_at);
+
+        let duration = ob.abort(Time::from_nanos(140), ObligationAbortReason::Explicit);
+        let pending = ob.is_pending();
+        crate::assert_with_log!(!pending, "pending", false, pending);
+        let leaked = ob.is_leaked();
+        crate::assert_with_log!(!leaked, "leaked", false, leaked);
+        crate::assert_with_log!(
+            ob.state == ObligationState::Aborted,
+            "state",
+            ObligationState::Aborted,
+            ob.state
+        );
+        crate::assert_with_log!(duration == 40, "duration", 40, duration);
+        let reason = ob.abort_reason;
+        crate::assert_with_log!(
+            reason == Some(ObligationAbortReason::Explicit),
+            "abort_reason",
+            Some(ObligationAbortReason::Explicit),
+            reason
+        );
+        crate::test_complete!("obligation_lifecycle_abort");
+    }
+
+    #[test]
+    fn obligation_lifecycle_leaked() {
+        init_test("obligation_lifecycle_leaked");
+        let (oid, tid, rid) = test_ids();
+        let reserved_at = Time::from_nanos(5);
+        let mut ob = ObligationRecord::new(oid, ObligationKind::Lease, tid, rid, reserved_at);
+
+        let duration = ob.mark_leaked(Time::from_nanos(8));
+        let pending = ob.is_pending();
+        crate::assert_with_log!(!pending, "pending", false, pending);
+        let leaked = ob.is_leaked();
+        crate::assert_with_log!(leaked, "leaked", true, leaked);
+        crate::assert_with_log!(
+            ob.state == ObligationState::Leaked,
+            "state",
+            ObligationState::Leaked,
+            ob.state
+        );
+        crate::assert_with_log!(duration == 3, "duration", 3, duration);
+        crate::test_complete!("obligation_lifecycle_leaked");
+    }
+
+    #[test]
+    fn obligation_resolution_couples_state_and_abort_reason() {
+        init_test("obligation_resolution_couples_state_and_abort_reason");
+        crate::assert_with_log!(
+            ObligationResolution::Commit.state() == ObligationState::Committed,
+            "commit state",
+            ObligationState::Committed,
+            ObligationResolution::Commit.state()
+        );
+        crate::assert_with_log!(
+            ObligationResolution::Commit.abort_reason().is_none(),
+            "commit reason",
+            None::<ObligationAbortReason>,
+            ObligationResolution::Commit.abort_reason()
+        );
+
+        let abort = ObligationResolution::Abort(ObligationAbortReason::Cancel);
+        crate::assert_with_log!(
+            abort.state() == ObligationState::Aborted,
+            "abort state",
+            ObligationState::Aborted,
+            abort.state()
+        );
+        crate::assert_with_log!(
+            abort.abort_reason() == Some(ObligationAbortReason::Cancel),
+            "abort reason",
+            Some(ObligationAbortReason::Cancel),
+            abort.abort_reason()
+        );
+
+        crate::assert_with_log!(
+            ObligationResolution::Leak.state() == ObligationState::Leaked,
+            "leak state",
+            ObligationState::Leaked,
+            ObligationResolution::Leak.state()
+        );
+        crate::assert_with_log!(
+            ObligationResolution::Leak.abort_reason().is_none(),
+            "leak reason",
+            None::<ObligationAbortReason>,
+            ObligationResolution::Leak.abort_reason()
+        );
+        crate::test_complete!("obligation_resolution_couples_state_and_abort_reason");
+    }
+
+    #[test]
+    #[should_panic(expected = "obligation already resolved")]
+    fn double_commit_panics() {
+        init_test("double_commit_panics");
+        let (oid, tid, rid) = test_ids();
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.commit(Time::from_nanos(1_000_000_000));
+        ob.commit(Time::from_nanos(1_000_000_000)); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "obligation already resolved")]
+    fn double_abort_panics() {
+        init_test("double_abort_panics");
+        let (oid, tid, rid) = test_ids();
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Explicit,
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Explicit,
+        ); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "obligation already resolved")]
+    fn commit_after_abort_panics() {
+        init_test("commit_after_abort_panics");
+        let (oid, tid, rid) = test_ids();
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.abort(
+            Time::from_nanos(1_000_000_000),
+            ObligationAbortReason::Cancel,
+        );
+        ob.commit(Time::from_nanos(1_000_000_000)); // Should panic
+    }
+
+    #[test]
+    #[should_panic(expected = "obligation already resolved")]
+    fn mark_leaked_after_commit_panics() {
+        init_test("mark_leaked_after_commit_panics");
+        let (oid, tid, rid) = test_ids();
+        let mut ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        ob.commit(Time::from_nanos(1_000_000_000));
+        ob.mark_leaked(Time::from_nanos(1_000_000_000)); // Should panic
+    }
+
+    #[test]
+    fn obligation_kinds_are_distinguishable() {
+        init_test("obligation_kinds_are_distinguishable");
+        crate::assert_with_log!(
+            ObligationKind::SendPermit != ObligationKind::Ack,
+            "send != ack",
+            "not equal",
+            (ObligationKind::SendPermit, ObligationKind::Ack)
+        );
+        crate::assert_with_log!(
+            ObligationKind::Ack != ObligationKind::Lease,
+            "ack != lease",
+            "not equal",
+            (ObligationKind::Ack, ObligationKind::Lease)
+        );
+        crate::assert_with_log!(
+            ObligationKind::Lease != ObligationKind::IoOp,
+            "lease != ioop",
+            "not equal",
+            (ObligationKind::Lease, ObligationKind::IoOp)
+        );
+        crate::test_complete!("obligation_kinds_are_distinguishable");
+    }
+
+    #[test]
+    fn with_description_sets_description() {
+        init_test("with_description_sets_description");
+        let (oid, tid, rid) = test_ids();
+        let ob = ObligationRecord::with_description(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+            "test description",
+        );
+        crate::assert_with_log!(
+            ob.description == Some("test description".to_string()),
+            "description",
+            Some("test description".to_string()),
+            ob.description
+        );
+        crate::test_complete!("with_description_sets_description");
+    }
+
+    // Pure data-type tests (wave 12 – CyanBarn)
+
+    #[test]
+    fn source_location_display() {
+        let loc = SourceLocation {
+            file: "src/main.rs",
+            line: 42,
+            column: 5,
+        };
+        assert_eq!(loc.to_string(), "src/main.rs:42:5");
+    }
+
+    #[test]
+    fn source_location_unknown() {
+        let loc = SourceLocation::unknown();
+        assert_eq!(loc.file, "<unknown>");
+        assert_eq!(loc.line, 0);
+        assert_eq!(loc.column, 0);
+        assert_eq!(loc.to_string(), "<unknown>:0:0");
+    }
+
+    #[test]
+    fn source_location_debug_copy_eq() {
+        let loc = SourceLocation {
+            file: "f.rs",
+            line: 1,
+            column: 1,
+        };
+        let dbg = format!("{loc:?}");
+        assert!(dbg.contains("f.rs"));
+
+        // Copy
+        let loc2 = loc;
+        assert_eq!(loc, loc2);
+
+        // Inequality
+        let loc3 = SourceLocation {
+            file: "g.rs",
+            line: 1,
+            column: 1,
+        };
+        assert_ne!(loc, loc3);
+    }
+
+    #[test]
+    fn obligation_kind_display_all() {
+        assert_eq!(ObligationKind::SendPermit.to_string(), "send_permit");
+        assert_eq!(ObligationKind::Ack.to_string(), "ack");
+        assert_eq!(ObligationKind::Lease.to_string(), "lease");
+        assert_eq!(ObligationKind::IoOp.to_string(), "io_op");
+    }
+
+    #[test]
+    fn obligation_kind_as_str_all() {
+        assert_eq!(ObligationKind::SendPermit.as_str(), "send_permit");
+        assert_eq!(ObligationKind::Ack.as_str(), "ack");
+        assert_eq!(ObligationKind::Lease.as_str(), "lease");
+        assert_eq!(ObligationKind::IoOp.as_str(), "io_op");
+    }
+
+    #[test]
+    fn obligation_kind_debug_copy_hash_ord() {
+        use std::collections::HashSet;
+
+        let k = ObligationKind::Lease;
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Lease"));
+
+        // Copy
+        let k2 = k;
+        assert_eq!(k, k2);
+
+        // Hash
+        let mut set = HashSet::new();
+        set.insert(ObligationKind::SendPermit);
+        set.insert(ObligationKind::Ack);
+        set.insert(ObligationKind::Lease);
+        set.insert(ObligationKind::IoOp);
+        assert_eq!(set.len(), 4);
+
+        // Ord
+        let mut kinds = [
+            ObligationKind::IoOp,
+            ObligationKind::SendPermit,
+            ObligationKind::Lease,
+            ObligationKind::Ack,
+        ];
+        kinds.sort();
+        assert_eq!(kinds[0], ObligationKind::SendPermit);
+    }
+
+    #[test]
+    fn obligation_abort_reason_display_all() {
+        assert_eq!(ObligationAbortReason::Cancel.to_string(), "cancel");
+        assert_eq!(ObligationAbortReason::Error.to_string(), "error");
+        assert_eq!(ObligationAbortReason::Explicit.to_string(), "explicit");
+    }
+
+    #[test]
+    fn obligation_abort_reason_debug_copy_eq() {
+        let r = ObligationAbortReason::Cancel;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Cancel"));
+
+        let r2 = r;
+        assert_eq!(r, r2);
+
+        assert_ne!(ObligationAbortReason::Cancel, ObligationAbortReason::Error);
+    }
+
+    #[test]
+    fn obligation_state_debug_copy_eq() {
+        let states = [
+            ObligationState::Reserved,
+            ObligationState::Committed,
+            ObligationState::Aborted,
+            ObligationState::Leaked,
+        ];
+        for s in &states {
+            let dbg = format!("{s:?}");
+            assert!(!dbg.is_empty());
+
+            // Copy
+            let s2 = *s;
+            assert_eq!(*s, s2);
+        }
+
+        assert_ne!(ObligationState::Reserved, ObligationState::Committed);
+        assert_ne!(ObligationState::Aborted, ObligationState::Leaked);
+    }
+
+    #[test]
+    fn obligation_record_new_defaults() {
+        let (oid, tid, rid) = test_ids();
+        let ob = ObligationRecord::new(
+            oid,
+            ObligationKind::IoOp,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        assert_eq!(ob.state, ObligationState::Reserved);
+        assert!(ob.description.is_none());
+        assert!(ob.resolved_at.is_none());
+        assert!(ob.abort_reason.is_none());
+        assert!(ob.acquire_backtrace.is_none());
+        assert_eq!(ob.acquired_at, SourceLocation::unknown());
+    }
+
+    #[test]
+    fn obligation_record_debug() {
+        let (oid, tid, rid) = test_ids();
+        let ob = ObligationRecord::new(
+            oid,
+            ObligationKind::SendPermit,
+            tid,
+            rid,
+            Time::from_nanos(1_000_000_000),
+        );
+        let dbg = format!("{ob:?}");
+        assert!(dbg.contains("ObligationRecord"));
+        assert!(dbg.contains("SendPermit"));
+    }
+
+    #[test]
+    fn source_location_debug_clone_copy_eq() {
+        let loc = SourceLocation::unknown();
+        let dbg = format!("{loc:?}");
+        assert!(dbg.contains("SourceLocation"), "{dbg}");
+        let copied: SourceLocation = loc;
+        let cloned = loc;
+        assert_eq!(copied, cloned);
+    }
+
+    #[test]
+    fn obligation_kind_debug_clone_copy_hash_eq() {
+        use std::collections::HashSet;
+        let k = ObligationKind::Lease;
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Lease"), "{dbg}");
+        let copied: ObligationKind = k;
+        let cloned = k;
+        assert_eq!(copied, cloned);
+        assert!(k < ObligationKind::IoOp);
+
+        let mut set = HashSet::new();
+        set.insert(ObligationKind::SendPermit);
+        set.insert(ObligationKind::Ack);
+        set.insert(ObligationKind::Lease);
+        set.insert(ObligationKind::IoOp);
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn obligation_abort_reason_debug_clone_copy_eq() {
+        let r = ObligationAbortReason::Cancel;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Cancel"), "{dbg}");
+        let copied: ObligationAbortReason = r;
+        let cloned = r;
+        assert_eq!(copied, cloned);
+        assert_ne!(r, ObligationAbortReason::Explicit);
+    }
+}

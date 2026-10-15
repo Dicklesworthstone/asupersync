@@ -1,0 +1,91 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "no_rewrites_conservative",
+  "input_metadata": {
+    "node_count": 3,
+    "root_node": 2,
+    "node_types": [
+      "leaf",
+      "race"
+    ],
+    "max_depth": 1,
+    "description": "Simple race under conservative policy - no rewrites applied"
+  },
+  "rewrite_policy": {
+    "policy_name": "none",
+    "associativity": false,
+    "commutativity": false,
+    "distributivity": false,
+    "require_binary_joins": true,
+    "timeout_simplification": false
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 2,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "race",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Race[task_a,task_b]"
+    },
+    "output_plan": {
+      "root": 2,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        },
+        {
+          "id": 1,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_b"
+          }
+        },
+        {
+          "id": 2,
+          "node_type": "race",
+          "details": {
+            "children": [
+              0,
+              1
+            ]
+          }
+        }
+      ],
+      "canonical_form": "Race[task_a,task_b]"
+    },
+    "applicable_rules": [],
+    "rules_applied": [],
+    "transformed": false,
+    "transformation_steps": []
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-aj7lx3.11",
+        "title": "[observability] Redacted cross-agent timeline receipt",
+        "status": "in_progress"
+      },
+      {
+        "id": "asupersync-other1",
+        "title": "Other in-progress bead",
+        "status": "in_progress"
+      }
+    ]
+  },
+  "git": {
+    "commits": [
+      {
+        "hash": "17896bafc1234567",
+        "created_ts": "2026-05-08T05:31:00Z",
+        "subject": "[br-asupersync-aj7lx3.11] add redacted timeline receipt",
+        "body": "Validation passed."
+      }
+    ]
+  },
+  "agent_mail": {
+    "messages": [],
+    "reservations": []
+  }
+}

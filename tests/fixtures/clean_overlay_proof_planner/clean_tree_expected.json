@@ -1,0 +1,57 @@
+{
+  "agent_name": "SapphireHill",
+  "blockers": [],
+  "command_intent": {
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_clean_overlay cargo test -p asupersync --lib selected_filter -- --nocapture",
+    "description": "focused lib proof for selected clean path",
+    "remote_required": true
+  },
+  "decision": "admit-clean-overlay-proof",
+  "excluded_dirty_paths": [],
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_branch": false,
+    "runs_git_mutation": false,
+    "runs_git_worktree": false,
+    "runs_rch": false
+  },
+  "generated_at": "2026-06-14T23:00:00Z",
+  "head": "1111111111111111111111111111111111111111",
+  "included_paths": [
+    {
+      "matched_selected_pattern": "src/lib.rs",
+      "overlay_source": "head",
+      "path": "src/lib.rs",
+      "reservation_evidence": [],
+      "status": "clean-at-head"
+    }
+  ],
+  "input_schema_version": "clean-overlay-proof-planner-input-v1",
+  "no_claim_boundaries": [
+    "does not prove broad workspace health",
+    "does not run cargo or rch",
+    "does not authorize local cargo fallback",
+    "does not permit branches, worktrees, scratch clones, or destructive cleanup"
+  ],
+  "non_mutating": true,
+  "operator_notes": [
+    "This helper only plans proof inputs; it never constructs a branch, worktree, scratch clone, or overlay directory.",
+    "Default mode fails closed on any unselected dirty path, deleted path, or selected dirty path without an active self reservation.",
+    "Set report_only=true only for dry-run reporting; report-only output is not proof admission."
+  ],
+  "proof_allowed": true,
+  "report_only": false,
+  "schema_version": "clean-overlay-proof-planner-v1",
+  "selected_paths": [
+    "src/lib.rs"
+  ],
+  "summary": {
+    "blocker_count": 0,
+    "excluded_dirty_count": 0,
+    "included_count": 1,
+    "selected_pattern_count": 1
+  }
+}

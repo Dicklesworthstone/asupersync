@@ -1,0 +1,23 @@
+{
+  "config": {
+    "channel_capacity": 4,
+    "reorder_probability": 50,
+    "duplication_probability": 0,
+    "reorder_buffer_size": 6,
+    "chaos_seed": 11111,
+    "message_count": 15,
+    "reserve_drop_probability": 0,
+    "early_close_probability": 0,
+    "cancel_probability": 70,
+    "concurrent_receivers": 1,
+    "max_data_size": 8
+  },
+  "messages": [
+    { "id": 200, "data": [0, 1] },
+    { "id": 201, "data": [2, 3] },
+    { "id": 202, "data": [4, 5] },
+    { "id": 203, "data": [6, 7] },
+    { "id": 204, "data": [8, 9] },
+    { "id": 205, "data": [10, 11] }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "schema_version": "touched-surface-proof-selector-input-v1",
+  "touched_files": ["src/runtime/scheduler.rs"],
+  "lanes": [
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "command": "rch exec -- cargo test -p asupersync --lib",
+      "guarantee_ids": ["lib-test-frontier"],
+      "source_paths": ["src/**"],
+      "covers": "runtime crate unit-test frontier",
+      "explicit_not_covered": "integration tests and fuzz targets",
+      "broad_frontier": false
+    },
+    {
+      "lane_id": "all-targets-check",
+      "kind": "compile_frontier",
+      "command": "rch exec -- cargo check -p asupersync --all-targets",
+      "guarantee_ids": ["all-target-compile-frontier"],
+      "source_paths": ["src/**", "tests/**"],
+      "covers": "runtime crate all-target compile frontier",
+      "explicit_not_covered": "workspace satellite crates and fuzz manifest",
+      "broad_frontier": true
+    }
+  ],
+  "selection_rules": [
+    {
+      "rule_id": "runtime-source",
+      "patterns": ["src/**"],
+      "lane_ids": ["lib-tests"],
+      "supplemental_lane_ids": ["all-targets-check"],
+      "reason": "runtime source change needs lib-frontier proof plus broad compile frontier"
+    }
+  ],
+  "blocked_lanes": [
+    {
+      "lane_id": "lib-tests",
+      "reason": "peer dirty source file blocks lib frontier",
+      "blocked_by_paths": ["src/runtime/scheduler.rs"]
+    }
+  ]
+}

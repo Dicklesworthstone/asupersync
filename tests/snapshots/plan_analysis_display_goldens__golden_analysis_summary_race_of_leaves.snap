@@ -1,0 +1,5 @@
+---
+source: tests/plan_analysis_display_goldens.rs
+expression: analysis.summary()
+---
+3/3 safe, 0 obligation issue(s), 0 cancel issue(s)

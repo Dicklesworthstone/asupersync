@@ -1,0 +1,16 @@
+---
+source: src/plan/certificate.rs
+assertion_line: 2333
+expression: identity_compact
+---
+CompactCertificate {
+    version: CertificateVersion(
+        1,
+    ),
+    policy_bits: 29,
+    before_hash: PlanHash(bd6c50d19e902460fb4b8d1f9698031509fdfd61eb980be22bec2eece0c48bc1),
+    after_hash: PlanHash(bd6c50d19e902460fb4b8d1f9698031509fdfd61eb980be22bec2eece0c48bc1),
+    before_node_count: 1,
+    after_node_count: 1,
+    steps: [],
+}

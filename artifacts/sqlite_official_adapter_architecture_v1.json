@@ -1,0 +1,577 @@
+{
+  "artifact_id": "sqlite-official-adapter-architecture-v1",
+  "schema_version": 1,
+  "bead_id": "asupersync-ym2wtv.3.1",
+  "capability_ids": [
+    "CAP-SQLITE",
+    "CAP-DOWNSTREAM-CONSUMERS"
+  ],
+  "governing_adr": "DEP-ADR-010",
+  "doc_path": "docs/adr/sqlite_official_adapter_architecture.md",
+  "observed_at_utc": "2026-08-02T17:35:00Z",
+  "architecture_decision": {
+    "state": "KEEP_PENDING_CURRENT_GRAPH_AND_OWNER_CONTRACT",
+    "incumbent_state": "ACCEPTED_AND_SUPPORTED",
+    "candidate_state": "PROVISIONAL_PREFERENCE_NOT_IMPLEMENTATION_AUTHORIZED",
+    "implementation_allowed": false,
+    "close_bead_allowed": false,
+    "reason": "The existing fsqlite package is the preferred non-duplicative placement, but comparative package evidence, the complete graph matrix, accepted owner contract, native/io-uring feature split, and toolchain disposition are unresolved. DEP-ADR-010 therefore keeps asupersync[sqlite] and rusqlite as the supported path."
+  },
+  "observed_repositories": [
+    {
+      "repository_id": "asupersync",
+      "url": "https://github.com/Dicklesworthstone/asupersync",
+      "observed_revision": "77f5a4221886fffc32ce6049bb853e3af617fa9b",
+      "package": "asupersync",
+      "package_version": "0.3.10",
+      "edition": "2024",
+      "toolchain": "nightly-2026-07-05",
+      "reproducibility_state": "TRACKED_BASELINE_BEFORE_THIS_PACKET"
+    },
+    {
+      "repository_id": "frankensqlite",
+      "url": "https://github.com/Dicklesworthstone/frankensqlite",
+      "observed_revision": "43463019323f77dbf178b9557daa0085a4ac54a3",
+      "package": "fsqlite",
+      "package_version": "0.1.19",
+      "edition": "2024",
+      "declared_rust_version": "1.85",
+      "toolchain": "nightly",
+      "asupersync_dependency": "^0.3.10 with default-features = false",
+      "reproducibility_state": "OBSERVED_DIRTY_WORKTREE_NOT_ACCEPTANCE_EVIDENCE"
+    }
+  ],
+  "preferred_candidate": {
+    "repository_id": "frankensqlite",
+    "package": "fsqlite",
+    "package_kind": "EXISTING_PUBLIC_FACADE",
+    "new_package_disposition": "UNKNOWN_PENDING_COMPANION_GRAPH_AND_OWNER_COMPARISON",
+    "public_namespace": "fsqlite::async_api",
+    "root_reexport": "fsqlite::AsyncConnection",
+    "feature": "async-api",
+    "current_feature_forwarding": [
+      "dep:asupersync",
+      "dep:futures-lite",
+      "fsqlite-types/native"
+    ],
+    "required_feature_forwarding": [
+      "dep:asupersync",
+      "dep:futures-lite",
+      "native"
+    ],
+    "feature_forwarding_state": "BLOCKED_BY_CURRENT_NATIVE_URING_COUPLING",
+    "selection_rationale": "A precursor integration seam already exists under this package and namespace, so it is the lowest-duplication provisional starting point. Whether the official adapter belongs here or in a second fsqlite-asupersync package remains deferred until graph, release-owner, and discoverability comparison.",
+    "required_native_feature_contract": "Before async-api may forward native, fsqlite-vfs/native must stop forwarding linux-asupersync-uring and the Linux io-uring dependency must become optional under that explicit platform feature. Otherwise the production adapter must declare and obtain owner acceptance for the io-uring edge.",
+    "current_linux_native_observation": "fsqlite/native forwards fsqlite-vfs/native; fsqlite-vfs/native forwards linux-asupersync-uring; and io-uring is an unconditional Linux target dependency at the observed revision.",
+    "public_context_requirement": "Every official async operation must take &asupersync::Cx as its first non-receiver argument. The current fsqlite_types::cx::Cx plus ambient NativeCx::current or Runtime::current_handle lookup is not the accepted end state.",
+    "worker_requirement": "Any dedicated worker thread, stack allocation, command admission, abandonment, interrupt, drain, and shutdown behavior must be declared and proved by the I2 lifecycle beads before implementation is accepted."
+  },
+  "proposed_dependency_dag": {
+    "production_edges": [
+      {
+        "from": "supported-user",
+        "to": "asupersync@0.3.10",
+        "configuration": "default-features = false plus the user's runtime feature profile"
+      },
+      {
+        "from": "supported-user",
+        "to": "fsqlite@0.1.19",
+        "configuration": "default-features = false, features = [async-api]; async-api may forward a corrected native base only after the Linux io-uring coupling is resolved"
+      },
+      {
+        "from": "fsqlite@0.1.19[async-api]",
+        "to": "asupersync@^0.3.10",
+        "configuration": "direct optional dependency enabled by async-api, default-features = false"
+      },
+      {
+        "from": "fsqlite@0.1.19",
+        "to": "fsqlite-core@0.1.19",
+        "configuration": "unconditional facade dependency with default-features = false"
+      },
+      {
+        "from": "fsqlite-core@0.1.19",
+        "to": "asupersync@^0.3.10",
+        "configuration": "structural dependency under both wasm and non-wasm target cfgs; disabling async-api is not a cycle escape"
+      },
+      {
+        "from": "asupersync@0.3.10[sqlite]",
+        "to": "rusqlite@0.40 and sqlparser@0.62",
+        "configuration": "incumbent remains supported until a later owner decision"
+      }
+    ],
+    "evidence_only_edges": [
+      {
+        "from": "neutral-parity-consumer",
+        "to": "asupersync[sqlite] and fsqlite[native]",
+        "configuration": "standalone workspace with an independent lockfile and one unified asupersync package ID"
+      }
+    ],
+    "forbidden_edges": [
+      {
+        "from": "asupersync",
+        "to": "fsqlite-or-any-frankensqlite-package",
+        "edge_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "reason": "This closes the reverse Cargo dependency cycle forbidden by DEP-ADR-010."
+      }
+    ],
+    "package_identity_invariants": [
+      "every supported combined consumer resolves exactly one asupersync package ID",
+      "the asupersync workspace and lockfile resolve zero fsqlite or FrankenSQLite package IDs",
+      "all dependency arrows between the repositories point from FrankenSQLite toward Asupersync",
+      "disabling async-api does not remove the structural fsqlite to fsqlite-core to asupersync path"
+    ]
+  },
+  "alternatives": [
+    {
+      "alternative": "create a new fsqlite-asupersync package",
+      "disposition": "DEFER_PENDING_OWNER_AND_GRAPH_COMPARISON",
+      "reason": "It appears cycle-safe but has not been compared on graph cost, release ownership, or discoverability. DEP-ADR-010 permits this alternative, so preference for the existing facade is not a terminal rejection."
+    },
+    {
+      "alternative": "add fsqlite to the Asupersync workspace or dev graph",
+      "disposition": "REJECT",
+      "reason": "It would close the reverse dependency cycle forbidden by DEP-ADR-010."
+    },
+    {
+      "alternative": "remove the incumbent sqlite feature before the adapter is supported",
+      "disposition": "REJECT",
+      "reason": "It would remove the only accepted one-stop path before package, graph, parity, ownership, and release evidence exists."
+    }
+  ],
+  "ownership_contract": {
+    "acceptance_state": "MISSING_NAMED_OWNER_APPROVAL",
+    "responsibilities": [
+      {
+        "owner": "FrankenSQLite repository maintainers",
+        "owns": "fsqlite::async_api source, public adapter API, feature forwarding, package release, migration notes, examples, and first-line support"
+      },
+      {
+        "owner": "Asupersync repository maintainers",
+        "owns": "Cx and runtime contracts, the incumbent sqlite feature, stable-subset declaration, and notification of runtime API changes"
+      },
+      {
+        "owner": "joint release gate",
+        "owns": "the compatibility matrix, one-package-ID proof, cross-repository CI, rollback rehearsal, and support interval publication"
+      }
+    ],
+    "release_order": [
+      "freeze immutable packaged Asupersync and fsqlite candidates plus the proposed support interval",
+      "validate every supported pair and graph coordinate against those packaged candidates before either publication",
+      "publish the validated Asupersync candidate",
+      "validate crates.io resolution of the published Asupersync release without a patch",
+      "publish the matching validated fsqlite release",
+      "publish adapter documentation only after clean crates.io resolution of both releases"
+    ],
+    "support_lifecycle": {
+      "current_state": "NOT_YET_ACCEPTED",
+      "required_policy": "Each fsqlite release must publish its supported Asupersync interval, minimum Rust version, target set, deprecation window, and rollback version. At least the current and immediately previous compatible pair remain in CI for one fsqlite minor-release interval.",
+      "incumbent_policy": "asupersync[sqlite] remains supported and is not deprecated while the adapter policy or evidence is incomplete."
+    }
+  },
+  "version_and_toolchain_contract": {
+    "observed_pair": "asupersync 0.3.10 / fsqlite 0.1.19",
+    "cargo_declared_asupersync_interval": "^0.3.10",
+    "supported_interval": "NOT_YET_PROVED_OR_PUBLISHED",
+    "stable_floor": "KNOWN_UNSUPPORTED_AT_CURRENT_REVISION_ON_X86_64_AND_WINDOWS",
+    "candidate_nightly_requirement": "The observed x86_64 graph unconditionally reaches fsqlite-btree and fsqlite-pager core_intrinsics feature gates; Windows also reaches windows_by_handle. Current FrankenSQLite documentation requires nightly.",
+    "toolchain_disposition": "OWNER_DECISION_PENDING_PINNED_NIGHTLY_OR_STABLE_SOURCE_REFACTOR",
+    "nightly_policy": "The adapter must not enable Asupersync's default nightly-outcome-try feature. Before I1 closes, owners must either accept and date-pin a shared nightly because FrankenSQLite source requires it, or require a stable-source refactor. A floating nightly and the bare Rust 1.85 declaration are not an accepted support contract.",
+    "compatibility_rules": [
+      "a supported consumer resolves one asupersync package ID from one source",
+      "the lowest and highest declared compatible Asupersync versions both compile in neutral-consumer CI",
+      "a breaking Cx or cancellation-contract change requires a coordinated compatibility update before either release is advertised",
+      "an unpublished path, git patch, or dirty checkout is evidence-only and cannot define a supported version interval"
+    ]
+  },
+  "graph_evidence_contract": {
+    "matrix_state": "INCOMPLETE_PENDING_OWNER_TARGET_AND_VERSION_ALLOWSETS",
+    "required_dependency_kinds": [
+      "normal",
+      "dev",
+      "build"
+    ],
+    "required_package_classifications": [
+      "build-script",
+      "proc-macro",
+      "native-code",
+      "tokio"
+    ],
+    "proc_macro_method": "Derive proc-macro packages from cargo metadata target.kind; cargo tree has no proc-macro edge selector.",
+    "target_allowset_state": "PROPOSED_NOT_OWNER_ACCEPTED",
+    "proposed_target_allowset": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ],
+    "explicitly_unsupported_targets": [
+      "wasm32-unknown-unknown for the dedicated-thread adapter"
+    ],
+    "receipt_rule": "Every supported row needs immutable revisions, manifest and lockfile SHA-256 digests, exact command, host and target triples, toolchain, feature set, package IDs by dependency kind, build-script and proc-macro package sets derived from metadata, Tokio/native classifications, exit code, and terminal timestamp.",
+    "coordinates": [
+      {
+        "coordinate_id": "ASUP-DEFAULT-LINUX",
+        "root": "asupersync",
+        "profile": "default production",
+        "features": "default",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "ASUP-SQLITE-LINUX",
+        "root": "asupersync",
+        "profile": "incumbent sqlite production",
+        "features": "no-default-features + sqlite",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "ASUP-SQLITE-DEV-LINUX",
+        "root": "asupersync",
+        "profile": "incumbent sqlite package tests",
+        "features": "no-default-features + sqlite",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "FSQLITE-DEFAULT-LINUX",
+        "root": "fsqlite",
+        "profile": "FrankenSQLite public facade baseline",
+        "features": "default",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "FSQLITE-WORKSPACE-DEV-LINUX",
+        "root": "frankensqlite-workspace",
+        "profile": "FrankenSQLite workspace dev baseline",
+        "features": "workspace default package profiles",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "FSQLITE-ASYNC-LINUX",
+        "root": "fsqlite",
+        "profile": "preferred adapter production",
+        "features": "no-default-features + async-api after native/io-uring feature split",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "BLOCKED_BY_CURRENT_NATIVE_URING_COUPLING"
+      },
+      {
+        "coordinate_id": "FSQLITE-ASYNC-DEV-LINUX",
+        "root": "fsqlite",
+        "profile": "preferred adapter package tests",
+        "features": "no-default-features + async-api after native/io-uring feature split",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "BLOCKED_BY_CURRENT_NATIVE_URING_COUPLING"
+      },
+      {
+        "coordinate_id": "FSQLITE-ASYNC-STABLE-X86_64",
+        "root": "fsqlite",
+        "profile": "preferred adapter stable/MSRV negative coordinate",
+        "features": "no-default-features + async-api",
+        "toolchain": "stable 1.85",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "KNOWN_UNSUPPORTED_AT_CURRENT_REVISION_CORE_INTRINSICS"
+      },
+      {
+        "coordinate_id": "USER-COEXIST-LINUX",
+        "root": "neutral-parity-consumer",
+        "profile": "incumbent and candidate coexistence",
+        "features": "asupersync no-default-features + sqlite; fsqlite no-default-features + async-api",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "BLOCKED_BY_CURRENT_NATIVE_URING_COUPLING"
+      },
+      {
+        "coordinate_id": "USER-LOWEST-SUPPORTED-LINUX",
+        "root": "neutral-parity-consumer",
+        "profile": "lowest proposed compatible release pair",
+        "features": "asupersync no-default-features + sqlite; fsqlite no-default-features + async-api",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "BLOCKED_BY_UNPUBLISHED_VERSION_INTERVAL"
+      },
+      {
+        "coordinate_id": "USER-HIGHEST-SUPPORTED-LINUX",
+        "root": "neutral-parity-consumer",
+        "profile": "highest proposed compatible release pair",
+        "features": "asupersync no-default-features + sqlite; fsqlite no-default-features + async-api",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "x86_64-unknown-linux-gnu",
+        "dependency_kinds": [
+          "normal",
+          "dev",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "BLOCKED_BY_UNPUBLISHED_VERSION_INTERVAL"
+      },
+      {
+        "coordinate_id": "USER-ADAPTER-MACOS",
+        "root": "neutral-parity-consumer",
+        "profile": "preferred adapter native-host resolution",
+        "features": "fsqlite no-default-features + async-api",
+        "host": "aarch64-apple-darwin",
+        "target": "aarch64-apple-darwin",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "USER-ADAPTER-WINDOWS",
+        "root": "neutral-parity-consumer",
+        "profile": "preferred adapter native-host resolution",
+        "features": "fsqlite no-default-features + async-api",
+        "host": "x86_64-pc-windows-msvc",
+        "target": "x86_64-pc-windows-msvc",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "MISSING_CURRENT_RECEIPT"
+      },
+      {
+        "coordinate_id": "USER-ADAPTER-WASM",
+        "root": "neutral-parity-consumer",
+        "profile": "preferred adapter unsupported-target disposition",
+        "features": "fsqlite no-default-features + async-api",
+        "host": "x86_64-unknown-linux-gnu",
+        "target": "wasm32-unknown-unknown",
+        "dependency_kinds": [
+          "normal",
+          "build"
+        ],
+        "package_classifications": [
+          "build-script",
+          "proc-macro",
+          "native-code",
+          "tokio"
+        ],
+        "receipt_state": "UNSUPPORTED_DEDICATED_THREAD_ADAPTER"
+      }
+    ],
+    "production_invariants": [
+      "zero fsqlite or FrankenSQLite package IDs in every Asupersync coordinate",
+      "exactly one asupersync package ID in every supported combined-user coordinate",
+      "zero Tokio package IDs in the candidate production normal graph",
+      "every native-code package and dedicated OS-thread behavior is declared per profile",
+      "dev-only or workspace-wide Tokio packages never count as a production adapter edge"
+    ]
+  },
+  "prerequisite_evidence": [
+    {
+      "artifact": "artifacts/dependency_api_adr_registry_v1.json",
+      "conclusion": "DEP-ADR-010 keeps the incumbent and forbids a reverse edge.",
+      "freshness": "AUTHORITATIVE_DECISION"
+    },
+    {
+      "artifact": "artifacts/sqlite_combined_graph_budget_v1.json",
+      "conclusion": "The historical proposal added 33 unique crates; a naive combined consumer duplicated Asupersync; a patch unified it.",
+      "freshness": "STALE_DIRTY_SINGLE_COORDINATE_NOT_I1_ACCEPTANCE"
+    },
+    {
+      "artifact": "artifacts/sqlite_parity_harness_v1.json",
+      "conclusion": "A standalone evidence-only consumer can resolve one Asupersync package and execute one retained parity vector.",
+      "freshness": "HISTORICAL_SMOKE_NOT_PUBLISHED_ADAPTER_EVIDENCE"
+    }
+  ],
+  "blocking_gaps": [
+    {
+      "gap_id": "I1-GRAPH-01",
+      "state": "BLOCKED",
+      "owner": "asupersync-ym2wtv.3.1",
+      "detail": "No current immutable normal/dev/build receipts or metadata-derived proc-macro classifications exist for the minimum profile matrix, and the owner target/version allowsets are not accepted.",
+      "unblock": "Generate every required coordinate from clean immutable revisions and attach manifest, lockfile, metadata, tree, classification, and terminal command receipts."
+    },
+    {
+      "gap_id": "I1-OWNER-01",
+      "state": "BLOCKED",
+      "owner": "cross-repository maintainers",
+      "detail": "Repository-level responsibilities are proposed, but no named owner has accepted release and support responsibility.",
+      "unblock": "Record named owner approval and the support lifecycle in the I1 bead thread."
+    },
+    {
+      "gap_id": "I1-FEATURE-01",
+      "state": "BLOCKED",
+      "owner": "cross-repository architecture owners",
+      "detail": "The desired async-api to native forwarding currently implies linux-asupersync-uring, and io-uring is an unconditional Linux target dependency.",
+      "unblock": "Accept the Linux io-uring edge explicitly or approve a downstream feature split that makes the dependency optional and keeps the base native adapter distinct."
+    },
+    {
+      "gap_id": "I1-TOOLCHAIN-01",
+      "state": "BLOCKED",
+      "owner": "cross-repository architecture owners",
+      "detail": "Current x86_64 and Windows source requires nightly despite the bare Rust 1.85 declaration, and the repository toolchain floats.",
+      "unblock": "Approve a date-pinned shared nightly requirement or require a stable-source refactor; record the decision without enabling nightly-outcome-try on the Asupersync dependency."
+    }
+  ],
+  "downstream_implementation_gates": [
+    {
+      "gate_id": "I2-API-CX",
+      "state": "NOT_AN_I1_CLOSURE_BLOCKER",
+      "owner": "asupersync-ym2wtv.3.2",
+      "requirement": "Replace the current fsqlite_types::cx::Cx plus ambient native-runtime lookup with one official &asupersync::Cx boundary."
+    },
+    {
+      "gate_id": "I2-LIFECYCLE-CANCELLATION",
+      "state": "NOT_AN_I1_CLOSURE_BLOCKER",
+      "owner": "asupersync-ym2wtv.3.2.4",
+      "requirement": "Prove interrupt, drain, response abandonment, worker join, and bounded shutdown before the adapter is supported."
+    },
+    {
+      "gate_id": "I4-PACKAGED-RELEASE",
+      "state": "NOT_AN_I1_CLOSURE_BLOCKER",
+      "owner": "asupersync-ym2wtv.3.4",
+      "requirement": "Exercise the release order and publish the version/support contract after I1 selects the architecture."
+    }
+  ],
+  "closure_conditions": [
+    "the package direction, structural fsqlite-core edge, and native/io-uring feature disposition are owner-accepted",
+    "all owner-accepted I1 graph coordinates have current immutable PASS receipts or explicit negative dispositions",
+    "the target allowset, version-pair bounds, and unsupported wasm row are explicit",
+    "named owners accept the architecture-level release responsibilities and pre-publication validation order",
+    "the Asupersync interval and pinned-nightly-or-stable-source toolchain policy are defined; publication and operational proof remain I4 work",
+    "any unavoidable reverse cycle, duplicate runtime, undeclared Tokio/native edge, or materially worse supported graph yields terminal KEEP before implementation"
+  ],
+  "validation": {
+    "contract_test": "tests/sqlite_official_adapter_architecture_contract.rs",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_sqlite_official_adapter_architecture\" cargo test -p asupersync --test sqlite_official_adapter_architecture_contract -- --nocapture",
+    "no_claim_boundary": "This source-free packet selects a provisional package placement and records fail-closed requirements. It does not prove any current FrankenSQLite graph, compile, runtime, cancellation, portability, parity, performance, publication, owner acceptance, support interval, or release readiness. It authorizes no source implementation, dependency change, feature deprecation, cutover, or bead closure."
+  }
+}

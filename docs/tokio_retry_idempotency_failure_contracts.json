@@ -1,0 +1,385 @@
+{
+  "schema_version": "1.0.0",
+  "document_id": "tokio_retry_idempotency_failure_contracts",
+  "bead_id": "asupersync-2oh2u.6.9",
+  "track": "T6",
+  "title": "Retry, Idempotency, and Failure Contracts for Data and Messaging Paths",
+  "contracts": {
+    "retry": [
+      {
+        "id": "C-RTY-01",
+        "title": "Shared Retry Policy Structure",
+        "domain": "retry",
+        "fields": [
+          {"name": "max_attempts", "type": "u32", "default": 3},
+          {"name": "initial_delay", "type": "Duration", "default_ms": 100},
+          {"name": "max_delay", "type": "Duration", "default_secs": 30},
+          {"name": "multiplier", "type": "f64", "default": 2.0},
+          {"name": "jitter", "type": "f64", "default": 0.1}
+        ],
+        "delay_formula": "min(initial_delay * multiplier^(attempt-1), max_delay) * (1 + random(jitter))",
+        "reference": "src/combinator/retry.rs",
+        "status": "implemented"
+      },
+      {
+        "id": "C-RTY-02",
+        "title": "Transaction Retry Eligibility",
+        "domain": "retry",
+        "eligibility": {
+          "postgresql": ["SQLSTATE 40001", "SQLSTATE 40P01"],
+          "mysql": ["Error 1213", "Error 1205"],
+          "sqlite": ["SQLITE_BUSY", "SQLITE_LOCKED"]
+        },
+        "non_retryable": [
+          "constraint_violation",
+          "syntax_error",
+          "authentication_failure",
+          "connection_failure"
+        ],
+        "backends_with_retry": ["postgresql", "mysql", "sqlite"],
+        "backends_missing_retry": [],
+        "status": "implemented"
+      },
+      {
+        "id": "C-RTY-03",
+        "title": "Connection Retry",
+        "domain": "retry",
+        "requirements": [
+          "first_attempt_immediate",
+          "backoff_on_failure",
+          "bounded_by_max_attempts",
+          "bounded_by_connection_timeout",
+          "cancel_safe"
+        ],
+        "reference": "src/database/pool.rs::get_with_retry",
+        "status": "implemented"
+      },
+      {
+        "id": "C-RTY-04",
+        "title": "Messaging Retry",
+        "domain": "retry",
+        "systems": {
+          "kafka": {
+            "producer_retry": "internal_rdkafka",
+            "consumer_retry": "rebalance_offset_replay",
+            "mechanism": "broker_managed"
+          },
+          "jetstream": {
+            "producer_retry": "application_level",
+            "consumer_retry": "server_redelivery",
+            "mechanism": "ack_wait_max_deliver"
+          },
+          "nats_core": {
+            "producer_retry": "none",
+            "consumer_retry": "none",
+            "mechanism": "at_most_once"
+          },
+          "redis_pubsub": {
+            "producer_retry": "none",
+            "consumer_retry": "none",
+            "mechanism": "at_most_once"
+          }
+        },
+        "status": "defined"
+      },
+      {
+        "id": "C-RTY-05",
+        "title": "Cancel-Aware Retry",
+        "domain": "retry",
+        "requirements": [
+          "check_cancel_before_attempt",
+          "check_cancel_during_delay",
+          "propagate_cancelled_outcome",
+          "delays_count_against_cx_budget"
+        ],
+        "status": "implemented"
+      }
+    ],
+    "error_classification": [
+      {
+        "id": "C-ERR-03",
+        "title": "Transient Error Predicate",
+        "domain": "error_classification",
+        "method": "is_transient",
+        "transient_conditions": {
+          "postgresql": ["SQLSTATE 40001", "SQLSTATE 40P01", "SQLSTATE 08xxx", "SQLSTATE 53xxx"],
+          "mysql": ["Error 1213", "Error 1205", "Error 2006", "Error 2013"],
+          "sqlite": ["SQLITE_BUSY", "SQLITE_LOCKED", "transient_io"],
+          "kafka": ["QueueFull", "broker_unavailable"],
+          "jetstream": ["timeout", "temporary_server_error"],
+          "nats": ["io_error", "transient_server_err"],
+          "redis": ["io_error", "connection_reset"]
+        },
+        "status": "implemented"
+      },
+      {
+        "id": "C-ERR-04",
+        "title": "Error Method Parity (Extended)",
+        "domain": "error_classification",
+        "required_methods": [
+          "is_transient",
+          "is_connection_error",
+          "is_serialization_failure",
+          "is_deadlock",
+          "is_unique_violation",
+          "is_constraint_violation",
+          "is_retryable",
+          "error_code"
+        ],
+        "backend_status": {
+          "postgresql": {
+            "is_serialization_failure": "implemented",
+            "is_deadlock": "implemented",
+            "is_unique_violation": "implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
+            "error_code": "implemented"
+          },
+          "mysql": {
+            "is_serialization_failure": "implemented",
+            "is_deadlock": "implemented",
+            "is_unique_violation": "implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
+            "error_code": "implemented"
+          },
+          "sqlite": {
+            "is_serialization_failure": "not_applicable",
+            "is_deadlock": "not_applicable",
+            "is_unique_violation": "implemented",
+            "is_transient": "implemented",
+            "is_connection_error": "implemented",
+            "is_retryable": "implemented",
+            "error_code": "implemented"
+          }
+        },
+        "status": "implemented"
+      },
+      {
+        "id": "C-ERR-05",
+        "title": "Messaging Error Classification",
+        "domain": "error_classification",
+        "required_methods": [
+          "is_transient",
+          "is_connection_error",
+          "is_capacity_error",
+          "is_timeout",
+          "is_retryable"
+        ],
+        "backend_status": {
+          "nats": "implemented",
+          "jetstream": "implemented",
+          "kafka": "implemented",
+          "redis": "implemented"
+        },
+        "status": "implemented"
+      }
+    ],
+    "idempotency": [
+      {
+        "id": "C-IMP-01",
+        "title": "Producer Idempotency",
+        "domain": "idempotency",
+        "systems": {
+          "kafka": {
+            "mechanism": "sequence_numbers",
+            "scope": "per_partition_per_session",
+            "config": "enable.idempotence=true",
+            "status": "delegates_to_rdkafka"
+          },
+          "jetstream": {
+            "mechanism": "duplicate_window",
+            "scope": "per_stream",
+            "config": "duplicate_window: Duration",
+            "status": "implemented"
+          },
+          "redis": {
+            "mechanism": "none_builtin",
+            "scope": "n/a",
+            "status": "not_available"
+          },
+          "database": {
+            "mechanism": "none_builtin",
+            "scope": "n/a",
+            "status": "application_level"
+          }
+        },
+        "status": "partial"
+      },
+      {
+        "id": "C-IMP-02",
+        "title": "Consumer Idempotency",
+        "domain": "idempotency",
+        "systems": {
+          "kafka": "offset_tracking_plus_app_dedup",
+          "jetstream": "explicit_ack_plus_max_deliver_plus_dead_letter",
+          "database": "upsert_or_conditional_insert"
+        },
+        "status": "defined"
+      },
+      {
+        "id": "C-IMP-03",
+        "title": "Request-Level Idempotency Keys",
+        "domain": "idempotency",
+        "fields": [
+          {"name": "idempotency_key", "type": "String"},
+          {"name": "ttl", "type": "Duration"},
+          {"name": "result_cache", "type": "bool"}
+        ],
+        "status": "not_implemented"
+      }
+    ],
+    "delivery": [
+      {
+        "id": "C-DLV-01",
+        "title": "Delivery Semantics Matrix",
+        "domain": "delivery",
+        "systems": {
+          "postgresql": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
+          "mysql": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
+          "sqlite": {"default": "exactly_once", "best": "exactly_once", "mechanism": "acid_transactions"},
+          "kafka": {"default": "at_least_once", "best": "exactly_once", "mechanism": "idempotent_transactional"},
+          "jetstream": {"default": "at_least_once", "best": "effectively_once", "mechanism": "ack_plus_dedup"},
+          "nats_core": {"default": "at_most_once", "best": "at_most_once", "mechanism": "fire_and_forget"},
+          "redis_pubsub": {"default": "at_most_once", "best": "at_most_once", "mechanism": "no_persistence"}
+        },
+        "status": "defined"
+      },
+      {
+        "id": "C-DLV-02",
+        "title": "Acknowledgement Contract",
+        "domain": "delivery",
+        "systems": {
+          "kafka": {"ack_type": "offset_commit", "timeout": "configurable", "redelivery": "from_last_committed"},
+          "jetstream": {"ack_type": "explicit_none_all", "timeout": "ack_wait", "redelivery": "up_to_max_deliver"},
+          "database": {"ack_type": "transaction_commit", "timeout": "connection_timeout", "redelivery": "n/a"}
+        },
+        "status": "defined"
+      },
+      {
+        "id": "C-DLV-03",
+        "title": "Dead Letter Contract",
+        "domain": "delivery",
+        "systems": {
+          "jetstream": "after_max_deliver_drop_or_advisory",
+          "kafka": "application_level_dlq_topic",
+          "database": "error_surfaced_to_caller_no_dlq"
+        },
+        "status": "defined"
+      }
+    ],
+    "failure_propagation": [
+      {
+        "id": "C-FPR-01",
+        "title": "Circuit Breaker Integration",
+        "domain": "failure_propagation",
+        "requirements": [
+          "open_circuit_stops_retry",
+          "half_open_probes_not_retry_attempts",
+          "track_retry_exhausted_separately"
+        ],
+        "reference": "src/combinator/circuit_breaker.rs",
+        "status": "defined"
+      },
+      {
+        "id": "C-FPR-02",
+        "title": "Rate Limiter Integration",
+        "domain": "failure_propagation",
+        "requirements": [
+          "rate_limit_rejection_not_retryable",
+          "retry_delay_respects_token_availability",
+          "block_strategy_integrates_with_retry",
+          "reject_strategy_distinct_error_category"
+        ],
+        "reference": "src/combinator/rate_limit.rs",
+        "status": "defined"
+      },
+      {
+        "id": "C-FPR-03",
+        "title": "Failure Escalation Chain",
+        "domain": "failure_propagation",
+        "chain": [
+          "operation_error",
+          "retry_if_eligible",
+          "circuit_breaker_check",
+          "pool_exhaustion_timeout",
+          "caller_error_with_causal_chain"
+        ],
+        "requirement": "preserve_original_error",
+        "status": "defined"
+      }
+    ],
+    "backpressure": [
+      {
+        "id": "C-BPR-01",
+        "title": "Queue Depth Signals",
+        "domain": "backpressure",
+        "signals": {
+          "connection_pool": {"metric": "waiters", "threshold": "configurable"},
+          "kafka_producer": {"metric": "queue_size", "threshold": "queue.buffering.max.messages"},
+          "rate_limiter": {"metric": "token_count", "threshold": "configured_rate"}
+        },
+        "status": "partial"
+      },
+      {
+        "id": "C-BPR-02",
+        "title": "Timeout as Backpressure",
+        "domain": "backpressure",
+        "requirements": [
+          "connection_timeout_prevents_unbounded_wait",
+          "query_timeout_prevents_pool_starvation",
+          "retry_budget_prevents_retry_storms",
+          "all_timeouts_respect_cx_cancellation"
+        ],
+        "status": "defined"
+      }
+    ]
+  },
+  "summary": {
+    "total_contracts": 19,
+    "domains": {
+      "retry": {"count": 5, "implemented": 4, "partial": 0, "defined": 1, "not_implemented": 0},
+      "error_classification": {"count": 3, "implemented": 3, "partial": 0, "defined": 0, "not_implemented": 0},
+      "idempotency": {"count": 3, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 1},
+      "delivery": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
+      "failure_propagation": {"count": 3, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 0},
+      "backpressure": {"count": 2, "implemented": 0, "partial": 1, "defined": 1, "not_implemented": 0}
+    },
+    "systems": ["postgresql", "mysql", "sqlite", "kafka", "jetstream", "nats_core", "redis_pubsub"],
+    "blocking_gaps": [
+      {"id": "RTY-G1", "severity": "closed", "description": "MySQL/SQLite transaction retry — IMPLEMENTED"},
+      {"id": "ERR-G1", "severity": "closed", "description": "MySQL/SQLite error classification methods — IMPLEMENTED"},
+      {"id": "ERR-G2", "severity": "closed", "description": "PostgreSQL is_transient/is_connection_error — IMPLEMENTED"},
+      {"id": "ERR-G3", "severity": "closed", "description": "Messaging error classification methods — IMPLEMENTED"},
+      {"id": "RTY-G2", "severity": "closed", "description": "Connection pool retry — IMPLEMENTED via get_with_retry()"},
+      {"id": "IMP-G1", "severity": "low", "description": "Request-level idempotency keys not implemented"}
+    ]
+  },
+  "source_modules": {
+    "retry_combinator": "src/combinator/retry.rs",
+    "circuit_breaker": "src/combinator/circuit_breaker.rs",
+    "rate_limiter": "src/combinator/rate_limit.rs",
+    "transaction": "src/database/transaction.rs",
+    "postgres": "src/database/postgres.rs",
+    "mysql": "src/database/mysql.rs",
+    "sqlite": "src/database/sqlite.rs",
+    "kafka": "src/messaging/kafka.rs",
+    "jetstream": "src/messaging/jetstream.rs",
+    "nats": "src/messaging/nats.rs",
+    "redis": "src/messaging/redis.rs"
+  },
+  "dependencies": {
+    "blocked_by": [
+      {"bead": "asupersync-2oh2u.6.5", "reason": "Pool/transaction contracts", "status": "open"},
+      {"bead": "asupersync-2oh2u.6.6", "reason": "Redis parity", "status": "in_progress"},
+      {"bead": "asupersync-2oh2u.6.7", "reason": "NATS/JetStream parity", "status": "closed"},
+      {"bead": "asupersync-2oh2u.6.8", "reason": "Kafka parity", "status": "in_progress"}
+    ],
+    "blocks": [
+      {"bead": "asupersync-2oh2u.6.10", "reason": "Deterministic integration suites"},
+      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests"}
+    ]
+  }
+}

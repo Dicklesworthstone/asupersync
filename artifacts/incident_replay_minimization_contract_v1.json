@@ -1,0 +1,218 @@
+{
+  "schema_version": "incident-replay-minimization-contract-v1",
+  "bead_id": "asupersync-lkygsb.3",
+  "module": "src/trace/incident.rs",
+  "description": "Contract for deterministic minimization of incident replay packages into stable repro packages while preserving the incident oracle and recording every shrink decision.",
+  "minimized_repro_schema_version": 1,
+  "oracle_kinds": [
+    "panic",
+    "cancellation_leak",
+    "obligation_leak",
+    "quiescence_violation",
+    "protocol_error",
+    "claim_drift",
+    "proof_command_failure"
+  ],
+  "verdicts": [
+    "minimized",
+    "already_minimal",
+    "budget_exhausted",
+    "inconclusive",
+    "blocked"
+  ],
+  "issue_kinds": [
+    "empty_trace",
+    "flaky_oracle",
+    "budget_exhausted",
+    "missing_oracle_source_role",
+    "missing_oracle_trace_fingerprint"
+  ],
+  "shrink_step_kinds": [
+    "remove_source",
+    "remove_feature_flag",
+    "keep_required",
+    "budget_exhausted"
+  ],
+  "determinism_contract": {
+    "repro_id": "incident-min-repro-v1:<16 lowercase hex FNV-1a digest>",
+    "source_order": "inherits canonical source order from replay packages and records removed source IDs separately",
+    "oracle_preservation": "every accepted source removal must keep required roles and required trace fingerprint present",
+    "budget": "step_budget bounds shrink attempts; exhaustion emits a typed budget_exhausted verdict and provenance step",
+    "ambient_inputs": "no wall-clock, randomness, network, host path traversal, hidden downloads, or host-global stress"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "minimize-crashpack-trace",
+      "expected_verdict": "minimized",
+      "expected_removed_sources": [
+        "trace-log-main"
+      ],
+      "config": {
+        "step_budget": 8,
+        "shrink_feature_flags": false
+      },
+      "oracle": {
+        "kind": "panic",
+        "expected_signal": "panic after deterministic schedule seed 42",
+        "stable": true,
+        "required_source_roles": [
+          "crash_pack"
+        ],
+        "required_trace_fingerprint": "0xfeedbeef"
+      },
+      "bundle": {
+        "schema_version": 1,
+        "bundle_id": "incident-minimizer-fixture-crashpack-trace",
+        "sources": [
+          {
+            "source_id": "crashpack-main",
+            "kind": "crash_pack",
+            "artifact_path": "artifacts/crashpacks/fixture.json",
+            "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "content_bytes": 512,
+            "redaction_status": "redacted",
+            "payload_snippet": "panic after deterministic schedule seed 42",
+            "metadata": {
+              "trace_fingerprint": "0xfeedbeef",
+              "observed_content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            }
+          },
+          {
+            "source_id": "trace-log-main",
+            "kind": "trace_log",
+            "artifact_path": "artifacts/traces/fixture.ndjson",
+            "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "content_bytes": 384,
+            "redaction_status": "redacted",
+            "metadata": {
+              "trace_fingerprint": "0xbead",
+              "observed_content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            }
+          }
+        ],
+        "command": {
+          "program": "rch",
+          "args": [
+            "exec",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "asupersync"
+          ],
+          "env": [],
+          "working_dir": "."
+        },
+        "determinism": {
+          "seed": 42,
+          "schedule_seed": 42,
+          "virtual_time_nanos": 0,
+          "config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+          "feature_flags": [
+            "test-internals"
+          ],
+          "target_triple": "x86_64-unknown-linux-gnu"
+        },
+        "privacy": {
+          "classification": "internal",
+          "redaction_status": "redacted",
+          "redaction_policy_id": "incident-redaction-v1"
+        },
+        "provenance": {
+          "capture_id": "capture-minimize-crashpack-trace",
+          "origin": "support_bundle",
+          "reporter": "operator",
+          "captured_commit": "94261a77f",
+          "related_bead_id": "asupersync-lkygsb.3"
+        }
+      }
+    },
+    {
+      "scenario_id": "already-minimal-single-source",
+      "expected_verdict": "already_minimal",
+      "expected_removed_sources": [],
+      "config": {
+        "step_budget": 8,
+        "shrink_feature_flags": false
+      },
+      "oracle": {
+        "kind": "panic",
+        "expected_signal": "panic after deterministic schedule seed 42",
+        "stable": true,
+        "required_source_roles": [
+          "crash_pack"
+        ],
+        "required_trace_fingerprint": "0xfeedbeef"
+      },
+      "bundle_ref": "minimize-crashpack-trace",
+      "source_filter": [
+        "crashpack-main"
+      ]
+    },
+    {
+      "scenario_id": "budget-exhausted",
+      "expected_verdict": "budget_exhausted",
+      "expected_issue_kinds": [
+        "budget_exhausted"
+      ],
+      "config": {
+        "step_budget": 0,
+        "shrink_feature_flags": true
+      },
+      "oracle_ref": "minimize-crashpack-trace",
+      "bundle_ref": "minimize-crashpack-trace"
+    },
+    {
+      "scenario_id": "flaky-oracle",
+      "expected_verdict": "inconclusive",
+      "expected_issue_kinds": [
+        "flaky_oracle"
+      ],
+      "config": {
+        "step_budget": 8,
+        "shrink_feature_flags": true
+      },
+      "oracle": {
+        "kind": "proof_command_failure",
+        "expected_signal": "remote proof command failed nondeterministically",
+        "stable": false,
+        "required_source_roles": [
+          "crash_pack"
+        ],
+        "required_trace_fingerprint": "0xfeedbeef"
+      },
+      "bundle_ref": "minimize-crashpack-trace"
+    },
+    {
+      "scenario_id": "empty-trace",
+      "expected_verdict": "blocked",
+      "expected_issue_kinds": [
+        "empty_trace"
+      ],
+      "config": {
+        "step_budget": 8,
+        "shrink_feature_flags": true
+      },
+      "oracle_ref": "minimize-crashpack-trace",
+      "bundle_ref": "minimize-crashpack-trace",
+      "source_filter": []
+    }
+  ],
+  "e2e_script": "scripts/validate_incident_replay_minimization.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "bundle_id",
+    "verdict",
+    "repro_id",
+    "issue_kinds",
+    "step_count",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "rch exec -- rustfmt --edition 2024 --check src/trace/incident.rs tests/incident_replay_minimization.rs",
+    "bash scripts/validate_incident_replay_minimization.sh --output-root target/incident-replay-minimization --run-id asupersync-lkygsb.3",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_minimization CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_replay_minimization --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_min_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test incident_replay_minimization --features test-internals"
+  ]
+}

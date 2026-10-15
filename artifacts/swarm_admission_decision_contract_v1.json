@@ -1,0 +1,662 @@
+{
+  "schema_version": "swarm-admission-decision-contract-v1",
+  "bead_id": "asupersync-vjc3pv.2",
+  "capability_id": "deterministic_swarm_admission_decision",
+  "artifact_path": "artifacts/swarm_admission_decision_contract_v1.json",
+  "contract_test": "tests/swarm_admission_decision_contract.rs",
+  "generated_at_utc": "2026-05-19T00:06:00Z",
+  "support_class": "artifact-contract-backed",
+  "side_effect_policy": {
+    "mode": "report_only",
+    "beads_mutation_allowed": false,
+    "agent_mail_mutation_allowed": false,
+    "filesystem_cleanup_allowed": false,
+    "cargo_execution_allowed": false,
+    "notes": "The admission decision contract is consumed by operators and future runtime code; it never authorizes cleanup, tracker mutation, branch creation, or local Cargo fallback by itself."
+  },
+  "required_input_classes": [
+    "capacity_snapshot",
+    "proof_lane_status",
+    "agent_mail_reservation_pressure",
+    "beads_backlog_state",
+    "host_pressure_snapshot",
+    "rch_admissibility"
+  ],
+  "allowed_pressure_sources": [
+    "agent_mail",
+    "beads",
+    "cgroup_v2",
+    "procfs",
+    "rch_receipt"
+  ],
+  "required_decision_outputs": [
+    "admit_full",
+    "brownout_degraded_optional",
+    "no_win",
+    "defer_tracker_blocked",
+    "fail_closed_stale_evidence",
+    "fail_closed_unsupported_host_data",
+    "fail_closed_malformed_input",
+    "fail_closed_local_rch_fallback"
+  ],
+  "decision_priority_order": [
+    "malformed_input",
+    "unsupported_pressure_source",
+    "local_rch_fallback",
+    "stale_evidence",
+    "tracker_blocked",
+    "remote_required_no_worker",
+    "brownout_pressure",
+    "admit_full"
+  ],
+  "decision_rules": [
+    {
+      "rule_id": "malformed-input",
+      "priority": 10,
+      "trigger": "input_status == malformed",
+      "decision": "fail_closed_malformed_input",
+      "required_issue_kind": "malformed_input",
+      "operator_action": "reject receipt and request a fresh complete snapshot"
+    },
+    {
+      "rule_id": "unsupported-pressure-source",
+      "priority": 20,
+      "trigger": "host_pressure_snapshot.pressure_source not in allowed_pressure_sources",
+      "decision": "fail_closed_unsupported_host_data",
+      "required_issue_kind": "unsupported_pressure_source",
+      "operator_action": "reject receipt and capture a supported pressure source"
+    },
+    {
+      "rule_id": "local-rch-fallback",
+      "priority": 30,
+      "trigger": "proof_lane_status.local_fallback_marker_detected == true",
+      "decision": "fail_closed_local_rch_fallback",
+      "required_issue_kind": "local_rch_fallback",
+      "operator_action": "discard as non-remote proof and rerun with RCH_REQUIRE_REMOTE=1"
+    },
+    {
+      "rule_id": "stale-evidence",
+      "priority": 40,
+      "trigger": "proof_lane_status.evidence_age_seconds > staleness_policy.max_source_age_seconds",
+      "decision": "fail_closed_stale_evidence",
+      "required_issue_kind": "stale_evidence",
+      "operator_action": "refresh capacity, proof, tracker, and pressure snapshots"
+    },
+    {
+      "rule_id": "tracker-blocked",
+      "priority": 50,
+      "trigger": "beads_backlog_state.tracker_writable == false || agent_mail_reservation_pressure.tracker_reserved == true",
+      "decision": "defer_tracker_blocked",
+      "required_issue_kind": "tracker_blocked",
+      "operator_action": "proceed source-only only when source reservations are clean, otherwise wait for tracker release"
+    },
+    {
+      "rule_id": "remote-required-no-worker",
+      "priority": 60,
+      "trigger": "rch_admissibility.remote_required == true && rch_admissibility.workers_admissible == false",
+      "decision": "no_win",
+      "required_issue_kind": "remote_worker_unavailable",
+      "required_receipt": "no_win_receipt",
+      "operator_action": "record no-win receipt without claiming validation success"
+    },
+    {
+      "rule_id": "brownout-pressure",
+      "priority": 70,
+      "trigger": "host_pressure_snapshot.disk_critical == true || host_pressure_snapshot.memory_pressure_bps >= 9000 || host_pressure_snapshot.cpu_saturation_bps >= 9000",
+      "decision": "brownout_degraded_optional",
+      "required_issue_kind": "brownout_pressure",
+      "required_receipt": "brownout_receipt",
+      "operator_action": "admit only critical work and shed optional proof/dashboard work"
+    },
+    {
+      "rule_id": "admit-full",
+      "priority": 80,
+      "trigger": "all required snapshots are fresh, supported, and below pressure thresholds",
+      "decision": "admit_full",
+      "required_issue_kind": "",
+      "operator_action": "claim the bead, reserve exact files, and run remote-required proof lanes"
+    }
+  ],
+  "staleness_policy": {
+    "timestamp_basis": "source_timestamp_utc to collected_timestamp_utc",
+    "max_source_age_seconds": 900,
+    "stale_decision": "fail_closed_stale_evidence"
+  },
+  "validation": {
+    "json_probe": "jq empty artifacts/swarm_admission_decision_contract_v1.json",
+    "format_check": "rustfmt --edition 2024 --check tests/swarm_admission_decision_contract.rs",
+    "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_boldtower_swarm_admission_contract CARGO_INCREMENTAL=0 cargo test -p asupersync --test swarm_admission_decision_contract -- --nocapture",
+    "local_fallback_policy": "Any local fallback marker in an rch receipt is a fail-closed decision and cannot count as validation evidence."
+  },
+  "forbidden_command_fragments": [
+    "git reset --hard",
+    "git clean -fd",
+    "rm -rf",
+    "git worktree add",
+    "git checkout -b",
+    "git switch -c",
+    "bare cargo test -p asupersync --test swarm_admission_decision_contract -- --nocapture"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "ASWARM-ADMISSION-ADMIT-FULL",
+      "description": "Fresh supported snapshots, writable tracker, low reservation pressure, and an admissible remote worker produce a full admit decision.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:00:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:05:00Z",
+        "evidence_age_seconds": 300,
+        "source_hash": "sha256:admit-full-capacity",
+        "host_cpu_count": 64,
+        "host_memory_gib": 256,
+        "active_agent_count": 12,
+        "target_agent_count": 24,
+        "ready_queue_depth": 18
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:00:30Z",
+        "collected_timestamp_utc": "2026-05-19T00:05:00Z",
+        "evidence_age_seconds": 270,
+        "source_hash": "sha256:admit-full-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "passed",
+        "retrieval_status": "available",
+        "first_blocker": ""
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:04:40Z",
+        "collected_timestamp_utc": "2026-05-19T00:05:00Z",
+        "evidence_age_seconds": 20,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 4,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:04:45Z",
+        "collected_timestamp_utc": "2026-05-19T00:05:00Z",
+        "evidence_age_seconds": 15,
+        "tracker_writable": true,
+        "ready_count": 3,
+        "in_progress_count": 1,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "cgroup_v2",
+        "source_timestamp_utc": "2026-05-19T00:04:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:05:00Z",
+        "evidence_age_seconds": 10,
+        "disk_critical": false,
+        "disk_free_bytes": 85899345920,
+        "memory_pressure_bps": 4200,
+        "cpu_saturation_bps": 5100
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": true,
+        "selected_worker": "ts2",
+        "local_fallback_refused": false
+      },
+      "expected_decision": {
+        "decision": "admit_full",
+        "rule_id": "admit-full",
+        "issue_kind": "",
+        "operator_action": "claim_and_validate_remote"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-BROWNOUT-DEGRADED-OPTIONAL",
+      "description": "Fresh supported snapshots with critical disk pressure shed optional dashboard/proof work while preserving source and tracker safety work.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:01:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:08:00Z",
+        "evidence_age_seconds": 420,
+        "source_hash": "sha256:brownout-capacity",
+        "host_cpu_count": 32,
+        "host_memory_gib": 128,
+        "active_agent_count": 18,
+        "target_agent_count": 36,
+        "ready_queue_depth": 44
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:01:30Z",
+        "collected_timestamp_utc": "2026-05-19T00:08:00Z",
+        "evidence_age_seconds": 390,
+        "source_hash": "sha256:brownout-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "blocked",
+        "retrieval_status": "disk_pressure_blocked",
+        "first_blocker": "artifact retrieval blocked by disk pressure"
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:07:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:08:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 14,
+        "ack_required_backlog": 1,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:07:45Z",
+        "collected_timestamp_utc": "2026-05-19T00:08:00Z",
+        "evidence_age_seconds": 15,
+        "tracker_writable": true,
+        "ready_count": 2,
+        "in_progress_count": 4,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "procfs",
+        "source_timestamp_utc": "2026-05-19T00:07:55Z",
+        "collected_timestamp_utc": "2026-05-19T00:08:00Z",
+        "evidence_age_seconds": 5,
+        "disk_critical": true,
+        "disk_free_bytes": 3221225472,
+        "memory_pressure_bps": 8100,
+        "cpu_saturation_bps": 7800
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": true,
+        "selected_worker": "ts2",
+        "local_fallback_refused": false
+      },
+      "brownout_receipt": {
+        "receipt_id": "brownout-disk-critical-001",
+        "degraded_optional_surfaces": [
+          "dashboard_refresh",
+          "artifact_retrieval",
+          "wide_clippy_lane"
+        ],
+        "preserved_surfaces": [
+          "source_patch",
+          "tracker_closeout",
+          "remote_required_unit_proof"
+        ],
+        "recovery_condition": "disk_free_bytes_above_20_gib_and_no_local_fallback_markers"
+      },
+      "expected_decision": {
+        "decision": "brownout_degraded_optional",
+        "rule_id": "brownout-pressure",
+        "issue_kind": "brownout_pressure",
+        "operator_action": "shed_optional_and_continue_bounded_source_work"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-NO-WIN-REMOTE-UNAVAILABLE",
+      "description": "Remote proof is required and no worker is admissible, so the operator records a no-win receipt instead of treating local fallback as evidence.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:10:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:12:00Z",
+        "evidence_age_seconds": 120,
+        "source_hash": "sha256:no-win-capacity",
+        "host_cpu_count": 16,
+        "host_memory_gib": 64,
+        "active_agent_count": 20,
+        "target_agent_count": 40,
+        "ready_queue_depth": 61
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:10:20Z",
+        "collected_timestamp_utc": "2026-05-19T00:12:00Z",
+        "evidence_age_seconds": 100,
+        "source_hash": "sha256:no-win-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "not_run",
+        "retrieval_status": "not_applicable",
+        "first_blocker": "no admissible remote workers"
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:11:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:12:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 9,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:11:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:12:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_writable": true,
+        "ready_count": 1,
+        "in_progress_count": 3,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "rch_receipt",
+        "source_timestamp_utc": "2026-05-19T00:11:58Z",
+        "collected_timestamp_utc": "2026-05-19T00:12:00Z",
+        "evidence_age_seconds": 2,
+        "disk_critical": false,
+        "disk_free_bytes": 34359738368,
+        "memory_pressure_bps": 6300,
+        "cpu_saturation_bps": 6400
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": false,
+        "selected_worker": "",
+        "local_fallback_refused": true
+      },
+      "no_win_receipt": {
+        "receipt_id": "no-win-rch-unavailable-001",
+        "reason": "remote_required_but_no_admissible_workers",
+        "first_blocker": "critical_pressure=5,hard_preflight=1,active_project_exclusion=1",
+        "local_fallback_refused": true,
+        "operator_next_action": "do_not_claim_remote_validation"
+      },
+      "expected_decision": {
+        "decision": "no_win",
+        "rule_id": "remote-required-no-worker",
+        "issue_kind": "remote_worker_unavailable",
+        "operator_action": "record_no_win_without_validation_claim"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-DEFER-TRACKER-BLOCKED",
+      "description": "Tracker mutation is blocked by an active reservation, so the decision defers tracker work while allowing explicitly source-only work elsewhere.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:12:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:15:00Z",
+        "evidence_age_seconds": 180,
+        "source_hash": "sha256:tracker-blocked-capacity",
+        "host_cpu_count": 32,
+        "host_memory_gib": 128,
+        "active_agent_count": 16,
+        "target_agent_count": 32,
+        "ready_queue_depth": 20
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:12:10Z",
+        "collected_timestamp_utc": "2026-05-19T00:15:00Z",
+        "evidence_age_seconds": 170,
+        "source_hash": "sha256:tracker-blocked-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "passed",
+        "retrieval_status": "available",
+        "first_blocker": ""
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:14:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:15:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": true,
+        "active_exclusive_reservations": 11,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:14:45Z",
+        "collected_timestamp_utc": "2026-05-19T00:15:00Z",
+        "evidence_age_seconds": 15,
+        "tracker_writable": false,
+        "ready_count": 4,
+        "in_progress_count": 2,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "agent_mail",
+        "source_timestamp_utc": "2026-05-19T00:14:55Z",
+        "collected_timestamp_utc": "2026-05-19T00:15:00Z",
+        "evidence_age_seconds": 5,
+        "disk_critical": false,
+        "disk_free_bytes": 42949672960,
+        "memory_pressure_bps": 5400,
+        "cpu_saturation_bps": 6600
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": true,
+        "selected_worker": "ts2",
+        "local_fallback_refused": false
+      },
+      "expected_decision": {
+        "decision": "defer_tracker_blocked",
+        "rule_id": "tracker-blocked",
+        "issue_kind": "tracker_blocked",
+        "operator_action": "avoid_tracker_mutation"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-FAIL-STALE-EVIDENCE",
+      "description": "Stale proof evidence fails closed before otherwise safe admission can proceed.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:00:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:30:00Z",
+        "evidence_age_seconds": 1800,
+        "source_hash": "sha256:stale-capacity",
+        "host_cpu_count": 32,
+        "host_memory_gib": 128,
+        "active_agent_count": 8,
+        "target_agent_count": 24,
+        "ready_queue_depth": 8
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:00:10Z",
+        "collected_timestamp_utc": "2026-05-19T00:30:00Z",
+        "evidence_age_seconds": 1790,
+        "source_hash": "sha256:stale-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "passed",
+        "retrieval_status": "available",
+        "first_blocker": ""
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:29:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:30:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 2,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:29:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:30:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_writable": true,
+        "ready_count": 1,
+        "in_progress_count": 0,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "cgroup_v2",
+        "source_timestamp_utc": "2026-05-19T00:29:55Z",
+        "collected_timestamp_utc": "2026-05-19T00:30:00Z",
+        "evidence_age_seconds": 5,
+        "disk_critical": false,
+        "disk_free_bytes": 68719476736,
+        "memory_pressure_bps": 4800,
+        "cpu_saturation_bps": 5100
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": true,
+        "selected_worker": "ts2",
+        "local_fallback_refused": false
+      },
+      "expected_decision": {
+        "decision": "fail_closed_stale_evidence",
+        "rule_id": "stale-evidence",
+        "issue_kind": "stale_evidence",
+        "operator_action": "refresh_snapshots"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-FAIL-UNSUPPORTED-HOST-DATA",
+      "description": "Unsupported pressure source fails closed before pressure thresholds are interpreted.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:20:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:21:00Z",
+        "evidence_age_seconds": 60,
+        "source_hash": "sha256:unsupported-capacity",
+        "host_cpu_count": 8,
+        "host_memory_gib": 32,
+        "active_agent_count": 8,
+        "target_agent_count": 12,
+        "ready_queue_depth": 10
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:20:20Z",
+        "collected_timestamp_utc": "2026-05-19T00:21:00Z",
+        "evidence_age_seconds": 40,
+        "source_hash": "sha256:unsupported-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": false,
+        "latest_status": "passed",
+        "retrieval_status": "available",
+        "first_blocker": ""
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:20:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:21:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 3,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:20:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:21:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_writable": true,
+        "ready_count": 1,
+        "in_progress_count": 0,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "freeform_shell_probe",
+        "source_timestamp_utc": "2026-05-19T00:20:55Z",
+        "collected_timestamp_utc": "2026-05-19T00:21:00Z",
+        "evidence_age_seconds": 5,
+        "disk_critical": false,
+        "disk_free_bytes": 68719476736,
+        "memory_pressure_bps": 4800,
+        "cpu_saturation_bps": 5100
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": true,
+        "selected_worker": "ts2",
+        "local_fallback_refused": false
+      },
+      "expected_decision": {
+        "decision": "fail_closed_unsupported_host_data",
+        "rule_id": "unsupported-pressure-source",
+        "issue_kind": "unsupported_pressure_source",
+        "operator_action": "capture_supported_pressure_source"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-FAIL-MALFORMED-INPUT",
+      "description": "Malformed input fails closed before any pressure or tracker state can be interpreted.",
+      "input_status": "malformed",
+      "malformed_fields": [
+        "capacity_snapshot.host_cpu_count",
+        "proof_lane_status.source_hash",
+        "beads_backlog_state.ready_count"
+      ],
+      "expected_decision": {
+        "decision": "fail_closed_malformed_input",
+        "rule_id": "malformed-input",
+        "issue_kind": "malformed_input",
+        "operator_action": "reject_and_request_complete_snapshot"
+      }
+    },
+    {
+      "scenario_id": "ASWARM-ADMISSION-FAIL-LOCAL-RCH-FALLBACK",
+      "description": "Any local rch fallback marker fails closed even when the command otherwise exits successfully.",
+      "input_status": "complete",
+      "capacity_snapshot": {
+        "source": "agent_swarm_capacity_envelope",
+        "source_timestamp_utc": "2026-05-19T00:24:00Z",
+        "collected_timestamp_utc": "2026-05-19T00:25:00Z",
+        "evidence_age_seconds": 60,
+        "source_hash": "sha256:local-fallback-capacity",
+        "host_cpu_count": 32,
+        "host_memory_gib": 128,
+        "active_agent_count": 10,
+        "target_agent_count": 20,
+        "ready_queue_depth": 14
+      },
+      "proof_lane_status": {
+        "lane_id": "swarm-admission-contract",
+        "source_timestamp_utc": "2026-05-19T00:24:20Z",
+        "collected_timestamp_utc": "2026-05-19T00:25:00Z",
+        "evidence_age_seconds": 40,
+        "source_hash": "sha256:local-fallback-proof",
+        "remote_required": true,
+        "local_fallback_marker_detected": true,
+        "latest_status": "passed",
+        "retrieval_status": "available",
+        "first_blocker": "[RCH] local (no admissible workers)"
+      },
+      "agent_mail_reservation_pressure": {
+        "source_timestamp_utc": "2026-05-19T00:24:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:25:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_reserved": false,
+        "active_exclusive_reservations": 4,
+        "ack_required_backlog": 0,
+        "stale_reservation_count": 0
+      },
+      "beads_backlog_state": {
+        "source_timestamp_utc": "2026-05-19T00:24:50Z",
+        "collected_timestamp_utc": "2026-05-19T00:25:00Z",
+        "evidence_age_seconds": 10,
+        "tracker_writable": true,
+        "ready_count": 2,
+        "in_progress_count": 0,
+        "stale_in_progress_count": 0
+      },
+      "host_pressure_snapshot": {
+        "pressure_source": "rch_receipt",
+        "source_timestamp_utc": "2026-05-19T00:24:55Z",
+        "collected_timestamp_utc": "2026-05-19T00:25:00Z",
+        "evidence_age_seconds": 5,
+        "disk_critical": false,
+        "disk_free_bytes": 68719476736,
+        "memory_pressure_bps": 4800,
+        "cpu_saturation_bps": 5100
+      },
+      "rch_admissibility": {
+        "remote_required": true,
+        "workers_admissible": false,
+        "selected_worker": "",
+        "local_fallback_refused": false
+      },
+      "expected_decision": {
+        "decision": "fail_closed_local_rch_fallback",
+        "rule_id": "local-rch-fallback",
+        "issue_kind": "local_rch_fallback",
+        "operator_action": "discard_local_fallback_receipt"
+      }
+    }
+  ]
+}

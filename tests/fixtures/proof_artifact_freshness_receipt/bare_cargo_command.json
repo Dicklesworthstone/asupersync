@@ -1,0 +1,23 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/bare-cargo-command.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:15:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

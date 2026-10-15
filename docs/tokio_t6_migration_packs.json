@@ -1,0 +1,234 @@
+{
+  "schema_version": "1.0.0",
+  "document_id": "tokio_t6_migration_packs",
+  "bead_id": "asupersync-2oh2u.6.11",
+  "track": "T6",
+  "title": "Migration Packs: Database and Messaging (Tokio Ecosystem to Asupersync)",
+  "migration_packs": [
+    {
+      "id": "MP-PG-01",
+      "source_crate": "tokio-postgres",
+      "target_module": "asupersync::database::postgres",
+      "feature_gate": "postgres",
+      "categories": ["connection", "query", "transaction", "error_classification", "custom_types"],
+      "api_mappings": 12,
+      "caveats": ["no_background_connection_task", "tosql_signature_differs", "typed_row_accessors"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-PG-02",
+      "source_crate": "sqlx (postgres)",
+      "target_module": "asupersync::database::postgres + pool",
+      "feature_gate": "postgres",
+      "categories": ["pool", "query", "derive_replacement", "compile_time_checks"],
+      "api_mappings": 8,
+      "caveats": ["no_derive_from_row", "no_compile_time_query_checking", "sync_pool"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-MY-01",
+      "source_crate": "mysql_async",
+      "target_module": "asupersync::database::mysql",
+      "feature_gate": "mysql",
+      "categories": ["connection", "query", "transaction", "error_classification"],
+      "api_mappings": 8,
+      "caveats": ["text_protocol_default", "no_tuple_param_binding"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-MY-02",
+      "source_crate": "sqlx (mysql)",
+      "target_module": "asupersync::database::mysql + pool",
+      "feature_gate": "mysql",
+      "categories": ["pool", "query"],
+      "api_mappings": 4,
+      "caveats": ["same_as_pg_pool_caveats"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-SQ-01",
+      "source_crate": "sqlx (sqlite)",
+      "target_module": "asupersync::database::sqlite",
+      "feature_gate": "sqlite",
+      "categories": ["connection", "query", "transaction", "batch_execution"],
+      "api_mappings": 8,
+      "caveats": ["blocking_pool_internal", "wal_mode_default", "positional_params"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-SQ-02",
+      "source_crate": "rusqlite",
+      "target_module": "asupersync::database::sqlite",
+      "feature_gate": "sqlite",
+      "categories": ["connection", "query", "transaction"],
+      "api_mappings": 6,
+      "caveats": ["async_wrapper_over_blocking", "string_params"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-RD-01",
+      "source_crate": "redis",
+      "target_module": "asupersync::messaging::redis",
+      "feature_gate": null,
+      "categories": ["connection", "commands", "response_handling", "error_classification"],
+      "api_mappings": 6,
+      "caveats": ["generic_cmd_interface", "manual_resp_parsing", "internal_pooling"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-NT-01",
+      "source_crate": "async-nats",
+      "target_module": "asupersync::messaging::nats",
+      "feature_gate": null,
+      "categories": ["connection", "publish", "request_reply", "subscribe"],
+      "api_mappings": 5,
+      "caveats": ["mut_self_required", "subscribe_requires_process_driver"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-JS-01",
+      "source_crate": "async-nats (jetstream)",
+      "target_module": "asupersync::messaging::jetstream",
+      "feature_gate": null,
+      "categories": ["context", "streams", "consumers", "publish", "error_classification"],
+      "api_mappings": 8,
+      "caveats": ["single_await_publish", "publish_with_id_requires_headers"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-KF-01",
+      "source_crate": "rdkafka",
+      "target_module": "asupersync::messaging::kafka",
+      "feature_gate": "kafka",
+      "categories": ["producer", "consumer", "transactional", "config"],
+      "api_mappings": 8,
+      "caveats": ["feature_gated_broker_io", "async_send", "raii_transaction_guard"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-POOL-01",
+      "source_crate": "sqlx/deadpool/bb8",
+      "target_module": "asupersync::database::pool",
+      "feature_gate": null,
+      "categories": ["pool_config", "lifecycle", "stats", "retry"],
+      "api_mappings": 10,
+      "caveats": ["sync_mutex_pool", "generic_connection_manager"],
+      "status": "complete"
+    },
+    {
+      "id": "MP-RETRY-01",
+      "source_crate": "manual retry loops",
+      "target_module": "asupersync::combinator::retry",
+      "feature_gate": null,
+      "categories": ["retry_policy", "exponential_backoff", "transaction_retry"],
+      "api_mappings": 4,
+      "caveats": [],
+      "status": "complete"
+    }
+  ],
+  "cross_cutting_concerns": {
+    "cancellation": {
+      "tokio_pattern": "CancellationToken / select!",
+      "asupersync_pattern": "&Cx parameter on all async operations",
+      "migration_note": "Replace token checks with Cx-aware operations"
+    },
+    "error_classification": {
+      "tokio_pattern": "Crate-specific error types with manual matching",
+      "asupersync_pattern": "Unified is_transient() / is_retryable() / is_connection_error()",
+      "migration_note": "Replace error code matching with classification methods"
+    },
+    "connection_pooling": {
+      "tokio_pattern": "Async pools (sqlx, deadpool, bb8)",
+      "asupersync_pattern": "Synchronous DbPool<M: ConnectionManager>",
+      "migration_note": "Implement ConnectionManager trait, use sync pool"
+    }
+  },
+  "operational_caveats": [
+    {
+      "id": "CAV-01",
+      "title": "Synchronous pool blocking",
+      "severity": "medium",
+      "description": "DbPool::get() blocks the calling thread. `try_get()` gives immediate capacity feedback but may still validate or create connections synchronously.",
+      "workaround": "Use try_get() when you need an immediate capacity signal, or get_with_retry() for fault-tolerant acquisition"
+    },
+    {
+      "id": "CAV-02",
+      "title": "Kafka feature-gated broker I/O",
+      "severity": "high",
+      "description": "KafkaProducer, KafkaConsumer, and TransactionalProducer require the `kafka` feature for real broker I/O; production builds without it return FeatureDisabled for broker operations.",
+      "workaround": "Build with `--features kafka` for real Kafka deployments"
+    },
+    {
+      "id": "CAV-03",
+      "title": "NATS subscription driver",
+      "severity": "medium",
+      "description": "NatsClient::subscribe() is implemented, but the owning client must continue calling process(&cx) to parse and dispatch messages.",
+      "workaround": "Drive process(&cx) in the owner task, or put the client behind a Mutex when sharing ownership"
+    },
+    {
+      "id": "CAV-04",
+      "title": "No derive(FromRow)",
+      "severity": "low",
+      "description": "No compile-time row mapping macros",
+      "workaround": "Implement manual from_row() functions"
+    },
+    {
+      "id": "CAV-05",
+      "title": "NatsClient requires &mut self",
+      "severity": "medium",
+      "description": "Cannot share NatsClient across tasks without Mutex",
+      "workaround": "Create multiple client instances or use Mutex wrapper"
+    }
+  ],
+  "rollback_paths": {
+    "compatibility_crate": "asupersync-tokio-compat",
+    "dual_stack_testing": "Feature-gated test modules",
+    "rollback_steps": [
+      "Revert Cargo.toml dependencies",
+      "Revert import paths",
+      "Remove &cx parameters",
+      "Restore original pool configuration",
+      "Restore original row access patterns"
+    ]
+  },
+  "evidence_links": {
+    "e2e_tests": "tests/e2e_t6_data_path.rs",
+    "unit_tests": "T6.12 (closed)",
+    "integration_tests": "T6.10 (closed)",
+    "postgres_source": "src/database/postgres.rs",
+    "mysql_source": "src/database/mysql.rs",
+    "sqlite_source": "src/database/sqlite.rs",
+    "pool_source": "src/database/pool.rs",
+    "transaction_source": "src/database/transaction.rs",
+    "redis_source": "src/messaging/redis.rs",
+    "nats_source": "src/messaging/nats.rs",
+    "jetstream_source": "src/messaging/jetstream.rs",
+    "kafka_source": "src/messaging/kafka.rs"
+  },
+  "summary": {
+    "total_migration_packs": 12,
+    "source_crates_covered": [
+      "tokio-postgres",
+      "sqlx (postgres, mysql, sqlite)",
+      "mysql_async",
+      "rusqlite",
+      "redis",
+      "async-nats",
+      "async-nats (jetstream)",
+      "rdkafka"
+    ],
+    "total_api_mappings": 87,
+    "total_caveats": 5,
+    "rollback_supported": true
+  },
+  "dependencies": {
+    "blocked_by": [
+      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit-test matrix", "status": "closed"},
+      {"bead": "asupersync-2oh2u.6.10", "reason": "Integration/fault-injection suites", "status": "closed"}
+    ],
+    "blocks": [
+      {"bead": "asupersync-2oh2u.11.2", "reason": "Domain-specific migration cookbooks"},
+      {"bead": "asupersync-2oh2u.10.9", "reason": "Replacement-readiness gate aggregator"}
+    ]
+  }
+}

@@ -1,0 +1,17 @@
+---
+source: tests/golden_doctor_health_report.rs
+expression: report
+---
+{
+  "root": "/test/workspace",
+  "workspace_manifest": "/test/workspace/Cargo.toml",
+  "scanner_version": "1.0.0",
+  "taxonomy_version": "2023.1",
+  "members": [],
+  "capability_edges": [],
+  "warnings": [
+    "Mock warning for snapshot",
+    "Another test warning"
+  ],
+  "events": []
+}

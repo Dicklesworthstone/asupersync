@@ -1,0 +1,279 @@
+{
+  "contract_version": "mock-code-finder-verification-contract-v1",
+  "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+  "bead_id": "asupersync-qlvtin",
+  "artifact_root": "artifacts/mock-code-finder",
+  "record_layout": {
+    "format": "jsonl",
+    "one_record_per_scenario": true,
+    "required_fields": [
+      "schema_version",
+      "bead_id",
+      "scenario_id",
+      "subsystem",
+      "support_class",
+      "source_files_inspected",
+      "command",
+      "rch_command_if_used",
+      "cargo_features",
+      "test_filter",
+      "env_keys_required",
+      "deterministic_seed_or_fixture_id",
+      "input_artifact",
+      "output_artifact",
+      "expected_behavior",
+      "actual_behavior",
+      "verdict",
+      "first_failure_line",
+      "duration_ms",
+      "git_sha_or_tree_state",
+      "blocker_bead_id",
+      "evidence_quality"
+    ],
+    "summary_file_suffix": ".summary.json",
+    "scenario_file_suffix": ".jsonl"
+  },
+  "allowed_values": {
+    "support_class": [
+      "production_live",
+      "wire_level",
+      "fixture_reference",
+      "explicitly_unsupported",
+      "blocked_external",
+      "audit_only"
+    ],
+    "verdict": [
+      "pass",
+      "fail",
+      "blocked",
+      "unsupported",
+      "expected_fail",
+      "fixture_only"
+    ],
+    "evidence_quality": [
+      "live",
+      "fixture_only",
+      "unsupported",
+      "expected_fail",
+      "blocked"
+    ]
+  },
+  "verdict_evidence_quality": {
+    "pass": [
+      "live"
+    ],
+    "fail": [
+      "live"
+    ],
+    "blocked": [
+      "blocked"
+    ],
+    "unsupported": [
+      "unsupported"
+    ],
+    "expected_fail": [
+      "expected_fail"
+    ],
+    "fixture_only": [
+      "fixture_only"
+    ]
+  },
+  "artifact_naming": {
+    "scenario_jsonl": "artifacts/mock-code-finder/<bead_id>/<scenario_group>.jsonl",
+    "summary_json": "artifacts/mock-code-finder/<bead_id>/<scenario_group>.summary.json",
+    "input_artifact": "Use a repo-relative path or an empty string when the scenario has no separate input artifact.",
+    "output_artifact": "Use a repo-relative path under artifact_root or an empty string when the command itself is the proof."
+  },
+  "redaction": {
+    "env_keys_required_are_names_only": true,
+    "forbid_secret_values": true,
+    "accepted_secret_placeholder": "<redacted>",
+    "forbidden_secret_markers": [
+      "password=",
+      "passwd=",
+      "token=",
+      "secret=",
+      "api_key=",
+      "apikey=",
+      "authorization:",
+      "database_url=",
+      "postgres_url="
+    ]
+  },
+  "acceptance_rules": [
+    "Every evidence JSONL file must contain at least one nonblank scenario record.",
+    "Each scenario record must include every required field and must set schema_version to mock-code-finder-evidence-jsonl-schema-v1.",
+    "A pass or fail verdict must use live evidence_quality and cannot be backed only by audit_only or fixture_reference support.",
+    "blocked verdicts must include a blocker_bead_id.",
+    "unsupported, expected_fail, and fixture_only records must not be counted as production conformance passes.",
+    "env_keys_required must list environment variable names only; values and secrets must be redacted before artifact capture."
+  ],
+  "sample_records": [
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "production-no-mock-policy-live-pass",
+      "subsystem": "mock-code-finder",
+      "support_class": "production_live",
+      "source_files_inspected": [
+        "scripts/check_no_mock_policy.py",
+        ".github/no_mock_policy.json"
+      ],
+      "command": "python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json --report artifacts/mock-code-finder/asupersync-qlvtin/no-mock-policy.summary.json",
+      "rch_command_if_used": "",
+      "cargo_features": [],
+      "test_filter": "no-mock-policy",
+      "env_keys_required": [
+        "STUB_SCAN_ARTIFACT_ROOT"
+      ],
+      "deterministic_seed_or_fixture_id": "policy-defaults-v1",
+      "input_artifact": ".github/no_mock_policy.json",
+      "output_artifact": "artifacts/mock-code-finder/asupersync-qlvtin/no-mock-policy.summary.json",
+      "expected_behavior": "The policy scanner reports no undocumented production mock or placeholder surfaces.",
+      "actual_behavior": "The scanner completed with exit status 0 and wrote a categorized summary artifact.",
+      "verdict": "pass",
+      "first_failure_line": "",
+      "duration_ms": 120,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "",
+      "evidence_quality": "live"
+    },
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "production-no-mock-policy-live-fail",
+      "subsystem": "mock-code-finder",
+      "support_class": "production_live",
+      "source_files_inspected": [
+        "src/runtime/scheduler/priority.rs"
+      ],
+      "command": "python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json --path src/runtime/scheduler/priority.rs",
+      "rch_command_if_used": "",
+      "cargo_features": [],
+      "test_filter": "priority-scheduler-scan",
+      "env_keys_required": [],
+      "deterministic_seed_or_fixture_id": "priority-scheduler-current-tree",
+      "input_artifact": "",
+      "output_artifact": "",
+      "expected_behavior": "The scanner rejects undocumented placeholder behavior in production scheduler code.",
+      "actual_behavior": "The scanner found an undocumented placeholder marker.",
+      "verdict": "fail",
+      "first_failure_line": "src/runtime/scheduler/priority.rs:17",
+      "duration_ms": 91,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "",
+      "evidence_quality": "live"
+    },
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "wire-level-postgres-proof-blocked",
+      "subsystem": "database-postgres",
+      "support_class": "blocked_external",
+      "source_files_inspected": [
+        "src/database/postgres.rs"
+      ],
+      "command": "cargo test -p asupersync --lib postgres_wire_protocol --features postgres,test-internals -- --nocapture",
+      "rch_command_if_used": "rch exec -- env CARGO_INCREMENTAL=0 cargo test -p asupersync --lib postgres_wire_protocol --features postgres,test-internals -- --nocapture",
+      "cargo_features": [
+        "postgres",
+        "test-internals"
+      ],
+      "test_filter": "postgres_wire_protocol",
+      "env_keys_required": [
+        "ASUPERSYNC_POSTGRES_TEST_URL"
+      ],
+      "deterministic_seed_or_fixture_id": "postgres-wire-current-tree",
+      "input_artifact": "",
+      "output_artifact": "",
+      "expected_behavior": "The live wire-protocol proof runs through rch without relying on local service state.",
+      "actual_behavior": "Compilation stopped in unrelated transaction code before this scenario could execute.",
+      "verdict": "blocked",
+      "first_failure_line": "src/database/transaction.rs:313",
+      "duration_ms": 8420,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "asupersync-dbtxn-blocker",
+      "evidence_quality": "blocked"
+    },
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "external-cloud-service-unsupported",
+      "subsystem": "cloud-provider",
+      "support_class": "explicitly_unsupported",
+      "source_files_inspected": [
+        "docs/cloud_provider_boundaries.md"
+      ],
+      "command": "python3 scripts/validate_mock_code_finder_evidence.py --contract artifacts/mock_code_finder_verification_contract_v1.json --jsonl artifacts/mock-code-finder/asupersync-qlvtin/cloud-provider.jsonl",
+      "rch_command_if_used": "",
+      "cargo_features": [],
+      "test_filter": "cloud-provider-boundary",
+      "env_keys_required": [
+        "CLOUD_PROVIDER_API_TOKEN"
+      ],
+      "deterministic_seed_or_fixture_id": "unsupported-cloud-api-v1",
+      "input_artifact": "docs/cloud_provider_boundaries.md",
+      "output_artifact": "artifacts/mock-code-finder/asupersync-qlvtin/cloud-provider.summary.json",
+      "expected_behavior": "The scanner records the unsupported boundary without treating it as a production pass.",
+      "actual_behavior": "The scenario is explicitly unsupported because the repo has no live cloud provider adapter for this boundary.",
+      "verdict": "unsupported",
+      "first_failure_line": "",
+      "duration_ms": 14,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "",
+      "evidence_quality": "unsupported"
+    },
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "known-policy-debt-expected-fail",
+      "subsystem": "mock-code-finder",
+      "support_class": "production_live",
+      "source_files_inspected": [
+        "scripts/check_no_mock_policy.py"
+      ],
+      "command": "python3 scripts/check_no_mock_policy.py --self-test-negative-fixture",
+      "rch_command_if_used": "",
+      "cargo_features": [],
+      "test_filter": "negative-fixture",
+      "env_keys_required": [],
+      "deterministic_seed_or_fixture_id": "negative-fixture-v1",
+      "input_artifact": "scripts/check_no_mock_policy.py",
+      "output_artifact": "",
+      "expected_behavior": "The negative fixture remains rejected until the linked policy debt is closed.",
+      "actual_behavior": "The scanner rejected the negative fixture as expected.",
+      "verdict": "expected_fail",
+      "first_failure_line": "negative_fixture.py:3",
+      "duration_ms": 33,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "asupersync-a45",
+      "evidence_quality": "expected_fail"
+    },
+    {
+      "schema_version": "mock-code-finder-evidence-jsonl-schema-v1",
+      "bead_id": "asupersync-qlvtin",
+      "scenario_id": "raptorq-fixture-reference-only",
+      "subsystem": "raptorq",
+      "support_class": "fixture_reference",
+      "source_files_inspected": [
+        "conformance/src/rfc6330_tests.rs"
+      ],
+      "command": "python3 scripts/validate_mock_code_finder_evidence.py --self-test",
+      "rch_command_if_used": "",
+      "cargo_features": [],
+      "test_filter": "fixture-contract-self-test",
+      "env_keys_required": [],
+      "deterministic_seed_or_fixture_id": "rfc6330-fixture-v1",
+      "input_artifact": "conformance/src/rfc6330_tests.rs",
+      "output_artifact": "",
+      "expected_behavior": "Fixture-only records are preserved for audit context but never counted as live conformance.",
+      "actual_behavior": "The validator accepted the fixture-only classification and kept it separate from live pass counts.",
+      "verdict": "fixture_only",
+      "first_failure_line": "",
+      "duration_ms": 8,
+      "git_sha_or_tree_state": "main@9e4f0cfa5-plus-working-tree",
+      "blocker_bead_id": "",
+      "evidence_quality": "fixture_only"
+    }
+  ]
+}

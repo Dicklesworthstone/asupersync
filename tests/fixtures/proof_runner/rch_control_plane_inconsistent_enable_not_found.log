@@ -1,0 +1,23 @@
+$ rch workers list --json
+{
+  "workers": [
+    {
+      "name": "vmi1153651",
+      "status": "healthy",
+      "slots": 32
+    }
+  ]
+}
+
+$ rch workers probe vmi1153651 --json
+{
+  "worker": "vmi1153651",
+  "reachable": true,
+  "status": "healthy"
+}
+
+$ rch workers enable vmi1153651
+Error: worker control-plane action failed
+
+Caused by:
+  Worker not found: vmi1153651

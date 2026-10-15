@@ -1,0 +1,10 @@
+---
+source: tests/codec_wire_frame_goldens.rs
+expression: "(\n            \"result_is_some\",\n            result.is_some(),\n            \"remaining_bytes\",\n            buf.len()\n        )"
+---
+(
+    "result_is_some",
+    false,
+    "remaining_bytes",
+    0,
+)

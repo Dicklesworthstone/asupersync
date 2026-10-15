@@ -1,0 +1,2 @@
+HEAD /status HTTP/1.0
+Host: legacy.example.com

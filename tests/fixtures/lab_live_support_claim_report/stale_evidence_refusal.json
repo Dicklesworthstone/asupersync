@@ -1,0 +1,27 @@
+{
+  "schema_version": "lab-live-support-claim-fixture-v1",
+  "fixture_id": "lab-live-support-claim.stale-evidence-refusal",
+  "row_id": "stale-evidence-refusal",
+  "claim_scope": "captured_filesystem",
+  "previous_support_class": "unsupported",
+  "evidence_status": "stale",
+  "live_verdict": "pass",
+  "claim_strengthening_allowed": false,
+  "support_action": "refuse_strengthening",
+  "expected_report_verdict": "stale_evidence_refused",
+  "freshness": {
+    "max_age_days": 14,
+    "evidence_age_days": 31,
+    "rch_job": "historical-only",
+    "worker": "unknown"
+  },
+  "artifact_bundle": {
+    "report": "artifacts/lab_live_support_claim_report_v1.json",
+    "source": "artifacts/lab_live_v2_filesystem_runner_v1.json"
+  },
+  "no_claims": [
+    "stale evidence cannot strengthen support claims",
+    "stale evidence is not a fresh RCH pass",
+    "does not prove broad workspace health"
+  ]
+}

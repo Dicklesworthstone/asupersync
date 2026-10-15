@@ -1,0 +1,202 @@
+{
+  "contract_version": "metamorphic-api-drift-ownership-contract-v1",
+  "bead_id": "asupersync-9u057b.10",
+  "parent_bead_id": "asupersync-9u057b",
+  "umbrella_bead_id": "asupersync-9u057b.8",
+  "description": "Executable ownership contract for modernizing stale metamorphic API-drift suites one file group at a time.",
+  "source_of_truth": {
+    "artifact": "artifacts/metamorphic_api_drift_ownership_contract_v1.json",
+    "contract_test": "tests/metamorphic_api_drift_ownership_contract.rs",
+    "umbrella_bead": "asupersync-9u057b.8"
+  },
+  "claim_protocol": {
+    "claim_one_surface_at_a_time": true,
+    "reserve_exact_paths_before_edit": true,
+    "do_not_claim_peer_owned_parent": true,
+    "close_child_sub_batches_separately": true,
+    "cargo_proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_p7 cargo test -p asupersync --test metamorphic_api_drift_ownership_contract -- --nocapture"
+  },
+  "required_failure_pattern_ids": [
+    "prop_assert_moved_value",
+    "strategy_scalar_misuse",
+    "private_module_import",
+    "stale_id_accessor_or_kind_projection",
+    "snapshot_projection_drift"
+  ],
+  "failure_patterns": [
+    {
+      "pattern_id": "prop_assert_moved_value",
+      "description": "Proptest diagnostics can move owned fields before later assertions or borrows.",
+      "modernization_rule": "Pin Copy fields to locals and clone owned strings before prop_assert_eq or assert_eq diagnostics consume them.",
+      "forbidden_markers": [
+        "prop_assert_eq!(config.thread_name_prefix, config_from_env.thread_name_prefix",
+        "prop_assert_eq!(single_decoded.method, folded_decoded.method"
+      ],
+      "allowed_markers": [
+        "let config_thread_name_prefix = config.thread_name_prefix.clone();",
+        "prop_assert_eq!(config_thread_name_prefix, config_from_env.thread_name_prefix"
+      ],
+      "rejected_example": "prop_assert_eq!(config.thread_name_prefix, config_from_env.thread_name_prefix, \"round-trip failed\");",
+      "allowed_example": "let config_thread_name_prefix = config.thread_name_prefix.clone();\nprop_assert_eq!(config_thread_name_prefix, config_from_env.thread_name_prefix, \"round-trip failed\");"
+    },
+    {
+      "pattern_id": "strategy_scalar_misuse",
+      "description": "Proptest helpers sometimes drift from strategies to scalar values in prop_oneof or collection strategy slots.",
+      "modernization_rule": "Keep arbitrary helpers returning impl Strategy or BoxedStrategy, and wrap fixed values with Just(value).",
+      "forbidden_markers": [
+        "prop_oneof![JitterStrategy::None",
+        "vec(0usize, 1..=10)"
+      ],
+      "allowed_markers": [
+        "Just(JitterStrategy::None)",
+        "impl Strategy<Value ="
+      ],
+      "rejected_example": "prop_oneof![JitterStrategy::None, JitterStrategy::Full]",
+      "allowed_example": "fn arb_jitter_strategy() -> impl Strategy<Value = JitterStrategy> {\n    prop_oneof![Just(JitterStrategy::None), Just(JitterStrategy::Full)]\n}"
+    },
+    {
+      "pattern_id": "private_module_import",
+      "description": "Integration suites can bit-rot by importing private implementation modules instead of public exports.",
+      "modernization_rule": "Use crate public exports or move the assertion next to the implementation as an inline cfg(test) module.",
+      "forbidden_markers": [
+        "use asupersync::runtime::scheduler::intrusive::",
+        "use asupersync::http::h2::internal::"
+      ],
+      "allowed_markers": [
+        "use asupersync::",
+        "cfg(test)"
+      ],
+      "rejected_example": "use asupersync::runtime::scheduler::intrusive::TaskLinks;",
+      "allowed_example": "#[cfg(test)]\nmod tests {\n    use asupersync::runtime::TaskId;\n}"
+    },
+    {
+      "pattern_id": "stale_id_accessor_or_kind_projection",
+      "description": "Typed IDs and proof kinds drift when tests compare implementation projections directly.",
+      "modernization_rule": "Compare stable public projections and pin proof-kind values before diagnostic assertions.",
+      "forbidden_markers": [
+        "proof1.kind(), proof2.kind()",
+        ".raw_id"
+      ],
+      "allowed_markers": [
+        "let proof1_kind = proof1.kind();",
+        "prop_assert_eq!(proof1_kind, proof2_kind"
+      ],
+      "rejected_example": "prop_assert_eq!(proof1.kind(), proof2.kind(), \"proof kind drift\");",
+      "allowed_example": "let proof1_kind = proof1.kind();\nlet proof2_kind = proof2.kind();\nprop_assert_eq!(proof1_kind, proof2_kind, \"proof kind drift\");"
+    },
+    {
+      "pattern_id": "snapshot_projection_drift",
+      "description": "Large metamorphic suites often assert directly on full snapshots whose fields change independently of the property under test.",
+      "modernization_rule": "Project snapshots into stable, property-specific structs before comparing.",
+      "forbidden_markers": [
+        "prop_assert_eq!(snapshot1, snapshot2",
+        "assert_eq!(full_snapshot_before, full_snapshot_after"
+      ],
+      "allowed_markers": [
+        "struct SnapshotProjection",
+        "prop_assert_eq!(projection_before, projection_after"
+      ],
+      "rejected_example": "prop_assert_eq!(snapshot1, snapshot2, \"scheduler snapshot drift\");",
+      "allowed_example": "struct SnapshotProjection { pending: usize, busy: usize }\nprop_assert_eq!(projection_before, projection_after, \"scheduler projection drift\");"
+    }
+  ],
+  "ownership_surfaces": [
+    {
+      "surface_id": "fs-config-env-roundtrip",
+      "owner_surface": "fs-config",
+      "claim_status": "modernized",
+      "paths": [
+        "src/fs_config_metamorphic_tests.rs"
+      ],
+      "failure_pattern_ids": [
+        "prop_assert_moved_value"
+      ],
+      "evidence_markers": [
+        "Pin scalar fields by value before the prop_assert_eq! moves them;",
+        "let config_thread_name_prefix = config.thread_name_prefix.clone();"
+      ],
+      "next_batch_rule": "If this row regresses, keep the fix in src/fs_config_metamorphic_tests.rs and run the focused lib-test filter for mr_env_config_env_roundtrip."
+    },
+    {
+      "surface_id": "http-grpc-header-folding",
+      "owner_surface": "http-grpc-protocol",
+      "claim_status": "modernized",
+      "paths": [
+        "src/http_grpc_protocol_metamorphic_tests.rs"
+      ],
+      "failure_pattern_ids": [
+        "prop_assert_moved_value"
+      ],
+      "evidence_markers": [
+        "Clone the borrowed fields so prop_assert_eq! doesn't partially-move",
+        "single_decoded.method.clone()"
+      ],
+      "next_batch_rule": "If this row regresses, keep header-folding semantics intact and clone only the moved diagnostic fields."
+    },
+    {
+      "surface_id": "channel-session-proof-type",
+      "owner_surface": "channel-session",
+      "claim_status": "claimable",
+      "paths": [
+        "tests/metamorphic_session_channels.rs"
+      ],
+      "failure_pattern_ids": [
+        "stale_id_accessor_or_kind_projection",
+        "prop_assert_moved_value"
+      ],
+      "evidence_markers": [
+        "mr2_proof_type_preservation_mpsc",
+        "proof1.kind(), proof2.kind()"
+      ],
+      "next_batch_rule": "Pin proof kind projections to locals, preserve reserve-send and direct-send semantics, then run the focused metamorphic_session_channels MR2 test."
+    },
+    {
+      "surface_id": "service-reconnect-jitter-strategy",
+      "owner_surface": "service-reconnect",
+      "claim_status": "modernized",
+      "paths": [
+        "tests/metamorphic_service_reconnect.rs"
+      ],
+      "failure_pattern_ids": [
+        "strategy_scalar_misuse"
+      ],
+      "evidence_markers": [
+        "fn arb_jitter_strategy() -> impl Strategy<Value = JitterStrategy>",
+        "Just(JitterStrategy::None)"
+      ],
+      "next_batch_rule": "If this row regresses, keep fixed jitter enum values wrapped in Just(...) and preserve the Strategy return type."
+    },
+    {
+      "surface_id": "conformance-registry-private-import-boundary",
+      "owner_surface": "conformance-registry",
+      "claim_status": "claimable",
+      "paths": [
+        "tests/conformance/mod.rs"
+      ],
+      "failure_pattern_ids": [
+        "private_module_import"
+      ],
+      "evidence_markers": [
+        "DO NOT re-wire without first fixing the broken imports.",
+        "task_inspector_wire"
+      ],
+      "next_batch_rule": "Before re-wiring a dormant conformance module, either move assertions next to private implementation details or switch imports to public exports."
+    },
+    {
+      "surface_id": "runtime-blocking-pool-snapshot",
+      "owner_surface": "runtime-blocking-pool",
+      "claim_status": "claimable",
+      "paths": [
+        "src/runtime/blocking_pool/comprehensive_metamorphic_tests.rs"
+      ],
+      "failure_pattern_ids": [
+        "snapshot_projection_drift"
+      ],
+      "evidence_markers": [
+        "Task conservation violated",
+        "snapshot.total_spawned"
+      ],
+      "next_batch_rule": "Project only the blocking-pool counters named by the MR before comparing snapshots."
+    }
+  ]
+}

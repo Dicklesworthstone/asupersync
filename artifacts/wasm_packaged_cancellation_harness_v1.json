@@ -1,0 +1,51 @@
+{
+  "schema_version": "wasm-packaged-cancellation-harness-v1",
+  "bead_id": "asupersync-3qv04.8.4.2",
+  "log_schema_version": "wasm-e2e-log-schema-v1",
+  "run_metadata_schema_version": "wasm-e2e-run-metadata-v1",
+  "suite_summary_schema_version": "e2e-suite-summary-v3",
+  "perf_summary_schema_version": "wasm-budget-summary-v1",
+  "scenario_id": "e2e-wasm-packaged-cancellation-quiescence",
+  "suite_scenario_id": "E2E-SUITE-WASM-PACKAGED-CANCELLATION",
+  "bundle_layout_required": [
+    "run-metadata.json",
+    "log.jsonl",
+    "perf-summary.json",
+    "summary.json",
+    "steps.ndjson"
+  ],
+  "cancellation_response_metrics": [
+    "M-PERF-03B"
+  ],
+  "cancellation_response_model": {
+    "model_id": "cancellation-step-budget-model-v1",
+    "components": [
+      "request_to_abort_ms",
+      "loser_drain_ms",
+      "shutdown_cleanup_ms"
+    ]
+  },
+  "perf_summary_export_path": "artifacts/wasm_packaged_cancellation_perf_summary.json",
+  "steps": [
+    {
+      "step_id": "cancelled_bootstrap_retry_recovery",
+      "command": "rch exec -- cargo test --test wasm_packaged_cancellation_harness cancelled_bootstrap_supports_retryable_recovery_path -- --nocapture"
+    },
+    {
+      "step_id": "render_restart_loser_drain",
+      "command": "rch exec -- cargo test --test wasm_packaged_cancellation_harness concurrent_render_restart_pattern_cancels_and_drains_losers -- --nocapture"
+    },
+    {
+      "step_id": "nested_cancel_cascade_quiescence",
+      "command": "rch exec -- cargo test --test wasm_packaged_cancellation_harness browser_nested_cancel_cascade_reaches_quiescence -- --nocapture"
+    },
+    {
+      "step_id": "shutdown_obligation_cleanup",
+      "command": "rch exec -- cargo test --test wasm_packaged_cancellation_harness shutdown_cancel_still_resolves_obligations -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-3qv04.8.5",
+    "asupersync-3qv04.8.7"
+  ]
+}

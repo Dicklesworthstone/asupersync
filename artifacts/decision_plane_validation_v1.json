@@ -1,0 +1,468 @@
+{
+  "contract_version": "decision-plane-validation-v1",
+  "bead_id": "asupersync-1508v.2.6",
+  "description": "AA-02.3 decision-plane operations validation: shadow, canary, rollback, evidence-ledger completeness.",
+  "runner_script": "scripts/run_decision_plane_validation_smoke.sh",
+  "runner_bundle_schema_version": "decision-plane-validation-smoke-bundle-v1",
+  "runner_report_schema_version": "decision-plane-validation-smoke-run-report-v1",
+  "promotion_pipeline": ["Shadow", "Canary", "Active"],
+  "hold_semantics": {
+    "blocks_promotion": true,
+    "preserves_prior_mode": true,
+    "release_restores_mode": true
+  },
+  "rollback_target": "Shadow",
+  "rollback_reasons": [
+    "CalibrationRegression",
+    "BudgetOverruns",
+    "ManualRollback",
+    "FallbackTriggered"
+  ],
+  "recovery_command_required_fields": [
+    "controller_id",
+    "controller_name",
+    "rolled_back_from",
+    "rolled_back_to",
+    "reason",
+    "policy_id",
+    "at_snapshot_id",
+    "remediation"
+  ],
+  "controller_snapshot_ledger": {
+    "schema_version": "controller-snapshot-ledger-v1",
+    "top_level_fields": [
+      "schema_version",
+      "registered_controllers",
+      "shadow_controllers",
+      "controllers"
+    ],
+    "controller_fields": [
+      { "name": "controller_id", "units": "controller id" },
+      { "name": "controller_name", "units": "string" },
+      { "name": "mode", "units": "enum" },
+      { "name": "decisions_this_epoch", "units": "decisions" },
+      { "name": "fallback_active", "units": "flag" },
+      { "name": "calibration_score", "units": "unit interval [0,1]" },
+      { "name": "last_decision_confidence", "units": "unit interval [0,1] or null" },
+      { "name": "last_action_label", "units": "string or null" },
+      { "name": "last_evidence_tick", "units": "ledger entry id or null" },
+      { "name": "last_snapshot_id", "units": "SnapshotId(u64) or null" },
+      { "name": "epochs_in_current_mode", "units": "epochs" },
+      { "name": "budget_overruns", "units": "count" },
+      { "name": "proof_artifact_id", "units": "artifact id or null" }
+    ],
+    "planner_render_order": [
+      "controller_name",
+      "mode",
+      "calibration_score",
+      "last_decision_confidence",
+      "decisions_this_epoch",
+      "fallback_active",
+      "last_action_label",
+      "last_evidence_tick",
+      "last_snapshot_id",
+      "epochs_in_current_mode",
+      "budget_overruns",
+      "proof_artifact_id"
+    ]
+  },
+  "controller_interference_matrix": {
+    "schema_version": "controller-interference-matrix-v1",
+    "catalog_fields": [
+      "controller_key",
+      "controller_name",
+      "inputs",
+      "outputs",
+      "fallback_mode",
+      "update_cadence_ticks"
+    ],
+    "pair_rule_fields": [
+      "pair_id",
+      "controllers",
+      "shared_telemetry_fields",
+      "shared_knob_surfaces",
+      "compose_verdict",
+      "safe_mode_precedence",
+      "timescale_separation"
+    ],
+    "env_fingerprint_fields": [
+      "host_class",
+      "worker_count",
+      "memory_gib",
+      "evidence_stream_id",
+      "lab_runtime"
+    ],
+    "decision_trace_fields": [
+      "tick",
+      "controller_key",
+      "action_label",
+      "knob_surface",
+      "value",
+      "fallback_activated",
+      "ledger_tick"
+    ],
+    "controllers": [
+      {
+        "controller_key": "scheduler_recommend",
+        "controller_name": "Scheduler Recommend",
+        "inputs": [
+          "ready_backlog_p95",
+          "cancel_debt_p95",
+          "worker_count",
+          "memory_gib"
+        ],
+        "outputs": ["cancel_streak_limit"],
+        "fallback_mode": "conservative_baseline",
+        "update_cadence_ticks": 4
+      },
+      {
+        "controller_key": "brownout_guard",
+        "controller_name": "Brownout Guard",
+        "inputs": [
+          "ready_backlog_p95",
+          "otlp_drop_rate",
+          "optional_surface_errors"
+        ],
+        "outputs": ["optional_surface_mode"],
+        "fallback_mode": "preserve_current_mode",
+        "update_cadence_ticks": 1
+      },
+      {
+        "controller_key": "tail_risk_admission",
+        "controller_name": "Tail Risk Admission",
+        "inputs": [
+          "ready_backlog_p95",
+          "tail_latency_p99",
+          "cancel_debt_p95"
+        ],
+        "outputs": ["admission_window"],
+        "fallback_mode": "conservative_baseline",
+        "update_cadence_ticks": 2
+      },
+      {
+        "controller_key": "admission_steering",
+        "controller_name": "Admission Steering",
+        "inputs": [
+          "ready_backlog_p95",
+          "remote_spill_rate",
+          "tail_latency_p99"
+        ],
+        "outputs": ["admission_window"],
+        "fallback_mode": "freeze_last_safe_value",
+        "update_cadence_ticks": 2
+      }
+    ],
+    "pair_rules": [
+      {
+        "pair_id": "scheduler_recommend+brownout_guard",
+        "controllers": ["scheduler_recommend", "brownout_guard"],
+        "shared_telemetry_fields": ["ready_backlog_p95"],
+        "shared_knob_surfaces": [],
+        "compose_verdict": "safe",
+        "safe_mode_precedence": "brownout_guard",
+        "timescale_separation": {
+          "faster_controller": "brownout_guard",
+          "slower_controller": "scheduler_recommend",
+          "minimum_ratio": 4,
+          "statement": "Brownout decisions may update every tick while scheduler retuning must wait at least 4 ticks between adjustments."
+        }
+      },
+      {
+        "pair_id": "tail_risk_admission+admission_steering",
+        "controllers": ["tail_risk_admission", "admission_steering"],
+        "shared_telemetry_fields": ["ready_backlog_p95", "tail_latency_p99"],
+        "shared_knob_surfaces": ["admission_window"],
+        "compose_verdict": "do_not_compose",
+        "safe_mode_precedence": "tail_risk_admission",
+        "forbidden_reason": "Same-timescale writers to admission_window would thrash the request budget.",
+        "timescale_separation": {
+          "faster_controller": "tail_risk_admission",
+          "slower_controller": "admission_steering",
+          "minimum_ratio": 1,
+          "statement": "No separation is available because both controllers react on the same cadence and target the same knob."
+        }
+      }
+    ]
+  },
+  "evidence_ledger_event_types": [
+    "Registered",
+    "Promoted",
+    "RolledBack",
+    "Held",
+    "Released",
+    "Deregistered",
+    "PromotionRejected",
+    "DecisionRecorded"
+  ],
+  "structured_log_fields_required": [
+    "controller_id",
+    "controller_name",
+    "mode",
+    "previous_mode",
+    "policy_id",
+    "calibration_score",
+    "epochs_in_mode",
+    "budget_overruns",
+    "decision_label",
+    "snapshot_id",
+    "verdict",
+    "rejection_reason",
+    "rollback_reason",
+    "fallback_active",
+    "recovery_command",
+    "ledger_entry_count",
+    "active_controller_set",
+    "shared_telemetry_fields",
+    "shared_knob_surfaces",
+    "knob_writes",
+    "timescale_ratio",
+    "decision_rate_mismatch",
+    "fallback_churn_count",
+    "compose_verdict",
+    "safe_mode_precedence",
+    "oscillation_detected",
+    "missing_evidence_fields",
+    "baseline_mode_retained",
+    "fallback_reason"
+  ],
+  "validation_scenarios": [
+    {
+      "scenario_id": "AA023-SHADOW-OBSERVE",
+      "description": "Controller starts in Shadow mode, observes snapshots, decisions are recorded but not applied.",
+      "category": "state-transition",
+      "expect_mode": "Shadow",
+      "expect_ledger_events": ["Registered", "DecisionRecorded"]
+    },
+    {
+      "scenario_id": "AA023-PROMOTE-SHADOW-CANARY",
+      "description": "Shadow controller with sufficient calibration and epochs promotes to Canary.",
+      "category": "state-transition",
+      "expect_mode": "Canary",
+      "expect_ledger_events": ["Registered", "Promoted"]
+    },
+    {
+      "scenario_id": "AA023-PROMOTE-CANARY-ACTIVE",
+      "description": "Canary controller with sufficient calibration and epochs promotes to Active.",
+      "category": "state-transition",
+      "expect_mode": "Active",
+      "expect_ledger_events": ["Registered", "Promoted", "Promoted"]
+    },
+    {
+      "scenario_id": "AA023-REJECT-SKIP-SHADOW-ACTIVE",
+      "description": "Direct Shadow-to-Active promotion is rejected as invalid transition.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "InvalidTransition"
+    },
+    {
+      "scenario_id": "AA023-REJECT-LOW-CALIBRATION",
+      "description": "Promotion rejected when calibration score is below policy threshold.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "CalibrationTooLow"
+    },
+    {
+      "scenario_id": "AA023-REJECT-INSUFFICIENT-EPOCHS",
+      "description": "Promotion rejected when controller has not spent enough epochs in current mode.",
+      "category": "bypass-prevention",
+      "expect_mode": "Shadow",
+      "expect_rejection": "InsufficientEpochs"
+    },
+    {
+      "scenario_id": "AA023-HOLD-BLOCKS-PROMOTE",
+      "description": "Controller placed on Hold cannot be promoted until released.",
+      "category": "state-transition",
+      "expect_mode": "Hold",
+      "expect_rejection": "HeldForInvestigation"
+    },
+    {
+      "scenario_id": "AA023-HOLD-RELEASE-RESTORES",
+      "description": "Releasing a held controller restores its prior mode.",
+      "category": "state-transition",
+      "expect_mode": "Canary",
+      "expect_ledger_events": ["Registered", "Promoted", "Held", "Released"]
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-CALIBRATION",
+      "description": "Calibration regression rolls back Active controller to Shadow with recovery command.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-BUDGET",
+      "description": "Budget overruns trigger rollback to Shadow with remediation steps.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-MANUAL",
+      "description": "Manual operator rollback returns controller to Shadow.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-FALLBACK-TRIGGERED",
+      "description": "Decision-triggered fallback rolls back to Shadow.",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_fallback_active": true,
+      "expect_recovery_command": true
+    },
+    {
+      "scenario_id": "AA023-ROLLBACK-SHADOW-NOOP",
+      "description": "Rollback of Shadow controller is a no-op (already most conservative).",
+      "category": "rollback",
+      "expect_mode": "Shadow",
+      "expect_recovery_command": false
+    },
+    {
+      "scenario_id": "AA023-EVIDENCE-COMPLETENESS",
+      "description": "Every state transition produces a ledger entry with policy ID and controller ID.",
+      "category": "evidence-ledger",
+      "expect_all_events_recorded": true
+    },
+    {
+      "scenario_id": "AA023-EVIDENCE-DECISION-BUDGET",
+      "description": "Decision recording tracks budget compliance in the ledger.",
+      "category": "evidence-ledger",
+      "expect_ledger_events": ["Registered", "DecisionRecorded"]
+    },
+    {
+      "scenario_id": "AA023-RECOVERY-REMEDIATION",
+      "description": "Recovery commands include actionable remediation steps for each rollback reason.",
+      "category": "recovery",
+      "expect_recovery_command": true,
+      "expect_remediation_nonempty": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-LEDGER-DEFAULTS",
+      "description": "Controller snapshot ledger exports empty and newly registered controller defaults without bespoke parsing.",
+      "category": "controller-ledger",
+      "expect_controller_snapshot_schema": true,
+      "expect_planner_renderable": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-LEDGER-MULTI-CONTROLLER",
+      "description": "Deterministic multi-controller evidence stream updates fallback, last action, confidence, and evidence ticks.",
+      "category": "controller-ledger",
+      "expect_controller_snapshot_schema": true,
+      "expect_planner_renderable": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-STABLE",
+      "description": "Timescale-separated scheduler and brownout controllers share telemetry without oscillation or fallback churn.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "safe",
+      "expect_oscillation_detected": false
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-FORBIDDEN",
+      "description": "Same-timescale admission controllers targeting the same knob surface are rejected before replay with a do-not-compose verdict.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "do_not_compose",
+      "expect_oscillation_detected": false
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-OSCILLATION",
+      "description": "A nominally allowed controller pair that violates timescale separation in replay is flagged for oscillation, fallback churn, and do-not-compose rollback.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "do_not_compose",
+      "expect_oscillation_detected": true
+    },
+    {
+      "scenario_id": "AA023-CONTROLLER-INTERFERENCE-MISSING-EVIDENCE-FALLBACK",
+      "description": "Missing shared evidence forces controllers back to the exact conservative baseline without applying composed actions.",
+      "category": "controller-interference",
+      "expect_compose_verdict": "safe",
+      "expect_oscillation_detected": false,
+      "expect_missing_evidence_fallback": true
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA023-SMOKE-TRANSITIONS",
+      "description": "Validate state transition scenarios via contract tests",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_AA023_SMOKE_TRANSITIONS cargo test -p asupersync --test decision_plane_validation_contract transition -- --nocapture",
+      "required_log_markers": [
+        "transition_shadow_observe",
+        "transition_promote_shadow_canary",
+        "transition_reject_skip_shadow_active",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
+      "expected_artifacts": []
+    },
+    {
+      "scenario_id": "AA023-SMOKE-ROLLBACKS",
+      "description": "Validate rollback and recovery command scenarios",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_AA023_SMOKE_ROLLBACKS cargo test -p asupersync --test decision_plane_validation_contract rollback -- --nocapture",
+      "required_log_markers": [
+        "rollback_calibration_regression",
+        "rollback_budget_overruns",
+        "rollback_fallback_triggered",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
+      "expected_artifacts": []
+    },
+    {
+      "scenario_id": "AA023-SMOKE-EVIDENCE",
+      "description": "Validate evidence ledger completeness and bypass prevention",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_AA023_SMOKE_EVIDENCE cargo test -p asupersync --test decision_plane_validation_contract evidence -- --nocapture",
+      "required_log_markers": [
+        "evidence_completeness_full_lifecycle",
+        "evidence_decision_budget_tracking",
+        "evidence_rollback_leaves_conservative_state",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
+      "expected_artifacts": []
+    },
+    {
+      "scenario_id": "AA023-SMOKE-CONTROLLER-LEDGER",
+      "description": "Validate controller snapshot ledger schema and planner-facing rendering",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_AA023_SMOKE_CONTROLLER_LEDGER ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1 ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1 cargo test -p asupersync --test decision_plane_validation_contract controller_snapshot_ledger -- --nocapture",
+      "required_log_markers": [
+        "controller_snapshot_ledger_defaults_when_registry_is_empty",
+        "controller_snapshot_ledger_multi_controller_rendering_is_stable",
+        "ASUPERSYNC_CONTROLLER_LEDGER_JSON=",
+        "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
+      "expected_artifacts": [
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_ledger.json",
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-LEDGER/controller_snapshot_planner_rows.json"
+      ]
+    },
+    {
+      "scenario_id": "AA023-SMOKE-CONTROLLER-INTERFERENCE",
+      "description": "Validate controller interference matrix schema plus stable, oscillating, and missing-evidence composition reports",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 'RUSTFLAGS=-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_AA023_SMOKE_CONTROLLER_INTERFERENCE ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT=1 ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT=1 cargo test -p asupersync --test decision_plane_validation_contract controller_interference -- --nocapture",
+      "required_log_markers": [
+        "controller_interference_matrix_schema_is_stable",
+        "controller_interference_replay_report_is_stable",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=",
+        "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=",
+        "test result: ok",
+        "Remote command finished: exit=0"
+      ],
+      "expected_artifacts": [
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_matrix.json",
+        ".decision-plane-validation-smoke-artifacts/run_*/AA023-SMOKE-CONTROLLER-INTERFERENCE/controller_interference_report.json"
+      ]
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.3.6",
+    "asupersync-1508v.8.6",
+    "asupersync-1508v.10.5",
+    "asupersync-1508v.10.7"
+  ]
+}

@@ -1,0 +1,1 @@
+too many parameters should return a protocol error without corrupting execute sync

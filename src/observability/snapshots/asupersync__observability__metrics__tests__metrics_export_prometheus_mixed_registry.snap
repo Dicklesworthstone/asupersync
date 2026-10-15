@@ -1,0 +1,15 @@
+---
+source: src/observability/metrics.rs
+expression: metrics.export_prometheus()
+---
+# TYPE requests_total counter
+requests_total 7
+# TYPE active_connections gauge
+active_connections 3
+# TYPE latency_seconds histogram
+latency_seconds_bucket{le="0.5"} 1
+latency_seconds_bucket{le="1"} 2
+latency_seconds_bucket{le="5"} 3
+latency_seconds_bucket{le="+Inf"} 3
+latency_seconds_sum 4.5
+latency_seconds_count 3

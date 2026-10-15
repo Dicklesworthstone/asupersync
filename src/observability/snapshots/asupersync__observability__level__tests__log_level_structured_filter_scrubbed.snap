@@ -1,0 +1,28 @@
+---
+source: src/observability/level.rs
+expression: scrub_structured_filter_snapshot(&rendered, pid, timestamp_nanos)
+---
+[threshold=trace]
+{"pid":[PID],"threshold":"trace","timestamp":"[TIMESTAMP]","level":"TRACE","message":"trace-path"}
+{"pid":[PID],"threshold":"trace","timestamp":"[TIMESTAMP]","level":"DEBUG","message":"debug-path"}
+{"pid":[PID],"threshold":"trace","timestamp":"[TIMESTAMP]","level":"INFO","message":"info-path"}
+{"pid":[PID],"threshold":"trace","timestamp":"[TIMESTAMP]","level":"WARN","message":"warn-path"}
+{"pid":[PID],"threshold":"trace","timestamp":"[TIMESTAMP]","level":"ERROR","message":"error-path"}
+
+[threshold=debug]
+{"pid":[PID],"threshold":"debug","timestamp":"[TIMESTAMP]","level":"DEBUG","message":"debug-path"}
+{"pid":[PID],"threshold":"debug","timestamp":"[TIMESTAMP]","level":"INFO","message":"info-path"}
+{"pid":[PID],"threshold":"debug","timestamp":"[TIMESTAMP]","level":"WARN","message":"warn-path"}
+{"pid":[PID],"threshold":"debug","timestamp":"[TIMESTAMP]","level":"ERROR","message":"error-path"}
+
+[threshold=info]
+{"pid":[PID],"threshold":"info","timestamp":"[TIMESTAMP]","level":"INFO","message":"info-path"}
+{"pid":[PID],"threshold":"info","timestamp":"[TIMESTAMP]","level":"WARN","message":"warn-path"}
+{"pid":[PID],"threshold":"info","timestamp":"[TIMESTAMP]","level":"ERROR","message":"error-path"}
+
+[threshold=warn]
+{"pid":[PID],"threshold":"warn","timestamp":"[TIMESTAMP]","level":"WARN","message":"warn-path"}
+{"pid":[PID],"threshold":"warn","timestamp":"[TIMESTAMP]","level":"ERROR","message":"error-path"}
+
+[threshold=error]
+{"pid":[PID],"threshold":"error","timestamp":"[TIMESTAMP]","level":"ERROR","message":"error-path"}

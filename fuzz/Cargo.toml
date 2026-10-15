@@ -1,0 +1,6233 @@
+[workspace]
+members = ["conformance"]
+
+[package]
+name = "asupersync-fuzz"
+version = "0.0.0"
+authors = ["Automated"]
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "sqlite", "mysql", "postgres", "messaging-fabric", "benchmark-adapters"] }
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+libc = "0.2"
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
+
+# Optional: for structured fuzzing
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+prost = "0.14"
+futures = "0.3"
+futures-util = "0.3"
+rustls = { version = "0.23.38", default-features = false, features = ["std", "ring", "tls12"] }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
+
+# For SCRAM-SHA-256 parsing
+base64 = "0.22"
+sha2 = "0.11"
+hmac = "0.13"
+
+# For AEAD envelope fuzzing
+chacha20poly1305 = "0.10.1"
+
+# For MessagePack serialization in trace streaming tests
+rmp-serde = "1.3"
+
+# Pinned incumbent oracle for the owned trace-block differential target.
+lz4_flex = "=0.14.0"
+
+# For concurrency limit metamorphic testing
+pin-project = "1"
+parking_lot = "0.12"
+
+# For path-traversal fuzz target's tempdir doc-root
+tempfile = "3.25"
+
+# For RwLock fuzzing async operations
+futures-executor = "0.3"
+
+# For gRPC compression flag mismatch testing
+flate2 = "1.0"
+
+[dev-dependencies]
+# For seed generation and corpus management
+rand = "0.9"
+
+# Fuzz targets - each [[bin]] entry defines a fuzz target
+# Run with: cargo +nightly fuzz run <target_name>
+
+# br-asupersync — focused HMAC verify fuzzer for src/security/{authenticated,
+# key}.rs. Exercises wrong-length / all-zero / all-ones / near-collision /
+# rotated-keyring shapes against KeyRing::verify and AuthenticationTag::verify.
+[[bin]]
+name = "security_authenticated_hmac"
+path = "fuzz_targets/security_authenticated_hmac.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-wjai3e — structured AuthenticationTag canonical-input fuzzer
+# for the sign_symbol / verify_authenticated_symbol seam. Drives object_id,
+# sbn, esi, kind, payload, and payload-length mutations as explicit fields,
+# then asserts that only identical canonical tuples preserve verification.
+[[bin]]
+name = "security_authenticated_aad_construction"
+path = "fuzz_targets/security_authenticated_aad_construction.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync (testing-fuzzing rotation 2026-04-26) — drives arbitrary
+# 32-byte inputs through AuthKey::from_bytes (q3terg entropy validator).
+# Cross-checks the validator's accept/reject decision against hand-computed
+# distinct-byte and Hamming-weight metrics; verifies determinism, round-trip
+# via as_bytes, and subkey-derivation no-panic on accepted keys.
+[[bin]]
+name = "security_key_entropy_validation"
+path = "fuzz_targets/security_key_entropy_validation.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync (testing-fuzzing rotation 2026-04-26) — exercises the
+# zeroize-on-drop SecretString (r2l1ze + y3he7v). Asserts: UTF-8 round-trip
+# via as_str/as_bytes; Debug always renders <redacted> with no plaintext
+# leak; PartialEq is reflexive + symmetric + matches byte equality;
+# explicit_zeroize is idempotent and leaves is_empty()=true; Drop never
+# panics.
+[[bin]]
+name = "security_secret_string"
+path = "fuzz_targets/security_secret_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http1_request"
+path = "fuzz_targets/http1_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http1_response"
+path = "fuzz_targets/http1_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_response_parser"
+path = "fuzz_targets/h1_response_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_server_request"
+path = "fuzz_targets/h1_server_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_upgrade_handling"
+path = "fuzz_targets/h1_upgrade_handling.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_upgrade_robust"
+path = "fuzz_targets/h1_upgrade_robust.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_decode"
+path = "fuzz_targets/hpack_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_decoder_comprehensive"
+path = "fuzz_targets/fuzz_hpack_decoder_comprehensive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_literal"
+path = "fuzz_targets/hpack_literal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_round_trip"
+path = "fuzz_targets/hpack_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_static"
+path = "fuzz_targets/hpack_static.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_header_block_decoder"
+path = "fuzz_targets/hpack_header_block_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_decoder_adversarial"
+path = "fuzz_targets/hpack_decoder_adversarial.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http2_frame"
+path = "fuzz_targets/http2_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_interest_flags"
+path = "fuzz_targets/interest_flags.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_row"
+path = "fuzz_targets/postgres_row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_row_description_data_row"
+path = "fuzz_targets/postgres_row_description_data_row.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_row_description_packet"
+path = "fuzz_targets/postgres_row_description_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_row_description"
+path = "fuzz_targets/postgres_row_description.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_typed_symbol_parser"
+path = "fuzz_targets/typed_symbol_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_mysql_wire_protocol"
+path = "fuzz_targets/mysql_wire_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_wire"
+path = "fuzz_targets/mysql_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_ok_packet"
+path = "fuzz_targets/mysql_ok_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_packet_header_error"
+path = "fuzz_targets/mysql_packet_header_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_stmt_execute_packet"
+path = "fuzz_targets/mysql_stmt_execute_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_handshake_protocol_41"
+path = "fuzz_targets/mysql_handshake_protocol_41.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-m5tnuz — dedicated MySQL ColumnDefinition41 parser fuzz.
+# Drives src/database/mysql.rs::parse_column_definition through six
+# length-encoded string fields plus fixed-width metadata, truncation, and
+# malformed length-prefix cases.
+[[bin]]
+name = "mysql_column_definition"
+path = "fuzz_targets/mysql_column_definition.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware MySQL ResultSet parsing fuzzer targeting the complete
+# result set protocol: column count header, column definition packets,
+# optional EOF separator, row data packets, and result set terminator.
+# Tests corruption scenarios, truncation, length mismatches, and packet
+# ordering to find protocol state machine vulnerabilities.
+[[bin]]
+name = "mysql_result_set_structure"
+path = "fuzz_targets/mysql_result_set_structure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_row_decoder"
+path = "fuzz_targets/mysql_row_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_connect_options"
+path = "fuzz_targets/mysql_connect_options.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_connect_options_parse"
+path = "fuzz_targets/postgres_connect_options_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_postgres_wire_protocol"
+path = "fuzz_targets/postgres_wire_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_decoder"
+path = "fuzz_targets/raptorq_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_repair_overhead"
+path = "fuzz_targets/raptorq_repair_overhead.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_codec"
+path = "fuzz_targets/length_delimited_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_frame_splitter"
+path = "fuzz_targets/fuzz_length_delimited_frame_splitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "binary_message_framing"
+path = "fuzz_targets/binary_message_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_lines_codec"
+path = "fuzz_targets/lines_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_round_trip"
+path = "fuzz_targets/codec_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_line"
+path = "fuzz_targets/h1_request_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_h1_request_line"
+path = "fuzz_targets/http_h1_request_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_status_line"
+path = "fuzz_targets/h1_status_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_pipeline"
+path = "fuzz_targets/h1_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_streams"
+path = "fuzz_targets/quic_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_gf256_operations"
+path = "fuzz_targets/gf256_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gf256_scalar_arithmetic"
+path = "fuzz_targets/gf256_scalar_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gf256_simd_vs_scalar_reference"
+path = "fuzz_targets/gf256_simd_vs_scalar_reference.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_random"
+path = "fuzz_targets/raptorq_decode_random.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_random_loss"
+path = "fuzz_targets/raptorq_decode_random_loss.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_excess_repair"
+path = "fuzz_targets/raptorq_decode_excess_repair.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_k_kprime_boundary"
+path = "fuzz_targets/raptorq_decoder_k_kprime_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_peel_boundary"
+path = "fuzz_targets/raptorq_decoder_peel_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf_decode"
+path = "fuzz_targets/grpc_protobuf_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server"
+path = "fuzz_targets/grpc_server.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_channel_state_machine"
+path = "fuzz_targets/channel_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cancel_protocol_validator"
+path = "fuzz_targets/cancel_protocol_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_websocket_frame_parsing"
+path = "fuzz_targets/websocket_frame_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_websocket_frame_fuzzing"
+path = "fuzz_targets/websocket_frame_fuzzing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_frame"
+path = "fuzz_targets/websocket_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_event_fuzzing"
+path = "fuzz_targets/trace_event_fuzzing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h3_native_protocol"
+path = "fuzz_targets/h3_native_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_core_protocol"
+path = "fuzz_targets/quic_core_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_frame_parsing"
+path = "fuzz_targets/quic_frame_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "atp_quic_frame_parse"
+path = "fuzz_targets/atp_quic_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "atp_quic_datagram_frame_parse"
+path = "fuzz_targets/atp_quic_datagram_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "atp_rq_symbol_datagram_parse"
+path = "fuzz_targets/atp_rq_symbol_datagram_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_tls_state_machine"
+path = "fuzz_targets/quic_tls_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_message_parsing"
+path = "fuzz_targets/tls_message_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_stream_record_framing"
+path = "fuzz_targets/tls_stream_record_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_state_machine_simple"
+path = "fuzz_targets/tls_state_machine_simple.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_state_machine_handshake"
+path = "fuzz_targets/tls_state_machine_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_x509"
+path = "fuzz_targets/tls_x509.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-0h6myr.3.5 — exact-source bounded DER residue fuzzer.
+[[bin]]
+name = "x509_der_residue"
+path = "fuzz_targets/x509_der_residue.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-t374gm — structured fuzzing for certificate pinning
+# validation in CertificatePinSet plus the builder/connector attachment
+# paths behind with_certificate_pins()/with_pin_set().
+[[bin]]
+name = "tls_cert_pinning"
+path = "fuzz_targets/tls_cert_pinning.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_postgres_scram_auth"
+path = "fuzz_targets/postgres_scram_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_redis_resp_protocol"
+path = "fuzz_targets/redis_resp_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resp3_pubsub_decoder"
+path = "fuzz_targets/resp3_pubsub_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_accept_encoding_negotiation"
+path = "fuzz_targets/http_accept_encoding_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_jetstream_json_api_parsing"
+path = "fuzz_targets/jetstream_json_api_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_ack_subject_parser"
+path = "fuzz_targets/jetstream_ack_subject_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_parser"
+path = "fuzz_targets/jetstream_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_pull_subscriber_state_machine"
+path = "fuzz_targets/jetstream_pull_subscriber_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_pull_consumer_max_waiting"
+path = "fuzz_targets/jetstream_pull_consumer_max_waiting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_compression_decompression"
+path = "fuzz_targets/http_compression_decompression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_sql_injection_detection"
+path = "fuzz_targets/sql_injection_detection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_dns_protocol_parsing"
+path = "fuzz_targets/dns_protocol_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_resolver_name_compression"
+path = "fuzz_targets/dns_resolver_name_compression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_resolv_conf_parser"
+path = "fuzz_targets/dns_resolv_conf_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_file_parsing"
+path = "fuzz_targets/trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fuzz_trace_file_parsing"
+path = "fuzz_targets/fuzz_trace_file_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_file_durability"
+path = "fuzz_targets/trace_file_durability.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_replay_event_deserialization"
+path = "fuzz_targets/replay_event_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_compression"
+path = "fuzz_targets/trace_compression.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_recorder"
+path = "fuzz_targets/trace_recorder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_symbol_id_deserialization"
+path = "fuzz_targets/symbol_id_deserialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_symbol_parsing"
+path = "fuzz_targets/raptorq_symbol_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bytes_buffer_manipulation"
+path = "fuzz_targets/bytes_buffer_manipulation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_buf_trait_operations"
+path = "fuzz_targets/buf_trait_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_buffer_composition"
+path = "fuzz_targets/buffer_composition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grpc_message_framing"
+path = "fuzz_targets/grpc_message_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bytes_codec_framing"
+path = "fuzz_targets/bytes_codec_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_symbol_authentication"
+path = "fuzz_targets/raptorq_symbol_authentication.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_kafka_wire_protocol"
+path = "fuzz_targets/kafka_wire_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_epoll_registration"
+path = "fuzz_targets/epoll_registration.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_codec_framing_comprehensive"
+path = "fuzz_targets/codec_framing_comprehensive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_watch_channel"
+path = "fuzz_targets/watch_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_watch_concurrent_send"
+path = "fuzz_targets/sync_watch_concurrent_send.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "watch_send_replace_race"
+path = "fuzz_targets/watch_send_replace_race.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h2_state_machine"
+path = "fuzz_targets/h2_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_aead_envelope"
+path = "fuzz_targets/raptorq_aead_envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_matrix_elimination"
+path = "fuzz_targets/raptorq_matrix_elimination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_gauss_matrix"
+path = "fuzz_targets/raptorq_decoder_gauss_matrix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_symbol_set"
+path = "fuzz_targets/raptorq_decoder_symbol_set.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "source_payload_hash_verification"
+path = "fuzz_targets/source_payload_hash_verification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_local_queue"
+path = "fuzz_targets/local_queue.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #118 — Local queue steal-half operations correctness testing
+# Tests arbitrary push/local-pop/steal-half sequences across multiple workers
+# to verify: total drained == total pushed, no duplicates, and FIFO within local operations.
+# Validates LIFO owner behavior, FIFO stealer behavior, and steal-batch properties.
+[[bin]]
+name = "local_queue_steal_half"
+path = "fuzz_targets/local_queue_steal_half.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qpack_decode"
+path = "fuzz_targets/qpack_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_systematic"
+path = "fuzz_targets/raptorq_systematic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_systematic_indices"
+path = "fuzz_targets/raptorq_systematic_indices.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_rfc6330"
+path = "fuzz_targets/raptorq_rfc6330.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_eviction"
+path = "fuzz_targets/hpack_eviction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_dynamic_table_eviction_edge_cases"
+path = "fuzz_targets/hpack_dynamic_table_eviction_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_dynamic_table_eviction"
+path = "fuzz_targets/h2_dynamic_table_eviction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_frame_sequence"
+path = "fuzz_targets/h2_frame_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_websocket_deflate"
+path = "fuzz_targets/websocket_deflate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_body_stream"
+path = "fuzz_targets/h1_body_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_event_serialization"
+path = "fuzz_targets/trace_event_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_channel_fault_injection"
+path = "fuzz_targets/channel_fault_injection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_io_uring_reactor"
+path = "fuzz_targets/io_uring_reactor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_linalg"
+path = "fuzz_targets/raptorq_linalg.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_framed_codec"
+path = "fuzz_targets/framed_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framed_backpressure"
+path = "fuzz_targets/framed_backpressure.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_distributed_snapshot"
+path = "fuzz_targets/distributed_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_distributed_snapshot_merge"
+path = "fuzz_targets/distributed_snapshot_merge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_distributed_bridge"
+path = "fuzz_targets/distributed_bridge.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_distributed_recovery_decode"
+path = "fuzz_targets/distributed_recovery_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_streaming"
+path = "fuzz_targets/trace_streaming.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_trace_recorder_concurrent_writer"
+path = "fuzz_targets/fuzz_trace_recorder_concurrent_writer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_obligation_ledger"
+path = "fuzz_targets/obligation_ledger.rs"
+test = false
+doc = false
+bench = false
+
+# Obligation concurrent races fuzz target - Round 4 /testing-fuzzing
+# Tests token-id wraparound, commit/abort interleaved with cancel propagation,
+# and ledger reset under concurrent abort_by_id operations using metamorphic testing
+[[bin]]
+name = "obligation_concurrent_races"
+path = "fuzz_targets/obligation_concurrent_races.rs"
+test = false
+doc = false
+bench = false
+
+# Symbol cancel races fuzz target - testing-fuzzing for cancel/symbol_cancel.rs
+# Tests token-id allocation under wraparound, race between cancel() and child(),
+# and drain ordering across nested scopes using metamorphic testing principles
+[[bin]]
+name = "symbol_cancel_races"
+path = "fuzz_targets/symbol_cancel_races.rs"
+test = false
+doc = false
+bench = false
+
+# Cancel hierarchy finalize - testing request→drain→finalize protocol across 3-deep hierarchies
+# Tests nested scope cancellation propagation and finalize phase completeness
+[[bin]]
+name = "cancel_hierarchy_finalize"
+path = "fuzz_targets/cancel_hierarchy_finalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_intrusive_heap_operations"
+path = "fuzz_targets/intrusive_heap_operations.rs"
+test = false
+doc = false
+bench = false
+
+# Stateful IntrusivePriorityHeap fuzzer with shadow model verification
+# Tests complete heap operation sequences: push/pop/remove/clear/peek/contains
+# with priority ordering and generation-based tie-breaking verification
+[[bin]]
+name = "intrusive_priority_heap_stateful"
+path = "fuzz_targets/intrusive_priority_heap_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_bytes_chain"
+path = "fuzz_targets/bytes_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_broadcast_lag"
+path = "fuzz_targets/broadcast_lag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_handshake_sequence"
+path = "fuzz_targets/tls_handshake_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_stream_lifecycle"
+path = "fuzz_targets/quic_stream_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_protobuf_fuzzing"
+path = "fuzz_targets/protobuf_fuzzing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_progress_certificate_math"
+path = "fuzz_targets/progress_certificate_math.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_macaroon_attenuation_chain"
+path = "fuzz_targets/macaroon_attenuation_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_quic_forensic_log"
+path = "fuzz_targets/quic_forensic_log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_codec_pipeline"
+path = "fuzz_targets/raptorq_codec_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h3_error_parsing"
+path = "fuzz_targets/h3_error_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_oneshot_drop_race"
+path = "fuzz_targets/oneshot_drop_race.rs"
+test = false
+doc = false
+bench = false
+
+# Oneshot send-then-recv vs cancel-mid-send timing verification
+# Tests arbitrary cancellation timing to ensure receiver gets either value OR Cancelled, never wedged
+[[bin]]
+name = "oneshot_cancellation_timing"
+path = "fuzz_targets/oneshot_cancellation_timing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority"
+path = "fuzz_targets/h2_priority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_frame"
+path = "fuzz_targets/h2_settings_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_frame_parser"
+path = "fuzz_targets/h2_settings_frame_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_rst_stream"
+path = "fuzz_targets/h2_rst_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_mut_freeze_split"
+path = "fuzz_targets/bytes_mut_freeze_split.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_slice_split_to"
+path = "fuzz_targets/bytes_slice_split_to.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_cursor_reader"
+path = "fuzz_targets/bytes_cursor_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_take_adapter"
+path = "fuzz_targets/bytes_take_adapter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_mut_boundaries"
+path = "fuzz_targets/bytes_mut_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "gf256_simd_edge_cases"
+path = "fuzz_targets/gf256_simd_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_canonicalize"
+path = "fuzz_targets/trace_canonicalize.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "consistent_hash_ring"
+path = "fuzz_targets/consistent_hash_ring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_client_response_fuzz"
+path = "fuzz_targets/h3_client_response_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_prepared_statement_injection_fuzz"
+path = "fuzz_targets/postgres_prepared_statement_injection_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_client_comprehensive"
+path = "fuzz_targets/fuzz_h1_client_comprehensive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_unix_datagram_comprehensive"
+path = "fuzz_targets/fuzz_unix_datagram_comprehensive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lab_runtime_virtual_time_fuzz"
+path = "fuzz_targets/lab_runtime_virtual_time_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cancel_signal_ordering_oracle"
+path = "fuzz_targets/cancel_signal_ordering_oracle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "region_heap_allocator"
+path = "fuzz_targets/region_heap_allocator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tcp_accept_loop_fuzz"
+path = "fuzz_targets/tcp_accept_loop_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framed_read_fuzz"
+path = "fuzz_targets/framed_read_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "stealing_fuzz"
+path = "fuzz_targets/stealing_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+# Stateful work stealing fuzzer with shadow model verification
+# Tests multi-queue stealing with Power of Two Choices algorithm,
+# owner LIFO vs stealer FIFO semantics, and task conservation invariants
+[[bin]]
+name = "work_stealing_stateful"
+path = "fuzz_targets/work_stealing_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "concurrency_limit_metamorphic"
+path = "fuzz_targets/concurrency_limit_metamorphic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plan_dag_fuzz"
+path = "fuzz_targets/plan_dag_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_datagram_frame"
+path = "fuzz_targets/h3_datagram_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_window_update"
+path = "fuzz_targets/h2_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_window_update_frame"
+path = "fuzz_targets/h2_window_update_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_window_increment_max"
+path = "fuzz_targets/h2_window_increment_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_listen_notify"
+path = "fuzz_targets/postgres_listen_notify.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_integrity"
+path = "fuzz_targets/trace_integrity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_client"
+path = "fuzz_targets/h3_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_codec"
+path = "fuzz_targets/h1_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_h1_codec"
+path = "fuzz_targets/fuzz_http_h1_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_acceptor"
+path = "fuzz_targets/tls_acceptor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client_hello_sni"
+path = "fuzz_targets/tls_client_hello_sni.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack"
+path = "fuzz_targets/h2_hpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack_table_size_update_underflow"
+path = "fuzz_targets/h2_hpack_table_size_update_underflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_after_rst_stream"
+path = "fuzz_targets/h2_data_after_rst_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_padded_data_frame"
+path = "fuzz_targets/h2_padded_data_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_after_priority"
+path = "fuzz_targets/h2_continuation_after_priority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_without_headers"
+path = "fuzz_targets/h2_continuation_without_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited"
+path = "fuzz_targets/length_delimited.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_encode_width"
+path = "fuzz_targets/length_delimited_encode_width.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_encoder"
+path = "fuzz_targets/length_delimited_encoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_max_frame_length_boundary"
+path = "fuzz_targets/length_delimited_max_frame_length_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware encoder write_buf fuzz for LengthDelimitedCodec. Drives
+# prefilled destination buffers plus decode-only builder knobs through the
+# encode path and asserts exact append bytes, prefix preservation, and
+# fail-closed invalid cases.
+[[bin]]
+name = "length_delimited_encoder_write_buf"
+path = "fuzz_targets/length_delimited_encoder_write_buf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_decoder_state"
+path = "fuzz_targets/length_delimited_decoder_state.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_frame_boundary"
+path = "fuzz_targets/length_delimited_frame_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_frame"
+path = "fuzz_targets/length_delimited_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_decoder_boundary"
+path = "fuzz_targets/length_delimited_decoder_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_scram"
+path = "fuzz_targets/postgres_scram.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_frames"
+path = "fuzz_targets/h2_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf"
+path = "fuzz_targets/grpc_protobuf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_prost_codec_decode"
+path = "fuzz_targets/grpc_prost_codec_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf_decode_malformed_varint_overflow"
+path = "fuzz_targets/grpc_protobuf_decode_malformed_varint_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_gzip_message_decode"
+path = "fuzz_targets/grpc_gzip_message_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_message_truncation"
+path = "fuzz_targets/grpc_message_truncation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_length_prefixed"
+path = "fuzz_targets/grpc_length_prefixed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_parser"
+path = "fuzz_targets/nats_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_subscription_matcher"
+path = "fuzz_targets/nats_subscription_matcher.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_subject_name_parser"
+path = "fuzz_targets/nats_subject_name_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_publish_subject_parser"
+path = "fuzz_targets/nats_publish_subject_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_hpub_headers"
+path = "fuzz_targets/nats_hpub_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_creds_jwt"
+path = "fuzz_targets/nats_creds_jwt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_config_from_url"
+path = "fuzz_targets/nats_config_from_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unix_stream"
+path = "fuzz_targets/unix_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "unix_ancillary_state_machine"
+path = "fuzz_targets/unix_ancillary_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_integer"
+path = "fuzz_targets/hpack_integer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_frame_parse"
+path = "fuzz_targets/h2_frame_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_connection_frame_decoder"
+path = "fuzz_targets/h2_connection_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_body"
+path = "fuzz_targets/h3_body.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_framed"
+path = "fuzz_targets/codec_framed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_framed_lifecycle"
+path = "fuzz_targets/codec_framed_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_stream"
+path = "fuzz_targets/quic_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qpack_stream"
+path = "fuzz_targets/qpack_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qpack_field_section"
+path = "fuzz_targets/qpack_field_section.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqlite_sql"
+path = "fuzz_targets/sqlite_sql.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqlite_pragma_ddl_parser"
+path = "fuzz_targets/sqlite_pragma_ddl_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqlite_pragma_serialization"
+path = "fuzz_targets/sqlite_pragma_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sqlite_bind_values"
+path = "fuzz_targets/sqlite_bind_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation"
+path = "fuzz_targets/h2_continuation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_flood"
+path = "fuzz_targets/h2_continuation_flood.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_zero_length_data"
+path = "fuzz_targets/h2_zero_length_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_head_response_body_discard"
+path = "fuzz_targets/h1_head_response_body_discard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_max_concurrent_streams"
+path = "fuzz_targets/h2_max_concurrent_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_lf_line_terminators"
+path = "fuzz_targets/h1_lf_line_terminators.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_header_list_size"
+path = "fuzz_targets/h2_settings_max_header_list_size.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_header_list_size_overflow"
+path = "fuzz_targets/h2_settings_max_header_list_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_transfer_encoding_identity"
+path = "fuzz_targets/h1_transfer_encoding_identity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_space_delimiter_rejection"
+path = "fuzz_targets/h1_space_delimiter_rejection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_alpn_negotiation"
+path = "fuzz_targets/h2_alpn_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_head_transfer_encoding_chunked"
+path = "fuzz_targets/h1_head_transfer_encoding_chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_frame_after_end_stream"
+path = "fuzz_targets/h2_data_frame_after_end_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_flow_control_window_rst_stream"
+path = "fuzz_targets/h2_flow_control_window_rst_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_update_frame"
+path = "fuzz_targets/h2_priority_update_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_rst_stream_internal_error"
+path = "fuzz_targets/h2_rst_stream_internal_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_frame_idle_stream"
+path = "fuzz_targets/h2_priority_frame_idle_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_ack_timeout"
+path = "fuzz_targets/h2_settings_ack_timeout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_frame_multiplicity"
+path = "fuzz_targets/h2_settings_frame_multiplicity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_ping_mismatched_ack"
+path = "fuzz_targets/h2_ping_mismatched_ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_undefined_identifier"
+path = "fuzz_targets/h2_settings_undefined_identifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_frame_closed_stream"
+path = "fuzz_targets/h2_data_frame_closed_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_frame_circular_dependency"
+path = "fuzz_targets/h2_priority_frame_circular_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_rst_stream_frame_size_error"
+path = "fuzz_targets/h2_rst_stream_frame_size_error.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #176 — HTTP/0.9 simple-request rejection fuzzer
+# Tests arbitrary HTTP/0.9 style requests (missing version specifiers) against
+# modern HTTP/1.1 parser. Validates proper rejection with 400 Bad Request for
+# requests like "GET /path\r\n" that lack "HTTP/1.1" version identifier.
+[[bin]]
+name = "h1_http09_simple_request_rejection"
+path = "fuzz_targets/h1_http09_simple_request_rejection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "symbol_auth"
+path = "fuzz_targets/symbol_auth.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "symbol_cancel_broadcast"
+path = "fuzz_targets/symbol_cancel_broadcast.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "key_derivation_context"
+path = "fuzz_targets/key_derivation_context.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fs_uring"
+path = "fuzz_targets/fs_uring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fs_uring_drop_path_race"
+path = "fuzz_targets/fs_uring_drop_path_race.rs"
+test = false
+doc = false
+bench = false
+
+# Shared filesystem cursor fuzzer for cloned File handles.
+[[bin]]
+name = "fs_file_arc_concurrent_access"
+path = "fuzz_targets/fs_file_arc_concurrent_access.rs"
+test = false
+doc = false
+bench = false
+
+# io_uring user_data encoding boundary and completion-tracking fuzzer.
+[[bin]]
+name = "fs_uring_user_data_overflow"
+path = "fuzz_targets/fs_uring_user_data_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_error_codes"
+path = "fuzz_targets/h3_error_codes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_http_client"
+path = "fuzz_targets/h1_http_client.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_parsed_url"
+path = "fuzz_targets/h1_parsed_url.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_header_values"
+path = "fuzz_targets/h1_header_values.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kafka_protocol"
+path = "fuzz_targets/kafka_protocol.rs"
+test = false
+doc = false
+bench = false
+
+# Parser-only Kafka protocol boundary fuzzer.
+[[bin]]
+name = "kafka_protocol_parser"
+path = "fuzz_targets/kafka_protocol_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_record"
+path = "fuzz_targets/tls_record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_response"
+path = "fuzz_targets/dns_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_never_indexed"
+path = "fuzz_targets/hpack_never_indexed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_bypass"
+path = "fuzz_targets/length_delimited_bypass.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "framed_length_delimited_underflow"
+path = "fuzz_targets/framed_length_delimited_underflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_push_promise"
+path = "fuzz_targets/h2_push_promise.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_framed_read"
+path = "fuzz_targets/codec_framed_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_framed_read_partial_buffering"
+path = "fuzz_targets/fuzz_framed_read_partial_buffering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_goaway"
+path = "fuzz_targets/h2_goaway.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "diagnostics_snapshot"
+path = "fuzz_targets/diagnostics_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+# Runtime diagnostic counter snapshot fuzzer.
+[[bin]]
+name = "diagnostic_counter_snapshot"
+path = "fuzz_targets/diagnostic_counter_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_tls_hello"
+path = "fuzz_targets/quic_tls_hello.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "protobuf_varint"
+path = "fuzz_targets/protobuf_varint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_records"
+path = "fuzz_targets/jetstream_records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_durable"
+path = "fuzz_targets/jetstream_durable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_durable_consumer_recreate"
+path = "fuzz_targets/jetstream_durable_consumer_recreate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_subject_name_parser"
+path = "fuzz_targets/jetstream_subject_name_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_stream_config_validator"
+path = "fuzz_targets/jetstream_stream_config_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_ordered_consumer_reset_on_gap"
+path = "fuzz_targets/jetstream_ordered_consumer_reset_on_gap.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_deliver_by_start_time_skew"
+path = "fuzz_targets/jetstream_deliver_by_start_time_skew.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_max_deliver_per_message"
+path = "fuzz_targets/jetstream_max_deliver_per_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_router"
+path = "fuzz_targets/transport_router.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_aggregator"
+path = "fuzz_targets/transport_aggregator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_aggregator_sliding_window"
+path = "fuzz_targets/transport_aggregator_sliding_window.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_close"
+path = "fuzz_targets/websocket_close.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encoding_universal"
+path = "fuzz_targets/encoding_universal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_ping"
+path = "fuzz_targets/h2_ping.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_matrix_ops"
+path = "fuzz_targets/raptorq_matrix_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_native_frames"
+path = "fuzz_targets/h3_native_frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_frame_ordering"
+path = "fuzz_targets/h3_frame_ordering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_mut_ops"
+path = "fuzz_targets/bytes_mut_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "finalizer_stack_ops"
+path = "fuzz_targets/finalizer_stack_ops.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_raptorq"
+path = "fuzz_targets/codec_raptorq.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_systematic_encoder_payload"
+path = "fuzz_targets/raptorq_systematic_encoder_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_encoder_repair_symbols"
+path = "fuzz_targets/raptorq_encoder_repair_symbols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_repair_count"
+path = "fuzz_targets/raptorq_repair_count.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_systematic_repair_mix"
+path = "fuzz_targets/raptorq_systematic_repair_mix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_truncated"
+path = "fuzz_targets/raptorq_decode_truncated.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_encoder_transition_cases"
+path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_intermediate_symbols"
+path = "fuzz_targets/raptorq_intermediate_symbols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_multipart"
+path = "fuzz_targets/web_multipart.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_multipart_parser"
+path = "fuzz_targets/web_multipart_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart_filename_extraction"
+path = "fuzz_targets/multipart_filename_extraction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_roundtrip"
+path = "fuzz_targets/raptorq_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_headers"
+path = "fuzz_targets/h2_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grpc_web_framing"
+path = "fuzz_targets/fuzz_grpc_web_framing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_web_trailer_roundtrip"
+path = "fuzz_targets/grpc_web_trailer_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_web_compressed_message"
+path = "fuzz_targets/grpc_web_compressed_message.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_sm"
+path = "fuzz_targets/raptorq_decoder_sm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoder_source_block_params"
+path = "fuzz_targets/raptorq_decoder_source_block_params.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_codec"
+path = "fuzz_targets/bytes_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bytes_codec_advanced"
+path = "fuzz_targets/bytes_codec_advanced.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_index_lookup"
+path = "fuzz_targets/hpack_index_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming"
+path = "fuzz_targets/grpc_streaming.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware gRPC streaming cancel storm fuzzer targeting stream state
+# transitions under concurrent cancellation pressure. Tests race conditions,
+# state consistency, and fail-closed semantics during cancel storms.
+[[bin]]
+name = "grpc_streaming_cancel_storm"
+path = "fuzz_targets/grpc_streaming_cancel_storm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_server_cancel_timing"
+path = "fuzz_targets/grpc_streaming_server_cancel_timing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_health_service_name"
+path = "fuzz_targets/grpc_health_service_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_unary_metadata"
+path = "fuzz_targets/grpc_server_unary_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_grpc_client_streaming_flow_control"
+path = "fuzz_targets/fuzz_grpc_client_streaming_flow_control.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_huffman_decode"
+path = "fuzz_targets/hpack_huffman_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack_huffman_decode"
+path = "fuzz_targets/h2_hpack_huffman_decode.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-17dwef — dedicated HPACK literal-header Huffman harness.
+# Builds valid single-header literal blocks first, then mutates length and
+# tail-byte structure so fuzzing reaches successful Huffman decode paths and
+# malformed literal-header edges through the same seam.
+[[bin]]
+name = "hpack_huffman_literal_headers"
+path = "fuzz_targets/hpack_huffman_literal_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_huffman_fragmentation"
+path = "fuzz_targets/hpack_huffman_fragmentation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "web_extract"
+path = "fuzz_targets/web_extract.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_web_sse"
+path = "fuzz_targets/fuzz_web_sse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data"
+path = "fuzz_targets/h2_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_frame_padding"
+path = "fuzz_targets/h2_data_frame_padding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_stream_flow"
+path = "fuzz_targets/quic_stream_flow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ws_frame"
+path = "fuzz_targets/ws_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "auth_aead"
+path = "fuzz_targets/auth_aead.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "distributed_envelope_serialization"
+path = "fuzz_targets/distributed_envelope_serialization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "security_tag_verifier"
+path = "fuzz_targets/security_tag_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "security_tag_boundary"
+path = "fuzz_targets/security_tag_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "authenticated_mac_verification"
+path = "fuzz_targets/authenticated_mac_verification.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qpack_decoder"
+path = "fuzz_targets/qpack_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_indexed"
+path = "fuzz_targets/hpack_indexed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack_static_table_lookup"
+path = "fuzz_targets/h2_hpack_static_table_lookup.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_static_indexed"
+path = "fuzz_targets/fuzz_hpack_static_indexed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "budget_arithmetic"
+path = "fuzz_targets/budget_arithmetic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_accounting_sm"
+path = "fuzz_targets/resource_accounting_sm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "det_rng"
+path = "fuzz_targets/det_rng.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otel_span_attributes"
+path = "fuzz_targets/otel_span_attributes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otel_otlp_request"
+path = "fuzz_targets/otel_otlp_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "postgres_bind_execute_sync"
+path = "fuzz_targets/postgres_bind_execute_sync.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-1cavuk — structure-aware frontend Parse/Bind extended-query
+# message fuzzer. Uses Arbitrary-derived parameter format codes, parameter
+# values, and result format codes to exercise canonical and malformed frames
+# against postgres.rs test-internals Parse/Bind decoders.
+[[bin]]
+name = "postgres_extended_query"
+path = "fuzz_targets/postgres_extended_query.rs"
+test = false
+doc = false
+bench = false
+
+# Focused Bind message fuzzer for parameter format/OID mismatch, length
+# overflow, and NULL marker handling in the extended-query protocol.
+[[bin]]
+name = "postgres_extended_query_bind"
+path = "fuzz_targets/postgres_extended_query_bind.rs"
+test = false
+doc = false
+bench = false
+
+# COPY IN frontend stream fuzzer for CopyData length prefixes, empty CopyFail,
+# and CopyDone-before-data handling.
+[[bin]]
+name = "postgres_copy_in"
+path = "fuzz_targets/postgres_copy_in.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_connection_window_update"
+path = "fuzz_targets/h2_connection_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_frame_decoder"
+path = "fuzz_targets/h2_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lab_network_message_routing"
+path = "fuzz_targets/lab_network_message_routing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dns_message_decoder"
+path = "fuzz_targets/dns_message_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "router_table_updates"
+path = "fuzz_targets/router_table_updates.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "transport_router_resolution_contention"
+path = "fuzz_targets/transport_router_resolution_contention.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_security_mac_verifier"
+path = "fuzz_targets/fuzz_security_mac_verifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_datagram_ack_parser"
+path = "fuzz_targets/quic_datagram_ack_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_codec_frame_splitter"
+path = "fuzz_targets/raptorq_codec_frame_splitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_raptorq_codec_frame_splitter"
+path = "fuzz_targets/fuzz_raptorq_codec_frame_splitter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_symbol_set_frame_transitions"
+path = "fuzz_targets/raptorq_symbol_set_frame_transitions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_encoding_config_boundary"
+path = "fuzz_targets/raptorq_encoding_config_boundary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_codec"
+path = "fuzz_targets/grpc_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_block_start"
+path = "fuzz_targets/hpack_block_start.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_length_delimited_eof_retention"
+path = "fuzz_targets/length_delimited_eof_retention.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "websocket_fragmentation_sequences"
+path = "fuzz_targets/websocket_fragmentation_sequences.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_stream_reordering"
+path = "fuzz_targets/quic_stream_reordering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_prefix_roundtrip"
+path = "fuzz_targets/length_delimited_prefix_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http1_chunked"
+path = "fuzz_targets/http1_chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_packet_number"
+path = "fuzz_targets/quic_packet_number.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "trace_file_rewind_oracle"
+path = "fuzz_targets/trace_file_rewind_oracle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "priority_inversion_oracle"
+path = "fuzz_targets/priority_inversion_oracle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cancel_debt_oracle"
+path = "fuzz_targets/cancel_debt_oracle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_varint_codec"
+path = "fuzz_targets/quic_varint_codec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "subject_pattern_parser"
+path = "fuzz_targets/subject_pattern_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "namespace_kernel"
+path = "fuzz_targets/namespace_kernel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "quic_transport_params_tlv"
+path = "fuzz_targets/quic_transport_params_tlv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "task_cancel_witness"
+path = "fuzz_targets/task_cancel_witness.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hpack_rfc7541_edge_cases"
+path = "fuzz_targets/hpack_rfc7541_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_hpack_malformed_dynatable"
+path = "fuzz_targets/hpack_malformed_dynatable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_decode"
+path = "fuzz_targets/length_delimited_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_raptorq_roundtrip"
+path = "fuzz_targets/codec_raptorq_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_codec_decode"
+path = "fuzz_targets/grpc_codec_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_connection_io"
+path = "fuzz_targets/h2_connection_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_io"
+path = "fuzz_targets/grpc_streaming_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_recv_window"
+path = "fuzz_targets/grpc_streaming_recv_window.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_gauss_solver"
+path = "fuzz_targets/raptorq_gauss_solver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decision"
+path = "fuzz_targets/raptorq_decision.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync — path-traversal fuzzer for src/web/static_files.rs.
+# Empty tempdir doc-root is the oracle: every response MUST be 404.
+# Any 200 = path-traversal escape.
+[[bin]]
+name = "web_static_path"
+path = "fuzz_targets/web_static_path.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync — binary DNS message parser fuzzer for src/net/dns/resolver.rs.
+# Properties: no panic, no infinite loop on label-pointer bombs, typed errors
+# only. Test-internals shims (parse_dns_response_for_fuzz +
+# decode_dns_name_for_fuzz) expose the private parsers.
+[[bin]]
+name = "dns_resolver_decode"
+path = "fuzz_targets/dns_resolver_decode.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync — URL-routing fuzzer for src/web/router.rs.
+# Random patterns ({:id}, /*, mixed literals) × random paths (encoded chars,
+# overlong, ambiguous, traversal-like). Oracles: no panics, well-typed
+# StatusCode, deterministic match, first-match-wins ordering.
+[[bin]]
+name = "web_router_match"
+path = "fuzz_targets/web_router_match.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync — SymbolCancelToken protocol fuzzer for src/cancel/symbol_cancel.rs.
+# Properties: idempotent cancel, wire round-trip, child propagation,
+# multi-thread CAS-winner invariant.
+[[bin]]
+name = "symbol_cancel_protocol"
+path = "fuzz_targets/symbol_cancel_protocol.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-tumfif — fuzz target for the
+# Scenario::from_json -> validate -> to_lab_config pipeline in
+# src/lab/scenario.rs. Adversarial scenario JSON (NaN/Inf
+# probabilities, swapped delay min/max, huge participants vec,
+# malformed link keys) must produce typed Err / Vec<ValidationError>
+# without panicking the validator or the downstream LabConfig builder.
+[[bin]]
+name = "lab_scenario_validate_and_build"
+path = "fuzz_targets/lab_scenario_validate_and_build.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-5o8xxe — fuzz target for
+# RestorableSnapshot::validate in src/lab/snapshot_restore.rs.
+# Adversarial snapshot graphs (cyclic parent pointers, dangling
+# owner IDs, NonQuiescentClosure shapes, duplicate IDs across
+# tables) must produce a ValidationResult without panicking the
+# cycle detector or OOM-ing during orphan walks.
+[[bin]]
+name = "lab_snapshot_restorable_validate"
+path = "fuzz_targets/lab_snapshot_restorable_validate.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ebsbrw — fuzz target for the trace-comparison
+# quartet (find_divergence, normalize_for_replay, compare_normalized,
+# traces_equivalent) in src/lab/replay.rs. Adversarial &[TraceEvent]
+# pairs must not panic any of the comparators; reflexivity
+# (traces_equivalent(t, t) == true) is asserted as a metamorphic
+# invariant.
+[[bin]]
+name = "lab_replay_trace_compare"
+path = "fuzz_targets/lab_replay_trace_compare.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-eetrey — fuzz target for compare_observables and
+# check_core_invariants in src/lab/dual_run.rs. Adversarial
+# NormalizedObservable pairs (NaN counters, swapped timestamps,
+# dangling IDs) must not panic; reflexivity
+# (compare_observables(o, o) reports zero mismatches) is enforced.
+[[bin]]
+name = "lab_dual_run_compare_observables"
+path = "fuzz_targets/lab_dual_run_compare_observables.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-gu6ua2 — fuzz target for ConformalCalibrator in
+# src/lab/conformal.rs. Adversarial OracleReport sequences (NaN
+# stats, total < failed, empty entries vec) driven through arbitrary
+# interleavings of calibrate() and predict() must not panic the
+# numerical kernels; is_well_calibrated() stays total.
+[[bin]]
+name = "lab_conformal_calibrate_predict"
+path = "fuzz_targets/lab_conformal_calibrate_predict.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ifb4n3 — meta-fuzz target for FuzzHarness::run in
+# src/lab/fuzz.rs. Adversarial seed sequences crossed with closure
+# behaviours (varied panic shapes, allocations, nested catch_unwind)
+# verify two intended invariants of the campaign driver:
+#   (P1) panic-floor — run() never propagates a closure panic;
+#   (P2) progress-floor — every seed in the budget is iterated.
+# Plus output invariants (findings ⊆ seed range, regression-corpus
+# round-trip stability) and end-to-end determinism (same input → same
+# finding seeds across two harness.run() invocations).
+[[bin]]
+name = "lab_fuzz_campaign_meta"
+path = "fuzz_targets/lab_fuzz_campaign_meta.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-wg35z0 — adversarial DecodeProof::replay_and_verify
+# fuzz. Synthesises arbitrary (DecodeConfig, ReceivedSymbol[]) tuples
+# and asserts replay_and_verify never panics — only Result<(), ReplayError>.
+[[bin]]
+name = "raptorq_proof_replay"
+path = "fuzz_targets/raptorq_proof_replay.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #120: structure-aware proof verifier determinism fuzzer for the live
+# DecodeProof::replay_and_verify seam in src/raptorq/proof.rs. Maps arbitrary
+# leaf/path byte blobs onto malformed proof/symbol mutations and asserts
+# deterministic verification plus malformed-proof rejection.
+[[bin]]
+name = "raptorq_proof_verifier_determinism"
+path = "fuzz_targets/raptorq_proof_verifier_determinism.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-voxekc — degenerate-config fuzz for RaptorQSenderBuilder /
+# RaptorQReceiverBuilder. NaN/Inf repair_overhead, symbol_size 0,
+# zero parallelism, tiny memory budgets must all be cleanly rejected
+# via ConfigError — never panic.
+[[bin]]
+name = "raptorq_builder_degenerate"
+path = "fuzz_targets/raptorq_builder_degenerate.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-i9d6b6 — slice-length-mismatch fuzz for the gf256
+# vector kernels (gf256_add_slice, gf256_addmul_slice,
+# gf256_add_slices2, gf256_addmul_slices2, gf256_mul_slices2).
+# Mismatched lengths must panic via the documented assertions; matched
+# lengths must not panic and gf256_add_slice must equal byte-wise XOR.
+[[bin]]
+name = "raptorq_gf256_slice_mismatch"
+path = "fuzz_targets/raptorq_gf256_slice_mismatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_gf256_simd_scalar_parity"
+path = "fuzz_targets/raptorq_gf256_simd_scalar_parity.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-6ugt3c — NATS INFO JSON extractor + HMSG header-block
+# decoder. Mirrors the production extract_json_string/_i64/_bool
+# functions and the HMSG name:value parser; feeds arbitrary bytes to
+# all three. Catches crash classes the high-level nats_parser target
+# does not surface (string-extractor escape-handling, HMSG name-CRLF
+# violations, JSON depth-bombs that bypass serde).
+[[bin]]
+name = "messaging_nats_info_hmsg"
+path = "fuzz_targets/messaging_nats_info_hmsg.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-kepz61 — federation config serde round-trip fuzz
+# for MorphismConstraints and LeafConfig. Covers compact/pretty JSON
+# identity, malformed JSON rejection, and deterministic serialization.
+[[bin]]
+name = "federation_serde_roundtrip"
+path = "fuzz_targets/federation_serde_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-9d9b89 — Kafka record-batch v2 decode hot path.
+# Mirrors the KIP-98 wire format (header + record-count + varint-
+# encoded records) and feeds arbitrary bytes. Targets crash classes
+# the kafka_protocol* targets do not cover: varint continuation
+# overrun, record_count integer overflow before pre-allocation, batch-
+# length-vs-CRC ordering on truncated frames.
+[[bin]]
+name = "messaging_kafka_record_batch"
+path = "fuzz_targets/messaging_kafka_record_batch.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware Kafka response frame fuzzer targeting response wire format parsing
+# in src/messaging/kafka.rs. Uses intelligent input generation to test response frame
+# headers, error parsing, metadata extraction, delivery results, and frame validation.
+# Covers correlation ID matching, length validation, error code mapping, and boundary
+# conditions with structure-aware mutation to find parsing edge cases.
+[[bin]]
+name = "kafka_response_frames"
+path = "fuzz_targets/kafka_response_frames.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-6zcnd9 — gRPC trailer-header decode fuzz: grpc-status
+# integer parser, grpc-message escape/unescape, grpc-status-details-bin
+# base64 decode. Asserts no panic / no OOM on adversarial UTF-8 inputs
+# with U+202E bidi, embedded NUL, truncated `%` escapes, oversize
+# integers, and base64 decode-bombs.
+[[bin]]
+name = "grpc_status_trailers"
+path = "fuzz_targets/grpc_status_trailers.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-icvybx — bearer-token Authorization header parser fuzz.
+# Auth boundary; every authenticated gRPC RPC's header passes through
+# `bearer_token` (exposed via the `#[doc(hidden)] fuzz_bearer_token`
+# re-exporter for direct testing). Asserts UTF-8 boundary safety, no
+# panic on multi-byte scheme prefixes, and the leading-space-trim
+# contract on the returned token.
+[[bin]]
+name = "grpc_bearer_token"
+path = "fuzz_targets/grpc_bearer_token.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-52uhvk — gRPC server-reflection DescribeService /
+# list_services fuzz. Drives ReflectionService::describe_service with
+# adversarial service-name strings (path-traversal shapes, U+202E,
+# very-long names) and asserts no panic / bounded allocation. The
+# in-memory BTreeMap lookup must never exfiltrate path-traversal
+# shapes — regression guard against future filesystem-touching
+# refactors.
+[[bin]]
+name = "grpc_reflection_describe"
+path = "fuzz_targets/grpc_reflection_describe.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-xt60rb — H3 QPACK prefixed-integer decoder fuzz.
+# Drives `qpack_decode_field_section` with continuation-chain shapes
+# that exercise `qpack_decode_prefixed_int` (h3_native.rs:1756). Targets
+# integer overflow via `checked_shl`, the `shift > 56` cap, and the
+# `prefix_len ∈ 1..=8` guard. No panic / no OOM / no infinite loop.
+[[bin]]
+name = "fuzz_h3_qpack_prefixed_integer"
+path = "fuzz_targets/fuzz_h3_qpack_prefixed_integer.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-1pafo2 — H3 QPACK string decoder fuzz. Drives
+# `qpack_decode_field_section` with literal-name / literal-value
+# representations that exercise `qpack_decode_string` (h3_native.rs:1811):
+# Huffman-flag rejection, declared-length truncation boundary, UTF-8
+# validation, length-overflow on the prefixed-int prefix.
+[[bin]]
+name = "fuzz_h3_qpack_string_decode"
+path = "fuzz_targets/fuzz_h3_qpack_string_decode.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ev48ox — H3 SETTINGS bool parser fuzz. Drives
+# `H3Settings::decode_payload` with every (id, value) cell over u64,
+# duplicate-ID sequences, and reserved-ID values. Exercises
+# `parse_bool_setting` (h3_native.rs:310) — every value other than
+# 0 or 1 must be rejected via `InvalidSettingValue`; a panic, OOM,
+# or accept here would let a peer flip a protocol-level capability bit.
+[[bin]]
+name = "fuzz_h3_settings_bool_parser"
+path = "fuzz_targets/fuzz_h3_settings_bool_parser.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-mbn0uo — H3 status-code parser fuzz
+[[bin]]
+name = "h3_parse_status_code"
+path = "fuzz_targets/h3_parse_status_code.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-001c14 — H2 FrameHeader::parse fuzz
+[[bin]]
+name = "h2_frame_header_parse"
+path = "fuzz_targets/h2_frame_header_parse.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-8dl9j7 — H1 chunk-size-line parser fuzz
+[[bin]]
+name = "h1_parse_chunk_size_line"
+path = "fuzz_targets/h1_parse_chunk_size_line.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-zepgmq — H1 header-line bounds parser fuzz
+[[bin]]
+name = "h1_parse_header_line_bounds"
+path = "fuzz_targets/h1_parse_header_line_bounds.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-sbc0pi — H1 request-line parser fuzz
+[[bin]]
+name = "h1_parse_request_line_bytes"
+path = "fuzz_targets/h1_parse_request_line_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_target_forms"
+path = "fuzz_targets/h1_request_target_forms.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-zv7n9x — H3 QPACK required-insert-count decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_required_insert_count"
+path = "fuzz_targets/h3_qpack_decode_required_insert_count.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-czy6d8 — H3 QPACK base decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_base"
+path = "fuzz_targets/h3_qpack_decode_base.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-dbp8lb — H3 QPACK size-limit decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_with_limit"
+path = "fuzz_targets/h3_qpack_decode_with_limit.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: web/session.rs SessionData + MemoryStore lifecycle
+[[bin]]
+name = "web_session_data"
+path = "fuzz_targets/web_session_data.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: plan/rewrite.rs RewritePolicy + RewriteRule
+[[bin]]
+name = "plan_rewrite_policy"
+path = "fuzz_targets/plan_rewrite_policy.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: plan/analysis.rs BudgetEffect algebra
+[[bin]]
+name = "plan_analysis_budget"
+path = "fuzz_targets/plan_analysis_budget.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: plan/latency_algebra.rs PiecewiseLinearCurve algebra
+[[bin]]
+name = "plan_latency_curves"
+path = "fuzz_targets/plan_latency_curves.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: plan/certificate.rs PlanHash determinism
+[[bin]]
+name = "plan_certificate_hash"
+path = "fuzz_targets/plan_certificate_hash.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz coverage gap: transport/sink.rs CollectingSink lifecycle
+[[bin]]
+name = "transport_sink_collecting"
+path = "fuzz_targets/transport_sink_collecting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decoding_pipeline_feed"
+path = "fuzz_targets/raptorq_decoding_pipeline_feed.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-seqfhv: WebSocket fragmentation sequence state machine fuzzer.
+# Tests RFC 6455 §5.4 violations and complex frame sequences that can trigger
+# state machine edge cases in WebSocket frame processing.
+[[bin]]
+name = "websocket_fragmentation_state_machine"
+path = "fuzz_targets/websocket_fragmentation_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-x5ordu: HPACK dynamic table state machine adversarial sequences fuzzer.
+# Tests sequences of insert/dynamic-table-resize/eviction across encoder+decoder,
+# asserting indices stay consistent throughout the operation sequence.
+[[bin]]
+name = "hpack_dynamic_table_sequences"
+path = "fuzz_targets/hpack_dynamic_table_sequences.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-eq1j92: TLS certificate chain validation pathological cases fuzzer.
+# Tests random valid+malformed cert sequences, expired/not-yet-valid certificates,
+# signature-algorithm mismatches, missing intermediates, and chain ordering issues.
+[[bin]]
+name = "tls_cert_chain_validation"
+path = "fuzz_targets/tls_cert_chain_validation.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-qs3664: WebSocket handshake parser fuzzer for RFC 6455 protocol negotiation.
+# Tests random Sec-WebSocket-Key/Version/Protocol/Extensions header combinations,
+# malformed Connection/Upgrade combos, oversized values, and HTTP header parsing edge cases.
+[[bin]]
+name = "websocket_handshake_parser"
+path = "fuzz_targets/websocket_handshake_parser.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-b9m51x: HTTP/3 QPACK cross-component integration edge cases fuzzer.
+# Tests encoder<->decoder integration with random state changes, dynamic table size
+# negotiations, header block ordering, and static-only mode enforcement.
+[[bin]]
+name = "qpack_cross_component_integration"
+path = "fuzz_targets/qpack_cross_component_integration.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-7aa9fp: HRW (Highest Random Weight) routing stability fuzzer.
+# Tests src/transport/router.rs:581-607,828-843 HRW routing decisions with
+# random key sequences, varying weight assignments, node add/remove between calls,
+# and asserts routing stability invariants (same key → same node modulo weight changes).
+[[bin]]
+name = "hrw_routing_stability"
+path = "fuzz_targets/hrw_routing_stability.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-srbpo7: Structure-aware PostgreSQL backend frame decoder fuzzer.
+# Tests src/database/postgres.rs::parse_message with random message types,
+# malformed length prefixes, oversized payloads, truncated Authentication/
+# RowDescription/DataRow frames, and backend protocol edge cases.
+[[bin]]
+name = "postgres_frame_decoder"
+path = "fuzz_targets/postgres_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ddgbpp: CommandComplete tag parser fuzzer.
+# Wires generated tags and arbitrary bytes into the production
+# fuzz_parse_command_complete_tag seam instead of a local mock oracle.
+[[bin]]
+name = "postgres_command_complete_tag_parser"
+path = "fuzz_targets/postgres_command_complete_tag_parser.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-7b0zcm: PostgreSQL StartupMessage parser fuzzer.
+# Drives the production startup parser seam with valid packets, embedded-NUL
+# smuggling shapes, duplicate keys, unterminated pairs, and length mismatches.
+[[bin]]
+name = "postgres_startup_message"
+path = "fuzz_targets/postgres_startup_message.rs"
+test = false
+doc = false
+bench = false
+
+# PostgreSQL ErrorResponse/NoticeResponse/ParameterStatus message family fuzzer.
+# Tests src/database/postgres.rs auth/error message parsing with structure-aware
+# input generation for field codes, SQLSTATE validation, and parameter handling.
+[[bin]]
+name = "postgres_auth_error_messages"
+path = "fuzz_targets/postgres_auth_error_messages.rs"
+test = false
+doc = false
+bench = false
+
+# PostgreSQL ParameterDescription/ParameterStatus message family fuzzer.
+# Tests src/database/postgres.rs parameter message parsing with structure-aware
+# input generation covering OID types, parameter names/values, encoding corruption,
+# and message format edge cases (negative counts, embedded nulls, oversized data).
+[[bin]]
+name = "postgres_parameter_messages"
+path = "fuzz_targets/postgres_parameter_messages.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-qs0zoz: RESP protocol adapter lifecycle and decode fuzzer.
+# Tests src/messaging/protocol/mod.rs handshake/health/transport state changes,
+# cancellation handling, RESP frame prefix consumption, and round-trip decode.
+[[bin]]
+name = "messaging_resp_protocol_adapter"
+path = "fuzz_targets/messaging_resp_protocol_adapter.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-m4quv5: Enhanced structure-aware DecodeProof proof-bytes adversarial fuzzer.
+# Tests src/raptorq/proof.rs DecodeProof serialization/deserialization with byte-level
+# corruptions, length field attacks, hash collisions, integer overflows, and format
+# confusion. Verifies replay_and_verify never panics on corrupted proof bytes.
+[[bin]]
+name = "raptorq_proof_bytes_enhanced"
+path = "fuzz_targets/raptorq_proof_bytes_enhanced.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-6ba4qs: Dedicated structure-aware fuzz target for JetStream ack control token parser.
+# Exercises the ack/nak/term/in-progress/release control token parser with intelligent input
+# generation to find edge cases in protocol parsing logic. Tests +ACK, -NAK, +WPI, +TERM
+# tokens with malformed variants, case variations, null injection, and boundary conditions.
+[[bin]]
+name = "jetstream_ack_control"
+path = "fuzz_targets/jetstream_ack_control.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream ACK reply subject splitter fuzz target.
+# Exercises dotted stream/consumer names plus malformed numeric tails against
+# the test-internals ACK metadata parser.
+[[bin]]
+name = "jetstream_ack_subject_splitter"
+path = "fuzz_targets/jetstream_ack_subject_splitter.rs"
+test = false
+doc = false
+bench = false
+
+# Focused fuzz target for JetStream PubAck duplicate detection logic.
+# Tests edge cases in extract_json_bool parsing of "duplicate" field:
+# boolean variants, numeric values, case variations, whitespace, JSON structure corruption.
+[[bin]]
+name = "jetstream_pub_ack_duplicate_detection"
+path = "fuzz_targets/jetstream_pub_ack_duplicate_detection.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream publish timeout fuzzer.
+# Uses a no-ack NATS mock to assert publish returns a configured timeout
+# instead of hanging when the PubAck response never arrives.
+[[bin]]
+name = "jetstream_pub_ack_timeout"
+path = "fuzz_targets/jetstream_pub_ack_timeout.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream `Nats-Msg-Id` duplicate-window fuzzer.
+# Covers just-before-window rejection plus exact-boundary and just-past expiry.
+[[bin]]
+name = "jetstream_msg_id_dedup"
+path = "fuzz_targets/jetstream_msg_id_dedup.rs"
+test = false
+doc = false
+bench = false
+
+# RFC 6330 RaptorQ encoder K_max + N_max boundary limits fuzzer.
+# Structure-aware fuzzing targeting SystematicParams validation and encoding
+# with K values around the RFC 6330 limit (~56,403) and various N combinations.
+# Tests encoder behavior at parameter boundaries, overflow conditions, and
+# validates that encoding fails gracefully at unsupported limits.
+[[bin]]
+name = "raptorq_encoder_rfc6330_limits"
+path = "fuzz_targets/raptorq_encoder_rfc6330_limits.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware QPACK Huffman literal-name encoding fuzzer.
+# Tests src/http/h3_native.rs qpack_encode_string and literal field encoding
+# with intelligent input generation for name/value combinations, Huffman vs raw
+# encoding decision logic, efficiency boundaries, edge cases, and round-trip consistency.
+# Exercises encoding paths that the qpack_decoder target doesn't cover.
+[[bin]]
+name = "qpack_huffman_literal_encoding"
+path = "fuzz_targets/qpack_huffman_literal_encoding.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware gRPC codec message length-prefix + compression-flag fuzzer.
+# Tests src/grpc/codec.rs decode function with intelligent input generation
+# for gRPC message framing: 1 byte compression flag + 4 bytes big-endian length + payload.
+# Exercises compression flag validation (0/1/invalid), length boundary conditions,
+# malformed headers, buffer chunking strategies, and message sequence processing.
+[[bin]]
+name = "grpc_codec_length_prefix"
+path = "fuzz_targets/grpc_codec_length_prefix.rs"
+test = false
+doc = false
+bench = false
+
+# gRPC compressed-flag length bomb fuzzer.
+# Verifies a Compressed-Flag=1 frame declaring MAX_INT length but ending early
+# is rejected from the prefix without allocating the declared body.
+[[bin]]
+name = "grpc_message_compressed_flag_bomb"
+path = "fuzz_targets/grpc_message_compressed_flag_bomb.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream ConsumerInfo/StreamInfo wire decoder fuzzer.
+# Tests src/messaging/jetstream.rs JSON response parsing with intelligent input generation
+# for stream state, consumer config, API errors, and metadata extraction.
+# Exercises JSON field extraction, type validation, error classification, unicode handling,
+# numeric edge cases, and malformed structure recovery (separate from PubAck/ack-subject).
+[[bin]]
+name = "jetstream_consumer_stream_info_decoder"
+path = "fuzz_targets/jetstream_consumer_stream_info_decoder.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream ConsumerInfo error-response fuzzer.
+# Tests src/messaging/jetstream.rs nested `"error"` parsing against
+# ConsumerInfo-shaped wrappers that shadow `code` / `err_code` /
+# `description` outside the real error object.
+[[bin]]
+name = "jetstream_consumer_info_error_responses"
+path = "fuzz_targets/jetstream_consumer_info_error_responses.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware JetStream PullSubscribeOpts wire format fuzzer.
+# Tests src/messaging/jetstream.rs pull subscription request encoding with intelligent input
+# generation for batch/expires JSON format: {"batch":N,"expires":NANOS}.
+# Exercises JSON structure validation, numeric boundary testing, timeout computation edge
+# cases, type confusion handling, and wire format manipulation strategies.
+[[bin]]
+name = "jetstream_pull_subscribe_opts_wire_format"
+path = "fuzz_targets/jetstream_pull_subscribe_opts_wire_format.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware CORS preflight negotiation fuzzer.
+# Tests src/web/middleware.rs CORS Origin / Access-Control-Request-* handling
+# with policy-aware request generation instead of raw random headers.
+# Exercises simple-vs-preflight routing, exact-origin matching, credentialed
+# responses, wildcard-vs-static allow-header behavior, and blocked-origin
+# fail-closed negotiation paths.
+[[bin]]
+name = "cors_preflight_negotiation"
+path = "fuzz_targets/cors_preflight_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-0b13b0: Layout-aware distributed snapshot boundary harness
+# Tests src/distributed/snapshot.rs deserialization boundaries with structure-aware
+# input generation for state recovery edge cases, partial snapshots, and corruption
+# detection. Exercises binary format parsing, boundary condition handling, OOM
+# resistance, optional field validation, and invariant checking across all parsing paths.
+[[bin]]
+name = "distributed_snapshot_boundary"
+path = "fuzz_targets/distributed_snapshot_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-uz7ncr: Structure-aware fuzzer for RaptorQ decoder Gaussian elimination boundary conditions.
+# Tests specific mathematical boundary conditions in the Gaussian elimination process, focusing on
+# rank-deficient matrix configurations, pivot selection edge cases, and constraint matrix boundaries.
+# Complements existing raptorq_decoder_gauss_matrix.rs with focused low-level matrix operation testing.
+[[bin]]
+name = "raptorq_gauss_elimination_boundaries"
+path = "fuzz_targets/raptorq_gauss_elimination_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-i7gcpg: Structure-aware CORS Origin parsing fuzzer for RFC 6454 multi-Origin header handling.
+# Tests src/web/middleware.rs Origin header parsing with intelligent input generation for multi-Origin
+# scenarios, malformed origins, case variations, and edge cases. Exercises RFC 6454 compliance for
+# multiple Origin headers, origin validation, policy enforcement, and ensures robust handling of
+# Origin header parsing edge cases under various CORS policy configurations.
+[[bin]]
+name = "cors_origin_parsing"
+path = "fuzz_targets/cors_origin_parsing.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-gh58ru: Structure-aware JetStream ConsumerInfo API error-response fuzzer.
+# Tests src/messaging/jetstream.rs API error parsing with intelligent input generation for
+# ConsumerInfo-specific error scenarios: consumer not found (10014), stream not found (10059),
+# invalid config (10012), name conflicts (10013), auth errors (10040+), and malformed responses.
+# Exercises error classification, JSON parsing robustness, and edge case handling in JetStream
+# API error responses with structure-aware mutation for ConsumerInfo operation failures.
+[[bin]]
+name = "jetstream_consumer_info_error_response"
+path = "fuzz_targets/jetstream_consumer_info_error_response.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for gRPC-Web trailers framing under chunked transfer encoding.
+# Tests src/grpc/web.rs Base64StreamDecoder with intelligent input generation for chunked
+# base64 decoding scenarios: partial quartet buffering across chunk boundaries, padding
+# handling, state transitions, and error propagation across HTTP chunk splits. Exercises
+# the complete pipeline from chunked base64 decoding through gRPC-Web trailer frame validation.
+[[bin]]
+name = "grpc_web_chunked_trailers"
+path = "fuzz_targets/grpc_web_chunked_trailers.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware RaptorQ encoder K=1 boundary case fuzzer.
+# Tests src/encoding.rs and src/raptorq/systematic.rs encoder K=1 boundary conditions
+# with intelligent input generation targeting systematic index table lookup edge cases,
+# parameter derivation for minimal source symbol counts, repair equation generation,
+# and degree distribution boundaries. Exercises critical path where K < 10 triggers
+# systematic table boundary bugs and validates fail-closed behavior on edge configurations.
+[[bin]]
+name = "raptorq_encoder_k1_boundary"
+path = "fuzz_targets/raptorq_encoder_k1_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware LineCodec boundary case fuzzer for max_length + LF/CRLF mix.
+# Tests src/codec/lines.rs decoder boundary conditions where line length enforcement
+# interacts with different line ending types (LF vs CRLF). Focuses on scenarios where
+# lines are exactly at max_length, exceed by 1, and mixed ending types that may cause
+# different boundary behavior. Exercises state transitions between normal and discard
+# modes, recovery after max length violations, and CRLF vs LF handling edge cases.
+[[bin]]
+name = "lines_codec_boundary_case"
+path = "fuzz_targets/lines_codec_boundary_case.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lines_codec_boundaries"
+path = "fuzz_targets/lines_codec_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for Redis RESP3 Big-Number type encoding.
+# Tests src/messaging/redis.rs RESP3 Big-Number parsing with intelligent input generation
+# targeting UTF-8 validation, CRLF injection, buffer overflow, and malformed wire formats.
+# Exercises encoding/decoding round-trip consistency, boundary conditions, attack scenarios,
+# and validates fail-closed behavior on malformed Big-Number type inputs. Covers numeric
+# edge cases, encoding validation, and protocol compliance for RESP3 big number handling.
+[[bin]]
+name = "redis_resp3_big_number"
+path = "fuzz_targets/redis_resp3_big_number.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 BulkString length-prefix parsing.
+# Targets src/messaging/redis.rs bulk string length handling with explicit
+# cases for over-limit declarations, i64 overflow in ASCII prefixes,
+# invalid negative lengths, truncated payloads, and malformed trailing CRLF.
+[[bin]]
+name = "redis_resp3_bulk_string_length_prefix"
+path = "fuzz_targets/redis_resp3_bulk_string_length_prefix.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 map parsing.
+# Covers empty maps, odd-length bulk keys, deeply nested values, malformed
+# length prefixes, and streamed maps ending after a key without a value.
+[[bin]]
+name = "redis_resp3_map_parse"
+path = "fuzz_targets/redis_resp3_map_parse.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 attribute (`|`) parsing.
+# Covers empty attribute maps, nested attributes, and attributes adjacent to
+# nested aggregate values.
+[[bin]]
+name = "redis_resp3_attributes"
+path = "fuzz_targets/redis_resp3_attributes.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 attribute (`|`) frame boundary cases.
+# Covers malformed pair counts, truncated key/value sequences, nested
+# attributes, CRLF variants, and raw malformed attribute bytes.
+[[bin]]
+name = "redis_resp3_attribute_frames"
+path = "fuzz_targets/redis_resp3_attribute_frames.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 verbatim strings with exact label preservation.
+# Targets src/messaging/redis.rs verbatim parsing for arbitrary payload bytes while
+# asserting that valid `txt`/`mkd` frames preserve the 3-byte label across
+# decode/encode round-trips and that malformed separator/trailer/length cases fail closed.
+[[bin]]
+name = "redis_resp3_verbatim_string"
+path = "fuzz_targets/redis_resp3_verbatim_string.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for Redis hash command encoding and wrapper response parsing.
+# Drives arbitrary binary key/field/value bytes through HSET/HGET command construction
+# via Pipeline::cmd_bytes, and exercises the public hset/hget wrapper result parsing on
+# valid UTF-8 key/field subsets to assert malformed replies fail closed without panicking.
+[[bin]]
+name = "redis_hash_command_parser"
+path = "fuzz_targets/redis_hash_command_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for RESP3 client-tracking push parsing.
+# Drives `invalidate` and `tracking` push frames through RespValue::try_decode,
+# asserting valid frames preserve kind/payload shape byte-for-byte and malformed
+# frames fail closed without panicking.
+[[bin]]
+name = "redis_client_tracking_push"
+path = "fuzz_targets/redis_client_tracking_push.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
+# Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
+# must maintain parsing context across transport reconstruction. Exercises buffer migration,
+# codec state preservation, partial frame handling, and invariant violations during reset.
+[[bin]]
+name = "framed_decoder_reset_reuse_cycle"
+path = "fuzz_targets/framed_decoder_reset_reuse_cycle.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware RaptorQ decoder Schedule construction edge cases fuzzer.
+# Tests pivot selection and dense elimination scheduling during inactivation phase
+# with intelligent input generation targeting different pivoting strategies, dense
+# matrix dimensions, sparsity patterns, tie-breaking scenarios, fallback conditions,
+# and cache behavior for Schedule construction robustness testing.
+[[bin]]
+name = "raptorq_decoder_schedule_edge_cases"
+path = "fuzz_targets/raptorq_decoder_schedule_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for JetStream API response parsing and classification.
+# Exercises StreamInfo, PubAck, and API error parsers directly, while also
+# generating broader ServerInfo / AccountInfo JSON shapes to stress shared
+# classification and malformed-input handling without self-crashing in the
+# harness on intentional control-byte cases.
+[[bin]]
+name = "jetstream_api_responses"
+path = "fuzz_targets/jetstream_api_responses.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware RaptorQ decoder N_max boundary fuzzer targeting RFC 6330 §5.3.5.1 N_max constraint.
+# Tests decoder ESI handling near the RFC 6330 N_max boundary (2^20 - 1) with intelligent input
+# generation for repair symbol ESI values approaching the maximum limit, overflow scenarios when
+# computing repair ISI from ESI + K' padding, edge cases with very large ESI values, and
+# validation of repair equation generation near the maximum repair symbol indices.
+[[bin]]
+name = "raptorq_decoder_n_max"
+path = "fuzz_targets/raptorq_decoder_n_max.rs"
+test = false
+doc = false
+bench = false
+
+# Tests progressive symbol arrival under cancellation storm for RaptorQ decoder wavefront pipeline.
+# Exercises batch processing patterns, cancellation timing, peeling queue consistency, and resource
+# cleanup under cancel pressure. Validates that partial progress is safely discarded on interruption
+# and that decoder state remains valid across cancel/retry sequences.
+[[bin]]
+name = "raptorq_progressive_cancel_storm"
+path = "fuzz_targets/raptorq_progressive_cancel_storm.rs"
+test = false
+doc = false
+bench = false
+
+# Tests gRPC Health Watch transitional state replay and streaming behavior under concurrent stress.
+# Exercises complex health status transition sequences, concurrent watch stream polling, race conditions
+# between status updates and stream notifications, waiter registration timing, and authentication
+# enforcement consistency between Check vs Watch methods.
+[[bin]]
+name = "grpc_health_watch_transitions"
+path = "fuzz_targets/grpc_health_watch_transitions.rs"
+test = false
+doc = false
+bench = false
+
+# Tests Kafka ProduceResponse parser with structure-aware input generation for edge cases.
+# Exercises response frame validation, error code handling, RecordMetadata parsing, length-prefixed
+# string handling, integer boundary conditions, and malformed frame structure detection under
+# various consistency patterns and delivery result parsing scenarios.
+[[bin]]
+name = "kafka_produce_response"
+path = "fuzz_targets/kafka_produce_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kafka_fetch_response"
+path = "fuzz_targets/kafka_fetch_response.rs"
+test = false
+doc = false
+bench = false
+
+# Tests RaptorQ decoder robustness under symbol corruption with structure-aware corruption patterns.
+# Exercises bit flips, burst errors, coefficient corruption, column index corruption, systematic
+# corruption patterns, error detection accuracy, corruption timing effects, and decoder stability
+# when corruption affects critical decode paths and error propagation.
+[[bin]]
+name = "raptorq_decoder_symbol_corruption"
+path = "fuzz_targets/raptorq_decoder_symbol_corruption.rs"
+test = false
+doc = false
+bench = false
+
+# RaptorQ codec symbol corruption fuzzer.
+# Exercises malformed ESI, symbol size, coefficient, and payload corruption paths.
+[[bin]]
+name = "raptorq_codec_symbol_corruption"
+path = "fuzz_targets/raptorq_codec_symbol_corruption.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-clf22o — structure-aware malformed source-block harness for
+# src/raptorq/decoder.rs. Builds valid source blocks from fuzzed K/source bytes,
+# then mutates source-symbol metadata and repair packets while asserting the
+# decoder entrypoints never panic.
+[[bin]]
+name = "raptorq_decoder_malformed"
+path = "fuzz_targets/raptorq_decoder_malformed.rs"
+test = false
+doc = false
+bench = false
+
+# Drives arbitrary bytes as bounded DecodeProof artifacts through
+# DecodeProof::replay_and_verify, asserting corrupted proofs fail closed.
+[[bin]]
+name = "raptorq_decoder_corrupt_proof"
+path = "fuzz_targets/raptorq_decoder_corrupt_proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_padding"
+path = "fuzz_targets/raptorq_decode_padding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decode_extra_repair"
+path = "fuzz_targets/raptorq_decode_extra_repair.rs"
+test = false
+doc = false
+bench = false
+
+# Tests adjusted_frame_len boundary conditions with saturating arithmetic and i64/usize conversion.
+# Exercises length adjustment overflow/underflow scenarios, frame length validation boundaries,
+# negative frame length handling, arithmetic saturation behavior, and integer conversion edge cases
+# in length-delimited frame processing with intelligent boundary condition testing.
+[[bin]]
+name = "length_delimited_adjust_saturating_boundary"
+path = "fuzz_targets/length_delimited_adjust_saturating_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for three-lane scheduler decision arbiter logic.
+# Tests lane choice decisions under various governor suggestions, queue depths, and cancel pressure.
+# Exercises Lyapunov governor weight configurations, fairness bounds, suggestion stability, and
+# deterministic decision-making properties of the scheduler's next_task() lane selection logic.
+[[bin]]
+name = "three_lane_decision_arbiter"
+path = "fuzz_targets/three_lane_decision_arbiter.rs"
+test = false
+doc = false
+bench = false
+
+# Stateful Lyapunov governor fuzzer with shadow model verification
+# Tests potential function computation, scheduling suggestions, convergence analysis,
+# weight configurations, state transitions, and Lyapunov stability properties
+[[bin]]
+name = "lyapunov_governor_stateful"
+path = "fuzz_targets/lyapunov_governor_stateful.rs"
+test = false
+doc = false
+bench = false
+
+# Constant-time MAC verification property fuzzer for src/security/authenticated.rs.
+# Tests timing side-channel resistance in MAC tag comparison to prevent timing attacks.
+# Validates that verify() and PartialEq timing is independent of:
+# - Position of first differing byte in MAC comparison
+# - Number of matching prefix bytes before first difference
+# - MAC validity (real vs zero/random tags)
+# Statistical timing analysis asserts coefficient of variation bounds for constant-time property.
+[[bin]]
+name = "mac_constant_time_verification"
+path = "fuzz_targets/mac_constant_time_verification.rs"
+test = false
+doc = false
+bench = false
+
+# HTTP/2 frame codec fuzzer for src/http/h2/connection.rs FrameCodec::decode.
+# Tests arbitrary byte input sequences against the frame decoder to ensure:
+# - No panics on malformed or adversarial input
+# - Proper error handling for protocol violations
+# - State consistency across partial decode operations
+# - Frame size validation and buffer management safety
+[[bin]]
+name = "h2_frame_codec_arbitrary_bytes"
+path = "fuzz_targets/h2_frame_codec_arbitrary_bytes.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware macaroon attenuation chain associativity fuzzer.
+# Tests mathematical properties of macaroon capability token attenuation:
+# - (a∘b)(t) ≡ b(a(t)) composition associativity
+# - No caveat dropping possible - monotonic restriction property
+# - Three-way associativity (a∘b)∘c ≡ a∘(b∘c)
+# - Identity element and idempotence properties
+# Uses Arbitrary derive on caveats for intelligent structure-aware input generation.
+[[bin]]
+name = "macaroon_attenuation_associativity"
+path = "fuzz_targets/macaroon_attenuation_associativity.rs"
+test = false
+doc = false
+bench = false
+
+# Intrusive priority heap invariant fuzzing for scheduler hot paths
+# Tests heap property maintenance, index consistency, and double-free safety
+# through arbitrary sequences of push/pop/remove/clear operations.
+[[bin]]
+name = "intrusive_heap_invariants"
+path = "fuzz_targets/intrusive_heap_invariants.rs"
+test = false
+doc = false
+bench = false
+
+# Intrusive scheduled-set dedup fuzzing for scheduler ring queues.
+# Tests arbitrary same-handle schedule/remove/dispatch cycles across ready and
+# cancel rings, asserting duplicate schedule attempts are idempotent, wrong-queue
+# removals fail closed, and each schedule epoch can dispatch at most once.
+[[bin]]
+name = "intrusive_scheduled_set_dedup"
+path = "fuzz_targets/intrusive_scheduled_set_dedup.rs"
+test = false
+doc = false
+bench = false
+
+# Notify state machine fuzzing for async synchronization primitives
+# Tests waiter starvation, double-wake prevention, and cancellation safety
+# through arbitrary sequences of notify_one/notify_waiters/notified operations.
+[[bin]]
+name = "notify_state_machine"
+path = "fuzz_targets/notify_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# ContendedMutex commutativity and deadlock-freedom fuzzing for sharded state
+# Tests no-deadlock guarantee, final-value commutativity, and poison safety
+# through arbitrary sequences of read/write/modify operations across multiple threads.
+[[bin]]
+name = "contended_mutex_commutativity"
+path = "fuzz_targets/contended_mutex_commutativity.rs"
+test = false
+doc = false
+bench = false
+
+# Cx scope nesting restriction monotonicity fuzzing for capability security
+# Tests that parent observation is never less restrictive than child through
+# arbitrary nested cancel/budget/macaroon mutations and scope hierarchies.
+[[bin]]
+name = "cx_scope_nesting"
+path = "fuzz_targets/cx_scope_nesting.rs"
+test = false
+doc = false
+bench = false
+
+# RwLock reader-writer queue starvation testing for fairness verification
+# Tests arbitrary acquire-shared/exclusive sequences to ensure no reader or writer
+# starvation under writer-preference fairness with bounded consecutive writer limits.
+[[bin]]
+name = "rwlock_reader_writer_queue"
+path = "fuzz_targets/rwlock_reader_writer_queue.rs"
+test = false
+doc = false
+bench = false
+
+# RwLock writer-priority fairness testing for acquire-shared/exclusive interleavings
+# Tests arbitrary acquire sequences to verify writer never blocked indefinitely by readers,
+# no read-after-write reordering, and proper writer-preference enforcement.
+[[bin]]
+name = "rwlock_writer_priority_fairness"
+path = "fuzz_targets/rwlock_writer_priority_fairness.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #168 — RwLock writer panic poisoning behavior testing
+# Tests arbitrary panic scenarios during write operations to verify subsequent lock
+# acquisitions return PoisonError and poison state propagates correctly across all acquisition methods.
+# Validates poison flag consistency and error propagation for reader/writer operations.
+[[bin]]
+name = "rwlock_poison_writer_panic"
+path = "fuzz_targets/rwlock_poison_writer_panic.rs"
+test = false
+doc = false
+bench = false
+
+# RwLock same-thread recursive read acquisition fuzzing.
+# Exercises nested read guard acquisition/release sequences and try_read accounting.
+[[bin]]
+name = "rwlock_reentrant_read"
+path = "fuzz_targets/rwlock_reentrant_read.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #170 — Oneshot receiver cancel-during-await race condition testing
+# Tests arbitrary cancellation timing during receiver await operations to verify receiver gets
+# either Cancelled OR value, never both. Validates cancel-safety and proper race resolution.
+# Exercises concurrent send/cancel patterns with multiple timing variations.
+[[bin]]
+name = "oneshot_receiver_cancel_race"
+path = "fuzz_targets/oneshot_receiver_cancel_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #119 — OnceCell concurrent initialization race condition testing
+# Tests arbitrary thread count with same init closure to verify exactly one closure
+# invocation and all threads see the same value under concurrent access patterns.
+# Validates initialization synchronization and proper race-free value propagation.
+[[bin]]
+name = "once_cell_concurrent_init"
+path = "fuzz_targets/once_cell_concurrent_init.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "once_cell_set_after_init"
+path = "fuzz_targets/once_cell_set_after_init.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #120 — Notify notify-one/notify-waiters interleaving correctness testing
+# Tests arbitrary sequences of notify_one and notify_waiters operations with waiter
+# management to verify all waiters present at notify_waiters wake exactly once.
+# Validates notification state machine and proper waiter synchronization patterns.
+[[bin]]
+name = "notify_interleaving"
+path = "fuzz_targets/notify_interleaving.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #121 — Semaphore permit acquire/forget/drop equivalence testing
+# Tests arbitrary sequences of acquire, forget, drop, and commit operations to verify
+# total permits remain stable with no leaks and proper conservation laws.
+# Validates permit lifecycle RAII semantics and obligation tracking correctness.
+[[bin]]
+name = "semaphore_permit_lifecycle"
+path = "fuzz_targets/semaphore_permit_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+# Semaphore multi-acquirer cancellation races and weighted acquire ordering
+# Tests concurrent acquire/cancel operations with variable permit counts to find
+# race conditions in waiter management, permit double-release bugs, and FIFO ordering.
+# Validates obligation tracking prevents double-release and cancel cleanup is correct.
+[[bin]]
+name = "semaphore_multi_acquirer_races"
+path = "fuzz_targets/semaphore_multi_acquirer_races.rs"
+test = false
+doc = false
+bench = false
+
+# Broadcast channel lag eviction and multi-producer fairness races
+# Tests slow-receiver lag detection, capacity-boundary multi-producer send ordering,
+# and receiver drop timing races to find buffer corruption, fairness violations,
+# and state inconsistencies in lag calculation and waker management.
+[[bin]]
+name = "broadcast_lag_eviction_races"
+path = "fuzz_targets/broadcast_lag_eviction_races.rs"
+test = false
+doc = false
+bench = false
+
+# Pool slot allocation races under cancellation and concurrent operations
+# Tests borrow-with-cancel races, return-after-pool-drop scenarios, and weighted
+# slot fairness in FIFO waiter queues to find resource leaks, accounting corruption,
+# and fairness violations in CreateSlotReservation and waiter management.
+[[bin]]
+name = "pool_slot_allocation_races"
+path = "fuzz_targets/pool_slot_allocation_races.rs"
+test = false
+doc = false
+bench = false
+
+# GlobalQueue MPMC injector correctness testing for scheduler task distribution
+# Tests arbitrary push/steal sequences across N workers to ensure no task is
+# lost or duplicated in the fetch-and-add based global task queue.
+[[bin]]
+name = "global_queue_mpmc_injector"
+path = "fuzz_targets/global_queue_mpmc_injector.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ndjson_diagnostics"
+path = "fuzz_targets/ndjson_diagnostics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_gzip_decompress"
+path = "fuzz_targets/grpc_gzip_decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "otlp_span_validation"
+path = "fuzz_targets/otlp_span_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_bidi_cancel"
+path = "fuzz_targets/grpc_streaming_bidi_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #126 — Redis pubsub subscribe/unsubscribe bookkeeping fuzzing.
+# Tests arbitrary subscribe/unsubscribe sequences against the real internal
+# dedup/untrack helpers to ensure no duplicate subscription leaks and no
+# unsubscribe-without-subscribe failure on the bookkeeping seam.
+[[bin]]
+name = "redis_pubsub_state_machine"
+path = "fuzz_targets/redis_pubsub_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #123 — Mutex acquire-release-poison sequence testing
+# Tests arbitrary acquire/release/poison operations to verify poisoned mutex
+# returns Err on subsequent acquire and release after poison is no-op.
+# Validates poison state consistency and RAII guard behavior under thread-based poisoning.
+[[bin]]
+name = "mutex_poison_sequence"
+path = "fuzz_targets/mutex_poison_sequence.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #127 — Watch channel version-counter wrap boundary testing
+# Tests arbitrary update/borrow_and_update sequences across u64 wrap boundary
+# to ensure changed() detection remains correct when versions wrap from u64::MAX to 0.
+# Validates inequality comparison (current != seen_version) works correctly across wrap.
+[[bin]]
+name = "watch_version_counter_wrap"
+path = "fuzz_targets/watch_version_counter_wrap.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #128 — Barrier wait-N reset cycle testing
+# Tests arbitrary cycles of (wait until N) → (reset) → (wait until N) to ensure
+# reset between cycles works without spurious wake. Validates exactly one leader per
+# generation, proper generation advancement, and clean reset state after trip.
+[[bin]]
+name = "barrier_wait_reset_cycle"
+path = "fuzz_targets/barrier_wait_reset_cycle.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #130 — OnceCell set + get_or_init race condition testing
+# Tests arbitrary mix of set/get_or_init operations across threads to ensure
+# result consistency: either set wins or first init wins, never partial state.
+# Critical invariants: exactly one successful initialization per cell.
+[[bin]]
+name = "once_cell_set_init_race"
+path = "fuzz_targets/once_cell_set_init_race.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf_varint_round_trip"
+path = "fuzz_targets/grpc_protobuf_varint_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf_varint"
+path = "fuzz_targets/grpc_protobuf_varint.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_client_half_close"
+path = "fuzz_targets/grpc_streaming_client_half_close.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_attribute_merging"
+path = "fuzz_targets/resource_attribute_merging.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_trailers_status_mapping"
+path = "fuzz_targets/grpc_server_trailers_status_mapping.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_prost_codec_encode_huge"
+path = "fuzz_targets/grpc_prost_codec_encode_huge.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #130 — HTTP/1.1 trailer parsing fuzzer
+# Targets ChunkedBodyDecoder::decode() trailer parsing logic to test handling
+# of malformed trailer headers including missing CRLF terminators, embedded
+# null bytes, forbidden header names, and boundary conditions.
+[[bin]]
+name = "h1_trailer_parsing"
+path = "fuzz_targets/h1_trailer_parsing.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #131 — HTTP/1.1 request line parser fuzzer
+# Targets request line parsing logic in src/http/h1/server.rs to test handling
+# of malformed METHOD/URI/VERSION bytes including invalid chars in URI,
+# ensuring malformed requests return 400 Bad Request without panicking.
+[[bin]]
+name = "h1_request_line_parser"
+path = "fuzz_targets/h1_request_line_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #133 — Semaphore add_permits + acquire ordering fuzzer
+# Tests arbitrary mix of add_permits/try_acquire operations to ensure
+# total acquired permits never exceeds total added permits. Validates
+# no over-allocation occurs and permit accounting remains consistent.
+[[bin]]
+name = "semaphore_add_acquire_ordering"
+path = "fuzz_targets/semaphore_add_acquire_ordering.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #147 — Semaphore add_permits overflow fuzzer
+# Tests arbitrary add_permits values approaching usize::MAX to ensure
+# saturating addition behavior with no undefined behavior. Validates
+# permits never exceed usize::MAX and overflow attempts remain stable.
+[[bin]]
+name = "semaphore_add_permits_overflow"
+path = "fuzz_targets/semaphore_add_permits_overflow.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #152 — Semaphore forget+reacquire scenario fuzzer
+# Tests arbitrary forget+acquire patterns to ensure forgotten permits
+# never return to available pool and total invariant is preserved.
+# Validates available + acquired + forgotten = initial_permits.
+[[bin]]
+name = "semaphore_forget_reacquire"
+path = "fuzz_targets/semaphore_forget_reacquire.rs"
+test = false
+doc = false
+bench = false
+
+# Semaphore acquire-with-cancel race condition fuzzer
+# Tests critical race conditions in async semaphore acquire with cancellation.
+# Validates no permit leaks when acquire futures are dropped mid-flight,
+# waiter queue integrity under cancellation, and proper wakeup delivery.
+[[bin]]
+name = "semaphore_acquire_cancel"
+path = "fuzz_targets/semaphore_acquire_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #153 — Notify spurious wakeup fuzzer
+# Tests arbitrary spurious wake patterns to ensure Notified futures
+# only complete when actually notified, not from spurious wakes.
+# Validates proper wake filtering and state tracking.
+[[bin]]
+name = "notify_spurious_wakeup"
+path = "fuzz_targets/notify_spurious_wakeup.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #154 — Barrier reset+wait race condition fuzzer
+# Tests arbitrary reset+wait interleavings to ensure pre-reset waiters
+# either complete or get reset-cleared cleanly. Validates generation
+# advancement and leader election consistency across reset cycles.
+[[bin]]
+name = "barrier_reset_wait_race"
+path = "fuzz_targets/barrier_reset_wait_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #134 — Notify multiple-waiter race condition fuzzer
+# Tests arbitrary M waiters + N notify_one calls to ensure exactly min(M,N)
+# waiters are notified in FIFO order. Validates notification accounting,
+# stored notification handling, and proper waiter queue management.
+[[bin]]
+name = "notify_multiple_waiter_race"
+path = "fuzz_targets/notify_multiple_waiter_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #135 — Watch subscriber late-join semantics fuzzer
+# Tests arbitrary update sequence with subscriber added at random point
+# to ensure late subscriber sees latest value (not historical values).
+# Validates new subscriber gets current state immediately.
+[[bin]]
+name = "watch_subscriber_late_join"
+path = "fuzz_targets/watch_subscriber_late_join.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #136 — OnceCell RAII drop ordering fuzzer
+# Tests arbitrary set+drop+set sequences to ensure drop runs before re-set
+# and validates no double-free or use-after-drop issues. Tests proper
+# RAII semantics for complex drop sequences.
+[[bin]]
+name = "once_cell_raii_drop_ordering"
+path = "fuzz_targets/once_cell_raii_drop_ordering.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #139 — OnceCell lazy initialization panic recovery fuzzer
+# Tests arbitrary panic-during-init sequences to ensure the cell remains
+# uninitialized after panic, next attempts re-try, and no permanent poison
+# occurs. Validates proper panic recovery and retry semantics.
+[[bin]]
+name = "once_cell_lazy_init_panic"
+path = "fuzz_targets/once_cell_lazy_init_panic.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #140 — Mutex poison-then-attempt-recovery sequence fuzzer
+# Tests arbitrary panic-mid-lock + subsequent operations to ensure poisoned
+# state persists correctly and all operations handle poison appropriately.
+# Validates poison propagation and persistence semantics.
+[[bin]]
+name = "mutex_poison_persistence"
+path = "fuzz_targets/mutex_poison_persistence.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #143 — Notify notified-future drop while pending fuzzer
+# Tests arbitrary drop-during-await sequences to ensure dropping unwakes
+# notification correctly and prevents resource leaks. Validates proper
+# cleanup of pending notified futures and notification slot management.
+[[bin]]
+name = "notify_drop_pending"
+path = "fuzz_targets/notify_drop_pending.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #155 — Notify notify_one + drop notified-fut race fuzzer
+# Tests arbitrary timing between notify_one() calls and Notified future
+# drops to ensure proper waiter slot cleanup and baton passing. Validates
+# that dropped futures release waiter slots and don't cause permanent leaks.
+[[bin]]
+name = "notify_drop_race"
+path = "fuzz_targets/notify_drop_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #156 — RwLock read-to-write upgrade race fuzzer
+# Tests arbitrary upgrade attempts to ensure only one upgrade succeeds while
+# others fail appropriately. Validates race conditions between multiple readers
+# attempting to upgrade to write access simultaneously.
+[[bin]]
+name = "rwlock_upgrade_race"
+path = "fuzz_targets/rwlock_upgrade_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #157 — Oneshot poll-then-cancel-then-recv fuzzer
+# Tests arbitrary mid-poll cancel behavior to ensure cancellation is observable
+# on the next poll and no use-after-free occurs. Validates proper cleanup of
+# waker state during cancellation sequences.
+[[bin]]
+name = "oneshot_poll_cancel_recv"
+path = "fuzz_targets/oneshot_poll_cancel_recv.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #158 — Notify notify_waiters() empty waiter set fuzzer
+# Tests arbitrary call patterns of notify_waiters() when no waiters are present
+# to ensure it's a no-op (not an error). Validates no stored notifications
+# created from empty-set broadcasts.
+[[bin]]
+name = "notify_waiters_empty_set"
+path = "fuzz_targets/notify_waiters_empty_set.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #159 — OnceCell take race fuzzer
+# Tests arbitrary take + set + get sequences to ensure take returns Some-then-None
+# and set after take initializes again. Validates proper race condition handling
+# in concurrent take/set/get operations.
+[[bin]]
+name = "once_cell_take_race"
+path = "fuzz_targets/once_cell_take_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #160 — Notify one/poll interleave spurious readiness detection fuzzer
+# Tests notify_one() interleaved with notified.poll() for arbitrary mixing patterns.
+# Validates that poll() only returns Ready after notify_one(), never spuriously.
+# Includes tracking wakers and comprehensive operation sequencing.
+[[bin]]
+name = "notify_one_poll_interleave"
+path = "fuzz_targets/notify_one_poll_interleave.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #166 — Notify notify_one() with multiple Notified futures fuzzer
+# Tests arbitrary scenarios with multiple waiters, validates that notify_one()
+# wakes exactly one waiter while others remain pending. Includes patterns like
+# single notify, multiple notify calls, interleaved operations, and rapid notify.
+[[bin]]
+name = "notify_one_multiple_waiters"
+path = "fuzz_targets/notify_one_multiple_waiters.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #172 — Notify race after waiter cancellation fuzzer
+# Tests arbitrary cancel during notify operations, validates that notifications are
+# atomically delivered or skipped with no double-delivery. Includes patterns for
+# notify_one cancellation, baton-passing, broadcast cancellation, and stored notifications.
+[[bin]]
+name = "notify_cancel_race"
+path = "fuzz_targets/notify_cancel_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #173 — Notify spurious wake under empty notifier fuzzer
+# Tests arbitrary poll-without-notify scenarios, validates that waiters stay Pending
+# with no false Ready states. Includes patterns for repeated polling, concurrent
+# polling, mixed notify/non-notify scenarios, and polling after non-notify operations.
+[[bin]]
+name = "notify_spurious_wake"
+path = "fuzz_targets/notify_spurious_wake.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #174 — Oneshot send to detached receiver fuzzer
+# Tests arbitrary detach/send sequences, validates that sending to detached receiver
+# returns Disconnected error without panicking. Includes patterns for concurrent
+# detach/send, reserve/commit timing, and rapid operation sequences.
+[[bin]]
+name = "oneshot_detached_send"
+path = "fuzz_targets/oneshot_detached_send.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #175 — Mutex lock_arc cancellation fuzzer
+# Tests arbitrary cancel during OwnedMutexGuard::lock() (lock_arc) await, validates
+# lock state remains correct and no resource leaks occur. Includes patterns for
+# concurrent cancellation, sequential operations, and rapid cancellation sequences.
+[[bin]]
+name = "mutex_lock_arc_cancel"
+path = "fuzz_targets/mutex_lock_arc_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #176 — Notify contention storm fuzzer
+# Tests notify_one() under high-frequency contention with arbitrary thread patterns.
+# Validates at-least-once delivery semantics, no notification leaks, and proper cleanup
+# under heavy load with many competing waiters and notifiers.
+[[bin]]
+name = "notify_contention_storm"
+path = "fuzz_targets/notify_contention_storm.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #161 — Oneshot explicit close operations fuzzer
+# Tests arbitrary close+send/recv interleavings through sender/receiver drops.
+# Validates post-close send returns Disconnected/Cancelled error and post-close
+# recv returns Closed/Cancelled error with proper state consistency.
+[[bin]]
+name = "oneshot_explicit_close"
+path = "fuzz_targets/oneshot_explicit_close.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #162 — Notify waiters drop pending Notified futures fuzzer
+# Tests notify_waiters() combined with dropping pending Notified futures.
+# Validates dropped futures properly release waiter slots with no leaks.
+# Includes comprehensive waiter tracking and slot leak detection.
+[[bin]]
+name = "notify_waiters_drop_pending"
+path = "fuzz_targets/notify_waiters_drop_pending.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #163 — OnceCell init-with-panic recovery fuzzer
+# Tests arbitrary panic-during-init scenarios to ensure panic recovery behavior.
+# Validates cell stays uninitialized after panic and retry attempts succeed.
+# Includes concurrent panic handling and state corruption detection.
+[[bin]]
+name = "once_cell_init_with_panic"
+path = "fuzz_targets/once_cell_init_with_panic.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
+# Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
+# to test handling of arbitrary frames including push without ENABLE_PUSH=1,
+# ensuring PROTOCOL_ERROR responses and no panics on malformed input.
+[[bin]]
+name = "h2_push_promise_handling"
+path = "fuzz_targets/h2_push_promise_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #134 — HTTP/2 WINDOW_UPDATE math overflow fuzzer
+# Targets WINDOW_UPDATE frame handling logic in src/http/h2/connection.rs
+# to test flow control window calculations with arbitrary delta values across
+# i32::MAX boundaries, ensuring FLOW_CONTROL_ERROR per RFC 9113.
+[[bin]]
+name = "h2_window_update_overflow"
+path = "fuzz_targets/h2_window_update_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_unary_metadata_isolation"
+path = "fuzz_targets/grpc_server_unary_metadata_isolation.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #131 — Counter/Gauge/Histogram concurrent updates fuzzer
+# Targets src/observability/metrics.rs to test thread safety of atomic operations
+# across multiple concurrent threads with arbitrary operation sequences.
+# Verifies metamorphic properties: Counter totals, Histogram count/sum, Gauge atomics.
+[[bin]]
+name = "metrics_concurrent_updates"
+path = "fuzz_targets/metrics_concurrent_updates.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #136 — HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE retroactive update fuzzer
+# Targets src/http/h2/connection.rs and src/http/h2/stream.rs window size update logic
+# to test retroactive recalculation of existing streams' flow control windows when
+# SETTINGS_INITIAL_WINDOW_SIZE changes. Verifies correct delta math, overflow handling,
+# and RFC 9113 compliance for window size constraints (≤ 2^31-1).
+[[bin]]
+name = "h2_settings_window_size_retroactive"
+path = "fuzz_targets/h2_settings_window_size_retroactive.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #137 — RwLock writer-priority under reader-storm fuzzer
+# Tests arbitrary mix of long-reader + waiting-writer to ensure writers
+# are not starved by sustained reader sequences. Validates writer-preference
+# fairness policy and proper prevention of writer starvation.
+[[bin]]
+name = "rwlock_writer_priority_reader_storm"
+path = "fuzz_targets/rwlock_writer_priority_reader_storm.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #137 — HTTP/2 HEADERS frame Priority field handling fuzzer
+# Targets src/http/h2/frame.rs HEADERS frame priority parsing to test stream dependency
+# tree construction and cycle detection with arbitrary priority weights and dependencies.
+# Verifies self-dependency detection, weight range validation (0-255), exclusive flag
+# handling, and proper PROTOCOL_ERROR responses per RFC 9113 Section 5.3.
+[[bin]]
+name = "h2_headers_priority_handling"
+path = "fuzz_targets/h2_headers_priority_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #141 — HTTP/2 Connection Idle Timeout Enforcement fuzzer
+# Targets src/http/h2/connection.rs idle timeout handling to test proper GOAWAY
+# frame transmission before keep-alive expiration with arbitrary idle periods.
+# Verifies timeout calculation, graceful connection closure, GOAWAY timing,
+# and proper error codes per RFC 9113 Section 6.8.
+[[bin]]
+name = "h2_idle_timeout_enforcement"
+path = "fuzz_targets/h2_idle_timeout_enforcement.rs"
+test = false
+doc = false
+bench = false
+
+# Targets src/observability/metrics.rs gauge value tracking to test the 
+# metamorphic property that gauge values match the last set operation.
+# Verifies that set() overwrites (not aggregates), add/sub modify current value,
+# and concurrent operations remain atomic across multiple threads.
+[[bin]]
+name = "gauge_value_tracking"
+path = "fuzz_targets/gauge_value_tracking.rs"
+test = false
+doc = false
+bench = false
+
+
+# Tick #142 — HTTP/2 PRIORITY Frame Cycle Detection fuzzer
+# Targets src/http/h2/connection.rs priority dependency tree management to test
+# cycle detection in stream dependency graphs with arbitrary priority relationships.
+# Verifies self-dependency detection, circular dependency rejection, and proper
+# PROTOCOL_ERROR responses per RFC 9113 Section 5.3.1.
+[[bin]]
+name = "h2_priority_cycle_detection"
+path = "fuzz_targets/h2_priority_cycle_detection.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #145 — HTTP/2 Trailers-Only Response fuzzer
+# Targets src/http/h2/connection.rs trailers-only response handling to test
+# arbitrary headers with END_STREAM flag, assert empty body + trailers as final frames
+# per RFC 9113. Verifies pseudo-header rejection, payload preservation, and protocol compliance.
+[[bin]]
+name = "h2_trailers_only_response"
+path = "fuzz_targets/h2_trailers_only_response.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #146 — HTTP/2 HEADERS frame fragmentation fuzzer
+# Targets src/http/h2/connection.rs HEADERS frame handling to test
+# fragmentation protocol violations: HEADERS + END_HEADERS without proper CONTINUATION,
+# orphaned CONTINUATION frames, interleaved streams. Asserts PROTOCOL_ERROR per RFC 9113.
+[[bin]]
+name = "h2_headers_fragmentation"
+path = "fuzz_targets/h2_headers_fragmentation.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #147 — HTTP/2 SETTINGS_HEADER_TABLE_SIZE update fuzzer
+# Targets src/http/h2/connection.rs HPACK dynamic table management to test
+# arbitrary header table size update sequences. Asserts correct table resizing,
+# proper entry eviction (FIFO), and no entry loss during size changes per RFC 7541.
+[[bin]]
+name = "h2_settings_header_table_size"
+path = "fuzz_targets/h2_settings_header_table_size.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #148 — HTTP/2 WINDOW_UPDATE underflow fuzzer
+# Targets src/http/h2/connection.rs flow control window management to test
+# arbitrary delta values causing negative-sum-window scenarios. Asserts proper
+# FLOW_CONTROL_ERROR responses per RFC 9113 §6.9 for window underflow conditions.
+[[bin]]
+name = "h2_window_update_underflow"
+path = "fuzz_targets/h2_window_update_underflow.rs"
+test = false
+doc = false
+bench = false
+
+# Targets src/observability/metrics.rs Counter.add() to test OTLP monotonic counter
+# specification compliance. Verifies counters never decrease, handles overflow
+# correctly, and maintains atomicity in concurrent scenarios per OTLP requirements.
+[[bin]]
+name = "counter_monotonic_compliance"
+path = "fuzz_targets/counter_monotonic_compliance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_idle_timeout_state_machine"
+path = "fuzz_targets/grpc_server_idle_timeout_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_codec_lpm_stream_boundary"
+path = "fuzz_targets/grpc_codec_lpm_stream_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #145 — Oneshot poll-after-await Future contract fuzzer
+# Tests arbitrary post-await poll patterns to ensure poll after Ready returns
+# Pending or panic per std::future contract. Validates proper Future state
+# management and PolledAfterCompletion handling.
+[[bin]]
+name = "oneshot_poll_after_await"
+path = "fuzz_targets/oneshot_poll_after_await.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #148 — Oneshot send-twice error scenarios fuzzer
+# Tests arbitrary multi-send attempts to ensure proper error handling when
+# sends fail due to disconnection or cancellation. Validates error cases
+# return original value and maintain channel state integrity.
+[[bin]]
+name = "oneshot_send_twice"
+path = "fuzz_targets/oneshot_send_twice.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #150 — Oneshot sender clone-then-drop scenarios fuzzer
+# Tests arbitrary clone+drop sequences using separate channels to simulate
+# multiple senders. Validates receivers get values when ANY sender sends,
+# and Cancelled only when ALL senders drop without sending.
+[[bin]]
+name = "oneshot_sender_clone_drop"
+path = "fuzz_targets/oneshot_sender_clone_drop.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #165 — Oneshot sender.send() after receiver-drop fuzzer
+# Tests arbitrary timing between sender.send() and receiver drop operations.
+# Validates that send returns Err(SendError::Disconnected(value)) with value
+# preserved, never panics, and handles concurrent drop/send scenarios correctly.
+[[bin]]
+name = "oneshot_send_after_receiver_drop"
+path = "fuzz_targets/oneshot_send_after_receiver_drop.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #167 — Mutex lock_owned with future cancellation fuzzer
+# Tests OwnedMutexGuard::lock() with arbitrary cancellation during await.
+# Validates lock state correctness after cancel, ensures no leaks, and verifies
+# other waiters can acquire lock. Patterns: cancel during poll, before poll,
+# rapid cancel/poll cycles, multi-operation cancel, delayed cancel, interleaved.
+[[bin]]
+name = "mutex_lock_owned_cancel"
+path = "fuzz_targets/mutex_lock_owned_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware lab-runtime fuzzer for concurrent Mutex acquire/release.
+# Drives multiple tasks through queued ownership transfer while injecting
+# cancellation before lock, while queued, and after acquire.
+[[bin]]
+name = "sync_mutex_concurrent_acquire"
+path = "fuzz_targets/sync_mutex_concurrent_acquire.rs"
+test = false
+doc = false
+bench = false
+
+# Same-owner mutex acquire fuzzer. Exercises `try_lock`,
+# `try_lock_owned`, and a single pending `lock(&Cx)` poll while a guard is held.
+[[bin]]
+name = "mutex_reentrant_acquire"
+path = "fuzz_targets/mutex_reentrant_acquire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_semaphore_concurrent_acquire"
+path = "fuzz_targets/sync_semaphore_concurrent_acquire.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for concurrent Pool acquire/release. Tracks checked-out
+# resource ids across worker threads and verifies final pool stats drain cleanly.
+[[bin]]
+name = "sync_pool_acquire_release"
+path = "fuzz_targets/sync_pool_acquire_release.rs"
+test = false
+doc = false
+bench = false
+
+# HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE boundary fuzzer.
+# Covers 2^31-2, 2^31-1, and 2^31 against Settings validation,
+# builder clamping, and StreamStore flow-control window arithmetic.
+[[bin]]
+name = "h2_settings_initial_window_clamp"
+path = "fuzz_targets/h2_settings_initial_window_clamp.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #177 — HTTP/2 SETTINGS unsupported value range fuzzer
+# Tests arbitrary u32 setting values exceeding RFC 9113 bounds. Validates
+# PROTOCOL_ERROR for out-of-bounds SETTINGS_ENABLE_PUSH (must be 0-1),
+# SETTINGS_INITIAL_WINDOW_SIZE (must be <= 2^31-1), and SETTINGS_MAX_FRAME_SIZE
+# (must be 16384-16777215), or graceful handling with clamping.
+[[bin]]
+name = "h2_settings_unsupported_value_range"
+path = "fuzz_targets/h2_settings_unsupported_value_range.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #178 — HTTP/2 CONTINUATION frame size limit fuzzer
+# Tests arbitrary continuation byte count sequences to validate aggregate
+# header-list-size limit enforcement. Ensures ENHANCE_YOUR_CALM error for
+# accumulated fragments exceeding max_header_list_size * 4 (capped at 256KB).
+[[bin]]
+name = "h2_continuation_frame_size_limit"
+path = "fuzz_targets/h2_continuation_frame_size_limit.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #179 — Oneshot sender split-and-clone fuzzer
+# Tests robustness when multiple Sender instances are created improperly
+# (by cloning internal Arc). Validates that only first send wins across
+# all concurrent attempts, with no panics or state corruption.
+[[bin]]
+name = "oneshot_sender_clone"
+path = "fuzz_targets/oneshot_sender_clone.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #179 — HTTP/1.1 LWS handling in headers fuzzer
+# Tests arbitrary linear-whitespace patterns in header values to validate
+# proper trimming per RFC 9110. Ensures leading/trailing space/tab removal,
+# internal LWS normalization, and rejection of deprecated line folding.
+[[bin]]
+name = "h1_lws_header_handling"
+path = "fuzz_targets/h1_lws_header_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #180 - Redis CLUSTER SLOTS parser fuzzer
+# Drives raw RESP plus normalized Redis Cluster slot-range replies through the
+# CLUSTER SLOTS parser, including legacy nodes, null/unknown endpoints, metadata,
+# bad ranges, invalid ports, and malformed endpoint strings.
+[[bin]]
+name = "fuzz_redis_cluster_slots"
+path = "fuzz_targets/redis_cluster_slots.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #180 — HTTP/2 HEADERS frame with trailers fuzzer
+# Tests arbitrary trailers validation to ensure they are only allowed after
+# END_STREAM data per RFC 9113 Section 8.1. Validates rejection of pseudo-
+# headers and forbidden headers in trailers, and proper stream state management.
+[[bin]]
+name = "h2_headers_frame_with_trailers"
+path = "fuzz_targets/h2_headers_frame_with_trailers.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #181 — Notify one + Notified poll race fuzzer
+# Tests race conditions between notify_one() calls and Notified::poll()
+# operations. Validates proper notification delivery during concurrent
+# polling and notification, ensuring no lost or spurious wakeups.
+[[bin]]
+name = "notify_poll_race"
+path = "fuzz_targets/notify_poll_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #182 — HTTP/1.1 chunked-body trailers fuzzer
+# Tests arbitrary trailer headers in HTTP/1.1 chunked encoding to validate
+# they are parsed only after the final 0-chunk per RFC 9112. Ensures
+# rejection of forbidden trailer headers and proper chunked state management.
+[[bin]]
+name = "h1_chunked_trailers"
+path = "fuzz_targets/h1_chunked_trailers.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #182 — Oneshot split sender multi-drop fuzzer
+# Tests scenarios where multiple Sender instances exist and validates
+# that receiver only sees Closed when ALL senders are dropped.
+# Verifies partial sender drops don't cause premature channel closure.
+[[bin]]
+name = "oneshot_split_sender"
+path = "fuzz_targets/oneshot_split_sender.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #183 — HTTP/2 SETTINGS_ENABLE_PUSH dynamic update fuzzer
+# Tests dynamic toggling of SETTINGS_ENABLE_PUSH between 0 and 1 to validate
+# that PUSH_PROMISE frames are properly blocked when push is disabled. Tests
+# invalid values, server constraints, and state transition correctness.
+[[bin]]
+name = "h2_settings_enable_push_dynamic"
+path = "fuzz_targets/h2_settings_enable_push_dynamic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_trailers_end_stream_validation"
+path = "fuzz_targets/h2_trailers_end_stream_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_trailers_after_data"
+path = "fuzz_targets/h2_trailers_after_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_window_update_delta_zero"
+path = "fuzz_targets/h2_window_update_delta_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_retroactive"
+path = "fuzz_targets/h2_settings_initial_window_size_retroactive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_overflow"
+path = "fuzz_targets/h2_settings_initial_window_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_max"
+path = "fuzz_targets/h2_settings_initial_window_size_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_negative_after_change"
+path = "fuzz_targets/h2_settings_initial_window_negative_after_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_frame_size_max"
+path = "fuzz_targets/h2_data_frame_size_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_zero_with_padded"
+path = "fuzz_targets/h2_data_zero_with_padded.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_circular_dependency"
+path = "fuzz_targets/h2_priority_circular_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_chunked_with_content_length"
+path = "fuzz_targets/h1_request_chunked_with_content_length.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_path_invalid"
+path = "fuzz_targets/h2_request_path_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_authority_special_chars"
+path = "fuzz_targets/h2_request_authority_special_chars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_path_with_query_string"
+path = "fuzz_targets/h2_request_path_with_query_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_zero"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_increase"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_increase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_decrease"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_dynamic"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_dynamic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_header_table_size_update"
+path = "fuzz_targets/h2_settings_header_table_size_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_chunked_split_buffer"
+path = "fuzz_targets/h1_chunked_split_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_connection_close"
+path = "fuzz_targets/h1_connection_close.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_connection_close_semantics"
+path = "fuzz_targets/h1_connection_close_semantics.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_connection_transition"
+path = "fuzz_targets/h1_connection_transition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_keep_alive_transition"
+path = "fuzz_targets/h1_keep_alive_transition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_response_trailers_parser"
+path = "fuzz_targets/h1_response_trailers_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_expect_100_continue"
+path = "fuzz_targets/h1_expect_100_continue.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_response_status_line"
+path = "fuzz_targets/h1_response_status_line.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_padding_validation"
+path = "fuzz_targets/h2_data_padding_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_content_length_body_mismatch"
+path = "fuzz_targets/h1_content_length_body_mismatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_malformed_lf_terminator"
+path = "fuzz_targets/h1_malformed_lf_terminator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_transfer_encoding_precedence"
+path = "fuzz_targets/h1_transfer_encoding_precedence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_timeout"
+path = "fuzz_targets/h2_continuation_timeout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_keep_alive_http10_default"
+path = "fuzz_targets/h1_keep_alive_http10_default.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_method_case_sensitivity"
+path = "fuzz_targets/h1_request_method_case_sensitivity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notify_drop_pending_fut"
+path = "fuzz_targets/notify_drop_pending_fut.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oneshot_sender_drop_receiver_poll"
+path = "fuzz_targets/oneshot_sender_drop_receiver_poll.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mutex_drop_after_panic"
+path = "fuzz_targets/mutex_drop_after_panic.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_enable_push_invalid"
+path = "fuzz_targets/h2_settings_enable_push_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_header_table_size_underflow"
+path = "fuzz_targets/h2_settings_header_table_size_underflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "notify_drop_pending_mid_poll"
+path = "fuzz_targets/notify_drop_pending_mid_poll.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_headers_continuation_sequencing"
+path = "fuzz_targets/h2_headers_continuation_sequencing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_minimum"
+path = "fuzz_targets/h2_settings_max_frame_size_minimum.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_below_default"
+path = "fuzz_targets/h2_settings_max_frame_size_below_default.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_overflow"
+path = "fuzz_targets/h2_settings_max_frame_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_unknown_id"
+path = "fuzz_targets/h2_settings_unknown_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_no_headers"
+path = "fuzz_targets/h2_continuation_no_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_zero_length"
+path = "fuzz_targets/h2_data_zero_length.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_invalid_value"
+path = "fuzz_targets/h2_settings_invalid_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_method_invalid"
+path = "fuzz_targets/h2_request_method_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_method_with_special_chars"
+path = "fuzz_targets/h2_request_pseudo_method_with_special_chars.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_scheme_invalid"
+path = "fuzz_targets/h2_request_pseudo_scheme_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_scheme_https_uppercase"
+path = "fuzz_targets/h2_request_pseudo_scheme_https_uppercase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_huge_pseudo_path"
+path = "fuzz_targets/h2_request_huge_pseudo_path.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_pseudo_header_order"
+path = "fuzz_targets/h2_pseudo_header_order.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_pseudo_header_uppercase"
+path = "fuzz_targets/h2_pseudo_header_uppercase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_path_canonicalization"
+path = "fuzz_targets/h2_path_canonicalization.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_chunked_chunk_extension"
+path = "fuzz_targets/h1_chunked_chunk_extension.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_request_line_invalid"
+path = "fuzz_targets/h1_request_line_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_change"
+path = "fuzz_targets/h2_settings_initial_window_size_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_dependency_loop"
+path = "fuzz_targets/h2_priority_dependency_loop.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_dependency_chain"
+path = "fuzz_targets/h2_priority_dependency_chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_overflow"
+path = "fuzz_targets/h2_continuation_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_headers_frame_size_cap_concurrent"
+path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_idle_stream"
+path = "fuzz_targets/h2_priority_idle_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_goaway_then_data"
+path = "fuzz_targets/h2_goaway_then_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oneshot_sender_close_receiver_poll"
+path = "fuzz_targets/oneshot_sender_close_receiver_poll.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mutex_arc_clone_race"
+path = "fuzz_targets/mutex_arc_clone_race.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_compressed_flag_mismatch"
+path = "fuzz_targets/grpc_compressed_flag_mismatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_rst_stream_flood"
+path = "fuzz_targets/h2_rst_stream_flood.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_padding_overflow"
+path = "fuzz_targets/h2_data_padding_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_authority_invalid"
+path = "fuzz_targets/h2_request_authority_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_huge_authority"
+path = "fuzz_targets/h2_request_with_huge_authority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sync_oneshot_cancel_recv"
+path = "fuzz_targets/sync_oneshot_cancel_recv.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_header_continuation"
+path = "fuzz_targets/h1_header_continuation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_header_list_size_zero"
+path = "fuzz_targets/h2_settings_max_header_list_size_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_table_size_zero"
+path = "fuzz_targets/h2_settings_table_size_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_duplicate_id"
+path = "fuzz_targets/h2_settings_duplicate_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_change"
+path = "fuzz_targets/h2_settings_max_frame_size_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_change_mid"
+path = "fuzz_targets/h2_settings_max_frame_size_change_mid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_te_chunked_extension_dos"
+path = "fuzz_targets/h1_te_chunked_extension_dos.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_te_value_invalid"
+path = "fuzz_targets/h1_te_value_invalid.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_header_too_large"
+path = "fuzz_targets/h2_request_header_too_large.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_authority_with_userinfo"
+path = "fuzz_targets/h2_request_authority_with_userinfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_with_padding_full_frame"
+path = "fuzz_targets/h2_data_with_padding_full_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_unknown_id_with_known"
+path = "fuzz_targets/h2_settings_unknown_id_with_known.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_window_update_combined_increments"
+path = "fuzz_targets/h2_window_update_combined_increments.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_after_settings"
+path = "fuzz_targets/h2_continuation_after_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_with_ack_flag"
+path = "fuzz_targets/h2_settings_with_ack_flag.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_header_duplicate"
+path = "fuzz_targets/h2_request_pseudo_header_duplicate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_self_dependency"
+path = "fuzz_targets/h2_priority_self_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_after_data"
+path = "fuzz_targets/h2_continuation_after_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_unlimited"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_unlimited.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_chunked_terminator_missing"
+path = "fuzz_targets/h1_chunked_terminator_missing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_chunked_terminator"
+path = "fuzz_targets/h1_chunked_terminator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_max_weight"
+path = "fuzz_targets/h2_priority_max_weight.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_padding_size_max"
+path = "fuzz_targets/h2_data_padding_size_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_zero_window_after_init"
+path = "fuzz_targets/h2_settings_zero_window_after_init.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_header_after_regular"
+path = "fuzz_targets/h2_request_pseudo_header_after_regular.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_at_zero"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_at_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_minus_one"
+path = "fuzz_targets/h2_settings_initial_window_minus_one.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_negative_value"
+path = "fuzz_targets/h2_settings_negative_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_after_end_stream"
+path = "fuzz_targets/h2_data_after_end_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_data_payload_at_max"
+path = "fuzz_targets/h2_data_payload_at_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_huge_dependency"
+path = "fuzz_targets/h2_priority_huge_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_path_relative"
+path = "fuzz_targets/h2_request_path_relative.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_recv_first_then_send"
+path = "fuzz_targets/h2_settings_recv_first_then_send.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_method_too_long"
+path = "fuzz_targets/h2_request_method_too_long.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_authority_empty"
+path = "fuzz_targets/h2_request_authority_empty.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_frame_size_at_max"
+path = "fuzz_targets/h2_settings_max_frame_size_at_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_header_unknown"
+path = "fuzz_targets/h2_request_pseudo_header_unknown.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_at_default_then_change"
+path = "fuzz_targets/h2_settings_at_default_then_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_path_with_fragment"
+path = "fuzz_targets/h2_request_path_with_fragment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_chunked_size_overflow"
+path = "fuzz_targets/h1_chunked_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_table_size_change"
+path = "fuzz_targets/h2_settings_table_size_change.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_unknown_value"
+path = "fuzz_targets/h2_settings_unknown_value.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_method_lowercase"
+path = "fuzz_targets/h2_request_method_lowercase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_zero_dependency"
+path = "fuzz_targets/h2_priority_zero_dependency.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-u3xx8w — narrow PriorityFrame::parse round-trip + invariants
+[[bin]]
+name = "h2_priority_frame_parse_roundtrip"
+path = "fuzz_targets/h2_priority_frame_parse_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_zero_max_concurrent"
+path = "fuzz_targets/h2_settings_zero_max_concurrent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_te_chunked_with_trailers"
+path = "fuzz_targets/h1_te_chunked_with_trailers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_query_only"
+path = "fuzz_targets/h2_request_pseudo_path_query_only.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_query"
+path = "fuzz_targets/h2_request_pseudo_path_with_query.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_userinfo"
+path = "fuzz_targets/h2_request_pseudo_authority_with_userinfo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_size_zero"
+path = "fuzz_targets/h2_settings_initial_window_size_zero.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_max"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_max.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_double_slash"
+path = "fuzz_targets/h2_request_pseudo_path_with_double_slash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_priority_then_data"
+path = "fuzz_targets/h2_request_with_priority_then_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_initial_window_negative_via_window_update"
+path = "fuzz_targets/h2_settings_initial_window_negative_via_window_update.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_max_concurrent_streams_decrease_below_active"
+path = "fuzz_targets/h2_settings_max_concurrent_streams_decrease_below_active.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_at_zero_then_increase"
+path = "fuzz_targets/h2_settings_at_zero_then_increase.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_settings_with_padding_disable_settings"
+path = "fuzz_targets/h2_settings_with_padding_disable_settings.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_unicode"
+path = "fuzz_targets/h2_request_pseudo_path_with_unicode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_invalid_pseudo_header_combination"
+path = "fuzz_targets/h2_request_with_invalid_pseudo_header_combination.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_starting_without_slash"
+path = "fuzz_targets/h2_request_pseudo_path_starting_without_slash.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_starting_with_at"
+path = "fuzz_targets/h2_request_pseudo_authority_starting_with_at.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_with_too_many_pseudo_headers"
+path = "fuzz_targets/h2_request_with_too_many_pseudo_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_method_extension"
+path = "fuzz_targets/h2_request_pseudo_method_extension.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_brackets"
+path = "fuzz_targets/h2_request_pseudo_authority_with_brackets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_invalid_ipv6"
+path = "fuzz_targets/h2_request_pseudo_authority_with_invalid_ipv6.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_authority_with_unicode"
+path = "fuzz_targets/h2_request_pseudo_authority_with_unicode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_request_pseudo_path_with_percent_encoding"
+path = "fuzz_targets/h2_request_pseudo_path_with_percent_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scheduler_state_snapshot"
+path = "fuzz_targets/scheduler_state_snapshot.rs"
+test = false
+doc = false
+bench = false
+
+# io_uring CQE ordering inversion and kernel buffer mapping aliasing fuzzer
+# Tests vulnerabilities in src/fs/uring.rs completion queue entry ordering,
+# buffer aliasing between overlapping operations, and ring submission overflow
+[[bin]]
+name = "fs_uring_cqe_ordering_inversion"
+path = "fuzz_targets/fs_uring_cqe_ordering_inversion.rs"
+test = false
+doc = false
+bench = false
+
+# I/O buffer boundary violations and cancellation edge case fuzzer
+# Tests vulnerabilities in src/io/ buffer bounds checking, copy operation
+# cancellation drain logic, and cross-operation buffer contamination
+[[bin]]
+name = "io_buffer_boundary_violations"
+path = "fuzz_targets/io_buffer_boundary_violations.rs"
+test = false
+doc = false
+bench = false
+
+# LabIoCap submit/complete counter consistency fuzzer.
+# Compares public IoStats snapshots against a shadow model across arbitrary event streams.
+[[bin]]
+name = "io_cap_counter_overflow"
+path = "fuzz_targets/io_cap_counter_overflow.rs"
+test = false
+doc = false
+bench = false
+
+# Progress certificate concurrent operations and ordering invariants fuzzer
+# Tests certificate validity under concurrent revoke operations, step ordering
+# monotonicity, and floating-point boundary edge cases (NaN, infinity, epsilon)
+[[bin]]
+name = "fuzz_progress_certificate_concurrent"
+path = "fuzz_targets/fuzz_progress_certificate_concurrent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_isolation_level_from_server_string"
+path = "fuzz_targets/fuzz_isolation_level_from_server_string.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_http_accept_encoding"
+path = "fuzz_targets/fuzz_http_accept_encoding.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_header_map_invariants"
+path = "fuzz_targets/http_header_map_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_codec_arbitrary_headers"
+path = "fuzz_targets/fuzz_h1_codec_arbitrary_headers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h2_frame_variant_decoder"
+path = "fuzz_targets/fuzz_h2_frame_variant_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h3_varint_frame_fuzzer"
+path = "fuzz_targets/h3_varint_frame_fuzzer.rs"
+test = false
+doc = false
+bench = false
+
+# Oracle-based RegionSnapshot serialization fuzzer for distributed/snapshot.rs
+# Tests round-trip invariants, parser robustness, and boundary conditions.
+# Uses multiple oracle strategies: crash detection, round-trip validation, and invariant checking.
+[[bin]]
+name = "distributed_snapshot_oracle"
+path = "fuzz_targets/distributed_snapshot_oracle.rs"
+test = false
+doc = false
+bench = false
+
+# Oracle-based gRPC codec hardening fuzzer with strong oracles
+# Tests round-trip invariants, differential behavior against reference implementation,
+# and deep state consistency. Implements oracle hierarchy: reference impl, round-trip,
+# boundary validation, and crash detection for comprehensive codec validation.
+[[bin]]
+name = "grpc_codec_oracle_hardening"
+path = "fuzz_targets/grpc_codec_oracle_hardening.rs"
+test = false
+doc = false
+bench = false
+
+# Restored registration (br-asupersync-lr6n3n): this entry was added in 5e4f74206
+# and accidentally clobbered 7 minutes later by 36053e577 (concurrent Cargo.toml
+# edits). DNS lookup helper outcome fuzzer with OPT-length oracle.
+[[bin]]
+name = "dns_lookup_decoder"
+path = "fuzz_targets/dns_lookup_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "benchmark_cartel_baseline_validation"
+path = "fuzz_targets/benchmark_cartel_baseline_validation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "forensics_evidence_collection_invariants"
+path = "fuzz_targets/forensics_evidence_collection_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lab_trace_replay_stateful"
+path = "fuzz_targets/lab_trace_replay_stateful.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oracle_integration_invariants"
+path = "fuzz_targets/oracle_integration_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "region_lifecycle_invariants"
+path = "fuzz_targets/region_lifecycle_invariants.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "replay_minimization_invariants"
+path = "fuzz_targets/replay_minimization_invariants.rs"
+test = false
+doc = false
+bench = false

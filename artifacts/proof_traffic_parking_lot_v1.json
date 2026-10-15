@@ -1,0 +1,57 @@
+{
+  "schema_version": "proof-traffic-parking-lot-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.4",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T07:05:00Z",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_traffic_parking_lot_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_parking_lot_contract.rs",
+    "rust_module": "src/audit/proof_traffic_parking_lot.rs"
+  },
+  "required_attempt_fields": [
+    "head_commit",
+    "command_intent",
+    "exact_rch_command_or_blocker_marker",
+    "target_dir",
+    "owned_paths",
+    "reservation_evidence",
+    "blocker_class",
+    "blocker_owner_or_thread",
+    "retry_predicate",
+    "no_claim_boundaries"
+  ],
+  "required_group_fields": [
+    "blocker_key",
+    "attempt_ids",
+    "command_intents",
+    "owned_paths",
+    "attempt_count"
+  ],
+  "resume_rules": [
+    "Exact RCH command may be emitted only when retry_predicate.satisfied is true and an exact command is recorded.",
+    "Unsatisfied retry predicates emit a fresh parked blocker marker.",
+    "Marker-only parked attempts emit a fresh parked blocker marker even when the predicate is satisfied.",
+    "Parked, refused, and stale attempts cannot be cited as green proof evidence."
+  ],
+  "required_fixture_coverage": [
+    "duplicate-blocker-grouping",
+    "distinct-command-details-preserved",
+    "resume-command-when-predicate-satisfied",
+    "fresh-blocker-when-predicate-unsatisfied",
+    "marker-only-attempt-does-not-emit-command",
+    "parked-refused-stale-not-green",
+    "deterministic-markdown-agent-mail-br"
+  ],
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No peer-owned build cancellation authority.",
+    "No parked, refused, or stale attempt is green proof evidence."
+  ]
+}

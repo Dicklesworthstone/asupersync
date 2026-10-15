@@ -1,0 +1,7 @@
+error[E0599]: no method named `send_text` found for struct `TypedWebSocketWrite<IO, WebSocketWriteCloseSent>` in the current scope
+  --> tests/compile_fail/websocket_typed_write_no_send_on_close_sent.rs:20:13
+   |
+20 |     closing.send_text(cx, "late payload").await?;
+   |             ^^^^^^^^^ method not found in `TypedWebSocketWrite<IO, WebSocketWriteCloseSent>`
+   |
+   = note: the method was found for `TypedWebSocketWrite<IO, WebSocketWriteOpen>`

@@ -1,0 +1,40 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v1",
+  "parser_surfaces": [
+    {
+      "id": "hpack_huffman_decode",
+      "path": "src/http/hpack.rs",
+      "symbol": "decode_huffman",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "high",
+      "category": "hpack"
+    },
+    {
+      "id": "mysql_handshake_parse",
+      "path": "src/database/mysql.rs",
+      "symbol": "parse_handshake",
+      "visibility": "pub",
+      "input_kind": "&[u8]",
+      "risk": "high",
+      "category": "mysql"
+    }
+  ],
+  "fuzz_targets": [
+    {
+      "id": "fuzz_hpack_decode_smoke",
+      "path": "fuzz/fuzz_targets/hpack_decode_smoke.rs",
+      "exists": true,
+      "covers": [],
+      "references": ["src/http/hpack.rs", "decode_huffman"]
+    },
+    {
+      "id": "fuzz_mysql_handshake_old",
+      "path": "fuzz/fuzz_targets/mysql_handshake_old.rs",
+      "exists": false,
+      "covers": ["mysql_handshake_parse"],
+      "references": ["parse_handshake"]
+    }
+  ],
+  "exemptions": []
+}

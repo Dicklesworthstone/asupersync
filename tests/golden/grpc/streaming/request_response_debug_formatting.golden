@@ -1,0 +1,11 @@
+=== Simple Request ===
+Request { metadata: Metadata { entries: [] }, message: "hello world", extensions: Extensions { typed_count: 0 } }
+
+=== Request with Metadata ===
+Request { metadata: Metadata { entries: [("authorization", Ascii("Bearer secret-token")), ("x-trace-id", Ascii("trace-123-456"))] }, message: 42, extensions: Extensions { typed_count: 0 } }
+
+=== Simple Response ===
+Response { metadata: Metadata { entries: [] }, message: "response data" }
+
+=== Response with Metadata ===
+Response { metadata: Metadata { entries: [("content-type", Ascii("application/grpc+proto")), ("custom-bin", Binary(Bytes { len: 2, start: 0, data: [1, 2] }))] }, message: ["item1", "item2", "item3"] }

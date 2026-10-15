@@ -1,0 +1,5 @@
+---
+source: src/http/h1/codec.rs
+expression: failure_report
+---
+failure_0: "EXPECTED ERROR but reference succeeded: Invalid chunk size\nOur error:  BadChunkedEncoding\nRef result: ParsedRequest { method: \"POST\", uri: \"/bad\", version: \"Http11\", headers: [(\"Transfer-Encoding\", \"chunked\")] }\nRaw bytes:  \"POST /bad HTTP/1.1\\r\\nTransfer-Encoding: chunked\\r\\n\\r\\nZZ\\r\\ndata\\r\\n\""

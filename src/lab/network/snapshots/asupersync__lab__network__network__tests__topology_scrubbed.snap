@@ -1,0 +1,47 @@
+---
+source: src/lab/network/network.rs
+expression: snapshot
+---
+{
+  "hosts": [
+    {
+      "crashed": false,
+      "host": "HOST_1",
+      "inbox_len": 0
+    },
+    {
+      "crashed": false,
+      "host": "HOST_2",
+      "inbox_len": 0
+    },
+    {
+      "crashed": false,
+      "host": "HOST_3",
+      "inbox_len": 0
+    }
+  ],
+  "metrics": {
+    "delivered": 0,
+    "dropped": 0,
+    "sent": 0
+  },
+  "partitions": [
+    {
+      "dst": "HOST_2",
+      "src": "HOST_1"
+    },
+    {
+      "dst": "HOST_3",
+      "src": "HOST_1"
+    },
+    {
+      "dst": "HOST_1",
+      "src": "HOST_2"
+    },
+    {
+      "dst": "HOST_1",
+      "src": "HOST_3"
+    }
+  ],
+  "queue_depth": 0
+}

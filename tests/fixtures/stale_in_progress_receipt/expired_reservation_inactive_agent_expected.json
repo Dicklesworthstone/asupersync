@@ -1,0 +1,96 @@
+{
+  "agent": "TopazGoose",
+  "agent_roster": {
+    "active_window_hours": 4,
+    "agents": [
+      {
+        "activity": "inactive",
+        "contact_policy": "",
+        "inactive_hours": 28.5,
+        "last_active_ts": "2026-05-07T00:00:00Z",
+        "model": "",
+        "name": "OlderAgent",
+        "program": "",
+        "task_description": ""
+      }
+    ],
+    "assignees": [
+      "OlderAgent"
+    ],
+    "counts": {
+      "active_agents": 0,
+      "inactive_agents": 1,
+      "missing_assignees": 0,
+      "total_agents": 1,
+      "unknown_activity_agents": 0
+    },
+    "missing_assignees": []
+  },
+  "classifications": [
+    {
+      "assignee": "OlderAgent",
+      "classification": "probably-stale",
+      "evidence": {
+        "assignee_inactive_hours": 28.5,
+        "assignee_last_active_ts": "2026-05-07T00:00:00Z",
+        "commit_created_ts": "",
+        "commit_hash": "",
+        "commit_subject": "",
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T04:30:00Z",
+        "issue_age_hours": 28.0,
+        "issue_updated_at": "2026-05-07T00:30:00Z",
+        "message_age_hours": null,
+        "message_created_ts": "",
+        "reservation_expired": true,
+        "reservation_expires_ts": "2026-05-07T01:00:00Z",
+        "reservation_holder": "OlderAgent",
+        "reservation_path_pattern": "src/old_surface.rs"
+      },
+      "id": "asupersync-stale1",
+      "proposed_action": {
+        "allowed_now": false,
+        "command": "br update asupersync-stale1 --status open --json",
+        "kind": "br-update-command",
+        "mutates": true,
+        "requires": "tracker reservation plus human/agent confirmation"
+      },
+      "rationale": "old in-progress bead has only expired reservation evidence",
+      "title": "Probably stale work"
+    }
+  ],
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T04:30:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "stale-in-progress-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "blocked_by_active_reservation": 0,
+    "closed_by_recent_commit": 0,
+    "fresh_active_peer": 0,
+    "needs_human_escalation": 0,
+    "probably_stale": 1,
+    "total_in_progress": 1
+  },
+  "thresholds": {
+    "active_after_hours": 4,
+    "stale_after_hours": 12
+  },
+  "tracker_state": {
+    "non_tracker_paths": [],
+    "status": "clean",
+    "tracker_paths": []
+  }
+}

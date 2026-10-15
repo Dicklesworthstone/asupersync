@@ -1,0 +1,9 @@
+---
+source: tests/grpc_production_features.rs
+expression: reflection_error_snapshot(&status)
+---
+{
+  "code": "NOT_FOUND",
+  "message": "service 'missing.Service' not found",
+  "details_len": 0
+}

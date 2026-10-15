@@ -1,0 +1,188 @@
+{
+  "schema_version": "fifth-wave-numa-scheduler-locality-lab-v1",
+  "bead_id": "asupersync-numa-scheduler-locality-lab-zhvkr9",
+  "purpose": "Deterministic NUMA and cache-locality lab contract for large-host scheduler planning without changing production scheduler policy or claiming hardware performance wins.",
+  "source_of_truth": {
+    "atlas_artifact": "artifacts/fifth_wave_swarm_control_plane_atlas_v1.json",
+    "runtime_workload_corpus": "artifacts/runtime_workload_corpus_v1.json",
+    "runtime_capacity_hints_contract": "tests/runtime_capacity_hints_contract.rs",
+    "numa_projection_source": "src/lab/numa/mod.rs",
+    "contract_test": "tests/fifth_wave_numa_scheduler_locality_lab_contract.rs",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "proof_lane": {
+    "lane_id": "fifth-wave-numa-scheduler-locality-lab",
+    "owner_bead": "asupersync-numa-scheduler-locality-lab-zhvkr9",
+    "proof_command_id": "fifth-wave-numa-scheduler-locality-lab-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_numa_scheduler_locality_lab CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_numa_scheduler_locality_lab_contract -- --nocapture",
+    "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_numa_scheduler_locality_lab",
+    "remote_required": true,
+    "local_fallback_allowed": false,
+    "covers": [
+      "numa_fixture_schema",
+      "cache_locality_metric_catalog",
+      "scheduler_lab_no_claim_boundary",
+      "large_host_topology_fixture_inventory"
+    ],
+    "does_not_cover": [
+      "does not prove scheduler performance improvement",
+      "does not change production scheduling policy",
+      "does not prove no regression",
+      "does not implement the fourth-wave governor",
+      "does not require real NUMA hardware",
+      "does not authorize local Cargo fallback"
+    ]
+  },
+  "projection_schema": {
+    "runtime_projection_type": "NumaCachePressureProjection",
+    "required_input_fields": [
+      "scenario_id",
+      "cache",
+      "agent_budget_bytes",
+      "agent_resident_bytes",
+      "local_node_bytes",
+      "remote_node_bytes",
+      "topology_confidence_bps",
+      "replay_pointer"
+    ],
+    "required_projection_fields": [
+      "scenario_id",
+      "pressure_bps",
+      "agent_budget_pressure_bps",
+      "cache_pressure_bps",
+      "remote_numa_penalty_bps",
+      "hot_cache_discount_bps",
+      "recommended_eviction_bytes",
+      "spill_to_disk_bytes",
+      "pressure_class",
+      "numa_hint_used",
+      "replay_pointer"
+    ],
+    "pressure_classes": [
+      "green",
+      "amber",
+      "red"
+    ],
+    "topology_confidence_threshold_bps": 7500,
+    "amber_pressure_threshold_bps": 7000,
+    "red_pressure_threshold_bps": 9000,
+    "metric_catalog": [
+      {
+        "metric": "agent_budget_pressure_bps",
+        "authority": "deterministic lab evidence",
+        "interpretation": "agent resident bytes divided by modeled per-agent budget"
+      },
+      {
+        "metric": "cache_pressure_bps",
+        "authority": "runtime artifact-cache snapshot",
+        "interpretation": "cache pressure emitted by ArtifactMemoryPressureSnapshot"
+      },
+      {
+        "metric": "remote_numa_penalty_bps",
+        "authority": "advisory lab signal",
+        "interpretation": "remote-node byte share only when topology confidence is high enough"
+      },
+      {
+        "metric": "recommended_eviction_bytes",
+        "authority": "deterministic lab recommendation",
+        "interpretation": "cold or over-budget bytes to evict before considering production policy changes"
+      }
+    ]
+  },
+  "fixture_catalog": [
+    {
+      "fixture_id": "portable-low-confidence-green",
+      "summary": "No real NUMA evidence is required; low topology confidence disables the remote-node penalty and keeps the projection portable.",
+      "expected_pressure_class": "green",
+      "expected_numa_hint_used": false,
+      "expected_remote_numa_penalty_bps": 0,
+      "expected_recommended_eviction_bytes": 0,
+      "hardware_required": false,
+      "proves": [
+        "portable_fallback",
+        "green_pressure_no_eviction"
+      ]
+    },
+    {
+      "fixture_id": "amber-locality-spill",
+      "summary": "High-confidence topology with elevated cache pressure routes cold spill-eligible bytes before production scheduler policy changes.",
+      "expected_pressure_class": "amber",
+      "expected_numa_hint_used": true,
+      "expected_remote_numa_penalty_bps": 3000,
+      "expected_recommended_eviction_bytes": 600,
+      "expected_spill_to_disk_bytes": 500,
+      "hardware_required": false,
+      "proves": [
+        "remote_penalty_applied",
+        "cold_spill_before_eviction"
+      ]
+    },
+    {
+      "fixture_id": "red-budget-overage",
+      "summary": "Critical cache plus per-agent budget overage yields red pressure and chooses the larger cold-byte target.",
+      "expected_pressure_class": "red",
+      "expected_numa_hint_used": true,
+      "expected_remote_numa_penalty_bps": 3000,
+      "expected_recommended_eviction_bytes": 1100,
+      "expected_spill_to_disk_bytes": 900,
+      "hardware_required": false,
+      "proves": [
+        "red_pressure_budget_overage",
+        "cold_bytes_bound_eviction_target"
+      ]
+    }
+  ],
+  "hardware_benchmark_plan": {
+    "status": "no_fresh_hardware_benchmark",
+    "required_before_performance_claims": [
+      "large-host run with explicit core count and memory size",
+      "NUMA topology capture attached to the benchmark receipt",
+      "scheduler fairness and cancellation-drain proof lanes green",
+      "comparison against current main with identical workload corpus",
+      "operator report that separates lab projection from observed hardware behavior"
+    ],
+    "no_claim_when_absent": "When no fresh hardware benchmark receipt is attached, this artifact may only prove deterministic lab projection behavior and no-claim boundaries."
+  },
+  "failure_fixtures": [
+    {
+      "case_id": "local-fallback-authorized",
+      "mutates": "proof_lane.local_fallback_allowed",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "remote RCH proof is required for closeout"
+    },
+    {
+      "case_id": "missing-no-performance-claim",
+      "mutates": "proof_lane.does_not_cover",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "artifact must not claim scheduler performance improvement"
+    },
+    {
+      "case_id": "hardware-benchmark-claimed-without-receipt",
+      "mutates": "hardware_benchmark_plan.status",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "hardware claims require fresh large-host benchmark receipts"
+    },
+    {
+      "case_id": "production-scheduler-policy-claim",
+      "mutates": "proof_lane.does_not_cover",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "artifact must not change production scheduler policy"
+    }
+  ],
+  "non_claims": [
+    "does not prove scheduler performance improvement",
+    "does not change production scheduling policy",
+    "does not prove no regression",
+    "does not implement the fourth-wave governor",
+    "does not require real NUMA hardware",
+    "does not authorize local Cargo fallback",
+    "does not prove broad workspace health",
+    "does not create branches, worktrees, scratch clones, or non-main refs"
+  ],
+  "closeout_requirements": [
+    "Focused remote RCH proof for fifth_wave_numa_scheduler_locality_lab_contract must pass from the current committed main.",
+    "Closeout may cite this artifact only for deterministic NUMA/cache projection fixtures, metric catalog coverage, no-claim boundaries, and hardware-benchmark preconditions.",
+    "Any production scheduler policy, performance, no-regression, or release-readiness claim requires a separate proof lane and fresh benchmark receipt."
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-expired-reservation` at `bcd7890abc`. Validation: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_expired cargo test passed.",
+        "from": "GentleCitadel",
+        "id": 1007,
+        "subject": "Closed asupersync-expired-reservation",
+        "thread_id": "asupersync-expired-reservation"
+      }
+    ],
+    "reservations": [
+      {
+        "agent": "GentleCitadel",
+        "expires_ts": "2026-05-10T08:00:00Z",
+        "id": 47,
+        "path": "tests/expired.rs"
+      }
+    ]
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-expired-reservation",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-expired-reservation",
+    "commit": "bcd7890abc",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-expired-reservation",
+    "thread_id": "asupersync-expired-reservation"
+  },
+  "git": {
+    "main_head": "bcd7890abc",
+    "origin_main": "bcd7890abc",
+    "origin_master": "bcd7890abc"
+  }
+}

@@ -1,0 +1,17 @@
+---
+source: src/atp/cache/mod.rs
+assertion_line: 706
+expression: config
+---
+{
+  "max_size_bytes": 536870912,
+  "max_entries": 5000,
+  "default_ttl": {
+    "secs": 43200,
+    "nanos": 0
+  },
+  "eviction_policy": "hybrid",
+  "allow_plaintext_shared": true,
+  "storage_root": "/var/cache/atp",
+  "compression_enabled": false
+}

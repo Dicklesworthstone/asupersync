@@ -1,0 +1,5 @@
+Diff in tests/validation_frontier_ledger_contract.rs:18:
+ struct ValidationFrontierRecord {
+-    command: String,
++    proof_lane_id: String,
+Remote command finished: exit=1

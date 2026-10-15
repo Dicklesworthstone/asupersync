@@ -1,0 +1,1419 @@
+//! QUIC Frame Codecs for ATP Transport
+//!
+//! Implements standard QUIC frame encoding/decoding that ATP can use as an
+//! underlying transport. This provides the frame layer needed for QUIC packet
+//! assembly and parsing.
+//!
+//! Frame types implemented:
+//! - ACK: Acknowledge received packets
+//! - PING: Keep-alive and path validation
+//! - CONNECTION_CLOSE: Terminate connection
+//! - CRYPTO: TLS handshake data
+//! - STREAM: Application data streams
+//! - RESET_STREAM: Abort stream transmission
+//! - STOP_SENDING: Request stream termination
+//! - MAX_DATA: Connection-level flow control
+//! - MAX_STREAM_DATA: Stream-level flow control
+//! - MAX_STREAMS: Stream count limits
+//! - DATA_BLOCKED: Connection flow control blocked
+//! - STREAM_DATA_BLOCKED: Stream flow control blocked
+//! - PATH_CHALLENGE: Path validation request
+//! - PATH_RESPONSE: Path validation response
+//! - HANDSHAKE_DONE: TLS handshake completion
+
+use crate::bytes::{Buf, BufMut, Bytes, BytesMut};
+use crate::net::atp::protocol::varint::{VARINT_MAX, VarInt, VarIntError};
+use crate::net::quic_core::ConnectionId;
+use crate::types::outcome::Outcome;
+
+/// QUIC frame type constants as defined in RFC 9000
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u64)]
+pub enum QuicFrameType {
+    /// PADDING frame
+    Padding = 0x00,
+    /// PING frame
+    Ping = 0x01,
+    /// ACK frame (without ECN)
+    Ack = 0x02,
+    /// ACK frame (with ECN)
+    AckEcn = 0x03,
+    /// RESET_STREAM frame
+    ResetStream = 0x04,
+    /// STOP_SENDING frame
+    StopSending = 0x05,
+    /// CRYPTO frame
+    Crypto = 0x06,
+    /// NEW_TOKEN frame
+    NewToken = 0x07,
+    /// STREAM frames (0x08-0x0f, with bits for OFF/LEN/FIN)
+    StreamBase = 0x08,
+    /// MAX_DATA frame
+    MaxData = 0x10,
+    /// MAX_STREAM_DATA frame
+    MaxStreamData = 0x11,
+    /// MAX_STREAMS frame (bidirectional)
+    MaxStreamsBidi = 0x12,
+    /// MAX_STREAMS frame (unidirectional)
+    MaxStreamsUni = 0x13,
+    /// DATA_BLOCKED frame
+    DataBlocked = 0x14,
+    /// STREAM_DATA_BLOCKED frame
+    StreamDataBlocked = 0x15,
+    /// STREAMS_BLOCKED frame (bidirectional)
+    StreamsBlockedBidi = 0x16,
+    /// STREAMS_BLOCKED frame (unidirectional)
+    StreamsBlockedUni = 0x17,
+    /// NEW_CONNECTION_ID frame
+    NewConnectionId = 0x18,
+    /// RETIRE_CONNECTION_ID frame
+    RetireConnectionId = 0x19,
+    /// PATH_CHALLENGE frame
+    PathChallenge = 0x1a,
+    /// PATH_RESPONSE frame
+    PathResponse = 0x1b,
+    /// CONNECTION_CLOSE frame (QUIC)
+    ConnectionCloseQuic = 0x1c,
+    /// CONNECTION_CLOSE frame (Application)
+    ConnectionCloseApp = 0x1d,
+    /// HANDSHAKE_DONE frame
+    HandshakeDone = 0x1e,
+    /// DATAGRAM frames (0x30 without length, 0x31 with explicit length) — RFC 9221.
+    Datagram = 0x30,
+}
+
+impl QuicFrameType {
+    /// Convert to wire format varint
+    pub fn to_varint(self) -> VarInt {
+        match VarInt::new(self as u64) {
+            Outcome::Ok(varint) => varint,
+            _ => panic!("frame type fits in varint"),
+        }
+    }
+
+    /// Parse from wire format varint
+    pub fn from_varint(varint: VarInt) -> Result<Self, QuicFrameError> {
+        let value = varint.value();
+        match value {
+            0x00 => Ok(QuicFrameType::Padding),
+            0x01 => Ok(QuicFrameType::Ping),
+            0x02 => Ok(QuicFrameType::Ack),
+            0x03 => Ok(QuicFrameType::AckEcn),
+            0x04 => Ok(QuicFrameType::ResetStream),
+            0x05 => Ok(QuicFrameType::StopSending),
+            0x06 => Ok(QuicFrameType::Crypto),
+            0x07 => Ok(QuicFrameType::NewToken),
+            0x08..=0x0f => Ok(QuicFrameType::StreamBase), // STREAM frames with flags
+            0x10 => Ok(QuicFrameType::MaxData),
+            0x11 => Ok(QuicFrameType::MaxStreamData),
+            0x12 => Ok(QuicFrameType::MaxStreamsBidi),
+            0x13 => Ok(QuicFrameType::MaxStreamsUni),
+            0x14 => Ok(QuicFrameType::DataBlocked),
+            0x15 => Ok(QuicFrameType::StreamDataBlocked),
+            0x16 => Ok(QuicFrameType::StreamsBlockedBidi),
+            0x17 => Ok(QuicFrameType::StreamsBlockedUni),
+            0x18 => Ok(QuicFrameType::NewConnectionId),
+            0x19 => Ok(QuicFrameType::RetireConnectionId),
+            0x1a => Ok(QuicFrameType::PathChallenge),
+            0x1b => Ok(QuicFrameType::PathResponse),
+            0x1c => Ok(QuicFrameType::ConnectionCloseQuic),
+            0x1d => Ok(QuicFrameType::ConnectionCloseApp),
+            0x1e => Ok(QuicFrameType::HandshakeDone),
+            0x30 | 0x31 => Ok(QuicFrameType::Datagram), // DATAGRAM frames (LEN bit)
+            other => Err(QuicFrameError::UnknownFrameType(other)),
+        }
+    }
+
+    /// Check if this is a STREAM frame type
+    pub fn is_stream_frame(value: u64) -> bool {
+        (value & 0xf8) == 0x08
+    }
+}
+
+/// QUIC Frame definitions
+///
+/// Non-exhaustive: QUIC defines more frame types than this enum decodes, and
+/// support for one adds a variant. A `match` outside this crate needs a
+/// wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QuicFrame {
+    /// PADDING frame
+    Padding {
+        /// Number of padding bytes
+        length: usize,
+    },
+
+    /// PING frame (no payload)
+    Ping,
+
+    /// ACK frame
+    Ack {
+        /// Largest acknowledged packet number
+        largest_acknowledged: VarInt,
+        /// ACK delay in microseconds
+        ack_delay: VarInt,
+        /// Number of ACK range count
+        ack_range_count: VarInt,
+        /// First ACK range length
+        first_ack_range: VarInt,
+        /// Additional ACK ranges
+        ack_ranges: Vec<AckRange>,
+        /// ECN counts (if present)
+        ecn_counts: Option<EcnCounts>,
+    },
+
+    /// RESET_STREAM frame
+    ResetStream {
+        /// Stream ID
+        stream_id: VarInt,
+        /// Application error code
+        error_code: VarInt,
+        /// Final size
+        final_size: VarInt,
+    },
+
+    /// STOP_SENDING frame
+    StopSending {
+        /// Stream ID
+        stream_id: VarInt,
+        /// Application error code
+        error_code: VarInt,
+    },
+
+    /// CRYPTO frame
+    Crypto {
+        /// Offset in the crypto stream
+        offset: VarInt,
+        /// Crypto data
+        data: Bytes,
+    },
+
+    /// STREAM frame
+    Stream {
+        /// Stream ID
+        stream_id: VarInt,
+        /// Offset in the stream (if present)
+        offset: Option<VarInt>,
+        /// Stream data
+        data: Bytes,
+        /// FIN flag
+        fin: bool,
+    },
+
+    /// MAX_DATA frame
+    MaxData {
+        /// Maximum data
+        maximum_data: VarInt,
+    },
+
+    /// MAX_STREAM_DATA frame
+    MaxStreamData {
+        /// Stream ID
+        stream_id: VarInt,
+        /// Maximum stream data
+        maximum_stream_data: VarInt,
+    },
+
+    /// MAX_STREAMS frame
+    MaxStreams {
+        /// Maximum streams
+        maximum_streams: VarInt,
+        /// Bidirectional streams
+        bidirectional: bool,
+    },
+
+    /// DATA_BLOCKED frame
+    DataBlocked {
+        /// Maximum data
+        maximum_data: VarInt,
+    },
+
+    /// STREAM_DATA_BLOCKED frame
+    StreamDataBlocked {
+        /// Stream ID
+        stream_id: VarInt,
+        /// Maximum stream data
+        maximum_stream_data: VarInt,
+    },
+
+    /// STREAMS_BLOCKED frame
+    StreamsBlocked {
+        /// Maximum streams
+        maximum_streams: VarInt,
+        /// Bidirectional streams
+        bidirectional: bool,
+    },
+
+    /// PATH_CHALLENGE frame
+    PathChallenge {
+        /// 8-byte challenge data
+        data: [u8; 8],
+    },
+
+    /// PATH_RESPONSE frame
+    PathResponse {
+        /// 8-byte response data
+        data: [u8; 8],
+    },
+
+    /// CONNECTION_CLOSE frame
+    ConnectionClose {
+        /// Error code
+        error_code: VarInt,
+        /// Frame type that caused the error (for QUIC close)
+        frame_type: Option<VarInt>,
+        /// Human-readable reason phrase
+        reason_phrase: Bytes,
+    },
+
+    /// HANDSHAKE_DONE frame (no payload)
+    HandshakeDone,
+
+    /// DATAGRAM frame (RFC 9221) — unreliable application datagram.
+    Datagram {
+        /// Opaque datagram payload (e.g. a RaptorQ symbol).
+        data: Bytes,
+    },
+
+    /// NEW_CONNECTION_ID frame (RFC 9000 §19.15)
+    NewConnectionId {
+        /// Sequence number of the connection ID
+        sequence_number: VarInt,
+        /// Connection IDs with sequence numbers less than this should be retired
+        retire_prior_to: VarInt,
+        /// Connection ID (1..=20 bytes)
+        connection_id: ConnectionId,
+        /// 16-byte stateless reset token
+        stateless_reset_token: [u8; 16],
+    },
+
+    /// RETIRE_CONNECTION_ID frame (RFC 9000 §19.16)
+    RetireConnectionId {
+        /// Sequence number of the connection ID being retired
+        sequence_number: VarInt,
+    },
+
+    /// NEW_TOKEN frame (RFC 9000 §19.7)
+    NewToken {
+        /// Token data
+        token: Bytes,
+    },
+}
+
+/// ACK range in an ACK frame
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AckRange {
+    /// Gap to next range
+    pub gap: VarInt,
+    /// ACK range length
+    pub ack_range_length: VarInt,
+}
+
+/// ECN counts in an ACK frame
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EcnCounts {
+    /// ECT(0) count
+    pub ect0_count: VarInt,
+    /// ECT(1) count
+    pub ect1_count: VarInt,
+    /// ECN-CE count
+    pub ecn_ce_count: VarInt,
+}
+
+/// QUIC frame encoding/decoding errors
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum QuicFrameError {
+    /// Varint encoding/decoding error
+    #[error("varint error: {0}")]
+    VarInt(#[from] VarIntError),
+
+    /// Unknown frame type
+    #[error("unknown frame type: {0}")]
+    UnknownFrameType(u64),
+
+    /// Invalid frame format
+    #[error("invalid frame format: {0}")]
+    InvalidFormat(String),
+
+    /// Unexpected end of frame data
+    #[error("unexpected end of frame data")]
+    UnexpectedEof,
+
+    /// Frame payload too large
+    #[error("frame payload too large: {size} bytes")]
+    PayloadTooLarge {
+        /// Observed payload size.
+        size: usize,
+    },
+}
+
+impl QuicFrame {
+    /// Encode frame to buffer
+    pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), QuicFrameError> {
+        match self {
+            QuicFrame::Padding { length } => {
+                // PADDING frames are just zeros
+                for _ in 0..*length {
+                    buf.put_u8(0x00);
+                }
+            }
+
+            QuicFrame::Ping => {
+                QuicFrameType::Ping.to_varint().encode_to_buf(buf)?;
+            }
+
+            QuicFrame::Ack {
+                largest_acknowledged,
+                ack_delay,
+                ack_range_count,
+                first_ack_range,
+                ack_ranges,
+                ecn_counts,
+            } => {
+                // Frame type
+                if ecn_counts.is_some() {
+                    QuicFrameType::AckEcn.to_varint().encode_to_buf(buf)?;
+                } else {
+                    QuicFrameType::Ack.to_varint().encode_to_buf(buf)?;
+                }
+
+                // ACK fields
+                largest_acknowledged.encode_to_buf(buf)?;
+                ack_delay.encode_to_buf(buf)?;
+                ack_range_count.encode_to_buf(buf)?;
+                first_ack_range.encode_to_buf(buf)?;
+
+                // ACK ranges
+                for range in ack_ranges {
+                    range.gap.encode_to_buf(buf)?;
+                    range.ack_range_length.encode_to_buf(buf)?;
+                }
+
+                // ECN counts (if present)
+                if let Some(ecn) = ecn_counts {
+                    ecn.ect0_count.encode_to_buf(buf)?;
+                    ecn.ect1_count.encode_to_buf(buf)?;
+                    ecn.ecn_ce_count.encode_to_buf(buf)?;
+                }
+            }
+
+            QuicFrame::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            } => {
+                QuicFrameType::ResetStream.to_varint().encode_to_buf(buf)?;
+                stream_id.encode_to_buf(buf)?;
+                error_code.encode_to_buf(buf)?;
+                final_size.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                QuicFrameType::StopSending.to_varint().encode_to_buf(buf)?;
+                stream_id.encode_to_buf(buf)?;
+                error_code.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::Crypto { offset, data } => {
+                QuicFrameType::Crypto.to_varint().encode_to_buf(buf)?;
+                offset.encode_to_buf(buf)?;
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid crypto data length".to_string(),
+                        ));
+                    }
+                }
+                buf.put_slice(data);
+            }
+
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                data,
+                fin,
+            } => {
+                // Construct STREAM frame type with flags
+                let mut frame_type = QuicFrameType::StreamBase as u64;
+                if offset.is_some() {
+                    frame_type |= 0x04; // OFF bit
+                }
+                // Always set the LEN bit so the frame is self-delimiting. Per
+                // RFC 9000 §19.8 a STREAM frame WITHOUT the LEN bit runs to the
+                // end of the packet, which is only valid as the LAST frame. This
+                // encoder does not control frame ordering, and `connection.rs`
+                // emits STREAM frames before DATAGRAM frames in the same packet,
+                // so a no-LEN (e.g. empty / FIN-only) STREAM frame would swallow
+                // every trailing frame's bytes as stream data — silently
+                // corrupting the sprayed DATAGRAM symbols. Always emitting the
+                // explicit length keeps STREAM frames self-delimiting, exactly
+                // like the DATAGRAM encoder (which always uses 0x31).
+                frame_type |= 0x02; // LEN bit (always: self-delimiting)
+                if *fin {
+                    frame_type |= 0x01; // FIN bit
+                }
+
+                match VarInt::new(frame_type) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid frame type".to_string(),
+                        ));
+                    }
+                }
+                stream_id.encode_to_buf(buf)?;
+
+                if let Some(offset_val) = offset {
+                    offset_val.encode_to_buf(buf)?;
+                }
+
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid data length".to_string(),
+                        ));
+                    }
+                }
+
+                buf.put_slice(data);
+            }
+
+            QuicFrame::MaxData { maximum_data } => {
+                QuicFrameType::MaxData.to_varint().encode_to_buf(buf)?;
+                maximum_data.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::MaxStreamData {
+                stream_id,
+                maximum_stream_data,
+            } => {
+                QuicFrameType::MaxStreamData
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                stream_id.encode_to_buf(buf)?;
+                maximum_stream_data.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::MaxStreams {
+                maximum_streams,
+                bidirectional,
+            } => {
+                if *bidirectional {
+                    QuicFrameType::MaxStreamsBidi
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                } else {
+                    QuicFrameType::MaxStreamsUni
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                }
+                maximum_streams.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::DataBlocked { maximum_data } => {
+                QuicFrameType::DataBlocked.to_varint().encode_to_buf(buf)?;
+                maximum_data.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::StreamDataBlocked {
+                stream_id,
+                maximum_stream_data,
+            } => {
+                QuicFrameType::StreamDataBlocked
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                stream_id.encode_to_buf(buf)?;
+                maximum_stream_data.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::StreamsBlocked {
+                maximum_streams,
+                bidirectional,
+            } => {
+                if *bidirectional {
+                    QuicFrameType::StreamsBlockedBidi
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                } else {
+                    QuicFrameType::StreamsBlockedUni
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                }
+                maximum_streams.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::PathChallenge { data } => {
+                QuicFrameType::PathChallenge
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                buf.put_slice(data);
+            }
+
+            QuicFrame::PathResponse { data } => {
+                QuicFrameType::PathResponse.to_varint().encode_to_buf(buf)?;
+                buf.put_slice(data);
+            }
+
+            QuicFrame::ConnectionClose {
+                error_code,
+                frame_type,
+                reason_phrase,
+            } => {
+                if frame_type.is_some() {
+                    QuicFrameType::ConnectionCloseQuic
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                } else {
+                    QuicFrameType::ConnectionCloseApp
+                        .to_varint()
+                        .encode_to_buf(buf)?;
+                }
+
+                error_code.encode_to_buf(buf)?;
+
+                if let Some(ft) = frame_type {
+                    ft.encode_to_buf(buf)?;
+                }
+
+                match VarInt::new(reason_phrase.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid reason phrase length".to_string(),
+                        ));
+                    }
+                }
+                buf.put_slice(reason_phrase);
+            }
+
+            QuicFrame::HandshakeDone => {
+                QuicFrameType::HandshakeDone
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+            }
+
+            QuicFrame::Datagram { data } => {
+                // Encode with the LEN bit set (type 0x31) so a DATAGRAM frame
+                // may be followed by other frames in the same packet (RFC 9221
+                // §4); a 0x30 frame would have to be the packet's last frame.
+                let frame_type = QuicFrameType::Datagram as u64 | 0x01;
+                match VarInt::new(frame_type) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid datagram frame type".to_string(),
+                        ));
+                    }
+                }
+                match VarInt::new(data.len() as u64) {
+                    Outcome::Ok(varint) => varint.encode_to_buf(buf)?,
+                    _ => {
+                        return Err(QuicFrameError::InvalidFormat(
+                            "Invalid datagram data length".to_string(),
+                        ));
+                    }
+                }
+                buf.put_slice(data);
+            }
+
+            QuicFrame::NewConnectionId {
+                sequence_number,
+                retire_prior_to,
+                connection_id,
+                stateless_reset_token,
+            } => {
+                QuicFrameType::NewConnectionId
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                sequence_number.encode_to_buf(buf)?;
+                retire_prior_to.encode_to_buf(buf)?;
+                buf.put_u8(connection_id.len() as u8);
+                buf.put_slice(connection_id.as_bytes());
+                buf.put_slice(stateless_reset_token);
+            }
+
+            QuicFrame::RetireConnectionId { sequence_number } => {
+                QuicFrameType::RetireConnectionId
+                    .to_varint()
+                    .encode_to_buf(buf)?;
+                sequence_number.encode_to_buf(buf)?;
+            }
+
+            QuicFrame::NewToken { token } => {
+                QuicFrameType::NewToken.to_varint().encode_to_buf(buf)?;
+                VarInt::from_u64_unchecked(token.len() as u64).encode_to_buf(buf)?;
+                buf.put_slice(token);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Decode frame from buffer
+    pub fn decode<B: Buf>(buf: &mut B) -> Result<Option<Self>, QuicFrameError> {
+        if !buf.has_remaining() {
+            return Ok(None);
+        }
+
+        // Decode frame type
+        let frame_type_varint = match VarInt::decode_from_buf(buf)? {
+            Some(vint) => vint,
+            None => return Ok(None),
+        };
+
+        let frame_type_value = frame_type_varint.value();
+
+        // Handle frame type
+        match frame_type_value {
+            0x00 => {
+                // PADDING - consume all consecutive padding bytes
+                let mut length = 1; // We already consumed one 0x00
+                while buf.has_remaining() && buf.chunk()[0] == 0x00 {
+                    buf.advance(1);
+                    length += 1;
+                }
+                Ok(Some(QuicFrame::Padding { length }))
+            }
+
+            0x01 => Ok(Some(QuicFrame::Ping)),
+
+            0x02 | 0x03 => {
+                // ACK frame (with or without ECN)
+                let has_ecn = frame_type_value == 0x03;
+
+                let largest_acknowledged =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let ack_delay =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let ack_range_count =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let first_ack_range =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+
+                let mut ack_ranges = Vec::new();
+                for _ in 0..ack_range_count.value() {
+                    let gap = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    let ack_range_length =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    ack_ranges.push(AckRange {
+                        gap,
+                        ack_range_length,
+                    });
+                }
+
+                let ecn_counts = if has_ecn {
+                    let ect0_count =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    let ect1_count =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    let ecn_ce_count =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    Some(EcnCounts {
+                        ect0_count,
+                        ect1_count,
+                        ecn_ce_count,
+                    })
+                } else {
+                    None
+                };
+
+                Ok(Some(QuicFrame::Ack {
+                    largest_acknowledged,
+                    ack_delay,
+                    ack_range_count,
+                    first_ack_range,
+                    ack_ranges,
+                    ecn_counts,
+                }))
+            }
+
+            0x04 => {
+                // RESET_STREAM
+                let stream_id =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let error_code =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let final_size =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::ResetStream {
+                    stream_id,
+                    error_code,
+                    final_size,
+                }))
+            }
+
+            0x05 => {
+                // STOP_SENDING
+                let stream_id =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let error_code =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::StopSending {
+                    stream_id,
+                    error_code,
+                }))
+            }
+
+            0x06 => {
+                // CRYPTO (RFC 9000 §19.6: offset + length must not exceed 2^62-1)
+                let offset = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                if offset.value().checked_add(length.value()).is_none_or(|end| end > VARINT_MAX) {
+                    return Err(QuicFrameError::InvalidFormat("crypto offset and length exceed 2^62-1".into()));
+                }
+                let data = copy_length_prefixed(buf, length)?;
+                Ok(Some(QuicFrame::Crypto { offset, data }))
+            }
+
+            0x07 => {
+                // NEW_TOKEN
+                let length = VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let token = copy_length_prefixed(buf, length)?;
+                Ok(Some(QuicFrame::NewToken { token }))
+            }
+
+            ft if QuicFrameType::is_stream_frame(ft) => {
+                // STREAM frame
+                let has_off = (ft & 0x04) != 0;
+                let has_len = (ft & 0x02) != 0;
+                let fin = (ft & 0x01) != 0;
+
+                let stream_id =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+
+                let offset = if has_off {
+                    Some(VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?)
+                } else {
+                    None
+                };
+
+                let data = if has_len {
+                    let length =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    copy_length_prefixed(buf, length)?
+                } else {
+                    // Rest of packet
+                    copy_to_bytes_from_buf(buf, buf.remaining())
+                };
+
+                Ok(Some(QuicFrame::Stream {
+                    stream_id,
+                    offset,
+                    data,
+                    fin,
+                }))
+            }
+
+            0x10 => {
+                // MAX_DATA
+                let maximum_data =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::MaxData { maximum_data }))
+            }
+
+            0x11 => {
+                // MAX_STREAM_DATA
+                let stream_id =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let maximum_stream_data =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::MaxStreamData {
+                    stream_id,
+                    maximum_stream_data,
+                }))
+            }
+
+            0x12 => {
+                // MAX_STREAMS (bidirectional)
+                let maximum_streams =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::MaxStreams {
+                    maximum_streams,
+                    bidirectional: true,
+                }))
+            }
+
+            0x13 => {
+                // MAX_STREAMS (unidirectional)
+                let maximum_streams =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::MaxStreams {
+                    maximum_streams,
+                    bidirectional: false,
+                }))
+            }
+
+            0x14 => {
+                // DATA_BLOCKED
+                let maximum_data =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::DataBlocked { maximum_data }))
+            }
+
+            0x15 => {
+                // STREAM_DATA_BLOCKED
+                let stream_id =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let maximum_stream_data =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::StreamDataBlocked {
+                    stream_id,
+                    maximum_stream_data,
+                }))
+            }
+
+            0x16 => {
+                // STREAMS_BLOCKED (bidirectional)
+                let maximum_streams =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::StreamsBlocked {
+                    maximum_streams,
+                    bidirectional: true,
+                }))
+            }
+
+            0x17 => {
+                // STREAMS_BLOCKED (unidirectional)
+                let maximum_streams =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::StreamsBlocked {
+                    maximum_streams,
+                    bidirectional: false,
+                }))
+            }
+
+            0x18 => {
+                // NEW_CONNECTION_ID
+                let sequence_number =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let retire_prior_to =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                if retire_prior_to.value() > sequence_number.value() {
+                    return Err(QuicFrameError::InvalidFormat(
+                        "retire_prior_to > sequence_number".to_string(),
+                    ));
+                }
+                if !buf.has_remaining() {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let cid_len = buf.get_u8() as usize;
+                if cid_len == 0 || cid_len > ConnectionId::MAX_LEN {
+                    return Err(QuicFrameError::InvalidFormat(format!(
+                        "invalid connection ID length: {cid_len}"
+                    )));
+                }
+                if buf.remaining() < cid_len + 16 {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let mut cid_bytes = [0u8; 20];
+                buf.copy_to_slice(&mut cid_bytes[..cid_len]);
+                let connection_id = ConnectionId::new(&cid_bytes[..cid_len])
+                    .map_err(|e| QuicFrameError::InvalidFormat(e.to_string()))?;
+                let mut stateless_reset_token = [0u8; 16];
+                buf.copy_to_slice(&mut stateless_reset_token);
+                Ok(Some(QuicFrame::NewConnectionId {
+                    sequence_number,
+                    retire_prior_to,
+                    connection_id,
+                    stateless_reset_token,
+                }))
+            }
+
+            0x19 => {
+                // RETIRE_CONNECTION_ID
+                let sequence_number =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                Ok(Some(QuicFrame::RetireConnectionId { sequence_number }))
+            }
+
+            0x1a => {
+                // PATH_CHALLENGE
+                if buf.remaining() < 8 {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let mut data = [0u8; 8];
+                buf.copy_to_slice(&mut data);
+                Ok(Some(QuicFrame::PathChallenge { data }))
+            }
+
+            0x1b => {
+                // PATH_RESPONSE
+                if buf.remaining() < 8 {
+                    return Err(QuicFrameError::UnexpectedEof);
+                }
+                let mut data = [0u8; 8];
+                buf.copy_to_slice(&mut data);
+                Ok(Some(QuicFrame::PathResponse { data }))
+            }
+
+            0x1c => {
+                // CONNECTION_CLOSE (QUIC)
+                let error_code =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let frame_type =
+                    Some(VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?);
+                let reason_length =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let reason_phrase = copy_length_prefixed(buf, reason_length)?;
+                Ok(Some(QuicFrame::ConnectionClose {
+                    error_code,
+                    frame_type,
+                    reason_phrase,
+                }))
+            }
+
+            0x1d => {
+                // CONNECTION_CLOSE (Application)
+                let error_code =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let reason_length =
+                    VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                let reason_phrase = copy_length_prefixed(buf, reason_length)?;
+                Ok(Some(QuicFrame::ConnectionClose {
+                    error_code,
+                    frame_type: None,
+                    reason_phrase,
+                }))
+            }
+
+            0x1e => {
+                // HANDSHAKE_DONE
+                Ok(Some(QuicFrame::HandshakeDone))
+            }
+
+            0x30 | 0x31 => {
+                // DATAGRAM (RFC 9221). The low bit (LEN) selects whether an
+                // explicit length prefix is present (0x31) or the payload runs
+                // to the end of the packet (0x30).
+                let has_len = (frame_type_value & 0x01) != 0;
+                let data = if has_len {
+                    let length =
+                        VarInt::decode_from_buf(buf)?.ok_or(QuicFrameError::UnexpectedEof)?;
+                    copy_length_prefixed(buf, length)?
+                } else {
+                    // Rest of packet.
+                    copy_to_bytes_from_buf(buf, buf.remaining())
+                };
+                Ok(Some(QuicFrame::Datagram { data }))
+            }
+
+            other => Err(QuicFrameError::UnknownFrameType(other)),
+        }
+    }
+}
+
+fn copy_to_bytes_from_buf<B: Buf>(buf: &mut B, len: usize) -> Bytes {
+    // Zero-copy when the underlying `Buf` is backed by shared storage
+    // (e.g. `BytesCursor`); copies otherwise.
+    buf.copy_to_bytes(len)
+}
+
+/// Take the `length` bytes a frame's length field announced, or fail if fewer
+/// remain. The length converts with `try_from`, not `as`: on a 32-bit target a
+/// length above `usize::MAX` would otherwise truncate to a smaller length that
+/// fits, and the frame would decode with the wrong boundary.
+fn copy_length_prefixed<B: Buf>(buf: &mut B, length: VarInt) -> Result<Bytes, QuicFrameError> {
+    let len = usize::try_from(length.value()).map_err(|_| QuicFrameError::UnexpectedEof)?;
+    if buf.remaining() < len {
+        return Err(QuicFrameError::UnexpectedEof);
+    }
+    Ok(copy_to_bytes_from_buf(buf, len))
+}
+
+/// Extensions for VarInt to work with Buf/BufMut
+trait VarIntBufExt {
+    fn encode_to_buf<B: BufMut>(&self, buf: &mut B) -> Result<(), QuicFrameError>;
+    fn decode_from_buf<B: Buf>(buf: &mut B) -> Result<Option<VarInt>, QuicFrameError>;
+}
+
+impl VarIntBufExt for VarInt {
+    fn encode_to_buf<B: BufMut>(&self, buf: &mut B) -> Result<(), QuicFrameError> {
+        let mut temp = BytesMut::new();
+        match self.encode(&mut temp) {
+            Outcome::Ok(()) => {}
+            _ => {
+                return Err(QuicFrameError::InvalidFormat(
+                    "VarInt encode failed".to_string(),
+                ));
+            }
+        }
+        buf.put_slice(&temp);
+        Ok(())
+    }
+
+    fn decode_from_buf<B: Buf>(buf: &mut B) -> Result<Option<VarInt>, QuicFrameError> {
+        let Some(&first_byte) = buf.chunk().first() else {
+            return Ok(None);
+        };
+        let encoded_len = match first_byte >> 6 {
+            0b00 => 1,
+            0b01 => 2,
+            0b10 => 4,
+            0b11 => 8,
+            _ => unreachable!(),
+        };
+        if buf.remaining() < encoded_len {
+            return Ok(None);
+        }
+
+        // `copy_to_bytes` traverses every chunk in a fragmented `Buf`. Copy
+        // exactly the width declared by the first byte so a complete VarInt
+        // can straddle chunk boundaries without consuming the following frame.
+        let encoded = buf.copy_to_bytes(encoded_len);
+        let mut temp = BytesMut::from(encoded.as_ref());
+        match VarInt::decode(&mut temp) {
+            Outcome::Ok(Some(varint)) => Ok(Some(varint)),
+            _ => Err(QuicFrameError::InvalidFormat(
+                "Invalid varint encoding".to_string(),
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_varint_decode_spans_every_noncontiguous_boundary() {
+        for value in [64, 16_384, 1_073_741_824] {
+            let expected = VarInt::new(value).unwrap();
+            let mut encoded = BytesMut::new();
+            expected.encode(&mut encoded).unwrap();
+
+            for split in 1..encoded.len() {
+                let mut fragmented = (&encoded[..split]).chain(&encoded[split..]);
+                let decoded = VarInt::decode_from_buf(&mut fragmented).unwrap();
+
+                assert_eq!(decoded, Some(expected), "value={value}, split={split}");
+                assert_eq!(fragmented.remaining(), 0, "value={value}, split={split}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_varint_decode_leaves_fragmented_incomplete_input_unconsumed() {
+        let expected = VarInt::new(16_384).unwrap();
+        let mut encoded = BytesMut::new();
+        expected.encode(&mut encoded).unwrap();
+        let truncated = &encoded[..encoded.len() - 1];
+        let mut fragmented = (&truncated[..1]).chain(&truncated[1..]);
+        let remaining = fragmented.remaining();
+
+        assert_eq!(VarInt::decode_from_buf(&mut fragmented).unwrap(), None);
+        assert_eq!(fragmented.remaining(), remaining);
+    }
+
+    #[test]
+    fn test_frame_decode_accepts_varint_split_across_chunks() {
+        let frame = QuicFrame::MaxData {
+            maximum_data: VarInt::new(16_384).unwrap(),
+        };
+        let mut encoded = BytesMut::new();
+        frame.encode(&mut encoded).unwrap();
+        let first_frame_len = encoded.len();
+        QuicFrame::Ping.encode(&mut encoded).unwrap();
+
+        for split in 2..first_frame_len {
+            let mut fragmented = (&encoded[..split]).chain(&encoded[split..]);
+            let decoded = QuicFrame::decode(&mut fragmented).unwrap().unwrap();
+
+            assert_eq!(decoded, frame, "split={split}");
+            assert_eq!(
+                QuicFrame::decode(&mut fragmented).unwrap().unwrap(),
+                QuicFrame::Ping,
+                "split={split}"
+            );
+            assert_eq!(fragmented.remaining(), 0, "split={split}");
+        }
+    }
+
+    #[test]
+    fn test_ping_frame() {
+        let frame = QuicFrame::Ping;
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_max_data_frame() {
+        let frame = QuicFrame::MaxData {
+            maximum_data: VarInt::new(1024).unwrap(),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_stream_frame_with_offset_and_length() {
+        let frame = QuicFrame::Stream {
+            stream_id: VarInt::new(4).unwrap(),
+            offset: Some(VarInt::new(1000).unwrap()),
+            data: Bytes::from_static(b"Hello, QUIC!"),
+            fin: true,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_path_challenge_frame() {
+        let frame = QuicFrame::PathChallenge {
+            data: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_connection_close_quic() {
+        let frame = QuicFrame::ConnectionClose {
+            error_code: VarInt::new(10).unwrap(),
+            frame_type: Some(VarInt::new(0x06).unwrap()), // CRYPTO frame
+            reason_phrase: Bytes::from_static(b"Handshake failed"),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_ack_frame_simple() {
+        let frame = QuicFrame::Ack {
+            largest_acknowledged: VarInt::new(100).unwrap(),
+            ack_delay: VarInt::new(50).unwrap(),
+            ack_range_count: VarInt::new(0).unwrap(),
+            first_ack_range: VarInt::new(10).unwrap(),
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_crypto_frame() {
+        let frame = QuicFrame::Crypto {
+            offset: VarInt::new(0).unwrap(),
+            data: Bytes::from_static(b"TLS handshake data"),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_crypto_frame_overflow_rejected() {
+        let mut buf = BytesMut::new();
+        QuicFrameType::Crypto.to_varint().encode_to_buf(&mut buf).unwrap();
+        VarInt::new(VARINT_MAX).unwrap().encode_to_buf(&mut buf).unwrap();
+        VarInt::new(1).unwrap().encode_to_buf(&mut buf).unwrap();
+        buf.put_u8(0x42);
+
+        let mut decode_buf = buf.freeze().reader();
+        let result = QuicFrame::decode(&mut decode_buf);
+        assert!(matches!(result, Err(QuicFrameError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_frame_type_parsing() {
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x01).unwrap()).unwrap(),
+            QuicFrameType::Ping
+        );
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x1a).unwrap()).unwrap(),
+            QuicFrameType::PathChallenge
+        );
+        assert!(QuicFrameType::is_stream_frame(0x08));
+        assert!(QuicFrameType::is_stream_frame(0x0f));
+        assert!(!QuicFrameType::is_stream_frame(0x10));
+        // Both DATAGRAM type bytes (LEN bit unset/set) map to the same kind.
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x30).unwrap()).unwrap(),
+            QuicFrameType::Datagram
+        );
+        assert_eq!(
+            QuicFrameType::from_varint(VarInt::new(0x31).unwrap()).unwrap(),
+            QuicFrameType::Datagram
+        );
+    }
+
+    #[test]
+    fn test_datagram_frame_round_trip() {
+        let frame = QuicFrame::Datagram {
+            data: Bytes::from_static(b"raptorq-symbol-payload"),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        // Encoded with the LEN bit set (type 0x31) so it is self-delimiting.
+        assert_eq!(buf.as_ref()[0], 0x31);
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_datagram_frame_empty_payload_round_trips() {
+        let frame = QuicFrame::Datagram { data: Bytes::new() };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_datagram_frame_no_length_consumes_rest_of_packet() {
+        // A 0x30 DATAGRAM (no LEN bit) carries its payload to the end of the
+        // packet; decode must surface exactly the remaining bytes.
+        let mut buf = BytesMut::new();
+        VarInt::new(0x30).unwrap().encode_to_buf(&mut buf).unwrap();
+        buf.put_slice(b"tail-bytes");
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(
+            decoded,
+            QuicFrame::Datagram {
+                data: Bytes::from_static(b"tail-bytes"),
+            }
+        );
+    }
+
+    #[test]
+    fn test_datagram_length_prefixed_leaves_trailing_frame() {
+        // A 0x31 DATAGRAM is self-delimiting: a trailing PING must still decode.
+        let datagram = QuicFrame::Datagram {
+            data: Bytes::from_static(b"symbol"),
+        };
+        let mut buf = BytesMut::new();
+        datagram.encode(&mut buf).unwrap();
+        QuicFrame::Ping.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        assert_eq!(
+            QuicFrame::decode(&mut decode_buf).unwrap().unwrap(),
+            datagram
+        );
+        assert_eq!(
+            QuicFrame::decode(&mut decode_buf).unwrap().unwrap(),
+            QuicFrame::Ping
+        );
+    }
+
+    #[test]
+    fn test_new_connection_id_frame_roundtrip() {
+        let cid = ConnectionId::new(b"test-cid-1234").unwrap();
+        let frame = QuicFrame::NewConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(1),
+            retire_prior_to: VarInt::from_u64_unchecked(0),
+            connection_id: cid,
+            stateless_reset_token: [0x42; 16],
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn test_new_connection_id_retire_prior_to_validation() {
+        let cid = ConnectionId::new(b"test-cid").unwrap();
+        let frame = QuicFrame::NewConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(1),
+            retire_prior_to: VarInt::from_u64_unchecked(2), // invalid: retire_prior_to > sequence_number
+            connection_id: cid,
+            stateless_reset_token: [0x42; 16],
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let err = QuicFrame::decode(&mut decode_buf).unwrap_err();
+        assert!(matches!(err, QuicFrameError::InvalidFormat(_)));
+    }
+
+    #[test]
+    fn test_retire_connection_id_frame_roundtrip() {
+        let frame = QuicFrame::RetireConnectionId {
+            sequence_number: VarInt::from_u64_unchecked(5),
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf).unwrap();
+
+        let mut decode_buf = buf.freeze().reader();
+        let decoded = QuicFrame::decode(&mut decode_buf).unwrap().unwrap();
+        assert_eq!(decoded, frame);
+    }
+
+    /// Every length-prefixed frame refuses a length past the bytes left. The
+    /// length here has low 32 bits of 1: on a 32-bit target an `as usize`
+    /// cast truncated it to one byte, which fits.
+    #[test]
+    fn length_prefixed_frames_refuse_a_length_past_the_remaining_bytes() {
+        let length = VarInt::new((1 << 32) + 1).unwrap();
+        // (frame, type byte, the varint fields before its length)
+        let cases: [(&str, u8, &[u64]); 6] = [
+            ("CRYPTO", 0x06, &[0]),
+            ("NEW_TOKEN", 0x07, &[]),
+            ("STREAM with LEN", 0x0a, &[4]),
+            ("CONNECTION_CLOSE", 0x1c, &[1, 0]),
+            ("application CONNECTION_CLOSE", 0x1d, &[1]),
+            ("DATAGRAM with LEN", 0x31, &[]),
+        ];
+        for (label, frame_type, fields) in cases {
+            let mut encoded = BytesMut::new();
+            encoded.put_u8(frame_type);
+            for &field in fields {
+                VarInt::new(field).unwrap().encode(&mut encoded).unwrap();
+            }
+            length.encode(&mut encoded).unwrap();
+            encoded.put_u8(0xab);
+            let mut buf: &[u8] = &encoded;
+            assert!(
+                matches!(
+                    QuicFrame::decode(&mut buf),
+                    Err(QuicFrameError::UnexpectedEof)
+                ),
+                "{label}"
+            );
+        }
+    }
+}

@@ -1,0 +1,437 @@
+{
+  "schema_version": "parser-fuzz-protocol-inventory-v1",
+  "generated_at": "2026-06-13T08:45:00Z",
+  "source_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.10",
+  "description": "Protocol-family inventory that maps current wire/parser surfaces to registered fuzz targets or explicit owner-bead followups.",
+  "inputs": {
+    "fuzz_manifest": "fuzz/Cargo.toml",
+    "target_root": "fuzz/fuzz_targets",
+    "coverage_registry_helper": "scripts/parser_fuzz_coverage_registry.py",
+    "coverage_registry_contract": "tests/parser_fuzz_coverage_registry_contract.rs",
+    "fuzz_target_registry_contract": "tests/fuzz_target_registry_contract.rs"
+  },
+  "requirements": {
+    "required_family_ids": [
+      "http1",
+      "http2_hpack",
+      "http3_qpack",
+      "websocket",
+      "tls_helpers",
+      "dns",
+      "database_protocols",
+      "kafka",
+      "quic",
+      "codecs",
+      "raptorq_metadata"
+    ],
+    "each_required_family_has_registered_targets_or_owner_bead": true,
+    "risk_ranking_present": true,
+    "stale_missing_duplicate_fixtures_present": true,
+    "integrates_existing_parser_registry_contract": true,
+    "does_not_generate_targets": true
+  },
+  "summary": {
+    "family_count": 12,
+    "required_family_count": 11,
+    "status_counts": {
+      "covered": 12,
+      "partial": 0,
+      "owner_bead": 0,
+      "missing": 0
+    }
+  },
+  "families": [
+    {
+      "id": "http1",
+      "label": "HTTP/1.1 request, response, chunked, and upgrade parsing",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/http/h1/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_h1_response_parser",
+          "path": "fuzz/fuzz_targets/h1_response_parser.rs"
+        },
+        {
+          "name": "fuzz_h1_server_request",
+          "path": "fuzz/fuzz_targets/h1_server_request.rs"
+        },
+        {
+          "name": "fuzz_http_h1_codec",
+          "path": "fuzz/fuzz_targets/fuzz_http_h1_codec.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "http2_hpack",
+      "label": "HTTP/2 frame parsing and HPACK header decoding",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/http/h2/",
+        "src/http/hpack/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_http2_frame",
+          "path": "fuzz/fuzz_targets/http2_frame.rs"
+        },
+        {
+          "name": "h2_frame_decoder",
+          "path": "fuzz/fuzz_targets/h2_frame_decoder.rs"
+        },
+        {
+          "name": "fuzz_hpack_decode",
+          "path": "fuzz/fuzz_targets/hpack_decode.rs"
+        },
+        {
+          "name": "hpack_header_block_decoder",
+          "path": "fuzz/fuzz_targets/hpack_header_block_decoder.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "http3_qpack",
+      "label": "HTTP/3 native frames and QPACK decoding",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/http/h3_native.rs",
+        "src/http/h3/",
+        "src/http/qpack/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_h3_native_protocol",
+          "path": "fuzz/fuzz_targets/h3_native_protocol.rs"
+        },
+        {
+          "name": "fuzz_h3_error_parsing",
+          "path": "fuzz/fuzz_targets/h3_error_parsing.rs"
+        },
+        {
+          "name": "fuzz_qpack_decode",
+          "path": "fuzz/fuzz_targets/qpack_decode.rs"
+        },
+        {
+          "name": "qpack_field_section",
+          "path": "fuzz/fuzz_targets/qpack_field_section.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "websocket",
+      "label": "WebSocket handshake, frame, and fragmentation parsing",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/web/",
+        "src/http/"
+      ],
+      "target_refs": [
+        {
+          "name": "websocket_handshake_parser",
+          "path": "fuzz/fuzz_targets/websocket_handshake_parser.rs"
+        },
+        {
+          "name": "fuzz_websocket_frame_parsing",
+          "path": "fuzz/fuzz_targets/websocket_frame_parsing.rs"
+        },
+        {
+          "name": "websocket_fragmentation_sequences",
+          "path": "fuzz/fuzz_targets/websocket_fragmentation_sequences.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "tls_helpers",
+      "label": "TLS record, message, stream, and certificate helper parsing",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/net/tls/",
+        "src/security/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_tls_message_parsing",
+          "path": "fuzz/fuzz_targets/tls_message_parsing.rs"
+        },
+        {
+          "name": "tls_record",
+          "path": "fuzz/fuzz_targets/tls_record.rs"
+        },
+        {
+          "name": "tls_stream_record_framing",
+          "path": "fuzz/fuzz_targets/tls_stream_record_framing.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "dns",
+      "label": "DNS message, response, resolver, and resolv.conf parsing",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/net/dns/"
+      ],
+      "target_refs": [
+        {
+          "name": "dns_message_decoder",
+          "path": "fuzz/fuzz_targets/dns_message_decoder.rs"
+        },
+        {
+          "name": "fuzz_dns_protocol_parsing",
+          "path": "fuzz/fuzz_targets/dns_protocol_parsing.rs"
+        },
+        {
+          "name": "dns_resolv_conf_parser",
+          "path": "fuzz/fuzz_targets/dns_resolv_conf_parser.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "database_protocols",
+      "label": "PostgreSQL, MySQL, and SQLite wire or statement parsing",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/database/postgres.rs",
+        "src/database/mysql.rs",
+        "src/database/sqlite.rs"
+      ],
+      "target_refs": [
+        {
+          "name": "postgres_frame_decoder",
+          "path": "fuzz/fuzz_targets/postgres_frame_decoder.rs"
+        },
+        {
+          "name": "postgres_row_description",
+          "path": "fuzz/fuzz_targets/postgres_row_description.rs"
+        },
+        {
+          "name": "fuzz_mysql_wire_protocol",
+          "path": "fuzz/fuzz_targets/mysql_wire_protocol.rs"
+        },
+        {
+          "name": "mysql_handshake_protocol_41",
+          "path": "fuzz/fuzz_targets/mysql_handshake_protocol_41.rs"
+        },
+        {
+          "name": "sqlite_sql",
+          "path": "fuzz/fuzz_targets/sqlite_sql.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "kafka",
+      "label": "Kafka request, response, and parser-only wire protocol surfaces",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/messaging/kafka.rs"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_kafka_wire_protocol",
+          "path": "fuzz/fuzz_targets/kafka_wire_protocol.rs"
+        },
+        {
+          "name": "kafka_protocol_parser",
+          "path": "fuzz/fuzz_targets/kafka_protocol_parser.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "quic",
+      "label": "QUIC frame, varint, packet-number, TLS-state, and transport-parameter parsing",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/net/quic_core/",
+        "src/net/quic_native/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_quic_frame_parsing",
+          "path": "fuzz/fuzz_targets/quic_frame_parsing.rs"
+        },
+        {
+          "name": "quic_varint_codec",
+          "path": "fuzz/fuzz_targets/quic_varint_codec.rs"
+        },
+        {
+          "name": "fuzz_quic_tls_state_machine",
+          "path": "fuzz/fuzz_targets/quic_tls_state_machine.rs"
+        },
+        {
+          "name": "quic_transport_params_tlv",
+          "path": "fuzz/fuzz_targets/quic_transport_params_tlv.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "codecs",
+      "label": "Length-delimited, framed, lines, bytes, and RaptorQ codec surfaces",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/codec/",
+        "src/bytes/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_length_delimited_codec",
+          "path": "fuzz/fuzz_targets/length_delimited_codec.rs"
+        },
+        {
+          "name": "fuzz_framed_codec",
+          "path": "fuzz/fuzz_targets/framed_codec.rs"
+        },
+        {
+          "name": "fuzz_lines_codec",
+          "path": "fuzz/fuzz_targets/lines_codec.rs"
+        },
+        {
+          "name": "bytes_codec",
+          "path": "fuzz/fuzz_targets/bytes_codec.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "raptorq_metadata",
+      "label": "RaptorQ symbol, source-block, RFC 6330, and proof metadata parsing",
+      "risk": "critical",
+      "status": "covered",
+      "source_refs": [
+        "src/raptorq/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_raptorq_symbol_parsing",
+          "path": "fuzz/fuzz_targets/raptorq_symbol_parsing.rs"
+        },
+        {
+          "name": "fuzz_raptorq_rfc6330",
+          "path": "fuzz/fuzz_targets/raptorq_rfc6330.rs"
+        },
+        {
+          "name": "raptorq_decoder_source_block_params",
+          "path": "fuzz/fuzz_targets/raptorq_decoder_source_block_params.rs"
+        },
+        {
+          "name": "raptorq_proof_verifier_determinism",
+          "path": "fuzz/fuzz_targets/raptorq_proof_verifier_determinism.rs"
+        }
+      ],
+      "owner_beads": []
+    },
+    {
+      "id": "messaging_wire",
+      "label": "Redis, NATS, and JetStream wire parsing adjacent to Kafka",
+      "risk": "high",
+      "status": "covered",
+      "source_refs": [
+        "src/messaging/"
+      ],
+      "target_refs": [
+        {
+          "name": "fuzz_redis_resp_protocol",
+          "path": "fuzz/fuzz_targets/redis_resp_protocol.rs"
+        },
+        {
+          "name": "nats_parser",
+          "path": "fuzz/fuzz_targets/nats_parser.rs"
+        },
+        {
+          "name": "jetstream_parser",
+          "path": "fuzz/fuzz_targets/jetstream_parser.rs"
+        }
+      ],
+      "owner_beads": []
+    }
+  ],
+  "fixture_contract": {
+    "helper": "scripts/parser_fuzz_coverage_registry.py",
+    "contract": "tests/parser_fuzz_coverage_registry_contract.rs",
+    "fixtures": [
+      {
+        "id": "covered_registry",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/covered_registry.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/covered_registry_expected.json",
+        "purpose": "happy-path covered parser surfaces pass the gate"
+      },
+      {
+        "id": "missing_high_risk",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/missing_high_risk.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/missing_high_risk_expected.json",
+        "purpose": "high-risk parser surfaces without fuzz targets fail with an action item"
+      },
+      {
+        "id": "partial_and_stale_target",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/partial_and_stale_target.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/partial_and_stale_target_expected.json",
+        "purpose": "partial references and stale target evidence do not count as coverage"
+      },
+      {
+        "id": "duplicate_targets",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/duplicate_targets.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/duplicate_targets_expected.json",
+        "purpose": "duplicate target IDs are coalesced deterministically"
+      },
+      {
+        "id": "schema_and_stale_target",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/schema_and_stale_target.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/schema_and_stale_target_expected.json",
+        "purpose": "unrecognized schema and stale target evidence fail closed"
+      },
+      {
+        "id": "exempt_and_expired",
+        "input": "tests/fixtures/parser_fuzz_coverage_registry/exempt_and_expired.json",
+        "expected": "tests/fixtures/parser_fuzz_coverage_registry/exempt_and_expired_expected.json",
+        "purpose": "exemptions require a reason and future expiry"
+      }
+    ]
+  },
+  "debt_policy": {
+    "coverage_status_meaning": "covered means at least one current registered fuzz target is mapped to the family; it is not a semantic completeness claim",
+    "missing_family_action": "create or assign an owner bead before claiming a family is accounted for",
+    "stale_target_action": "refresh the target path or mark the family owner_bead until the registry helper passes",
+    "duplicate_target_action": "repair fuzz/Cargo.toml registration before citing coverage"
+  },
+  "non_claims": [
+    "not a fuzz coverage completeness claim",
+    "not a replacement for cargo-fuzz execution or coverage reports",
+    "not a production security assurance",
+    "not a claim that semantic oracles are sufficient",
+    "not a broad workspace health proof"
+  ],
+  "forbidden_actions": {
+    "edits_fuzz_manifest": false,
+    "creates_fuzz_targets": false,
+    "runs_cargo_fuzz": false,
+    "runs_local_cargo": false,
+    "runs_git_mutation": false,
+    "runs_destructive_command": false
+  },
+  "validation": {
+    "lightweight_checks": [
+      "jq empty artifacts/parser_fuzz_protocol_inventory_v1.json",
+      "rustfmt --edition 2024 --check tests/parser_fuzz_protocol_inventory_contract.rs",
+      "git diff --check -- artifacts/parser_fuzz_protocol_inventory_v1.json docs/parser_fuzz_protocol_inventory.md tests/parser_fuzz_protocol_inventory_contract.rs"
+    ],
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_parser_fuzz_protocol_inventory\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test parser_fuzz_protocol_inventory_contract --no-default-features -- --nocapture"
+  }
+}

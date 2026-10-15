@@ -1,0 +1,18 @@
+[package]
+name = "asupersync-rust-browser-consumer-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+asupersync = { path = "../../../..", default-features = false, features = ["wasm-browser-dev"] }
+js-sys = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Document", "Window"] }

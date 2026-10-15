@@ -1,0 +1,302 @@
+{
+  "schema_version": "reference-app-gallery-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.8",
+  "purpose": "Proof-backed reference-app gallery index for existing Asupersync journeys, support-class labels, repro commands, structured-log expectations, and no-claim boundaries.",
+  "artifact_path": "artifacts/reference_app_gallery_v1.json",
+  "docs_path": "docs/reference_app_gallery.md",
+  "contract_test": "tests/reference_app_gallery_contract.rs",
+  "docs_markers": [
+    "REFERENCE-APP-GALLERY:SOURCE",
+    "REFERENCE-APP-GALLERY:JOURNEYS",
+    "REFERENCE-APP-GALLERY:LOGS",
+    "REFERENCE-APP-GALLERY:VALIDATION",
+    "REFERENCE-APP-GALLERY:NO-CLAIMS"
+  ],
+  "required_journey_ids": [
+    "http-db-service",
+    "websocket-stream",
+    "background-worker-graceful-drain",
+    "browser-client",
+    "distributed-remote-cluster",
+    "atp-loopback-transfer"
+  ],
+  "support_class_catalog": [
+    {
+      "support_class": "checked-reference",
+      "meaning": "The journey has checked examples or tests in-tree and a focused repro command.",
+      "claim_boundary": "This is reference coverage, not production support certification."
+    },
+    {
+      "support_class": "fixture-backed",
+      "meaning": "The journey has checked fixture projects or docs plus a contract lane.",
+      "claim_boundary": "The fixture proves packaging or schema behavior only for its explicit surface."
+    },
+    {
+      "support_class": "blocked-adapter",
+      "meaning": "The journey exists as a useful target but has a known implementation or infrastructure blocker.",
+      "claim_boundary": "Blocked rows must render as blocked, never as passing reference apps."
+    }
+  ],
+  "structured_log_contract": {
+    "required_fields": [
+      "journey_id",
+      "scenario_id",
+      "seed",
+      "fixture_path",
+      "proof_command",
+      "support_class",
+      "outcome",
+      "artifact_path"
+    ],
+    "forbidden_fields": [
+      "secret",
+      "token",
+      "password",
+      "raw_request_body",
+      "raw_response_body",
+      "absolute_host_path"
+    ],
+    "redaction_policy": "reference-app-gallery-redaction-v1",
+    "failure_policy": "missing required log fields or unredacted forbidden fields block the journey row"
+  },
+  "journeys": [
+    {
+      "journey_id": "http-db-service",
+      "title": "HTTP service plus database boundary",
+      "support_class": "checked-reference",
+      "source_paths": [
+        "tests/http_e2e.rs",
+        "tests/e2e_database.rs",
+        "tests/web_grpc_reference_services.rs",
+        "docs/grpc_server_database_postgres_e2e.md"
+      ],
+      "evidence_refs": [
+        "tests/e2e_log_quality_schema.rs",
+        "docs/e2e_testing_examples.md"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_http_db_service CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test http_e2e --no-default-features -- --nocapture",
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_db_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_database --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "seed",
+        "proof_command",
+        "outcome",
+        "artifact_path"
+      ],
+      "no_claims": [
+        "does not prove every HTTP route",
+        "does not prove live external database availability",
+        "does not prove production deployment readiness"
+      ]
+    },
+    {
+      "journey_id": "websocket-stream",
+      "title": "WebSocket stream and conformance journey",
+      "support_class": "checked-reference",
+      "source_paths": [
+        "tests/e2e_websocket.rs",
+        "tests/conformance_websocket.rs",
+        "tests/e2e/websocket/mod.rs",
+        "docs/websocket_server_channel_broadcast_e2e.md"
+      ],
+      "evidence_refs": [
+        "tests/golden/protocol/websocket_frame_format.golden",
+        "tests/golden/protocol/websocket_frame_masking_algorithm.golden"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_websocket_stream CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_websocket --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "seed",
+        "fixture_path",
+        "outcome",
+        "artifact_path"
+      ],
+      "no_claims": [
+        "does not prove every RFC 6455 edge case",
+        "does not prove browser network stack behavior",
+        "does not prove production capacity"
+      ]
+    },
+    {
+      "journey_id": "background-worker-graceful-drain",
+      "title": "Background worker with graceful drain",
+      "support_class": "checked-reference",
+      "source_paths": [
+        "examples/spork_minimal_supervised_app.rs",
+        "tests/e2e_h1_graceful_drain.rs",
+        "tests/conformance_h2_goaway_graceful_shutdown.rs",
+        "docs/signal_graceful_shutdown_supervision_tree_e2e.md",
+        "docs/spork_operational_semantics.md"
+      ],
+      "evidence_refs": [
+        "examples/scenarios/smoke_happy_path.yaml",
+        "examples/scenarios/host_crash_restart.yaml"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_background_drain CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_h1_graceful_drain --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "seed",
+        "support_class",
+        "outcome",
+        "artifact_path"
+      ],
+      "no_claims": [
+        "does not prove all supervisor topologies",
+        "does not prove OS signal delivery on every platform",
+        "does not prove broad shutdown correctness"
+      ]
+    },
+    {
+      "journey_id": "browser-client",
+      "title": "Browser client and Rust consumer fixture",
+      "support_class": "fixture-backed",
+      "source_paths": [
+        "tests/wasm_rust_browser_example_contract.rs",
+        "tests/fixtures/rust-browser-consumer",
+        "docs/wasm_react_reference_patterns.md",
+        "docs/browser_edition_readiness_matrix.md"
+      ],
+      "evidence_refs": [
+        "tests/browser_consumer_compatibility_matrix_contract.rs",
+        "tests/browser_package_integrity_gate_contract.rs"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_browser_client CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test wasm_rust_browser_example_contract --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "fixture_path",
+        "support_class",
+        "outcome",
+        "artifact_path"
+      ],
+      "no_claims": [
+        "does not prove browser GA readiness",
+        "does not prove every bundler or browser",
+        "does not prove live browser execution without the fixture scripts"
+      ]
+    },
+    {
+      "journey_id": "distributed-remote-cluster",
+      "title": "Distributed and remote-runtime toy cluster",
+      "support_class": "checked-reference",
+      "source_paths": [
+        "tests/e2e_distributed.rs",
+        "tests/distributed_trace_remote_invariants.rs",
+        "tests/remote_runtime_e2e.rs",
+        "docs/distributed_obligation_e2e.md",
+        "docs/distributed_snapshot_raptorq_encoder_e2e.md"
+      ],
+      "evidence_refs": [
+        "tests/distributed_consistent_hash_golden.rs",
+        "tests/golden_distributed_snapshot.rs"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_distributed_cluster CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test e2e_distributed --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "seed",
+        "proof_command",
+        "outcome",
+        "artifact_path"
+      ],
+      "no_claims": [
+        "does not prove a production cluster manager",
+        "does not prove wide-area network behavior",
+        "does not prove distributed restore compatibility"
+      ]
+    },
+    {
+      "journey_id": "atp-loopback-transfer",
+      "title": "ATP loopback transfer and CLI journey",
+      "support_class": "blocked-adapter",
+      "source_paths": [
+        "examples/atp_daemon_basic.rs",
+        "tests/atp_tcp_loopback_e2e.rs",
+        "tests/atp_cli_journey.rs",
+        "tests/atp/quic/e2e_endpoints.rs"
+      ],
+      "evidence_refs": [
+        "tests/atp_rq_loopback_e2e.rs",
+        "tests/atp_multiproc_e2e.rs"
+      ],
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_atp_loopback CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_tcp_loopback_e2e --no-default-features -- --nocapture"
+      ],
+      "structured_log_fields": [
+        "journey_id",
+        "scenario_id",
+        "fixture_path",
+        "support_class",
+        "outcome",
+        "artifact_path"
+      ],
+      "known_blockers": [
+        "ATP CLI transfer surface still has blocked/fail-closed adapter work tracked separately"
+      ],
+      "no_claims": [
+        "does not prove cross-machine ATP file transfer",
+        "does not prove daemon delegation",
+        "does not turn blocked adapter status into passing reference coverage"
+      ]
+    }
+  ],
+  "proof_lanes": [
+    {
+      "lane_id": "reference-app-gallery-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_app_gallery CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test reference_app_gallery_contract --no-default-features -- --nocapture",
+      "covers": [
+        "gallery schema",
+        "live source anchors",
+        "journey support-class labels",
+        "remote-only repro command shape",
+        "structured log field expectations",
+        "blocked-adapter fail-closed rows",
+        "docs marker alignment",
+        "no-claim boundaries"
+      ],
+      "does_not_cover": [
+        "running each journey",
+        "production app completeness",
+        "external service availability",
+        "browser screenshot correctness",
+        "cross-machine ATP transfer",
+        "broad workspace health",
+        "release readiness",
+        "live RCH fleet availability"
+      ],
+      "no_local_cargo_fallback": true
+    }
+  ],
+  "validation": {
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_reference_app_gallery CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test reference_app_gallery_contract --no-default-features -- --nocapture",
+    "static_checks": [
+      "jq empty artifacts/reference_app_gallery_v1.json",
+      "rustfmt --edition 2024 --check tests/reference_app_gallery_contract.rs",
+      "git diff --check -- artifacts/reference_app_gallery_v1.json docs/reference_app_gallery.md tests/reference_app_gallery_contract.rs"
+    ],
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not create new production reference apps",
+    "does not run every journey",
+    "does not prove production deployment readiness",
+    "does not prove broad workspace health",
+    "does not prove release readiness",
+    "does not prove live RCH fleet availability",
+    "does not authorize local Cargo fallback",
+    "does not turn blocked adapter rows into passing coverage"
+  ]
+}

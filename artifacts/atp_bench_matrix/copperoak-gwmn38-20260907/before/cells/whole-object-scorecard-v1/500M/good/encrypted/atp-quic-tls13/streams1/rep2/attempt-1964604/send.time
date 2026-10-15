@@ -1,0 +1,25 @@
+[atp] progress metrics direction=send transport=quic bytes=524288000 throughput_bytes_per_sec=6658915 symbols_sent=0 symbols_accepted=0 feedback_rounds=0 decode_micros=0 fanout=1 ring_peak_occupancy=n/a ring_avg_occupancy=n/a drop_count=n/a park_count=n/a
+[atp] progress quic_limiter dominant=unacked_guard dominant_micros=55623038 dominant_share_pct=70 total_stall_micros=87813749 peak_bytes_in_flight=0 peak_cwnd=12000 final_cwnd=2400 final_ssthresh=Some(2400) slow_start_exited=true min_rtt_micros=Some(1000) smoothed_rtt_micros=Some(278791) loss_timeouts=0 lost_packets=0 lost_bytes=0 retransmit_batches=284 retransmitted_stream_bytes=409317367 pto_count=0 unacked_admission_cap_bytes=16777216 min_stream_send_credit_bytes=Some(4576) udp_send_errors=0 sndbuf_requested=Some(16777216) sndbuf_applied=Some(8388608) rcvbuf_applied=Some(8388608)
+	Command being timed: "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX /data/tmp/copperoak-gwmn38-20260907/bin/before send /data/tmp/copperoak-gwmn38-20260907/workloads/500M.bin 10.99.0.1:48313 --transport quic --symbol-size 1141 --peer-id atpsend-301948 --max-bytes 6442450944 --no-delta --rq-round0-loss-pct 0.1 --ca /data/tmp/copperoak-gwmn38-20260907/matrix-before/cells/whole-object-scorecard-v1/500M/good/encrypted/atp-quic-tls13/streams1/rep2/attempt-1964604/cert.pem --server-name 10.99.0.1"
+	User time (seconds): 5.58
+	System time (seconds): 2.44
+	Percent of CPU this job got: 10%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:18.74
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 56052
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 14992
+	Voluntary context switches: 219807
+	Involuntary context switches: 804
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 16
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

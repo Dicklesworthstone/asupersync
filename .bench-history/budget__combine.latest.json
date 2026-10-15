@@ -1,0 +1,12 @@
+{
+  "cv_pct": 12.129787273547633,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 9.410293410887222,
+  "median_ns": 9.072218529954341,
+  "name": "budget/combine",
+  "p95_ns": 11.023914074398329,
+  "p99_ns": 14.757874073572761,
+  "profile": "release-perf",
+  "std_dev_ns": 1.1414485725572898
+}

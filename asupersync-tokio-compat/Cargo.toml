@@ -1,0 +1,68 @@
+[package]
+name = "asupersync-tokio-compat"
+version = "0.6.0"
+edition = "2024"
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+description = "Compatibility bridge for running Tokio-locked crates within the Asupersync async runtime."
+repository = "https://github.com/Dicklesworthstone/asupersync"
+keywords = ["async", "tokio", "compatibility", "bridge", "interop"]
+categories = ["asynchronous", "network-programming"]
+
+[package.metadata.asupersync_compat_policy]
+policy_version = "1.0.0"
+compatibility_line = "0.2.x"
+release_train = "tokio-compat"
+owner_track = "asupersync-2oh2u.7"
+exception_review = "threaded-agent-mail"
+
+[dependencies]
+# Core Asupersync runtime (no Tokio in core paths).
+asupersync = { version = "0.6.0", path = ".." }
+
+# Tokio sync primitives and I/O traits — does NOT require a running Tokio runtime.
+# Used for trait implementations and type bridging.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+# hyper v1 runtime traits (executor, timer, I/O).
+hyper = { version = "1", optional = true }
+hyper-util = { version = "0.1", optional = true, features = ["tokio"] }
+http = { version = "1", optional = true }
+http-body = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
+
+# Byte buffers (explicit for body_bridge; also transitive via http-body).
+bytes = { version = "1", optional = true }
+
+# Tokio I/O traits for bidirectional adapter.
+tokio-util = { version = "0.7", optional = true, features = ["io"] }
+
+# tower Service trait for adapter bridge.
+tower = { version = "0.5.3", optional = true }
+
+# Pin projection for adapter futures.
+pin-project-lite = "0.2"
+
+[features]
+default = []
+# hyper v1 bridge: executor, timer, and I/O adapters.
+hyper-bridge = ["dep:hyper", "dep:hyper-util", "dep:http", "dep:http-body", "dep:http-body-util", "dep:bytes"]
+# Tokio I/O trait adapters (AsyncRead/AsyncWrite bidirectional).
+tokio-io = ["dep:tokio-util", "tokio/io-util"]
+# tower Service bridge: bidirectional Service trait adapters.
+tower-bridge = ["dep:tower"]
+# Full compatibility (all adapters).
+full = ["hyper-bridge", "tokio-io", "tower-bridge"]
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_panics_doc = "allow"
+
+[dev-dependencies]
+asupersync = { version = "0.6.0", path = "..", features = ["test-internals"] }
+futures-lite = "2"

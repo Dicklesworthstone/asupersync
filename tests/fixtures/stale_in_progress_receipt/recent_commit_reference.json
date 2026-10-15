@@ -1,0 +1,39 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-08T03:30:00Z",
+        "name": "TopazGoose"
+      }
+    ],
+    "available": true,
+    "messages": [],
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "TopazGoose",
+        "id": "asupersync-aj7lx3.7",
+        "title": "Build-slot admission",
+        "updated_at": "2026-05-08T03:00:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [
+      {
+        "created_ts": "2026-05-08T04:45:00Z",
+        "hash": "29d852cf8123456789",
+        "subject": "[br-asupersync-aj7lx3.7] cover proof runner build-slot admission"
+      }
+    ],
+    "status": "ok"
+  }
+}

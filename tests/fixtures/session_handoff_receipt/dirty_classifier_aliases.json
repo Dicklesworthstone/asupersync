@@ -1,0 +1,78 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [
+      {
+        "agent_name": "CopperSpring",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:30:00Z",
+        "path_pattern": ".beads/issues.jsonl"
+      },
+      {
+        "agent_name": "RubyRobin",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:30:00Z",
+        "path_pattern": "src/runtime/scheduler/swarm_evidence.rs"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "id": "asupersync-c8thc8.11",
+        "issue_type": "task",
+        "title": "[testing-conformance] Harden session handoff receipt contracts",
+        "updated_at": "2026-05-08T04:25:00Z"
+      }
+    ],
+    "ready": [
+      {
+        "id": "asupersync-c8thc8.1",
+        "issue_type": "task",
+        "title": "[swarm-scale] Canonical capacity snapshot and replay fixtures"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "path": ".beads/issues.jsonl",
+        "recommended_action": "stage only with the matching bead work; do not mix unrelated tracker updates",
+        "status": " M",
+        "suspected_owner_or_bead": "beads-tracker-state"
+      },
+      {
+        "path": "src/runtime/scheduler/swarm_evidence.rs",
+        "recommended_action": "coordinate with RubyRobin before validation",
+        "status": " M",
+        "suspected_owner_or_bead": "peer-owned/swarm-capacity"
+      }
+    ]
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": [
+      "rustfmt-check",
+      "all-targets-check"
+    ]
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "tracker_sync": {
+    "db_newer": false,
+    "dirty_count": 0,
+    "jsonl_exists": true,
+    "jsonl_newer": false,
+    "status": "ok"
+  }
+}

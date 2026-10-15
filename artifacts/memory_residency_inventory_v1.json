@@ -1,0 +1,315 @@
+{
+  "schema_version": "memory-residency-inventory-v1",
+  "bead_id": "asupersync-memory-residency-control-ho2itz.1",
+  "parent_bead_id": "asupersync-memory-residency-control-ho2itz",
+  "status": "inventory_only",
+  "generated_on": "2026-06-13",
+  "docs_path": "docs/proof/memory_residency_inventory.md",
+  "focused_contract_test": "tests/memory_residency_inventory_contract.rs",
+  "next_child_bead": "asupersync-memory-residency-control-ho2itz.2",
+  "summary": "Source-of-truth inventory for existing memory-residency surfaces, proof ownership, overlap boundaries, and the fail-closed rules required before any opt-in residency control loop is added.",
+  "source_of_truth": {
+    "inventory_artifact": "artifacts/memory_residency_inventory_v1.json",
+    "inventory_docs": "docs/proof/memory_residency_inventory.md",
+    "inventory_contract_test": "tests/memory_residency_inventory_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json"
+  },
+  "global_no_claim_boundaries": [
+    {
+      "boundary_id": "broad_workspace_health",
+      "statement": "This inventory does not prove broad workspace health, all-target health, clippy health, or release readiness."
+    },
+    {
+      "boundary_id": "release_readiness",
+      "statement": "This inventory is not a release gate and does not claim the crate is ready to publish."
+    },
+    {
+      "boundary_id": "allocator_universality",
+      "statement": "This inventory does not claim a universal allocator strategy, allocator replacement, or production-on-by-default residency behavior."
+    },
+    {
+      "boundary_id": "performance_improvement",
+      "statement": "This inventory does not prove throughput improvement, p999 improvement, memory reduction, NUMA win, or cache warmth benefit."
+    },
+    {
+      "boundary_id": "permission_to_delete_files",
+      "statement": "This inventory grants no permission to delete files, clean worktrees, create branches, or create worktrees."
+    },
+    {
+      "boundary_id": "local_cargo_fallback",
+      "statement": "Cargo proof commands for this lane require RCH and no local Cargo fallback."
+    },
+    {
+      "boundary_id": "default_runtime_behavior_change",
+      "statement": "This inventory does not change default runtime behavior, admission policy, cache eviction policy, or scheduler selection."
+    }
+  ],
+  "validation_policy": {
+    "fail_closed_checks": [
+      "missing_owner_row",
+      "duplicate_claim_owner",
+      "duplicate_claim_id",
+      "stale_proof_command",
+      "broad_performance_claim",
+      "broad_allocator_claim",
+      "release_readiness_claim",
+      "local_cargo_fallback",
+      "missing_no_claim_boundary",
+      "missing_overlap_decision",
+      "missing_next_child_for_gap"
+    ],
+    "proof_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "target_dir_prefix": "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_",
+    "mapped_gap_policy": "Rows in source_gap_rows are intentionally not claim rows. They must name source files, a next child bead, required work before claim, and no-claim boundaries."
+  },
+  "claim_rows": [
+    {
+      "claim_id": "runtime_capacity_hints",
+      "owner_id": "memory-residency-runtime-capacity-hints-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "RuntimeCapacityHints and trace storage profile fixtures define deterministic capacity and burst-allocation accounting used by later residency policy work.",
+      "source_files": [
+        "src/runtime/config.rs",
+        "scripts/run_runtime_capacity_hints_smoke.sh"
+      ],
+      "contract_tests": [
+        "tests/runtime_capacity_hints_contract.rs"
+      ],
+      "artifacts": [
+        "artifacts/runtime_capacity_hints_smoke_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_capacity_hints_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_capacity_hints_contract --features test-internals -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove scheduler throughput, allocator replacement, NUMA locality, or release readiness.",
+        "Does not change default RuntimeConfig behavior."
+      ]
+    },
+    {
+      "claim_id": "memory_tier_slab_pool_substrate",
+      "owner_id": "memory-residency-slab-pool-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "The existing slab/pool certification maps hot runtime records, warm capacity/locality plans, cold evidence artifacts, and safe heap fallback rows.",
+      "source_files": [
+        "src/runtime/config.rs",
+        "src/runtime/task_table.rs",
+        "src/util/arena.rs",
+        "src/util/pool.rs"
+      ],
+      "contract_tests": [
+        "tests/memory_tier_slab_pool_contract.rs"
+      ],
+      "artifacts": [
+        "artifacts/memory_tier_slab_pool_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_tier_slab_pool_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_tier_slab_pool_contract --features test-internals -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove a new allocator, default production tiering, large-page availability, or release readiness.",
+        "Does not replace the asupersync-h6pjqb certification."
+      ]
+    },
+    {
+      "claim_id": "hot_cold_arena_tiers",
+      "owner_id": "memory-residency-hot-cold-arena-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "Hot/cold arena tier fixtures and smoke reports define deterministic operator-visible tiering and fallback behavior for 64-core/256-GiB style scenarios.",
+      "source_files": [
+        "src/runtime/config.rs",
+        "scripts/run_hot_cold_arena_tiers_smoke.sh"
+      ],
+      "contract_tests": [
+        "tests/hot_cold_arena_tiers.rs"
+      ],
+      "artifacts": [
+        "artifacts/hot_cold_arena_tiers_smoke_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_hot_cold_arena_tiers_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test hot_cold_arena_tiers --features test-internals -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove real-host memory savings, p999 improvement, large-page support, or production-on-by-default tiering.",
+        "Dry-run reports remain operator evidence, not allocator correctness evidence."
+      ]
+    },
+    {
+      "claim_id": "numa_arena_locality",
+      "owner_id": "memory-residency-numa-locality-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "NUMA arena locality fixtures define deterministic cohort-pinning, low-confidence fallback, no-win fallback, and real-host template evidence.",
+      "source_files": [
+        "src/runtime/config.rs",
+        "scripts/run_numa_arena_locality_smoke.sh"
+      ],
+      "contract_tests": [
+        "tests/numa_arena_locality_contract.rs"
+      ],
+      "artifacts": [
+        "artifacts/numa_arena_locality_smoke_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_numa_arena_locality_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test numa_arena_locality_contract --features test-internals -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove host NUMA topology is present, a locality win exists, or a broad scheduler performance improvement.",
+        "The real-host template is not a substitute for fresh host evidence."
+      ]
+    },
+    {
+      "claim_id": "proof_pack_warmth_planner",
+      "owner_id": "memory-residency-proof-pack-warmth-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "Proof-pack warmth planning can classify warm workers and emit isolated dry-run command templates without treating cache warmth as correctness evidence.",
+      "source_files": [
+        "scripts/proof_pack_warmth_planner.py"
+      ],
+      "contract_tests": [
+        "tests/proof_pack_warmth_planner_contract.rs",
+        "tests/proof_pack_cache_key_contract.rs"
+      ],
+      "artifacts": [
+        "artifacts/proof_pack_cache_key_contract_v1.json",
+        "artifacts/proof_pack_warmth_expected_savings_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_pack_warmth_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_pack_warmth_planner_contract -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Cache warmth is not correctness evidence.",
+        "Does not prove RCH fleet availability, proof pass/fail outcome, or release readiness."
+      ]
+    },
+    {
+      "claim_id": "runtime_pressure_control_evidence",
+      "owner_id": "memory-residency-runtime-pressure-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "Runtime pressure evidence records source schema versions, memory-budget pressure rows, RCH proof-lane pressure rows, no-local-fallback evidence, and operator diagnostics boundaries.",
+      "source_files": [
+        "src/runtime/resource_monitor.rs",
+        "src/runtime/resource_monitor_metamorphic.rs",
+        "src/runtime/rch_health/mod.rs"
+      ],
+      "contract_tests": [
+        "tests/runtime_pressure_control_evidence_contract.rs"
+      ],
+      "artifacts": [
+        "artifacts/runtime_pressure_control_evidence_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove autonomous admission/backpressure behavior, real-host throughput, scheduler regression closure, or RCH fleet health.",
+        "Does not make pressure control production-on-by-default."
+      ]
+    },
+    {
+      "claim_id": "swarm_memory_residency_policy",
+      "owner_id": "memory-residency-swarm-policy-owner",
+      "claim_status": "contract_guarded",
+      "supported_claim": "The scheduler swarm memory-residency policy artifact defines deterministic request, plan, stale-metrics, empty-budget, and contradictory-policy fixtures.",
+      "source_files": [
+        "src/runtime/scheduler/swarm_evidence.rs"
+      ],
+      "contract_tests": [
+        "tests/scheduler_swarm_evidence_artifact.rs"
+      ],
+      "artifacts": [
+        "artifacts/swarm_memory_residency_policy_contract_v1.json"
+      ],
+      "proof_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_scheduler_swarm_memory_residency cargo test -p asupersync --test scheduler_swarm_evidence_artifact swarm_memory_residency --features test-internals -- --nocapture"
+      ],
+      "no_claim_boundaries": [
+        "Does not prove a general runtime memory-residency controller.",
+        "Does not supersede fourth-wave governance, validation-frontier signoff, or AppSpec surfaces."
+      ]
+    }
+  ],
+  "source_gap_rows": [
+    {
+      "gap_id": "artifact_cache_pressure_snapshot",
+      "owner_id": "memory-residency-artifact-cache-gap-owner",
+      "gap_status": "source_mapped_no_claim",
+      "source_files": [
+        "src/runtime/cache.rs"
+      ],
+      "why_not_claimed": "ArtifactMemoryPressureSnapshot and ArtifactCache expose useful pressure accounting, but this inventory does not create a dedicated residency policy, artifact contract, or RCH proof lane for cache eviction decisions.",
+      "required_before_claim": [
+        "Add a checked artifact that owns hot/warm/cold cache accounting semantics.",
+        "Add a focused contract test that verifies deterministic snapshot rows and fail-closed eviction boundaries.",
+        "Wire the row into M3 live accounting before claiming residency control behavior."
+      ],
+      "next_child_bead": "asupersync-memory-residency-control-ho2itz.3",
+      "no_claim_boundaries": [
+        "No cache eviction policy change is claimed.",
+        "No memory reduction, cache hit-rate win, or proof-pack correctness claim is made."
+      ]
+    }
+  ],
+  "overlap_decisions": [
+    {
+      "overlap_id": "asupersync-h6pjqb",
+      "decision": "build_on_do_not_duplicate",
+      "referenced_surfaces": [
+        "artifacts/memory_tier_slab_pool_contract_v1.json",
+        "tests/memory_tier_slab_pool_contract.rs",
+        "src/runtime/config.rs"
+      ],
+      "rationale": "M1 treats the memory-tier slab/pool contract as existing substrate. Later M2/M3 work must extend from this inventory instead of rewriting the h6pjqb certificate."
+    },
+    {
+      "overlap_id": "scheduler-hot-path-perf",
+      "decision": "no_performance_claim",
+      "referenced_surfaces": [
+        "benches/next_task_hotpath.rs",
+        "benches/scheduler_autotuner_bench.rs"
+      ],
+      "rationale": "M1 records memory-residency evidence only. It does not claim scheduler hot-path improvement or touch dirty benchmark files."
+    },
+    {
+      "overlap_id": "fourth-wave-pressure-governance",
+      "decision": "do_not_supersede",
+      "referenced_surfaces": [
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "artifacts/fourth_wave_governor_final_signoff_v1.json",
+        "tests/fourth_wave_governor_final_signoff_contract.rs"
+      ],
+      "rationale": "Fourth-wave governance remains the operator signoff surface for pressure-governor evidence. M1 only inventories memory-residency source ownership and no-claim boundaries."
+    },
+    {
+      "overlap_id": "validation-frontier",
+      "decision": "consult_only",
+      "referenced_surfaces": [
+        "artifacts/validation_frontier_signoff_v1.json",
+        "docs/proof/validation_frontier_runbook.md",
+        "tests/validation_frontier_signoff_contract.rs"
+      ],
+      "rationale": "Validation-frontier rows explain how to interpret proof-lane evidence. M1 does not claim broad workspace health, release readiness, runtime correctness, or local Cargo fallback approval."
+    },
+    {
+      "overlap_id": "appspec",
+      "decision": "do_not_duplicate",
+      "referenced_surfaces": [
+        "artifacts/api_surface_map_v1.json",
+        "tests/api_surface_map_contract.rs"
+      ],
+      "rationale": "AppSpec/API surface work owns public API shape. M1 does not expose new API, change runtime defaults, or alter API surface maps."
+    }
+  ],
+  "inventory_commands": [
+    "rg -n \"RuntimeCapacityHints|ArenaTemperaturePolicy|ArtifactMemoryPressureSnapshot|ResourceMonitor|SwarmMemoryResidencyPlan\" src artifacts tests docs",
+    "jq '.claim_rows[].claim_id' artifacts/memory_residency_inventory_v1.json",
+    "python3 -m json.tool artifacts/memory_residency_inventory_v1.json >/dev/null",
+    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_inventory_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_inventory_contract -- --nocapture"
+  ],
+  "focused_proof": {
+    "lane_id": "memory-residency-inventory-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_inventory_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_inventory_contract -- --nocapture",
+    "covers": "Inventory schema, source/test/artifact path existence, unique claim owners, required overlap decisions, RCH-only proof command shape, mapped gap boundaries, and docs alignment.",
+    "explicit_not_covered": "Does not prove runtime correctness, release readiness, performance improvement, allocator replacement, live RCH fleet availability, cache eviction behavior, or default runtime behavior."
+  }
+}

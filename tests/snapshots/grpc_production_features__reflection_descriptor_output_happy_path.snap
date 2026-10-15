@@ -1,0 +1,46 @@
+---
+source: tests/grpc_production_features.rs
+expression: reflection_registry_snapshot(&reflection)
+---
+{
+  "list_response": {
+    "services": [
+      "grpc.health.v1.Health",
+      "grpc.reflection.v1alpha.ServerReflection"
+    ]
+  },
+  "describe_responses": [
+    {
+      "service": {
+        "name": "grpc.health.v1.Health",
+        "methods": [
+          {
+            "name": "Check",
+            "path": "/grpc.health.v1.Health/Check",
+            "client_streaming": false,
+            "server_streaming": false
+          },
+          {
+            "name": "Watch",
+            "path": "/grpc.health.v1.Health/Watch",
+            "client_streaming": false,
+            "server_streaming": true
+          }
+        ]
+      }
+    },
+    {
+      "service": {
+        "name": "grpc.reflection.v1alpha.ServerReflection",
+        "methods": [
+          {
+            "name": "ServerReflectionInfo",
+            "path": "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
+            "client_streaming": true,
+            "server_streaming": true
+          }
+        ]
+      }
+    }
+  ]
+}

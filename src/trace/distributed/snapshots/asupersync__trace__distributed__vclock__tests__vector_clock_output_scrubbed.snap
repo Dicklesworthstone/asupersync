@@ -1,0 +1,13 @@
+---
+source: src/trace/distributed/vclock.rs
+expression: |-
+  scrub_vclock_output(json!({
+      "display": merged.to_string(), "debug": format!("{merged:?}"),
+      "order_vs_a": format!("{:?}", merged.causal_order(&a)),
+  }))
+---
+{
+  "debug": "VC{[NODE_A]:2, [NODE_B]:1}",
+  "display": "[[NODE_A]=2, [NODE_B]=1]",
+  "order_vs_a": "After"
+}

@@ -1,0 +1,1763 @@
+//! Unix domain socket datagram implementation.
+//!
+//! This module provides [`UnixDatagram`] for connectionless communication over
+//! Unix domain sockets.
+//!
+//! # Example
+//!
+//! ```
+//! use asupersync::net::unix::UnixDatagram;
+//!
+//! async fn example() -> std::io::Result<()> {
+//!     // Create a pair of connected datagrams
+//!     let (mut a, mut b) = UnixDatagram::pair()?;
+//!
+//!     a.send(b"hello").await?;
+//!     let mut buf = [0u8; 5];
+//!     let n = b.recv(&mut buf).await?;
+//!     assert_eq!(&buf[..n], b"hello");
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Bound vs Unbound
+//!
+//! - **Bound sockets** have a filesystem path (or abstract name on Linux) and can receive
+//!   datagrams sent to that address.
+//! - **Unbound sockets** can still send datagrams and receive responses, but cannot receive
+//!   unsolicited datagrams.
+//! - **Connected sockets** have a default destination and can use [`send`](UnixDatagram::send)
+//!   instead of [`send_to`](UnixDatagram::send_to).
+
+use crate::net::udp::{Armed, ReactorRegistration};
+use crate::net::unix::stream::UCred;
+use crate::runtime::reactor::Interest;
+use nix::errno::Errno;
+use nix::sys::socket::{self, MsgFlags, SockaddrLike};
+use std::io;
+use std::os::unix::net::{self, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::task::{Context, Poll};
+
+#[inline]
+fn cancelled_poll<T>() -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))
+}
+
+#[inline]
+fn empty_datagram_recv_from_buffer_error() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "UnixDatagram::recv_from requires a non-empty buffer",
+    )
+}
+
+#[inline]
+fn would_block_errno(errno: Errno) -> bool {
+    errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK
+}
+
+#[inline]
+fn errno_poll_error<T>(errno: Errno) -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32)))
+}
+
+/// A Unix domain socket datagram.
+///
+/// Provides connectionless, unreliable datagram communication for inter-process
+/// communication within the same machine.
+///
+/// # Cancel-Safety
+///
+/// Send and receive operations are cancel-safe: if cancelled, the datagram is
+/// either fully sent/received or not at all (no partial datagrams).
+///
+/// # Socket File Cleanup
+///
+/// When dropped, a bound datagram socket removes the socket file from the
+/// filesystem
+/// (unless it was created with [`from_std`](Self::from_std) or is an abstract
+/// namespace socket).
+///
+/// Async methods take `&mut self` to avoid concurrent waiters clobbering
+/// the single reactor registration/waker slot.
+#[derive(Debug)]
+pub struct UnixDatagram {
+    /// Reactor registration for async I/O wakeup, aware of the process-global
+    /// fallback I/O driver (GH#67, tx9j0f).
+    registration: ReactorRegistration,
+    /// The underlying standard library datagram socket.
+    inner: net::UnixDatagram,
+    /// Path to the socket file (for cleanup on drop).
+    /// None for abstract namespace sockets, unbound sockets, or from_std().
+    path: Option<PathBuf>,
+    /// Device/inode identity captured at bind time for safe cleanup.
+    cleanup_identity: Option<super::listener::SocketFileIdentity>,
+}
+
+impl UnixDatagram {
+    fn from_bound_with<F>(path: &Path, inner: net::UnixDatagram, configure: F) -> io::Result<Self>
+    where
+        F: FnOnce(&net::UnixDatagram) -> io::Result<()>,
+    {
+        let (inner, cleanup_identity) =
+            super::listener::finalize_bound_socket(path, inner, configure)?;
+
+        Ok(Self {
+            inner,
+            path: Some(path.to_path_buf()),
+            cleanup_identity,
+            registration: ReactorRegistration::new(),
+        })
+    }
+
+    /// Binds to a filesystem path.
+    ///
+    /// Creates a new Unix datagram socket bound to the specified path.
+    /// If the path already exists, bind fails rather than deleting the existing entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The filesystem path for the socket
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The path is inaccessible or has permission issues
+    /// - The directory doesn't exist
+    /// - Another error occurs during socket creation
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let socket = UnixDatagram::bind("/tmp/my_datagram.sock")?;
+    /// ```
+    pub fn bind<P: AsRef<Path>>(path: P) -> io::Result<Self> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::bind")?;
+        let path = path.as_ref();
+
+        super::listener::reject_non_socket_bind_path(path)?;
+        let inner = net::UnixDatagram::bind(path)?;
+        Self::from_bound_with(path, inner, |socket| socket.set_nonblocking(true))
+    }
+
+    /// Binds to an abstract namespace socket (Linux only).
+    ///
+    /// Abstract namespace sockets are not bound to the filesystem and are
+    /// automatically cleaned up by the kernel when all references are closed.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The abstract socket name (without leading null byte)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if socket creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let socket = UnixDatagram::bind_abstract(b"my_abstract_socket")?;
+    /// ```
+    #[cfg(target_os = "linux")]
+    pub fn bind_abstract(name: &[u8]) -> io::Result<Self> {
+        use std::os::linux::net::SocketAddrExt;
+
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::bind_abstract")?;
+        let addr = SocketAddr::from_abstract_name(name)?;
+        let inner = net::UnixDatagram::bind_addr(&addr)?;
+        inner.set_nonblocking(true)?;
+
+        Ok(Self {
+            inner,
+            path: None, // No filesystem path for abstract sockets
+            cleanup_identity: None,
+            registration: ReactorRegistration::new(),
+        })
+    }
+
+    /// Creates an unbound Unix datagram socket.
+    ///
+    /// The socket is not bound to any address. It can send datagrams using
+    /// [`send_to`](Self::send_to) and receive responses, but cannot receive
+    /// unsolicited datagrams.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if socket creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let socket = UnixDatagram::unbound()?;
+    /// socket.send_to(b"hello", "/tmp/server.sock").await?;
+    /// ```
+    pub fn unbound() -> io::Result<Self> {
+        let inner = net::UnixDatagram::unbound()?;
+        inner.set_nonblocking(true)?;
+
+        Ok(Self {
+            inner,
+            path: None,
+            cleanup_identity: None,
+            registration: ReactorRegistration::new(),
+        })
+    }
+
+    /// Creates a pair of connected Unix datagram sockets.
+    ///
+    /// This is useful for inter-thread or bidirectional communication
+    /// within the same process. The sockets are connected to each other,
+    /// so [`send`](Self::send) and [`recv`](Self::recv) can be used directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if socket creation fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (mut a, mut b) = UnixDatagram::pair()?;
+    /// a.send(b"ping").await?;
+    /// let mut buf = [0u8; 4];
+    /// let n = b.recv(&mut buf).await?;
+    /// assert_eq!(&buf[..n], b"ping");
+    /// ```
+    pub fn pair() -> io::Result<(Self, Self)> {
+        let (s1, s2) = net::UnixDatagram::pair()?;
+        s1.set_nonblocking(true)?;
+        s2.set_nonblocking(true)?;
+
+        Ok((
+            Self {
+                inner: s1,
+                path: None,
+                cleanup_identity: None,
+                registration: ReactorRegistration::new(),
+            },
+            Self {
+                inner: s2,
+                path: None,
+                cleanup_identity: None,
+                registration: ReactorRegistration::new(),
+            },
+        ))
+    }
+
+    /// Connects the socket to a remote address.
+    ///
+    /// After connecting, [`send`](Self::send) and [`recv`](Self::recv) can be used
+    /// instead of [`send_to`](Self::send_to) and [`recv_from`](Self::recv_from).
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The filesystem path of the socket to connect to
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the connection fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let socket = UnixDatagram::unbound()?;
+    /// socket.connect("/tmp/server.sock")?;
+    /// socket.send(b"hello").await?;
+    /// ```
+    pub fn connect<P: AsRef<Path>>(&self, path: P) -> io::Result<()> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect")?;
+        self.inner.connect(path)
+    }
+
+    /// Connects to an abstract namespace socket (Linux only).
+    ///
+    /// After connecting, [`send`](Self::send) and [`recv`](Self::recv) can be used.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The abstract socket name (without leading null byte)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if connection fails.
+    #[cfg(target_os = "linux")]
+    pub fn connect_abstract(&self, name: &[u8]) -> io::Result<()> {
+        use std::os::linux::net::SocketAddrExt;
+
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::connect_abstract")?;
+        let addr = SocketAddr::from_abstract_name(name)?;
+        self.inner.connect_addr(&addr)
+    }
+
+    /// Register interest with the reactor for async wakeup.
+    ///
+    /// With no ambient I/O driver the fd parks on the process-global fallback
+    /// driver instead of self-waking into a hot loop (GH#67,
+    /// asupersync-tx9j0f); see [`ReactorRegistration::arm`].
+    fn register_interest(&mut self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
+        if self.registration.arm(&self.inner, interest, cx.waker())? == Armed::SelfWake {
+            crate::net::tcp::stream::fallback_rewake(cx);
+        }
+        Ok(())
+    }
+
+    fn pending_on_interest<T>(
+        &mut self,
+        cx: &Context<'_>,
+        interest: Interest,
+    ) -> Poll<io::Result<T>> {
+        match self.register_interest(cx, interest) {
+            Ok(()) => Poll::Pending,
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
+    /// Sends data to the specified address.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe. If cancelled, the datagram is either fully
+    /// sent or not at all.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The data to send
+    /// * `path` - The destination address
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes sent (always equals `buf.len()` on success for datagrams).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The destination doesn't exist
+    /// - The send buffer is full
+    /// - The datagram is too large
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut socket = UnixDatagram::unbound()?;
+    /// let n = socket.send_to(b"hello", "/tmp/server.sock").await?;
+    /// ```
+    pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
+        crate::cx::io_gate::require_ambient_io("net::UnixDatagram::send_to")?;
+        let path_ref = path.as_ref();
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            match self.inner.send_to(buf, path_ref) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.pending_on_interest(cx, Interest::WRITABLE)
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+        .await
+    }
+
+    /// Receives data and the source address.
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe. If cancelled, no data is lost - it will be
+    /// available for the next receive call.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Buffer to receive data into
+    ///
+    /// # Returns
+    ///
+    /// A tuple of (bytes_received, source_address).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the receive fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut socket = UnixDatagram::bind("/tmp/server.sock")?;
+    /// let mut buf = [0u8; 1024];
+    /// let (n, addr) = socket.recv_from(&mut buf).await?;
+    /// println!("Received {} bytes from {:?}", n, addr);
+    /// ```
+    pub async fn recv_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        if buf.is_empty() {
+            return Err(empty_datagram_recv_from_buffer_error());
+        }
+
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            match self.inner.recv_from(buf) {
+                Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.pending_on_interest(cx, Interest::READABLE)
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+        .await
+    }
+
+    /// Sends data to the connected peer.
+    ///
+    /// The socket must be connected via [`connect`](Self::connect) or created
+    /// with [`pair`](Self::pair).
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe. If cancelled, the datagram is either fully
+    /// sent or not at all.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - The data to send
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The socket is not connected
+    /// - The send buffer is full
+    /// - The datagram is too large
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (mut a, _b) = UnixDatagram::pair()?;
+    /// let n = a.send(b"hello").await?;
+    /// ```
+    pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            match self.inner.send(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.pending_on_interest(cx, Interest::WRITABLE)
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+        .await
+    }
+
+    /// Receives data from the connected peer.
+    ///
+    /// The socket must be connected via [`connect`](Self::connect) or created
+    /// with [`pair`](Self::pair).
+    ///
+    /// # Cancel-Safety
+    ///
+    /// This method is cancel-safe. If cancelled, no data is lost - it will be
+    /// available for the next receive call.
+    ///
+    /// # Arguments
+    ///
+    /// * `buf` - Buffer to receive data into
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes received.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket is not connected or receive fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (mut a, mut b) = UnixDatagram::pair()?;
+    /// a.send(b"hello").await?;
+    /// let mut buf = [0u8; 5];
+    /// let n = b.recv(&mut buf).await?;
+    /// ```
+    pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            match self.inner.recv(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    self.pending_on_interest(cx, Interest::READABLE)
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
+        })
+        .await
+    }
+
+    /// Returns the local socket address.
+    ///
+    /// For bound sockets, this returns the path or abstract name.
+    /// For unbound sockets, this returns an unnamed address.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    /// Returns the socket address of the connected peer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket is not connected.
+    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.peer_addr()
+    }
+
+    /// Returns the credentials of the peer process.
+    ///
+    /// This can be used to verify the identity of the process on the other
+    /// end of a connected datagram socket for security purposes.
+    ///
+    /// # Platform-Specific Behavior
+    ///
+    /// - On Linux: Uses `SO_PEERCRED` socket option to retrieve uid, gid, and pid.
+    /// - On macOS/FreeBSD/OpenBSD/NetBSD: Uses `getpeereid()` to retrieve uid and gid;
+    ///   pid is not available.
+    ///
+    /// # Note
+    ///
+    /// For datagram sockets, Linux records peer credentials only for a socket
+    /// pair created by [`pair`](Self::pair). An unconnected socket, or one
+    /// connected with [`connect`](Self::connect), has none, and this returns an
+    /// [`io::ErrorKind::NotConnected`] error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The kernel holds no peer credentials for this socket (see above)
+    /// - Retrieving credentials fails for platform-specific reasons
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (a, b) = UnixDatagram::pair()?;
+    /// let cred = a.peer_cred()?;
+    /// if cred.uid == 0 {
+    ///     println!("Connected to a root process");
+    /// }
+    /// ```
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    pub fn peer_cred(&self) -> io::Result<UCred> {
+        datagram_peer_cred_impl(&self.inner)
+    }
+
+    /// Creates an async `UnixDatagram` from a standard library socket.
+    ///
+    /// The socket will be set to non-blocking mode. Unlike [`bind`](Self::bind),
+    /// the socket file will **not** be automatically removed on drop.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setting non-blocking mode fails.
+    pub fn from_std(socket: net::UnixDatagram) -> io::Result<Self> {
+        socket.set_nonblocking(true)?;
+
+        Ok(Self {
+            inner: socket,
+            path: None, // Don't clean up sockets we didn't create
+            cleanup_identity: None,
+            registration: ReactorRegistration::new(),
+        })
+    }
+
+    /// Returns the underlying std socket reference.
+    #[must_use]
+    pub fn as_std(&self) -> &net::UnixDatagram {
+        &self.inner
+    }
+
+    /// Takes ownership of the filesystem path, preventing automatic cleanup.
+    ///
+    /// After calling this, the socket file will **not** be removed when the
+    /// socket is dropped. Returns the path if it was set.
+    pub fn take_path(&mut self) -> Option<PathBuf> {
+        self.cleanup_identity = None;
+        self.path.take()
+    }
+
+    /// Polls for read readiness.
+    ///
+    /// This is useful for implementing custom poll loops.
+    pub fn poll_recv_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        use std::os::unix::io::AsRawFd;
+
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return cancelled_poll();
+        }
+
+        // For datagrams, a 1-byte MSG_PEEK probe checks readiness without consuming data.
+        let mut buf = [0u8; 1];
+        match socket::recv(
+            self.inner.as_raw_fd(),
+            &mut buf,
+            MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+        ) {
+            Ok(_) => Poll::Ready(Ok(())),
+            Err(errno) if would_block_errno(errno) => {
+                self.pending_on_interest(cx, Interest::READABLE)
+            }
+            Err(errno) => errno_poll_error(errno),
+        }
+    }
+
+    /// Polls for write readiness.
+    ///
+    /// This is useful for implementing custom poll loops.
+    pub fn poll_send_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+        use std::os::unix::io::AsFd;
+
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+            return cancelled_poll();
+        }
+
+        let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
+        match poll(&mut fds, PollTimeout::ZERO) {
+            Ok(0) => self.pending_on_interest(cx, Interest::WRITABLE),
+            Ok(_) => {
+                let Some(revents) = fds[0].revents() else {
+                    return Poll::Ready(Err(io::Error::other("poll returned unknown event bits")));
+                };
+
+                if revents.contains(PollFlags::POLLOUT) {
+                    Poll::Ready(Ok(()))
+                } else if revents
+                    .intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+                {
+                    if let Ok(Some(err)) = self.inner.take_error() {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Ready(Err(io::Error::other(format!(
+                        "poll indicates socket error: {revents:?}"
+                    ))))
+                } else {
+                    self.pending_on_interest(cx, Interest::WRITABLE)
+                }
+            }
+            Err(errno) => errno_poll_error(errno),
+        }
+    }
+
+    /// Peeks at incoming data without consuming it.
+    ///
+    /// Like [`recv`](Self::recv), but the data remains in the receive buffer.
+    pub async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        use std::os::unix::io::AsRawFd;
+
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            match socket::recv(
+                self.inner.as_raw_fd(),
+                buf,
+                MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(errno) if would_block_errno(errno) => {
+                    self.pending_on_interest(cx, Interest::READABLE)
+                }
+                Err(errno) => errno_poll_error(errno),
+            }
+        })
+        .await
+    }
+
+    fn socket_addr_from_unix_addr(addr: &socket::UnixAddr) -> io::Result<SocketAddr> {
+        fn get_unnamed() -> io::Result<SocketAddr> {
+            static UNNAMED: std::sync::OnceLock<SocketAddr> = std::sync::OnceLock::new();
+            if let Some(addr) = UNNAMED.get() {
+                return Ok(addr.clone());
+            }
+            let addr = net::UnixDatagram::unbound()?.local_addr()?;
+            let _ = UNNAMED.set(addr.clone());
+            Ok(addr)
+        }
+
+        if addr.len() as usize <= std::mem::offset_of!(libc::sockaddr_un, sun_path) {
+            return get_unnamed();
+        }
+
+        if let Some(path) = addr.path() {
+            // macOS/BSD report an unbound sender as a zero-filled sun_path
+            // with a non-zero length; std would refuse the interior NULs.
+            // That is the unnamed address (br-asupersync-bi2462.21.4).
+            let bytes = std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str());
+            if bytes.iter().all(|byte| *byte == 0) {
+                return get_unnamed();
+            }
+            return SocketAddr::from_pathname(path)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+
+        #[cfg(target_os = "linux")]
+        if let Some(name) = addr.as_abstract() {
+            use std::os::linux::net::SocketAddrExt;
+            return <SocketAddr as SocketAddrExt>::from_abstract_name(name)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e));
+        }
+
+        // std does not expose a public constructor for unnamed unix socket
+        // addresses, so synthesize one through a temporary unbound socket.
+        get_unnamed()
+    }
+
+    /// Peeks at incoming data and returns the source address.
+    ///
+    /// Like [`recv_from`](Self::recv_from), but the data remains in the receive buffer.
+    pub async fn peek_from(&mut self, buf: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
+        use std::io::IoSliceMut;
+        use std::os::unix::io::AsRawFd;
+
+        std::future::poll_fn(|cx| {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
+                return cancelled_poll();
+            }
+            let mut iov = [IoSliceMut::new(buf)];
+            match socket::recvmsg::<socket::UnixAddr>(
+                self.inner.as_raw_fd(),
+                &mut iov,
+                None,
+                MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
+            ) {
+                Ok(msg) => {
+                    let Some(addr) = msg.address else {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "unix datagram recvmsg missing source address",
+                        )));
+                    };
+                    let addr = Self::socket_addr_from_unix_addr(&addr)?;
+                    Poll::Ready(Ok((msg.bytes, addr)))
+                }
+                Err(errno) if would_block_errno(errno) => {
+                    self.pending_on_interest(cx, Interest::READABLE)
+                }
+                Err(errno) => errno_poll_error(errno),
+            }
+        })
+        .await
+    }
+
+    /// Sets the read timeout on the socket.
+    ///
+    /// Note: This timeout applies to blocking operations. For async operations,
+    /// use timeouts at the application level.
+    pub fn set_read_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
+        self.inner.set_read_timeout(dur)
+    }
+
+    /// Sets the write timeout on the socket.
+    ///
+    /// Note: This timeout applies to blocking operations. For async operations,
+    /// use timeouts at the application level.
+    pub fn set_write_timeout(&self, dur: Option<std::time::Duration>) -> io::Result<()> {
+        self.inner.set_write_timeout(dur)
+    }
+
+    /// Gets the read timeout on the socket.
+    pub fn read_timeout(&self) -> io::Result<Option<std::time::Duration>> {
+        self.inner.read_timeout()
+    }
+
+    /// Gets the write timeout on the socket.
+    pub fn write_timeout(&self) -> io::Result<Option<std::time::Duration>> {
+        self.inner.write_timeout()
+    }
+}
+
+impl Drop for UnixDatagram {
+    fn drop(&mut self) {
+        // Clean up only the socket file we originally created.
+        if let (Some(path), Some(identity)) = (&self.path, self.cleanup_identity) {
+            let _ = super::listener::remove_socket_file_if_same_inode(path, identity);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl std::os::unix::io::AsRawFd for UnixDatagram {
+    fn as_raw_fd(&self) -> std::os::unix::io::RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+// Platform-specific peer credential implementations for datagram sockets
+
+/// Linux implementation using SO_PEERCRED.
+#[cfg(target_os = "linux")]
+fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
+    use nix::sys::socket::sockopt;
+    let cred = socket::getsockopt(socket, sockopt::PeerCredentials)
+        .map_err(|e| io::Error::from_raw_os_error(e as i32))?;
+    // SO_PEERCRED also succeeds on a datagram socket the kernel holds no peer
+    // credentials for (an unconnected socket, or one connected with connect()
+    // rather than created by pair()). It then reports uid and gid -1, which
+    // must not be handed out as a peer identity
+    // (br-asupersync-unix-socket-audit-alx18f). pid 0 alone is no signal: it
+    // also appears for a peer in another PID namespace.
+    if cred.uid() as u32 == u32::MAX && cred.gid() as u32 == u32::MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "peer credentials are not available: the kernel records them only for a \
+             unix datagram socket pair created by pair()",
+        ));
+    }
+    Ok(UCred {
+        uid: cred.uid() as u32,
+        gid: cred.gid() as u32,
+        pid: Some(cred.pid()),
+    })
+}
+
+/// macOS/BSD implementation using getpeereid.
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd"
+))]
+fn datagram_peer_cred_impl(socket: &net::UnixDatagram) -> io::Result<UCred> {
+    let (uid, gid) = nix::unistd::getpeereid(socket).map_err(|e| match e {
+        // LOCAL_PEERCRED (what getpeereid reads) is defined for connected
+        // stream sockets; a datagram socket pair answers EINVAL on macOS.
+        // That is a typed capability gap, not a transient failure
+        // (br-asupersync-bi2462.21.4).
+        nix::errno::Errno::EINVAL | nix::errno::Errno::ENOTCONN | nix::errno::Errno::EOPNOTSUPP => {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "peer credentials are not available for unix datagram sockets on this \
+                 platform (LOCAL_PEERCRED requires a connected stream socket)",
+            )
+        }
+        other => io::Error::from_raw_os_error(other as i32),
+    })?;
+    Ok(UCred {
+        uid: uid.as_raw(),
+        gid: gid.as_raw(),
+        pid: None, // Not available via getpeereid
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use std::sync::Arc;
+    use std::task::{Context, Waker};
+    use tempfile::tempdir;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    /// GH#67 follow-up (asupersync-tx9j0f): a `UnixDatagram` polled with no
+    /// I/O driver on the current `Cx` parks on the process-global fallback
+    /// driver instead of re-waking itself into a hot loop.
+    mod gh67_fallback_io_driver {
+        use super::*;
+        use crate::cx::Cx;
+        use crate::net::udp::fallback_io_test_support::signal_waker;
+        use std::sync::atomic::Ordering;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        #[test]
+        fn poll_recv_ready_without_io_driver_parks_until_datagram_arrives() {
+            assert!(
+                Cx::current().is_none(),
+                "test must run without an ambient Cx"
+            );
+            let (mut socket, peer) = UnixDatagram::pair().expect("socket pair");
+            let (signal, waker, rx) = signal_waker();
+            let mut task_cx = Context::from_waker(&waker);
+
+            assert!(matches!(
+                socket.poll_recv_ready(&mut task_cx),
+                Poll::Pending
+            ));
+            assert_eq!(
+                signal.hits.load(Ordering::SeqCst),
+                0,
+                "driverless poll must park, not self-wake (GH#67)"
+            );
+            assert!(
+                socket.registration.on_fallback(),
+                "driverless poll registers with the process-global fallback I/O driver"
+            );
+            assert!(
+                rx.recv_timeout(Duration::from_millis(200)).is_err(),
+                "no wake may arrive while the peer is silent"
+            );
+
+            peer.inner.send(b"wake").expect("peer send");
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("fallback reactor pump delivers the readiness wake");
+            assert_eq!(signal.hits.load(Ordering::SeqCst), 1);
+            assert!(matches!(
+                socket.poll_recv_ready(&mut task_cx),
+                Poll::Ready(Ok(()))
+            ));
+            let mut buf = [0u8; 8];
+            let len = socket.inner.recv(&mut buf).expect("recv the datagram");
+            assert_eq!(&buf[..len], b"wake");
+        }
+    }
+
+    #[test]
+    fn test_pair() {
+        init_test("test_datagram_pair");
+        futures_lite::future::block_on(async {
+            let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
+
+            a.send(b"hello").await.expect("send failed");
+            let mut buf = [0u8; 5];
+            let n = b.recv(&mut buf).await.expect("recv failed");
+
+            crate::assert_with_log!(n == 5, "received bytes", 5, n);
+            crate::assert_with_log!(&buf == b"hello", "received data", b"hello", buf);
+        });
+        crate::test_complete!("test_datagram_pair");
+    }
+
+    #[test]
+    fn test_bind_and_send_to() {
+        init_test("test_datagram_bind_send_to");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind failed");
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
+
+            // Send from client to server
+            let sent = client
+                .send_to(b"hello", &server_path)
+                .await
+                .expect("send_to failed");
+            crate::assert_with_log!(sent == 5, "sent bytes", 5, sent);
+
+            // Receive on server
+            let mut buf = [0u8; 5];
+            let (n, _addr) = server.recv_from(&mut buf).await.expect("recv_from failed");
+            crate::assert_with_log!(n == 5, "received bytes", 5, n);
+            crate::assert_with_log!(&buf == b"hello", "received data", b"hello", buf);
+        });
+        crate::test_complete!("test_datagram_bind_send_to");
+    }
+
+    #[test]
+    fn test_peek_from_reports_peer_and_preserves_data() {
+        init_test("test_datagram_peek_from");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+            let client_path = dir.path().join("client.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
+
+            client
+                .send_to(b"peek", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut peek_buf = [0u8; 4];
+            let (n, addr) = server
+                .peek_from(&mut peek_buf)
+                .await
+                .expect("peek_from failed");
+            crate::assert_with_log!(n == 4, "peek bytes", 4, n);
+            crate::assert_with_log!(&peek_buf == b"peek", "peek data", b"peek", peek_buf);
+            let peek_path = addr.as_pathname().map(std::path::Path::to_path_buf);
+            crate::assert_with_log!(
+                peek_path.as_ref() == Some(&client_path),
+                "peek addr",
+                Some(&client_path),
+                peek_path.as_ref()
+            );
+
+            let mut recv_buf = [0u8; 4];
+            let (n2, addr2) = server
+                .recv_from(&mut recv_buf)
+                .await
+                .expect("recv_from failed");
+            crate::assert_with_log!(n2 == 4, "recv bytes", 4, n2);
+            crate::assert_with_log!(&recv_buf == b"peek", "recv data", b"peek", recv_buf);
+            let recv_path = addr2.as_pathname().map(std::path::Path::to_path_buf);
+            crate::assert_with_log!(
+                recv_path.as_ref() == Some(&client_path),
+                "recv addr",
+                Some(&client_path),
+                recv_path.as_ref()
+            );
+        });
+        crate::test_complete!("test_datagram_peek_from");
+    }
+
+    #[test]
+    fn test_peek_from_unbound_sender_reports_unnamed_addr() {
+        init_test("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
+
+            client
+                .send_to(b"peek", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut peek_buf = [0u8; 4];
+            let (peeked, peek_addr) = server
+                .peek_from(&mut peek_buf)
+                .await
+                .expect("peek_from failed");
+            crate::assert_with_log!(peeked == 4, "peek bytes", 4, peeked);
+            crate::assert_with_log!(&peek_buf == b"peek", "peek data", b"peek", peek_buf);
+            crate::assert_with_log!(
+                peek_addr.is_unnamed(),
+                "peek addr unnamed",
+                true,
+                peek_addr.is_unnamed()
+            );
+            crate::assert_with_log!(
+                peek_addr.as_pathname().is_none(),
+                "peek addr pathname",
+                "None",
+                format!("{:?}", peek_addr.as_pathname())
+            );
+
+            let mut recv_buf = [0u8; 4];
+            let (received, recv_addr) = server
+                .recv_from(&mut recv_buf)
+                .await
+                .expect("recv_from failed");
+            crate::assert_with_log!(received == 4, "recv bytes", 4, received);
+            crate::assert_with_log!(&recv_buf == b"peek", "recv data", b"peek", recv_buf);
+            crate::assert_with_log!(
+                recv_addr.is_unnamed(),
+                "recv addr unnamed",
+                true,
+                recv_addr.is_unnamed()
+            );
+            crate::assert_with_log!(
+                recv_addr.as_pathname().is_none(),
+                "recv addr pathname",
+                "None",
+                format!("{:?}", recv_addr.as_pathname())
+            );
+        });
+        crate::test_complete!("test_datagram_peek_from_unbound_sender_reports_unnamed_addr");
+    }
+
+    #[test]
+    fn test_recv_from_rejects_empty_buffer_without_consuming_datagram() {
+        init_test("test_datagram_recv_from_empty_buffer");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+            let client_path = dir.path().join("client.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
+
+            client
+                .send_to(b"ping", &server_path)
+                .await
+                .expect("send_to failed");
+
+            let mut empty = [];
+            let err = server
+                .recv_from(&mut empty)
+                .await
+                .expect_err("empty buffer must fail");
+            crate::assert_with_log!(
+                err.kind() == io::ErrorKind::InvalidInput,
+                "error kind",
+                io::ErrorKind::InvalidInput,
+                err.kind()
+            );
+
+            let mut buf = [0u8; 4];
+            let (received, addr) = server
+                .recv_from(&mut buf)
+                .await
+                .expect("recv_from after error failed");
+            crate::assert_with_log!(received == 4, "recv bytes", 4, received);
+            crate::assert_with_log!(&buf == b"ping", "recv data", b"ping", buf);
+            let recv_path = addr.as_pathname().map(std::path::Path::to_path_buf);
+            crate::assert_with_log!(
+                recv_path.as_ref() == Some(&client_path),
+                "recv addr",
+                Some(&client_path),
+                recv_path.as_ref()
+            );
+        });
+        crate::test_complete!("test_datagram_recv_from_empty_buffer");
+    }
+
+    #[test]
+    fn test_connect() {
+        init_test("test_datagram_connect");
+        futures_lite::future::block_on(async {
+            let dir = tempdir().expect("create temp dir");
+            let server_path = dir.path().join("server.sock");
+            let client_path = dir.path().join("client.sock");
+
+            let mut server = UnixDatagram::bind(&server_path).expect("bind server failed");
+            let mut client = UnixDatagram::bind(&client_path).expect("bind client failed");
+
+            // Connect client to server
+            client.connect(&server_path).expect("connect failed");
+
+            // Now we can use send/recv instead of send_to/recv_from
+            client.send(b"ping").await.expect("send failed");
+
+            let mut buf = [0u8; 4];
+            let (n, addr) = server.recv_from(&mut buf).await.expect("recv_from failed");
+            crate::assert_with_log!(n == 4, "received bytes", 4, n);
+            crate::assert_with_log!(&buf == b"ping", "received data", b"ping", buf);
+
+            // Check the source address
+            let pathname = addr.as_pathname();
+            crate::assert_with_log!(pathname.is_some(), "has pathname", true, pathname.is_some());
+        });
+        crate::test_complete!("test_datagram_connect");
+    }
+
+    #[test]
+    fn test_socket_cleanup_on_drop() {
+        init_test("test_datagram_cleanup_on_drop");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("cleanup_test.sock");
+
+        {
+            let _socket = UnixDatagram::bind(&path).expect("bind failed");
+            let exists = path.exists();
+            crate::assert_with_log!(exists, "socket exists", true, exists);
+        }
+
+        let exists = path.exists();
+        crate::assert_with_log!(!exists, "socket cleaned up", false, exists);
+        crate::test_complete!("test_datagram_cleanup_on_drop");
+    }
+
+    #[test]
+    fn test_from_std_no_cleanup() {
+        init_test("test_datagram_from_std_no_cleanup");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("from_std_test.sock");
+
+        // Create with std
+        let std_socket = net::UnixDatagram::bind(&path).expect("bind failed");
+
+        {
+            // Wrap in async version
+            let _socket = UnixDatagram::from_std(std_socket).expect("from_std failed");
+        }
+
+        // Socket file should still exist (from_std doesn't clean up)
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket remains", true, exists);
+
+        // Clean up manually
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_datagram_from_std_no_cleanup");
+    }
+
+    #[test]
+    fn test_take_path_prevents_cleanup() {
+        init_test("test_datagram_take_path");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("take_path_test.sock");
+
+        {
+            let mut socket = UnixDatagram::bind(&path).expect("bind failed");
+
+            // Take the path
+            let taken = socket.take_path();
+            crate::assert_with_log!(taken.is_some(), "taken some", true, taken.is_some());
+        }
+
+        // Socket should still exist
+        let exists = path.exists();
+        crate::assert_with_log!(exists, "socket remains", true, exists);
+
+        // Clean up manually
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_datagram_take_path");
+    }
+
+    #[test]
+    fn test_bind_refuses_stale_socket_file() {
+        init_test("test_datagram_bind_refuses_stale_socket_file");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("stale_datagram.sock");
+
+        let stale = net::UnixDatagram::bind(&path).expect("create stale socket");
+        drop(stale);
+
+        crate::assert_with_log!(path.exists(), "stale socket exists", true, path.exists());
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should refuse stale socket path");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
+        );
+        crate::assert_with_log!(path.exists(), "stale socket preserved", true, path.exists());
+        crate::test_complete!("test_datagram_bind_refuses_stale_socket_file");
+    }
+
+    #[test]
+    fn test_bind_refuses_live_socket_file() {
+        init_test("test_datagram_bind_refuses_live_socket_file");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("live_datagram.sock");
+
+        let original = net::UnixDatagram::bind(&path).expect("create live socket");
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should refuse live socket path");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::AddrInUse,
+            "bind error kind",
+            io::ErrorKind::AddrInUse,
+            err.kind()
+        );
+        crate::assert_with_log!(path.exists(), "live socket preserved", true, path.exists());
+
+        drop(original);
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("test_datagram_bind_refuses_live_socket_file");
+    }
+
+    #[test]
+    fn replacement_socket_path_survives_old_datagram_drop() {
+        init_test("replacement_socket_path_survives_old_datagram_drop");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("datagram_rebind.sock");
+
+        let original = UnixDatagram::bind(&path).expect("bind failed");
+        crate::assert_with_log!(path.exists(), "socket exists", true, path.exists());
+
+        std::fs::remove_file(&path).expect("unlink original path");
+        let replacement = net::UnixDatagram::bind(&path).expect("bind replacement failed");
+        crate::assert_with_log!(path.exists(), "replacement exists", true, path.exists());
+
+        drop(original);
+
+        crate::assert_with_log!(
+            path.exists(),
+            "old datagram drop preserved replacement path",
+            true,
+            path.exists()
+        );
+
+        drop(replacement);
+        std::fs::remove_file(&path).ok();
+        crate::test_complete!("replacement_socket_path_survives_old_datagram_drop");
+    }
+
+    #[test]
+    fn test_bind_cleanup_on_post_bind_init_failure() {
+        init_test("test_datagram_bind_cleanup_on_post_bind_init_failure");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("datagram_init_failure.sock");
+
+        crate::net::unix::listener::remove_stale_socket_file(&path).expect("clear stale socket");
+        let inner = net::UnixDatagram::bind(&path).expect("bind failed");
+        let err = UnixDatagram::from_bound_with(&path, inner, |_socket| {
+            Err(io::Error::other("injected datagram init failure"))
+        })
+        .expect_err("post-bind init should fail");
+
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Other,
+            "init error kind",
+            io::ErrorKind::Other,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            !path.exists(),
+            "socket path cleaned after init failure",
+            false,
+            path.exists()
+        );
+
+        crate::test_complete!("test_datagram_bind_cleanup_on_post_bind_init_failure");
+    }
+
+    #[test]
+    fn test_local_addr() {
+        init_test("test_datagram_local_addr");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("local_addr_test.sock");
+
+        let socket = UnixDatagram::bind(&path).expect("bind failed");
+        let addr = socket.local_addr().expect("local_addr failed");
+
+        let pathname = addr.as_pathname();
+        crate::assert_with_log!(pathname.is_some(), "has pathname", true, pathname.is_some());
+        let pathname = pathname.unwrap();
+        crate::assert_with_log!(pathname == path, "pathname matches", path, pathname);
+        crate::test_complete!("test_datagram_local_addr");
+    }
+
+    #[test]
+    fn test_unbound_local_addr() {
+        init_test("test_datagram_unbound_local_addr");
+        let socket = UnixDatagram::unbound().expect("unbound failed");
+        let addr = socket.local_addr().expect("local_addr failed");
+
+        // Unbound sockets have no pathname
+        let pathname = addr.as_pathname();
+        crate::assert_with_log!(
+            pathname.is_none(),
+            "no pathname",
+            "None",
+            format!("{:?}", pathname)
+        );
+        crate::test_complete!("test_datagram_unbound_local_addr");
+    }
+
+    #[test]
+    fn test_peek() {
+        init_test("test_datagram_peek");
+        futures_lite::future::block_on(async {
+            let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
+
+            a.send(b"hello").await.expect("send failed");
+
+            // Peek should see the data
+            let mut buf = [0u8; 5];
+            let n = b.peek(&mut buf).await.expect("peek failed");
+            crate::assert_with_log!(n == 5, "peeked bytes", 5, n);
+            crate::assert_with_log!(&buf == b"hello", "peeked data", b"hello", buf);
+
+            // Data should still be there for recv
+            let mut buf2 = [0u8; 5];
+            let n = b.recv(&mut buf2).await.expect("recv failed");
+            crate::assert_with_log!(n == 5, "received bytes", 5, n);
+            crate::assert_with_log!(&buf2 == b"hello", "received data", b"hello", buf2);
+        });
+        crate::test_complete!("test_datagram_peek");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_abstract_socket() {
+        init_test("test_datagram_abstract_socket");
+        futures_lite::future::block_on(async {
+            let server_name = b"asupersync_test_datagram_abstract";
+            let mut server = UnixDatagram::bind_abstract(server_name).expect("bind failed");
+
+            let mut client = UnixDatagram::unbound().expect("unbound failed");
+            client
+                .connect_abstract(server_name)
+                .expect("connect failed");
+
+            client.send(b"hello").await.expect("send failed");
+
+            let mut buf = [0u8; 5];
+            let n = server.recv(&mut buf).await.expect("recv failed");
+            crate::assert_with_log!(n == 5, "received bytes", 5, n);
+        });
+        crate::test_complete!("test_datagram_abstract_socket");
+    }
+
+    #[test]
+    fn test_datagram_registers_on_wouldblock() {
+        use crate::cx::Cx;
+        use crate::runtime::LabReactor;
+        use crate::runtime::io_driver::IoDriverHandle;
+        use crate::types::{Budget, RegionId, TaskId};
+
+        init_test("test_datagram_registers_on_wouldblock");
+
+        // Create a pair and drain the socket to ensure WouldBlock on recv
+        let (mut a, mut b) = UnixDatagram::pair().expect("pair failed");
+
+        // Set up reactor context
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // Try to poll recv when no data available - should return Pending and register
+        let poll = b.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Pending),
+            "poll is Pending",
+            "Poll::Pending",
+            format!("{:?}", poll)
+        );
+        let has_registration = b.registration.is_some();
+        crate::assert_with_log!(
+            has_registration,
+            "registration present",
+            true,
+            has_registration
+        );
+
+        // Now send some data
+        futures_lite::future::block_on(async {
+            a.send(b"test").await.expect("send failed");
+        });
+
+        // Poll should succeed
+        let poll = b.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Ready(Ok(()))),
+            "poll is Ready",
+            "Poll::Ready(Ok(()))",
+            format!("{:?}", poll)
+        );
+
+        crate::test_complete!("test_datagram_registers_on_wouldblock");
+    }
+
+    #[test]
+    fn test_datagram_send_registers_on_wouldblock() {
+        use crate::cx::Cx;
+        use crate::runtime::LabReactor;
+        use crate::runtime::io_driver::IoDriverHandle;
+        use crate::types::{Budget, RegionId, TaskId};
+
+        init_test("test_datagram_send_registers_on_wouldblock");
+
+        // Create a pair
+        let (mut a, _b) = UnixDatagram::pair().expect("pair failed");
+
+        // Set up reactor context
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor);
+        let cx = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver),
+            None,
+        );
+        let _guard = Cx::set_current(Some(cx));
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        // poll_send_ready should work without blocking for an empty socket
+        let poll = a.poll_send_ready(&mut poll_cx);
+        // Either ready or pending with registration is acceptable
+        if matches!(poll, Poll::Pending) {
+            let has_registration = a.registration.is_some();
+            crate::assert_with_log!(
+                has_registration,
+                "registration present on Pending",
+                true,
+                has_registration
+            );
+        }
+
+        crate::test_complete!("test_datagram_send_registers_on_wouldblock");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn test_cancelled_datagram_ops_return_interrupted_without_registration() {
+        use crate::cx::Cx;
+
+        init_test("test_cancelled_datagram_ops_return_interrupted_without_registration");
+
+        let dir = tempdir().expect("create temp dir");
+        let server_path = dir.path().join("cancel-server.sock");
+        let client_path = dir.path().join("cancel-client.sock");
+
+        let mut path_server = UnixDatagram::bind(&server_path).expect("bind server failed");
+        let mut path_client = UnixDatagram::bind(&client_path).expect("bind client failed");
+        let (mut connected_a, mut connected_b) = UnixDatagram::pair().expect("pair failed");
+
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let _guard = Cx::set_current(Some(cx));
+
+        let err = futures_lite::future::block_on(path_client.send_to(b"hello", &server_path))
+            .expect_err("cancelled send_to must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "send_to cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_client.registration.is_none(),
+            "send_to registration skipped",
+            true,
+            path_client.registration.is_none()
+        );
+
+        let mut buf = [0u8; 8];
+
+        let err = futures_lite::future::block_on(path_server.recv_from(&mut buf))
+            .expect_err("cancelled recv_from must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "recv_from cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "recv_from registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_a.send(b"hello"))
+            .expect_err("cancelled send must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "send cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_a.registration.is_none(),
+            "send registration skipped",
+            true,
+            connected_a.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_b.recv(&mut buf))
+            .expect_err("cancelled recv must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "recv cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_b.registration.is_none(),
+            "recv registration skipped",
+            true,
+            connected_b.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(connected_b.peek(&mut buf))
+            .expect_err("cancelled peek must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "peek cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            connected_b.registration.is_none(),
+            "peek registration skipped",
+            true,
+            connected_b.registration.is_none()
+        );
+
+        let err = futures_lite::future::block_on(path_server.peek_from(&mut buf))
+            .expect_err("cancelled peek_from must fail");
+        crate::assert_with_log!(
+            err.kind() == io::ErrorKind::Interrupted,
+            "peek_from cancelled",
+            io::ErrorKind::Interrupted,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "peek_from registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        let recv_ready = path_server.poll_recv_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                recv_ready,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ),
+            "poll_recv_ready cancelled",
+            "Poll::Ready(Interrupted)",
+            format!("{recv_ready:?}")
+        );
+        crate::assert_with_log!(
+            path_server.registration.is_none(),
+            "poll_recv_ready registration skipped",
+            true,
+            path_server.registration.is_none()
+        );
+
+        let send_ready = connected_a.poll_send_ready(&mut poll_cx);
+        crate::assert_with_log!(
+            matches!(
+                send_ready,
+                Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Interrupted
+            ),
+            "poll_send_ready cancelled",
+            "Poll::Ready(Interrupted)",
+            format!("{send_ready:?}")
+        );
+        crate::assert_with_log!(
+            connected_a.registration.is_none(),
+            "poll_send_ready registration skipped",
+            true,
+            connected_a.registration.is_none()
+        );
+
+        crate::test_complete!(
+            "test_cancelled_datagram_ops_return_interrupted_without_registration"
+        );
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd"
+    ))]
+    #[test]
+    fn test_peer_cred() {
+        init_test("test_datagram_peer_cred");
+        let (a, b) = UnixDatagram::pair().expect("pair failed");
+
+        // Both sides should be able to get peer credentials. macOS answers
+        // the datagram pair with a typed `Unsupported` (LOCAL_PEERCRED is a
+        // stream-socket facility there); that is the documented contract, so
+        // the test records it instead of asserting Linux behaviour.
+        let (cred_a, cred_b) = match (a.peer_cred(), b.peer_cred()) {
+            (Ok(cred_a), Ok(cred_b)) => (cred_a, cred_b),
+            (Err(err), _) | (_, Err(err))
+                if cfg!(not(target_os = "linux")) && err.kind() == io::ErrorKind::Unsupported =>
+            {
+                crate::assert_with_log!(
+                    true,
+                    "datagram peer credentials unsupported on this platform (typed)",
+                    "Unsupported",
+                    err.kind()
+                );
+                crate::test_complete!("test_datagram_peer_cred");
+                return;
+            }
+            (Err(err), _) | (_, Err(err)) => panic!("peer_cred failed: {err}"),
+        };
+
+        // Both should report the same process (ourselves)
+        let user_id = nix::unistd::getuid().as_raw();
+        let group_id = nix::unistd::getgid().as_raw();
+
+        crate::assert_with_log!(cred_a.uid == user_id, "a uid", user_id, cred_a.uid);
+        crate::assert_with_log!(cred_a.gid == group_id, "a gid", group_id, cred_a.gid);
+        crate::assert_with_log!(cred_b.uid == user_id, "b uid", user_id, cred_b.uid);
+        crate::assert_with_log!(cred_b.gid == group_id, "b gid", group_id, cred_b.gid);
+
+        // On Linux, pid should be available and match our process
+        #[cfg(target_os = "linux")]
+        {
+            let proc_id = i32::try_from(std::process::id()).expect("process id fits in i32");
+            let pid_a = cred_a.pid.expect("pid should be available on Linux");
+            let pid_b = cred_b.pid.expect("pid should be available on Linux");
+            crate::assert_with_log!(pid_a == proc_id, "a pid", proc_id, pid_a);
+            crate::assert_with_log!(pid_b == proc_id, "b pid", proc_id, pid_b);
+        }
+
+        crate::test_complete!("test_datagram_peer_cred");
+    }
+
+    /// br-asupersync-unix-socket-audit-alx18f item 4: Linux SO_PEERCRED answers
+    /// an unconnected datagram socket, and one connected with connect(), with
+    /// uid and gid -1. peer_cred must refuse them, not return them.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn peer_cred_refuses_sockets_without_kernel_credentials() {
+        init_test("peer_cred_refuses_sockets_without_kernel_credentials");
+        let unbound = UnixDatagram::unbound().expect("unbound socket");
+        let err = unbound
+            .peer_cred()
+            .expect_err("an unconnected socket has no peer credentials");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected, "{err}");
+
+        let name = format!("asupersync-peer-cred-{}", std::process::id());
+        let _receiver = UnixDatagram::bind_abstract(name.as_bytes()).expect("bind abstract");
+        let sender = UnixDatagram::unbound().expect("unbound sender");
+        sender
+            .connect_abstract(name.as_bytes())
+            .expect("connect to the abstract name");
+        let err = sender
+            .peer_cred()
+            .expect_err("connect() records no peer credentials for a datagram socket");
+        assert_eq!(err.kind(), io::ErrorKind::NotConnected, "{err}");
+        crate::test_complete!("peer_cred_refuses_sockets_without_kernel_credentials");
+    }
+
+    #[test]
+    fn test_bind_refuses_non_socket_path() {
+        init_test("test_datagram_bind_refuses_non_socket_path");
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("not_a_socket");
+        std::fs::write(&path, b"important data").expect("write file");
+
+        let err = UnixDatagram::bind(&path).expect_err("bind should reject non-socket path");
+        crate::assert_with_log!(
+            err.kind() == std::io::ErrorKind::AlreadyExists,
+            "error kind",
+            std::io::ErrorKind::AlreadyExists,
+            err.kind()
+        );
+
+        // Verify the file was NOT deleted
+        let contents = std::fs::read(&path).expect("read file");
+        let unchanged = contents == b"important data";
+        crate::assert_with_log!(unchanged, "file unchanged", true, unchanged);
+        crate::test_complete!("test_datagram_bind_refuses_non_socket_path");
+    }
+}

@@ -1,0 +1,25 @@
+{
+  "schema_version": "swarm-coordination-replay-input-v1",
+  "events": [
+    {
+      "id": "reservation-a",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "agent": "BlackDove",
+      "type": "reservation",
+      "bead_id": "asupersync-aj7lx3.14",
+      "path": "fuzz/Cargo.toml",
+      "exclusive": true,
+      "status": "active"
+    },
+    {
+      "id": "reservation-b",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "agent": "TopazGoose",
+      "type": "reservation",
+      "bead_id": "asupersync-aj7lx3.15",
+      "path": "fuzz/Cargo.toml",
+      "exclusive": true,
+      "status": "active"
+    }
+  ]
+}

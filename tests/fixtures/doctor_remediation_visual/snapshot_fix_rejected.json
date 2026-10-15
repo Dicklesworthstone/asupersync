@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "snapshot-remediation-fix-rejected",
+  "viewport_width": 132,
+  "viewport_height": 44,
+  "focused_panel": "remediation_panel",
+  "selected_node_id": "finding-01",
+  "stage_digest": "len:2|preview|rejected",
+  "visual_profile": "frankentui-cancel",
+  "capture_index": 1
+}

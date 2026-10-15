@@ -1,0 +1,72 @@
+{
+  "schema_version": "doctor-visual-harness-manifest-v1",
+  "run_id": "golden-run-001",
+  "scenario_id": "golden-scenario-success",
+  "artifact_root": "artifacts/golden-run-001/doctor/e2e/",
+  "records": [
+    {
+      "artifact_id": "golden-scenario-success-metrics",
+      "artifact_class": "metrics",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-metrics.json",
+      "checksum_hint": "golden-run-001-metrics",
+      "retention_class": "warm",
+      "linked_artifacts": [
+        "golden-scenario-success-replay-metadata",
+        "golden-scenario-success-summary"
+      ]
+    },
+    {
+      "artifact_id": "golden-scenario-success-replay-metadata",
+      "artifact_class": "replay_metadata",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-replay-metadata.json",
+      "checksum_hint": "golden-run-001-replay",
+      "retention_class": "warm",
+      "linked_artifacts": [
+        "golden-scenario-success-structured-log",
+        "golden-scenario-success-transcript"
+      ]
+    },
+    {
+      "artifact_id": "golden-scenario-success-snapshot",
+      "artifact_class": "snapshot",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-snapshot.json",
+      "checksum_hint": "snapshot-golden-success-snapshot-0",
+      "retention_class": "hot",
+      "linked_artifacts": ["golden-scenario-success-summary", "golden-scenario-success-transcript"]
+    },
+    {
+      "artifact_id": "golden-scenario-success-structured-log",
+      "artifact_class": "structured_log",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-structured-log.json",
+      "checksum_hint": "golden-structured-log-001",
+      "retention_class": "hot",
+      "linked_artifacts": [
+        "golden-scenario-success-replay-metadata",
+        "golden-scenario-success-summary",
+        "golden-scenario-success-transcript"
+      ]
+    },
+    {
+      "artifact_id": "golden-scenario-success-summary",
+      "artifact_class": "summary",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-summary.json",
+      "checksum_hint": "golden-summary-001",
+      "retention_class": "warm",
+      "linked_artifacts": [
+        "golden-scenario-success-metrics",
+        "golden-scenario-success-structured-log"
+      ]
+    },
+    {
+      "artifact_id": "golden-scenario-success-transcript",
+      "artifact_class": "transcript",
+      "artifact_path": "artifacts/golden-run-001/doctor/e2e/golden-scenario-success-transcript.json",
+      "checksum_hint": "golden-transcript-001",
+      "retention_class": "hot",
+      "linked_artifacts": [
+        "golden-scenario-success-snapshot",
+        "golden-scenario-success-structured-log"
+      ]
+    }
+  ]
+}

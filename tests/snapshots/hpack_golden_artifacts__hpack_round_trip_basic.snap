@@ -1,0 +1,72 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Basic GET headers round-trip without Huffman",
+  "original_headers": [
+    {
+      "name": ":method",
+      "value": "GET"
+    },
+    {
+      "name": ":path",
+      "value": "/"
+    },
+    {
+      "name": ":scheme",
+      "value": "https"
+    },
+    {
+      "name": ":authority",
+      "value": "example.com"
+    }
+  ],
+  "encoder_config": {
+    "use_huffman": false,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    130,
+    132,
+    135,
+    65,
+    11,
+    101,
+    120,
+    97,
+    109,
+    112,
+    108,
+    101,
+    46,
+    99,
+    111,
+    109
+  ],
+  "decoder_config": {
+    "use_huffman": false,
+    "max_table_size": 4096,
+    "max_header_list_size": 8192
+  },
+  "decoded_headers": [
+    {
+      "name": ":method",
+      "value": "GET"
+    },
+    {
+      "name": ":path",
+      "value": "/"
+    },
+    {
+      "name": ":scheme",
+      "value": "https"
+    },
+    {
+      "name": ":authority",
+      "value": "example.com"
+    }
+  ],
+  "round_trip_successful": true
+}

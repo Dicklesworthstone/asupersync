@@ -1,0 +1,65 @@
+{
+  "schema_version": "wasm-packaged-bootstrap-harness-v1",
+  "bead_id": "asupersync-3qv04.8.4.1",
+  "log_schema_version": "wasm-e2e-log-schema-v1",
+  "run_metadata_schema_version": "wasm-e2e-run-metadata-v1",
+  "suite_summary_schema_version": "e2e-suite-summary-v3",
+  "perf_summary_schema_version": "wasm-budget-summary-v1",
+  "scenario_id": "e2e-wasm-packaged-bootstrap-load-reload",
+  "suite_scenario_id": "E2E-SUITE-WASM-PACKAGED-BOOTSTRAP",
+  "bundle_layout_required": [
+    "run-metadata.json",
+    "log.jsonl",
+    "perf-summary.json",
+    "summary.json",
+    "steps.ndjson"
+  ],
+  "startup_latency_metrics": [
+    "M-PERF-02A",
+    "M-PERF-02B"
+  ],
+  "steady_state_memory_metrics": [
+    "M-PERF-03A"
+  ],
+  "startup_latency_model": {
+    "model_id": "artifact-budget-model-v1",
+    "components": [
+      "download_ms",
+      "instantiate_ms",
+      "bootstrap_ms"
+    ]
+  },
+  "steady_state_memory_model": {
+    "model_id": "artifact-memory-envelope-v1",
+    "components": [
+      "wasm_module_mib",
+      "js_bridge_mib",
+      "runtime_state_mib",
+      "steady_buffers_mib",
+      "shutdown_reserve_mib"
+    ]
+  },
+  "perf_summary_export_path": "artifacts/wasm_packaged_bootstrap_perf_summary.json",
+  "steps": [
+    {
+      "step_id": "packaged_module_load",
+      "command": "rch exec -- cargo test --test wasm_packaged_bootstrap_harness packaged_module_load -- --nocapture"
+    },
+    {
+      "step_id": "bootstrap_to_runtime_ready",
+      "command": "rch exec -- cargo test --test wasm_packaged_bootstrap_harness bootstrap_to_runtime_ready -- --nocapture"
+    },
+    {
+      "step_id": "reload_remount_cycle",
+      "command": "rch exec -- cargo test --test wasm_packaged_bootstrap_harness reload_remount_cycle -- --nocapture"
+    },
+    {
+      "step_id": "clean_shutdown",
+      "command": "rch exec -- cargo test --test wasm_packaged_bootstrap_harness clean_shutdown -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-3qv04.8.5",
+    "asupersync-3qv04.8.6"
+  ]
+}

@@ -1,0 +1,98 @@
+{
+  "schema_version": "browser-package-integrity-failure-rehearsals-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.2",
+  "rehearsals": [
+    {
+      "id": "tampered_wasm_digest",
+      "mutation": "change one byte in packages/browser-core/asupersync_bg.wasm after the integrity manifest is generated",
+      "mutated_path": "packages/browser-core/asupersync_bg.wasm",
+      "detected_by": [
+        "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+        "tests/wasm_supply_chain_controls.rs"
+      ],
+      "expected_reason_code": "integrity_manifest_digest_mismatch",
+      "expected_action": "block_package_ga",
+      "release_channel_effect": "no_promotion",
+      "operator_recovery": [
+        "rebuild browser-core artifacts from source",
+        "regenerate integrity, SBOM, and provenance artifacts",
+        "rerun the package integrity gate in the same candidate window"
+      ],
+      "fail_closed": true
+    },
+    {
+      "id": "abi_metadata_mismatch",
+      "mutation": "change abi_version or abi_signature_fingerprint_v1 without matching exported ABI constants",
+      "mutated_path": "packages/browser-core/abi-metadata.json",
+      "detected_by": [
+        "packages/browser-core/abi-metadata.json",
+        "tests/wasm_packaged_abi_compatibility_matrix.rs",
+        "asupersync-browser-core/tests/abi_exports.rs"
+      ],
+      "expected_reason_code": "abi_metadata_fingerprint_or_version_mismatch",
+      "expected_action": "block_package_ga",
+      "release_channel_effect": "no_promotion",
+      "operator_recovery": [
+        "rebuild abi-metadata.json through scripts/build_browser_core_artifacts.sh",
+        "rerun ABI export and packaged compatibility contracts",
+        "keep older package line as the documented downgrade target"
+      ],
+      "fail_closed": true
+    },
+    {
+      "id": "oversized_bundle_ceiling",
+      "mutation": "increase publishable wasm or JS payload above the release profile hard ceiling",
+      "mutated_path": "artifacts/wasm_bundle_size_budget_v1.json",
+      "detected_by": [
+        "artifacts/wasm_bundle_size_budget_v1.json",
+        "tests/wasm_bundle_size_budget_contract.rs"
+      ],
+      "expected_reason_code": "bundle_budget_ceiling_exceeded",
+      "expected_action": "block_package_ga",
+      "release_channel_effect": "no_promotion",
+      "operator_recovery": [
+        "attach size-delta review evidence",
+        "reduce bundle size or explicitly update budgets with release-owner approval",
+        "rerun package integrity and bundle budget contracts"
+      ],
+      "fail_closed": true
+    },
+    {
+      "id": "missing_types_declaration",
+      "mutation": "remove a package exports.types or package types target from the publishable manifest",
+      "mutated_path": "packages/browser/package.json",
+      "detected_by": [
+        "tests/wasm_npm_pack_smoke_contract.rs",
+        "tests/wasm_package_build_contract.rs"
+      ],
+      "expected_reason_code": "package_types_export_missing",
+      "expected_action": "block_package_ga",
+      "release_channel_effect": "no_promotion",
+      "operator_recovery": [
+        "restore TypeScript declaration output in the package manifest",
+        "rerun package build validation",
+        "rerun npm pack smoke validation"
+      ],
+      "fail_closed": true
+    },
+    {
+      "id": "missing_rollback_evidence",
+      "mutation": "promote a candidate without rollback playbook summary or release channel rollback references",
+      "mutated_path": "docs/wasm_release_channel_strategy.md",
+      "detected_by": [
+        "docs/wasm_release_channel_strategy.md",
+        "docs/wasm_release_rollback_incident_playbook.md",
+        "tests/wasm_release_rollback_incident_playbook.rs"
+      ],
+      "expected_reason_code": "release_channel_rollback_artifact_missing",
+      "expected_action": "block_package_ga",
+      "release_channel_effect": "no_promotion",
+      "operator_recovery": [
+        "attach rollback playbook summary artifact",
+        "record demotion and dist-tag recovery commands",
+        "rerun release channel strategy and rollback playbook contracts"
+      ],
+      "fail_closed": true
+    }
+  ]
+}

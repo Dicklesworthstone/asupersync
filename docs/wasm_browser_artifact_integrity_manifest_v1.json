@@ -1,0 +1,82 @@
+{
+  "schema_version": "asupersync-wasm-artifact-integrity-v1",
+  "bead": "asupersync-3qv04.7.2",
+  "hash_algorithm": "sha256",
+  "entries": [
+    {
+      "path": "docs/wasm_browser_sbom_v1.json",
+      "sha256": "9d5f3e0231b9d7675d71b3c54b1bd6cc5a226817e8db55e94f111a77277d4c4f",
+      "kind": "sbom"
+    },
+    {
+      "path": "docs/wasm_browser_provenance_attestation_v1.json",
+      "sha256": "e09380b2b124cb3dc21b5bb561c84ce0cfb716b684a5ef11bb523f29c226f337",
+      "kind": "provenance"
+    },
+    {
+      "path": "packages/browser-core/package.json",
+      "sha256": "0c6ee067050655dcc6565e2c99aaf0f945bd04c1cec0e0332fc891125dd54fbb",
+      "kind": "manifest"
+    },
+    {
+      "path": "packages/browser-core/index.js",
+      "sha256": "13cac4230f8eeb574d74133379814c8234803e8fa7c8c7b0b7940346a4a591b5",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/index.d.ts",
+      "sha256": "45ecd7db8149042ab1b28f51641b93d490d1afc9b76af6d8ceefd8e42a498a19",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/asupersync.js",
+      "sha256": "547f6a607032e08c07e06fbfa172bf800f4821db725fea0956a5f42accee27f0",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/asupersync.d.ts",
+      "sha256": "d19cd91c0544a0a6e3120f49231fff16ca16e58effd84b24e11282f312b3272b",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/types.d.ts",
+      "sha256": "4e1e172a1eb86594af4f2818bbe30a53badc9a87f924752390ecbd61cf861678",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/asupersync_bg.wasm",
+      "sha256": "2206f641a0d2a83d7968aa301e8c30552539b6330050deb87708fd000868951a",
+      "kind": "wasm"
+    },
+    {
+      "path": "packages/browser-core/asupersync_bg.wasm.d.ts",
+      "sha256": "77c67b3be2083c45aec8cc57930e903236ce584bbdf7e263b4e4fdabed422211",
+      "kind": "package-file"
+    },
+    {
+      "path": "packages/browser-core/abi-metadata.json",
+      "sha256": "bcded5f10c7139e0da6ce24990a85efae071b353697b85314cfaad44c1ac790b",
+      "kind": "metadata"
+    },
+    {
+      "path": "packages/browser-core/debug-metadata.json",
+      "sha256": "a01ddbc4fbe173778e55d366f3d4e0bed22f2b0abaefceaa8337aa6aeca5f784",
+      "kind": "metadata"
+    },
+    {
+      "path": "packages/browser/package.json",
+      "sha256": "441f13164faa91cb210fc1f272f8f14119d061591b4145a1f4d4529f261eb2fa",
+      "kind": "manifest"
+    },
+    {
+      "path": "packages/react/package.json",
+      "sha256": "f7cf567b7d9ac3ec8eb6b905c3390f52f49d31bf284f1432dd9e2fa0cf0cd7b7",
+      "kind": "manifest"
+    },
+    {
+      "path": "packages/next/package.json",
+      "sha256": "3360fece8ff1aac7ec6fab5426c4e431a52d0cc12118c6c330af27641790f84c",
+      "kind": "manifest"
+    }
+  ]
+}

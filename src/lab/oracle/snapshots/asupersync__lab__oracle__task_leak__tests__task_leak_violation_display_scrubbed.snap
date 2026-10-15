@@ -1,0 +1,5 @@
+---
+source: src/lab/oracle/task_leak.rs
+expression: scrub_task_leak_display(&violation.to_string())
+---
+Region [REGION_ID] closed at Time(100ns) with 2 leaked task(s): [[TASK_ID_1], [TASK_ID_2]]

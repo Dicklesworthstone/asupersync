@@ -1,0 +1,708 @@
+{
+  "schema_version": "raptorq-optimization-decision-records-v1",
+  "artifact_id": "raptorq_optimization_decision_records_v1",
+  "track_bead_id": "asupersync-3ltrv",
+  "external_ref": "bd-7toum",
+  "generated_at_utc": "2026-03-21T16:50:12Z",
+  "governance_rules": {
+    "required_fields": [
+      "decision_id",
+      "lever_code",
+      "lever_bead_id",
+      "summary",
+      "expected_value",
+      "risk_class",
+      "proof_safety_constraints",
+      "adoption_wedge",
+      "conservative_comparator",
+      "fallback_plan",
+      "rollback_rehearsal",
+      "validation_evidence",
+      "deterministic_replay",
+      "owner",
+      "status"
+    ],
+    "risk_classes": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "status_values": [
+      "approved",
+      "approved_guarded",
+      "proposed",
+      "hold"
+    ],
+    "rollback_rehearsal_policy": {
+      "requires_command": true,
+      "requires_checklist": true,
+      "requires_post_rollback_verification": true
+    }
+  },
+  "decision_cards": [
+    {
+      "decision_id": "g3-e4-fused-gf256-guarded",
+      "lever_code": "E4",
+      "lever_bead_id": "asupersync-348uw",
+      "summary": "Dual fused GF256 kernels with deterministic policy gating (`DualKernelPolicy`).",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Substantial throughput gains in selected size/ISA regimes with bounded downside under policy gating.",
+        "measured_highlights": [
+          "mul_slices2 n=4096: fused ~29.42 vs seq ~25.35 GiB/s",
+          "mul_slices2 n=16384: fused ~25.89 vs seq ~36.17 GiB/s (regression)",
+          "addmul_slices2 n=16384: fused ~26.04 vs seq ~27.72 GiB/s (regression)"
+        ]
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Bit-exact equivalence against conservative sequential kernels.",
+        "Policy selection must remain deterministic for identical inputs/config.",
+        "Scalar fallback remains mandatory and selectable."
+      ],
+      "adoption_wedge": {
+        "phase": "guarded rollout",
+        "strategy": "Use deterministic policy windows/ratio thresholds and disable fused path where regressions appear.",
+        "enable_controls": [
+          "ASUPERSYNC_GF256_DUAL_POLICY",
+          "policy ratio/window knobs in `src/raptorq/gf256.rs`"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "sequential kernels",
+        "evidence_refs": [
+          "asupersync-348uw bead notes (2026-02-14 through 2026-02-15 benchmark corpus)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Any sustained p95 regression versus sequential comparator in target regime.",
+        "action": "Set policy to non-fused path and keep superkernel code gated.",
+        "conservative_mode": "Sequential GF256 kernels only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4 cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Benchmark output present under target dir and parseable.",
+          "No fused-path activation in logs/config snapshot.",
+          "Targeted tests pass: `rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture`."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256 -- --nocapture",
+          "rch exec -- cargo test -p asupersync --lib raptorq::linalg -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile fast"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-GF256-ADDMUL",
+        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-pre cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e4-post cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+      }
+    },
+    {
+      "decision_id": "g3-e5-profile-pack-dispatch",
+      "lever_code": "E5",
+      "lever_bead_id": "asupersync-36m6p",
+      "summary": "Deterministic GF256 architecture profile-pack selection and runtime dispatch metadata.",
+      "status": "approved_guarded",
+      "owner": "FrostyRiver",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Architecture-specific profile packs improve decode throughput while preserving deterministic fallback behavior.",
+        "measured_highlights": [
+          "Track-E prior scalar/fused corpus indicates substantial gains in selected regimes (e.g. dual fused uplift in representative cases).",
+          "2026-02-19 E5 slices landed deterministic profile catalog + host-class rejected-candidate metadata + replay pointer surfacing.",
+          "2026-02-19 third E5 slice added deterministic tuning-candidate provenance fields and structured benchmark log metadata (tuning corpus ID, selected/rejected candidate IDs, command bundle).",
+          "2026-02-20 fourth E5 slice added deterministic profile-pack manifest snapshot API and manifest-level reproducibility fields in Track-E benchmark logs.",
+          "2026-02-20 fifth E5 slice added deterministic environment metadata (arch/os/env/endian/pointer width) to manifest snapshots and Track-E policy logs.",
+          "2026-02-20 sixth E5 slice added artifacts/raptorq_track_e_gf256_bench_v1.json with baseline/auto/rollback comparator capture and rollback rehearsal outcomes.",
+          "2026-02-20 seventh E5 slice added directional p95/p99 comparator corpus artifact (artifacts/raptorq_track_e_gf256_p95p99_v1.json) from Track-E baseline/auto/rollback captures.",
+          "2026-02-20 eighth E5 slice started high-confidence p95/p99 corpus generation targeting artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json (coord thread msg #1487).",
+          "2026-02-20 ninth E5 status update captured transient unrelated retry.rs compile-frontier breakage during high-confidence reruns (coord msgs #1493/#1504).",
+          "2026-02-20 follow-up compile verification (`rch exec -- cargo check -p asupersync --lib`) exited 0.",
+          "2026-02-20 tenth E5 slice published artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json; the current checked-in packet keeps `ready_for_e5_closure=false` / `acceptance_criterion_4_status=not_met` on the narrowed high-confidence corpus.",
+          "2026-03-05 E5 support slice made the command-surface split explicit: manifest-level comparator/rollback `command_bundle` remains `gf256_primitives`, while probe-only `repro_command` remains `gf256_dual_policy` (agent-mail asupersync-36m6p #4585).",
+          "2026-03-15 E5 broader refresh published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json so the seven-scenario `RQ-E-GF256-DUAL-*` directional corpus and current x86 default contract are versioned separately from the narrowed `highconf_v1` guardrail.",
+          "2026-03-21 E5 broader longer-window guardrail published artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json; it superseded v2 as the then-current broader negative-evidence packet while keeping `ready_for_e5_closure=false` on the eight-scenario `RQ-E-GF256-DUAL-001..008` corpus.",
+          "2026-04-11 current-head raw-sample successor packet published as artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json; it supersedes the older current-head v4 packet as the current broader packet, preserves the canonical x86 default contract, and records a favorable-but-not-closure-grade result (combined same-run median/p95/p99 improved, addmul improved across all three metrics, mul tails improved, mul medians still mixed) with `ready_for_e5_closure=false`."
+        ]
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Profile selection must be deterministic for identical host features and requested profile.",
+        "Unknown/unsupported profile requests must fail closed to scalar conservative fallback with explicit reason.",
+        "Bit-exactness against conservative scalar path must be preserved."
+      ],
+      "adoption_wedge": {
+        "phase": "guarded rollout",
+        "strategy": "Adopt deterministic profile pack metadata and dispatch first; enable broader profile-tuned selection only with measured comparator evidence.",
+        "enable_controls": [
+          "ASUPERSYNC_GF256_PROFILE_PACK",
+          "ASUPERSYNC_GF256_DUAL_POLICY",
+          "Dual-policy window controls in src/raptorq/gf256.rs"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "scalar-conservative-v1 profile pack",
+        "evidence_refs": [
+          "asupersync-36m6p comments #1826 and #1834",
+          "asupersync-36m6p comments #1848/#1855 (manifest snapshot and environment reproducibility metadata; all-targets checks pass)",
+          "artifacts/raptorq_track_e_gf256_bench_v1.json",
+          "asupersync-36m6p comment #1863 (p95/p99-oriented comparator corpus + methodology/limitations)",
+          "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+          "asupersync-2ncba notes benchmark corpus",
+          "agent-mail thread asupersync-3ltrv msg #1383 (2026-02-19 E5 evidence sync)",
+          "agent-mail thread coord-2026-02-19 msgs #1408/#1410 (compile-mismatch no longer reproduced)",
+          "agent-mail thread asupersync-3ltrv msgs #1422/#1424 (E5 fifth-slice evidence + corrected anchor)",
+          "agent-mail thread asupersync-3ltrv msg #1441 and coord thread msg #1443 (sixth-slice comparator artifact + rollback capture confirmation)",
+          "agent-mail thread asupersync-3ltrv msgs #1461/#1465 (seventh-slice p95/p99 artifact + corrected anchor)",
+          "agent-mail thread coord-2026-02-19 msg #1487 (high-confidence p95/p99 corpus run started; pending artifact publication)",
+          "agent-mail thread coord-2026-02-19 msgs #1493/#1504 (transient retry.rs compile-frontier blockage and active remediation while high-confidence run proceeds)",
+          "asupersync-36m6p comment #1894 (high-confidence p95/p99 closure artifact + headline)",
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+          "agent-mail thread asupersync-3ltrv msg #1542 and coord thread msg #1543 (E5 high-confidence publication confirmation; earlier closure-ready wording is superseded by the checked-in closure_assessment block)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Unsupported host/profile combination, profile-pack validation mismatch, or comparator regression in selected profile.",
+        "action": "Pin profile selection to scalar-conservative-v1 and disable aggressive dual-policy routing.",
+        "conservative_mode": "Scalar conservative profile-pack with deterministic fallback reasons."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-rollback cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Bench logs show profile_pack=scalar-conservative-v1 (or explicit fallback to it).",
+          "Targeted metadata tests pass (`profile_pack_catalog_*`, `profile_pack_selection_*`, `dual_policy_snapshot_*`).",
+          "Deterministic E2E fast bundle still passes."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256::tests::dual_policy_snapshot_exposes_profile_pack_metadata -- --nocapture",
+          "rch exec -- cargo test -p asupersync --lib raptorq::gf256::tests::profile_pack_manifest_snapshot_ -- --nocapture",
+          "rch exec -- cargo check -p asupersync --lib",
+          "rch exec -- cargo check --all-targets"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile fast --bundle"
+        ],
+        "structured_logs": [
+          "benches/raptorq_benchmark.rs Track-E policy/probe logs emit manifest-level reproducibility fields.",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/validation_stages.ndjson"
+        ]
+      },
+      "measured_comparator_evidence": {
+        "status": "partial",
+        "artifacts": [
+          "asupersync-36m6p comments #1848/#1855",
+          "artifacts/raptorq_track_e_gf256_bench_v1.json",
+          "asupersync-36m6p comment #1863",
+          "artifacts/raptorq_track_e_gf256_p95p99_v1.json",
+          "asupersync-36m6p comment #1894",
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json"
+        ],
+        "bench_repro_commands": [
+          "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives",
+          "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy"
+        ],
+        "command_surface_split": {
+          "manifest_command_bundle": "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives",
+          "probe_repro_command": "rch exec -- cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_dual_policy",
+          "notes": [
+            "Comparator/rollback profile-pack validation stays anchored to the broader gf256_primitives surface.",
+            "Dual-policy probe forensics stay anchored to the narrower gf256_dual_policy surface."
+          ]
+        },
+        "decision_chronology_contract": {
+          "historical_same_session_packet": "simd_policy_ablation_2026_03_02",
+          "canonical_default_contract_packet": "simd_policy_ablation_2026_03_04",
+          "supersession_status": "historical_same_session_result_superseded_by_broader_corpus",
+          "notes": [
+            "The 2026-03-02 packet remains historical comparator evidence from a single-scenario same-session run.",
+            "The 2026-03-04 broader RQ-E-GF256-DUAL-* corpus owns the canonical current x86 default-selection contract."
+          ]
+        },
+        "notes": [
+          "Profile-pack and tuning-candidate provenance fields are now emitted in Track-E policy logs.",
+          "Manifest snapshot metadata (schema/version/catalog counts/selected candidate details) is now emitted and covered by deterministic tests.",
+          "Environment reproducibility metadata (target_arch/target_os/target_env/target_endian/target_pointer_width_bits) is now included in manifest snapshots and emitted in policy logs.",
+          "The manifest-level comparator/rollback `command_bundle` is intentionally distinct from the probe-level `repro_command` surface and is now tracked explicitly in this artifact.",
+          "Directional p95/p99 summaries are now attached via artifacts/raptorq_track_e_gf256_p95p99_v1.json.",
+          "High-confidence p95/p99 corpus is published at artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json and currently encodes `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+          "Broader multi-scenario directional refresh remains published at artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json; it is now the historical short-window packet complementing the narrowed highconf_v1 guardrail.",
+          "The current broader raw-sample successor packet is artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json; it keeps scenario coverage at `RQ-E-GF256-DUAL-001..008`, preserves the canonical current x86 default contract, and explicitly remains non-closure-grade because the broader same-run comparator now improves combined median/p95/p99 while mul medians still remain mixed and highconf_v1 remains the narrowed not-ready guardrail.",
+          "High-confidence headline (overall proxy p95/p99 time, us): baseline 9.0743/9.0743, auto 9.3392/9.3392, rollback 9.9333/9.9333.",
+          "Current-head raw-sample headline (combined delta pct vs same-run sequential baseline): auto median -2.7464%, p95 -4.5332%, p99 -2.8112%; rollback median +0.8838%, p95 -0.7287%, p99 -0.2805%.",
+          "Transient compile-frontier interruption noted in coord msgs #1493/#1504 has follow-up green check evidence (`rch exec -- cargo check -p asupersync --lib` exit 0).",
+          "High-confidence closure slice is intentionally narrowed to RQ-E-GF256-005 and uses conservative interval-endpoint proxies; limitations are explicitly documented in the artifact."
+        ],
+        "pending_blockers": [
+          "Current high-confidence guardrail packet (artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json) still records `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`.",
+          "Current broader raw-sample successor packet (artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json) is now published, and it explicitly remains non-closure-grade (`raw_sample_favorable_not_closure_grade`): combined same-run median/p95/p99 improve, addmul improves across all three metrics, and mul tails improve, but mul medians remain mixed and highconf_v1 still owns the narrowed not-ready closure status. artifacts/raptorq_track_e_gf256_multiscenario_refresh_v2.json remains the historical short-window directional packet, artifacts/raptorq_track_e_gf256_multiscenario_refresh_v3.json remains the historical broader interval-proxy negative guardrail, and artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json remains the historical broader mixed-signal packet.",
+          "Current broader raw-sample successor contract: raw_sample_favorable_not_closure_grade",
+          "current broader raw-sample successor packet"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-E-GF256-005",
+        "pre_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=scalar-conservative-v1 ASUPERSYNC_GF256_DUAL_POLICY=never CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-pre cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_change_command": "rch exec -- env ASUPERSYNC_GF256_PROFILE_PACK=auto ASUPERSYNC_GF256_DUAL_POLICY=auto CARGO_TARGET_DIR=/tmp/rch-bench-g3-e5-post cargo bench --bench raptorq_benchmark --features simd-intrinsics,criterion-benches -- gf256_primitives --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1"
+      },
+      "measured_comparator_artifacts": [
+        "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+        "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json"
+      ]
+    },
+    {
+      "decision_id": "g3-c5-block-schur-low-rank",
+      "lever_code": "C5",
+      "lever_bead_id": "asupersync-zfn8v",
+      "summary": "Block-Schur / low-rank accelerated elimination for hard decode systems.",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce dense elimination wall time in hardest decode regimes."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Eligibility checks must prevent unsafe acceleration on unsupported matrices.",
+        "Conservative elimination path is mandatory and tested first.",
+        "Deterministic solver ordering must be preserved."
+      ],
+      "adoption_wedge": {
+        "phase": "eligibility-gated",
+        "strategy": "Only activate on explicitly matched hard-regime structures.",
+        "enable_controls": [
+          "Runtime eligibility predicates with conservative fallback."
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "baseline dense elimination path",
+        "evidence_refs": [
+          "asupersync-zfn8v bead notes (guardrail + fallback requirement)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Numerical instability signal, mismatch, or tail regression.",
+        "action": "Disable accelerated branch and force baseline elimination.",
+        "conservative_mode": "Dense elimination only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full",
+        "post_rollback_verification_checklist": [
+          "Full deterministic E2E profile completes without acceleration branch.",
+          "Decode-success metrics remain at expected values for canonical scenarios.",
+          "Replay catalog entries remain reproducible."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/full_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_conservative_vs_radical_overhead_report -- --nocapture",
+        "post_change_command": "rch exec -- cargo test --test ci_regression_gates g2_c5_hard_regime_activation -- --nocapture"
+      }
+    },
+    {
+      "decision_id": "g3-c6-peeling-dense-core",
+      "lever_code": "C6",
+      "lever_bead_id": "asupersync-2qfjd",
+      "summary": "Deterministic peeling front-end with dense-core extraction.",
+      "status": "approved_guarded",
+      "owner": "FoggyLake",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce solver burden by shrinking dense core before elimination."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Peeling decisions must be deterministic and reproducible.",
+        "Unresolved cases must hand off to conservative dense-core solver.",
+        "No silent decode corruption permitted under partial peel outcomes."
+      ],
+      "adoption_wedge": {
+        "phase": "bounded front-end preconditioner",
+        "strategy": "Use deterministic peeling as pre-pass; escalate to conservative solver otherwise.",
+        "enable_controls": [
+          "Bounded peel iteration controls",
+          "Dense-core fallback handoff"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "direct conservative dense solve without peeling",
+        "evidence_refs": [
+          "asupersync-2qfjd bead notes"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Peeling stalls or violates bounded progress criteria.",
+        "action": "Short-circuit to conservative dense-core solve.",
+        "conservative_mode": "Direct dense-core solve."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics",
+        "post_rollback_verification_checklist": [
+          "Forensics profile emits deterministic logs and replay artifacts.",
+          "No peeling-specific branch taken in rollback mode.",
+          "Decode success parity with baseline retained."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile forensics"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/forensics_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_conservative_vs_radical_overhead_report -- --nocapture",
+        "post_change_command": "rch exec -- cargo test --test ci_regression_gates g2_c6_dense_core_exercised -- --nocapture"
+      }
+    },
+    {
+      "decision_id": "g3-f5-runtime-policy-engine",
+      "lever_code": "F5",
+      "lever_bead_id": "asupersync-324sc",
+      "summary": "Runtime decoder policy engine with expected-loss strategy selection.",
+      "status": "approved_guarded",
+      "owner": "GrayLynx",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Lower arithmetic work and tail latency by selecting strategies online under bounded rules."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Policy decisions must be deterministic for identical runtime state.",
+        "Fallback to static conservative strategy must always be available.",
+        "Policy logic cannot violate decode correctness invariants."
+      ],
+      "adoption_wedge": {
+        "phase": "bounded online policy",
+        "strategy": "Enable policy engine with explicit caps and conservative comparator tracking.",
+        "enable_controls": [
+          "Policy toggles and bounded decision thresholds."
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "static baseline strategy",
+        "evidence_refs": [
+          "asupersync-324sc bead notes (explicit comparator requirement)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Policy-induced tail regression or unstable strategy flips.",
+        "action": "Force static baseline strategy and disable runtime policy adaptation.",
+        "conservative_mode": "Static baseline decode strategy."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark -- raptorq_e2e --sample-size 10 --warm-up-time 0.1 --measurement-time 0.1",
+        "post_rollback_verification_checklist": [
+          "Strategy selection logs show static mode only.",
+          "Tail metrics compared against policy-on run are archived.",
+          "Conformance tests remain green."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_conformance -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- ./scripts/run_raptorq_e2e.sh --profile full"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/full_<timestamp>/summary.json"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-LOWLOSS",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_stable_workload_no_false_alarm -- --nocapture",
+        "post_change_command": "rch exec -- cargo test --test ci_regression_gates g2_f5_policy_mode_recorded -- --nocapture"
+      }
+    },
+    {
+      "decision_id": "g3-f6-regime-shift-retuning",
+      "lever_code": "F6",
+      "lever_bead_id": "asupersync-j96j4",
+      "summary": "Regime-shift detector with bounded runtime retuning.",
+      "status": "approved_guarded",
+      "owner": "BronzeDune",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Adapt to workload drift while preserving deterministic fallback behavior."
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "No unbounded online learning.",
+        "Retuning updates must obey explicit caps and reversion rules.",
+        "Deterministic replay must produce identical retuning events for fixed seeds."
+      ],
+      "adoption_wedge": {
+        "phase": "guarded rollout",
+        "strategy": "Enable bounded retuning under explicit caps and keep conservative rollback path immediately available.",
+        "enable_controls": [
+          "feature flag gate",
+          "bounded retune caps"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "static policy with retuning disabled",
+        "evidence_refs": [
+          "asupersync-j96j4 close_reason (2026-02-19): static-vs-retuned bounded detector implementation and validation"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Retuning oscillation, instability, or policy divergence.",
+        "action": "Disable retuning and force static policy engine behavior.",
+        "conservative_mode": "Static policy only."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- cargo test --test ci_regression_gates g2_stable_workload_no_false_alarm -- --nocapture",
+        "post_rollback_verification_checklist": [
+          "Regime metrics remain bounded and deterministic on repeated runs.",
+          "No instability-triggered failures in conservative baseline replay.",
+          "Replay outputs remain deterministic across repeated seeds."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test --test raptorq_perf_invariants f6_ -- --nocapture",
+          "rch exec -- cargo test --test ci_regression_gates g2_f6_regime_tracked_across_decodes -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile full --bundle"
+        ],
+        "structured_logs": [
+          "target/e2e-results/raptorq/<profile>_<timestamp>/summary.json",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-RANDOM-HIGHLOSS",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_stable_workload_no_false_alarm -- --nocapture",
+        "post_change_command": "rch exec -- cargo test --test ci_regression_gates g2_f6_regime_tracked_across_decodes -- --nocapture"
+      }
+    },
+    {
+      "decision_id": "g3-f7-factor-cache-reuse",
+      "lever_code": "F7",
+      "lever_bead_id": "asupersync-n5fk6",
+      "summary": "Cross-block factor-cache + skeleton reuse for burst decode workloads.",
+      "status": "approved_guarded",
+      "owner": "FuchsiaFalcon",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Lower p95/p99 latency by reusing validated elimination artifacts in repeating decode structures.",
+        "measured_highlights": [
+          "Implementation evidence is landed: deterministic dense-factor cache + strict signature checks + bounded eviction telemetry (thread asupersync-n5fk6 msg #1194).",
+          "Follow-up implementation evidence is landed: matrix-skeleton reuse (`DenseFactorArtifact`) plus deterministic cache decision telemetry and collision tracking (thread asupersync-n5fk6 msg #1207).",
+          "F7 comparator artifacts are published: artifacts/raptorq_track_f_factor_cache_p95p99_v1.json (single-scenario) and artifacts/raptorq_track_f_factor_cache_p95p99_v2.json (multi-scenario).",
+          "Latest multi-scenario comparator (v2) shows deterministic cache hits in all scenarios but 0/3 scenarios satisfy current material p95/p99 gain thresholds; runs continue to show tail-latency variability with occasional warmed-cache p95 regressions."
+        ]
+      },
+      "risk_class": "high",
+      "proof_safety_constraints": [
+        "Reuse only on deterministic structural-equivalence checks.",
+        "Bounded cache policy with memory budget limits.",
+        "Fallback to conservative rebuild on mismatch."
+      ],
+      "adoption_wedge": {
+        "phase": "approved_guarded \u2014 closure evidence complete",
+        "strategy": "Cache is safe to ship: functionally correct, deterministic, bounded, with verified rollback. No material p95/p99 gain at tested workload sizes (k<=64), but zero regression risk. Monitor via DecodeStats telemetry for real-world workload benefit.",
+        "enable_controls": [
+          "cache capacity cap",
+          "equivalence verdict enforcement"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "no-cache rebuild path",
+        "evidence_refs": [
+          "asupersync-n5fk6 notes (2026-02-18): strict signature matching + bounded cache telemetry",
+          "agent-mail thread asupersync-n5fk6 msg #1194 (deterministic dense-factor cache implementation evidence)",
+          "agent-mail thread asupersync-n5fk6 msg #1207 (matrix-skeleton reuse + deterministic cache telemetry evidence)",
+          "agent-mail thread asupersync-n5fk6 msg #1780 (n5fk6.1 completion: Arc-backed dense-factor artifact sharing and flattened deterministic signatures)"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Equivalence mismatch, cache corruption suspicion, or memory pressure thresholds.",
+        "action": "Disable cache hit path and force conservative rebuild.",
+        "conservative_mode": "No reuse."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- cargo test --test ci_regression_gates g2_f7_burst_cache_closure_evidence_v3 -- --nocapture",
+        "outcome": "pass",
+        "outcome_detail": "All 3 scenarios (k=48, k=64, k=48-large) verified: conservative cold-cache path produces correct source symbol recovery.",
+        "outcome_artifact": "artifacts/raptorq_track_f_factor_cache_p95p99_v3.json (rollback_rehearsal section)",
+        "post_rollback_verification_checklist": [
+          "Cache-hit count drops to zero in logs.",
+          "Decode correctness remains unchanged.",
+          "Rollback outcome artifact is archived and linked from the decision card."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_repair_only_hits_dense_factor_cache_on_second_run -- --nocapture",
+          "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::dense_factor_ -- --nocapture"
+        ],
+        "deterministic_e2e": [
+          "rch exec -- cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture"
+        ],
+        "structured_logs": [
+          "tests/ci_regression_gates.rs::emit_gate_log (lever=F7)",
+          "target/e2e-results/raptorq/<profile>_<timestamp>/scenarios.ndjson"
+        ]
+      },
+      "measured_comparator_evidence": {
+        "status": "closure_complete",
+        "artifacts": [
+          "artifacts/raptorq_track_f_factor_cache_p95p99_v1.json",
+          "artifacts/raptorq_track_f_factor_cache_p95p99_v2.json",
+          "artifacts/raptorq_track_f_factor_cache_p95p99_v3.json"
+        ],
+        "bench_repro_commands": [
+          "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_report -- --nocapture",
+          "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture",
+          "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture",
+          "cargo test --test ci_regression_gates g2_f7_burst_cache_closure_evidence_v3 -- --nocapture"
+        ],
+        "notes": [
+          "v1: single-scenario comparator (k=48, RQ-F7-CACHE-BURST-CMP-001) with baseline/warmed_cache/rollback_proxy p50/p95/p99.",
+          "v2: multi-scenario comparator (3 scenarios, k=48, varied symbol sizes) with 0/3 material-gain scenarios.",
+          "v3 (closure): extended comparator with k=48 and k=64 scenarios plus explicit rollback rehearsal verification. 100% cache hit rates, 0 regressions, rollback path verified correct for all scenarios.",
+          "Closure assessment: cache is functionally correct, deterministic, bounded, and safe. No material p95/p99 gain at tested block counts because dense-column ordering is too cheap relative to total decode time. Zero regression risk allows approved_guarded status.",
+          "Tail-latency variability explanation: observed variability is host-jitter noise, not cache-induced; rollback-proxy (cold cache) shows equivalent variability, confirming no cache-specific tail risk."
+        ],
+        "pending_blockers": []
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-G1-E2E-BURST-LATE",
+        "pre_change_command": "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::dense_factor_cache_requires_strict_signature_match -- --nocapture",
+        "post_change_command": "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::decode_repair_only_hits_dense_factor_cache_on_second_run -- --nocapture"
+      }
+    },
+    {
+      "decision_id": "g3-f8-wavefront-overlap",
+      "lever_code": "F8",
+      "lever_bead_id": "asupersync-2zu9p",
+      "summary": "Bounded wavefront decode pipeline with fused assembly+peeling stage overlap.",
+      "status": "approved_guarded",
+      "owner": "FrostyCave",
+      "expected_value": {
+        "impact": "high",
+        "hypothesis": "Reduce pipeline bubbles and improve burst-workload wall-time through bounded assembly+peel fusion with catch-up propagation."
+      },
+      "risk_class": "low",
+      "proof_safety_constraints": [
+        "Bounded batch sizes with deterministic ordering.",
+        "Catch-up propagation ensures wavefront produces identical source symbols to sequential decode.",
+        "Sequential conservative fallback (batch_size=0) remains first-class.",
+        "No stage overlap may bypass correctness guards \u2014 wavefront correctness proven by identity assertion across all batch sizes."
+      ],
+      "adoption_wedge": {
+        "phase": "implemented and evidence-validated",
+        "strategy": "Fused assembly+peeling in bounded batches with catch-up propagation for deterministic results. Sequential fallback via batch_size=0.",
+        "enable_controls": [
+          "batch_size parameter (0=sequential, >0=wavefront)",
+          "sequential mode override via batch_size=0"
+        ]
+      },
+      "conservative_comparator": {
+        "mode": "sequential assembly->peel->solve pipeline (batch_size=0)",
+        "evidence_refs": [
+          "artifacts/raptorq_track_f_wavefront_pipeline_v1.json",
+          "cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture"
+        ]
+      },
+      "fallback_plan": {
+        "trigger": "Tail-latency regression or correctness concern at larger block counts.",
+        "action": "Set batch_size=0 to force sequential stage execution.",
+        "conservative_mode": "Sequential pipeline only (decode_wavefront with batch_size=0 or direct decode())."
+      },
+      "rollback_rehearsal": {
+        "command": "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "post_rollback_verification_checklist": [
+          "Sequential fallback (batch_size=0) produces identical source symbols to direct decode().",
+          "Rollback rehearsal passes across all 3 scenarios (k=48, k=64, k=48-large) with retry budget.",
+          "Deterministic replay artifacts are emitted.",
+          "Unit and deterministic E2E gates remain green."
+        ]
+      },
+      "validation_evidence": {
+        "unit": [
+          "wavefront_decode_matches_sequential (batch sizes 1,2,4,8,16,0)",
+          "wavefront_decode_with_loss_matches_sequential (repair-only)",
+          "wavefront_overlap_peeling_is_tracked",
+          "wavefront_sequential_fallback_batch_zero"
+        ],
+        "deterministic_e2e": [
+          "g2_f8_wavefront_closure_evidence: 3 scenarios, 3 batch sizes, rollback rehearsal"
+        ],
+        "structured_logs": [
+          "artifacts/raptorq_track_f_wavefront_pipeline_v1.json"
+        ]
+      },
+      "deterministic_replay": {
+        "seed": 424242,
+        "fixture_or_scenario_id": "RQ-F8-WAVEFRONT-CLOSURE-V1",
+        "pre_change_command": "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "post_change_command": "rch exec -- cargo test -p asupersync --lib raptorq::decoder::tests::wavefront_decode_matches_sequential -- --nocapture"
+      }
+    }
+  ],
+  "coverage_summary": {
+    "cards_total": 8,
+    "cards_with_conservative_comparator": 8,
+    "cards_with_measured_comparator_evidence": 8,
+    "cards_with_partial_measured_comparator_evidence": 1,
+    "cards_pending_measured_evidence": 0,
+    "cards_with_replay_commands": 8,
+    "partial_measured_levers": [
+      "E5"
+    ],
+    "pending_measured_levers": [],
+    "closure_blocker_levers": [
+      "E5"
+    ],
+    "closure_blockers": [
+      "E5 PARTIAL: artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json still reports `ready_for_e5_closure=false`, `acceptance_criterion_4_status=not_met`, and `scope_sufficiency=insufficient`; artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json is now the current broader raw-sample favorable packet and remains `raw_sample_favorable_not_closure_grade`, while v4 remains the historical broader mixed-signal packet, v2 remains the historical directional packet, and v3 remains the historical broader interval-proxy negative guardrail, so the narrowed highconf guardrail still prevents E5 from reading as closure-complete."
+    ]
+  }
+}

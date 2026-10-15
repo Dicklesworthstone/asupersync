@@ -1,0 +1,1027 @@
+//! Contract tests for the validation frontier ledger schema and parser fixtures.
+
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use std::collections::BTreeSet;
+
+const ARTIFACT_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
+const DOC_PATH: &str = "docs/ci_proof_gates_contract.md";
+
+#[derive(Debug, PartialEq, Eq)]
+struct FailureSite {
+    crate_or_surface: String,
+    target: String,
+    file: String,
+    line: u64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ValidationFrontierRecord {
+    command: String,
+    timestamp: String,
+    touched_files: Vec<String>,
+    decision: String,
+    error_class: String,
+    first_failure: FailureSite,
+    likely_owner: String,
+    likely_bead: Option<String>,
+    external_to_narrow_fuzz_target_work: bool,
+    supplemental_proof_command: String,
+    summary: String,
+}
+
+fn load_json(path: &str) -> Value {
+    let raw = std::fs::read_to_string(path).unwrap_or_else(|error| panic!("read {path}: {error}"));
+    serde_json::from_str(&raw).unwrap_or_else(|error| panic!("parse {path}: {error}"))
+}
+
+fn artifact() -> Value {
+    load_json(ARTIFACT_PATH)
+}
+
+fn doc() -> String {
+    std::fs::read_to_string(DOC_PATH).expect("proof gates doc must exist")
+}
+
+fn fixtures(artifact: &Value) -> &[Value] {
+    artifact["fixtures"]
+        .as_array()
+        .expect("fixtures must be an array")
+}
+
+fn string_field(value: &Value, key: &str) -> String {
+    value[key]
+        .as_str()
+        .unwrap_or_else(|| panic!("{key} must be a string"))
+        .to_string()
+}
+
+fn string_vec_field(value: &Value, key: &str) -> Vec<String> {
+    value[key]
+        .as_array()
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn proof_attempt_records(artifact: &Value) -> &[Value] {
+    artifact["proof_attempt_records"]
+        .as_array()
+        .expect("proof_attempt_records must be an array")
+}
+
+fn golden_summaries(artifact: &Value) -> &[Value] {
+    artifact["golden_summaries"]
+        .as_array()
+        .expect("golden_summaries must be an array")
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value[key]
+        .as_bool()
+        .unwrap_or_else(|| panic!("{key} must be a boolean"))
+}
+
+fn parse_compile_target(line: &str) -> (String, String) {
+    let crate_start = line
+        .find('`')
+        .unwrap_or_else(|| panic!("compile line missing crate start: {line}"));
+    let crate_end = line[crate_start + 1..].find('`').map_or_else(
+        || panic!("compile line missing crate end: {line}"),
+        |offset| crate_start + 1 + offset,
+    );
+    let crate_name = line[crate_start + 1..crate_end].to_string();
+    let target_start = line[crate_end..].find('(').map_or_else(
+        || panic!("compile line missing target start: {line}"),
+        |offset| crate_end + offset + 1,
+    );
+    let target_end = line[target_start..].find(')').map_or_else(
+        || panic!("compile line missing target end: {line}"),
+        |offset| target_start + offset,
+    );
+    (crate_name, line[target_start..target_end].to_string())
+}
+
+fn parse_code_snippet(
+    fixture: &Value,
+    error_class: &str,
+    decision: &str,
+    likely_owner: &str,
+    likely_bead: Option<String>,
+    external_to_narrow_fuzz_target_work: bool,
+) -> ValidationFrontierRecord {
+    let snippet = string_field(fixture, "snippet");
+    let error_line = snippet
+        .lines()
+        .find(|line| line.starts_with("error"))
+        .unwrap_or_else(|| panic!("fixture missing error line: {snippet}"));
+    let summary = error_line.split_once(": ").map_or_else(
+        || panic!("error line missing summary: {error_line}"),
+        |(_, rest)| rest.to_string(),
+    );
+    let location_line = snippet
+        .lines()
+        .find(|line| line.contains("-->"))
+        .unwrap_or_else(|| panic!("fixture missing location line: {snippet}"));
+    let location = location_line.split_once("-->").map_or_else(
+        || panic!("location line missing arrow: {location_line}"),
+        |(_, rest)| rest.trim(),
+    );
+    let mut location_parts = location.split(':');
+    let file = location_parts
+        .next()
+        .expect("location file")
+        .trim()
+        .to_string();
+    let line = location_parts
+        .next()
+        .expect("location line")
+        .parse::<u64>()
+        .expect("location line must parse");
+    let compile_line = snippet
+        .lines()
+        .find(|line| line.starts_with("error: could not compile"))
+        .unwrap_or_else(|| panic!("fixture missing compile stop line: {snippet}"));
+    let (crate_or_surface, target) = parse_compile_target(compile_line);
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: decision.to_string(),
+        error_class: error_class.to_string(),
+        first_failure: FailureSite {
+            crate_or_surface,
+            target,
+            file,
+            line,
+        },
+        likely_owner: likely_owner.to_string(),
+        likely_bead,
+        external_to_narrow_fuzz_target_work,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary,
+    }
+}
+
+fn parse_reservation_conflict(fixture: &Value) -> ValidationFrontierRecord {
+    let conflict = serde_json::from_str::<Value>(&string_field(fixture, "snippet"))
+        .expect("reservation conflict snippet must parse as JSON");
+    let first_conflict = conflict["conflicts"]
+        .as_array()
+        .and_then(|conflicts| conflicts.first())
+        .expect("at least one conflict");
+    let holder = first_conflict["holders"]
+        .as_array()
+        .and_then(|holders| holders.first())
+        .expect("at least one holder");
+    let path = first_conflict["path"]
+        .as_str()
+        .expect("conflict path must be a string")
+        .to_string();
+    let agent = holder["agent"]
+        .as_str()
+        .expect("holder agent must be a string")
+        .to_string();
+    let expires = holder["expires_ts"]
+        .as_str()
+        .expect("holder expiry must be a string");
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: "blocked-external".to_string(),
+        error_class: "file_reservation_conflict".to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "agent-mail".to_string(),
+            target: "reservation".to_string(),
+            file: path,
+            line: 0,
+        },
+        likely_owner: agent.clone(),
+        likely_bead: fixture["likely_bead_hint"].as_str().map(str::to_string),
+        external_to_narrow_fuzz_target_work: true,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary: format!("exclusive reservation held by {agent} until {expires}"),
+    }
+}
+
+fn parse_peer_dirty_index(fixture: &Value) -> ValidationFrontierRecord {
+    let snippet = string_field(fixture, "snippet");
+    let first_path = snippet
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| panic!("peer-dirty fixture missing staged path: {snippet}"))
+        .to_string();
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: "blocked-external".to_string(),
+        error_class: "peer_dirty_index_conflict".to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "git".to_string(),
+            target: "staged-index".to_string(),
+            file: first_path,
+            line: 0,
+        },
+        likely_owner: "shared-main peer dirt".to_string(),
+        likely_bead: None,
+        external_to_narrow_fuzz_target_work: true,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary: "unrelated staged paths present before commit".to_string(),
+    }
+}
+
+fn parse_rustc_json_output(fixture: &Value) -> ValidationFrontierRecord {
+    let snippet = string_field(fixture, "snippet");
+    let diagnostic = snippet
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|entry| {
+            entry["reason"].as_str() == Some("compiler-message")
+                && entry["message"]["level"].as_str() == Some("error")
+        })
+        .unwrap_or_else(|| panic!("rustc JSON fixture missing compiler error: {snippet}"));
+    let message = &diagnostic["message"];
+    let primary_span = message["spans"]
+        .as_array()
+        .and_then(|spans| {
+            spans
+                .iter()
+                .find(|span| span["is_primary"].as_bool() == Some(true))
+        })
+        .unwrap_or_else(|| panic!("rustc JSON fixture missing primary span: {snippet}"));
+    let target_name = string_field(&diagnostic["target"], "name");
+    let target_kind = diagnostic["target"]["kind"]
+        .as_array()
+        .and_then(|kinds| kinds.first())
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let target = if target_kind == "test" {
+        format!("test \"{target_name}\"")
+    } else {
+        target_kind.to_string()
+    };
+
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: "failed-local".to_string(),
+        error_class: "rustc_compile_error".to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: string_field(&diagnostic["target"], "crate_name"),
+            target,
+            file: string_field(primary_span, "file_name"),
+            line: primary_span["line_start"]
+                .as_u64()
+                .expect("primary span line_start must be an integer"),
+        },
+        likely_owner: "local_change".to_string(),
+        likely_bead: fixture["expected_record"]["likely_bead"]
+            .as_str()
+            .map(str::to_string),
+        external_to_narrow_fuzz_target_work: false,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary: string_field(message, "message"),
+    }
+}
+
+fn parse_rch_remote_refusal(fixture: &Value) -> ValidationFrontierRecord {
+    let snippet = string_field(fixture, "snippet");
+    let summary = snippet
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| panic!("RCH refusal fixture missing summary: {snippet}"))
+        .trim()
+        .to_string();
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: "blocked-external".to_string(),
+        error_class: "rch_admission_refusal".to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "rch".to_string(),
+            target: "remote-admission".to_string(),
+            file: "rch".to_string(),
+            line: 0,
+        },
+        likely_owner: "rch worker pool".to_string(),
+        likely_bead: None,
+        external_to_narrow_fuzz_target_work: true,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary,
+    }
+}
+
+fn parse_rch_topology_preflight(fixture: &Value) -> ValidationFrontierRecord {
+    let command = string_field(fixture, "command");
+    assert!(
+        command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+        "topology preflight canary must be remote-required: {command}"
+    );
+    assert!(
+        command.contains(" CARGO_TARGET_DIR="),
+        "topology preflight canary must isolate Cargo output: {command}"
+    );
+
+    let snippet = string_field(fixture, "snippet");
+    for marker in [
+        "Selected worker:",
+        "Starting remote compilation pipeline",
+        "Prepared dependency sync manifest",
+    ] {
+        assert!(
+            snippet.contains(marker),
+            "topology preflight fixture missing marker {marker:?}: {snippet}"
+        );
+    }
+
+    let receipt = &fixture["preflight_receipt"];
+    assert_eq!(
+        receipt["schema_version"].as_str(),
+        Some("rch-topology-preflight-receipt-v1")
+    );
+    assert_eq!(
+        receipt["command_class"].as_str(),
+        Some("remote-required-cargo-test")
+    );
+    let worker = string_field(receipt, "selected_worker");
+    assert!(
+        snippet.contains(&format!("Selected worker: {worker}")),
+        "topology preflight fixture snippet must include selected worker {worker}"
+    );
+    let topology = receipt["topology_probe_summary"]
+        .as_object()
+        .expect("topology_probe_summary must be an object");
+    for key in ["data_projects", "dp"] {
+        assert!(
+            topology.get(key).and_then(Value::as_str).is_some(),
+            "topology probe summary must include {key}"
+        );
+    }
+    let stderr_signature = string_field(receipt, "stderr_signature");
+    assert!(
+        snippet.contains(&stderr_signature),
+        "topology preflight fixture must preserve stderr or Cargo-start signature"
+    );
+
+    let cargo_started = bool_field(receipt, "cargo_started");
+    let (decision, error_class, file, likely_owner, external, summary) = if cargo_started {
+        assert_eq!(receipt["failure_phase"].as_str(), Some("none"));
+        assert!(
+            ["Compiling ", "Checking ", "Finished ", "Running "]
+                .iter()
+                .any(|marker| snippet.contains(marker)),
+            "cargo_started fixture must include Cargo output: {snippet}"
+        );
+        (
+            "pass",
+            "none",
+            "",
+            "rch topology preflight",
+            false,
+            format!(
+                "remote topology preflight passed and Cargo started on worker {worker}; no source proof is implied"
+            ),
+        )
+    } else {
+        assert_eq!(
+            receipt["failure_phase"].as_str(),
+            Some("remote-topology-preflight")
+        );
+        for marker in [
+            "remote topology preflight failed",
+            "[RCH] remote required; refusing local fallback",
+        ] {
+            assert!(
+                snippet.contains(marker),
+                "topology preflight failure fixture missing marker {marker:?}: {snippet}"
+            );
+        }
+        (
+            "blocked-external",
+            "rch_topology_preflight",
+            "rch",
+            "rch topology preflight",
+            true,
+            format!("remote topology preflight failed before Cargo started: {stderr_signature}"),
+        )
+    };
+
+    ValidationFrontierRecord {
+        command,
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: decision.to_string(),
+        error_class: error_class.to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "rch".to_string(),
+            target: "topology-preflight".to_string(),
+            file: file.to_string(),
+            line: 0,
+        },
+        likely_owner: likely_owner.to_string(),
+        likely_bead: fixture["expected_record"]["likely_bead"]
+            .as_str()
+            .map(str::to_string),
+        external_to_narrow_fuzz_target_work: external,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary,
+    }
+}
+
+fn parse_rustfmt_diff(fixture: &Value) -> ValidationFrontierRecord {
+    let snippet = string_field(fixture, "snippet");
+    let diff_line = snippet
+        .lines()
+        .find(|line| line.starts_with("Diff in "))
+        .unwrap_or_else(|| panic!("rustfmt fixture missing diff header: {snippet}"));
+    let location = diff_line
+        .strip_prefix("Diff in ")
+        .expect("diff header prefix")
+        .trim_end_matches(':');
+    let (file, line) = location
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("rustfmt diff header missing file line: {diff_line}"));
+    let line = line
+        .parse::<u64>()
+        .unwrap_or_else(|error| panic!("rustfmt line must parse: {line}: {error}"));
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: "failed-local".to_string(),
+        error_class: "rustfmt_diff".to_string(),
+        first_failure: FailureSite {
+            crate_or_surface: "rustfmt".to_string(),
+            target: "format-check".to_string(),
+            file: file.to_string(),
+            line,
+        },
+        likely_owner: "local_change".to_string(),
+        likely_bead: fixture["expected_record"]["likely_bead"]
+            .as_str()
+            .map(str::to_string),
+        external_to_narrow_fuzz_target_work: false,
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary: format!("rustfmt diff in {file}:{line}"),
+    }
+}
+
+fn parse_fixture(fixture: &Value) -> ValidationFrontierRecord {
+    match fixture["source_kind"]
+        .as_str()
+        .expect("fixture source_kind")
+    {
+        "rustc_output" => parse_code_snippet(
+            fixture,
+            "rustc_compile_error",
+            "failed-local",
+            "local_change",
+            fixture["expected_record"]["likely_bead"]
+                .as_str()
+                .map(str::to_string),
+            false,
+        ),
+        "clippy_output" => parse_code_snippet(
+            fixture,
+            "clippy_lint_wall",
+            "blocked-external",
+            "shared-main external blocker",
+            None,
+            true,
+        ),
+        "rustc_broad_frontier_output" => parse_code_snippet(
+            fixture,
+            "rustc_compile_error",
+            "blocked-external",
+            "shared-main external blocker",
+            None,
+            true,
+        ),
+        "file_reservation_conflict" => parse_reservation_conflict(fixture),
+        "peer_dirty_index" => parse_peer_dirty_index(fixture),
+        "rustc_json_output" => parse_rustc_json_output(fixture),
+        "rch_remote_required_refusal" => parse_rch_remote_refusal(fixture),
+        "rch_topology_preflight_output" => parse_rch_topology_preflight(fixture),
+        "rustfmt_diff" => parse_rustfmt_diff(fixture),
+        "truncated_rustc_output" => parse_code_snippet(
+            fixture,
+            "truncated_rustc_output",
+            "blocked-external",
+            "shared-main external blocker",
+            None,
+            true,
+        ),
+        other => panic!("unexpected fixture source_kind: {other}"),
+    }
+}
+
+fn expected_record(fixture: &Value) -> ValidationFrontierRecord {
+    let expected = &fixture["expected_record"];
+    let first_failure = &expected["first_failure"];
+    ValidationFrontierRecord {
+        command: string_field(fixture, "command"),
+        timestamp: string_field(fixture, "timestamp"),
+        touched_files: string_vec_field(fixture, "touched_files"),
+        decision: string_field(expected, "decision"),
+        error_class: string_field(expected, "error_class"),
+        first_failure: FailureSite {
+            crate_or_surface: string_field(first_failure, "crate_or_surface"),
+            target: string_field(first_failure, "target"),
+            file: string_field(first_failure, "file"),
+            line: first_failure["line"]
+                .as_u64()
+                .expect("first_failure.line must be an integer"),
+        },
+        likely_owner: string_field(expected, "likely_owner"),
+        likely_bead: expected["likely_bead"].as_str().map(str::to_string),
+        external_to_narrow_fuzz_target_work: bool_field(
+            expected,
+            "external_to_narrow_fuzz_target_work",
+        ),
+        supplemental_proof_command: string_field(fixture, "supplemental_proof_command"),
+        summary: string_field(expected, "summary"),
+    }
+}
+
+fn golden_summary(record: &Value) -> String {
+    let proof_lane_id = string_field(record, "proof_lane_id");
+    let decision = string_field(record, "decision");
+    let exit_status = record["exit_status"]
+        .as_i64()
+        .expect("exit_status must be an integer");
+    let worker = record["rch_result"]["worker"].as_str().unwrap_or("none");
+    let dirty_overlap = bool_field(&record["dirty_tree_summary"], "overlaps_touched_files");
+    let bucket_count = record["error_buckets"]
+        .as_array()
+        .expect("error_buckets must be an array")
+        .len();
+    let first = if record["first_blocker"].is_null() {
+        "first=none".to_string()
+    } else {
+        let first = &record["first_blocker"];
+        format!(
+            "first={}:{} {}",
+            string_field(first, "file"),
+            first["line"].as_u64().expect("first_blocker.line integer"),
+            string_field(first, "error_class")
+        )
+    };
+
+    format!(
+        "{proof_lane_id} {decision} exit={exit_status} worker={worker} dirty_overlap={dirty_overlap} buckets={bucket_count} {first}"
+    )
+}
+
+#[test]
+fn artifact_declares_frontier_contract_version() {
+    let artifact = artifact();
+    assert_eq!(
+        artifact["contract_version"].as_str(),
+        Some("validation-frontier-ledger-v1")
+    );
+    assert_eq!(
+        artifact["record_schema_version"].as_str(),
+        Some("validation-frontier-record-v1")
+    );
+}
+
+#[test]
+fn decision_classes_cover_expected_outcomes() {
+    let artifact = artifact();
+    let decisions = artifact["decision_classes"]
+        .as_array()
+        .expect("decision_classes must be an array")
+        .iter()
+        .map(|entry| string_field(entry, "decision"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        decisions,
+        BTreeSet::from([
+            "blocked-external".to_string(),
+            "failed-local".to_string(),
+            "pass".to_string(),
+        ])
+    );
+}
+
+#[test]
+fn error_classes_cover_required_blocker_families() {
+    let artifact = artifact();
+    let classes = artifact["error_classes"]
+        .as_array()
+        .expect("error_classes must be an array")
+        .iter()
+        .map(|entry| string_field(entry, "error_class"))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "rustc_compile_error",
+        "clippy_lint_wall",
+        "file_reservation_conflict",
+        "peer_dirty_index_conflict",
+        "rch_admission_refusal",
+        "rch_topology_preflight",
+        "rustfmt_diff",
+        "truncated_rustc_output",
+    ] {
+        assert!(
+            classes.contains(required),
+            "missing blocker class {required}"
+        );
+    }
+}
+
+#[test]
+fn record_schema_lists_required_closeout_fields() {
+    let artifact = artifact();
+    let fields = artifact["record_fields"]
+        .as_array()
+        .expect("record_fields must be an array")
+        .iter()
+        .map(|entry| string_field(entry, "name"))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "command",
+        "proof_lane_id",
+        "commit",
+        "timestamp",
+        "touched_files",
+        "dirty_tree_summary",
+        "rch_result.admission",
+        "rch_result.worker",
+        "rch_result.local_fallback_refused",
+        "exit_status",
+        "decision",
+        "error_class",
+        "first_blocker",
+        "first_failure.crate_or_surface",
+        "first_failure.target",
+        "first_failure.file",
+        "first_failure.line",
+        "error_buckets",
+        "affected_files",
+        "likely_owner",
+        "likely_bead",
+        "external_to_narrow_fuzz_target_work",
+        "green_proof_claimed",
+        "supplemental_proof_command",
+        "summary",
+    ] {
+        assert!(fields.contains(required), "missing record field {required}");
+    }
+}
+
+#[test]
+fn fixture_parser_matches_expected_records() {
+    let artifact = artifact();
+    for fixture in fixtures(&artifact) {
+        assert_eq!(
+            parse_fixture(fixture),
+            expected_record(fixture),
+            "fixture {} should parse to expected record",
+            string_field(fixture, "fixture_id")
+        );
+    }
+}
+
+#[test]
+fn fixtures_cover_required_parser_inputs() {
+    let artifact = artifact();
+    let source_kinds = fixtures(&artifact)
+        .iter()
+        .map(|entry| string_field(entry, "source_kind"))
+        .collect::<BTreeSet<_>>();
+    for required in [
+        "rustc_output",
+        "rustc_json_output",
+        "rch_remote_required_refusal",
+        "rch_topology_preflight_output",
+        "rustfmt_diff",
+        "clippy_output",
+        "truncated_rustc_output",
+    ] {
+        assert!(
+            source_kinds.contains(required),
+            "missing parser fixture kind {required}"
+        );
+    }
+}
+
+#[test]
+fn recurring_all_target_blockers_are_current_and_external() {
+    let artifact = artifact();
+    let fixtures = fixtures(&artifact);
+    let required = [
+        (
+            "VF-ALL-TARGETS-SCHEDULER-BUDGET-TEST-WALL",
+            "tests/scheduler_cooperative_budget_yield_audit.rs",
+            461,
+            "no function or associated item named `test_with_budget`",
+        ),
+        (
+            "VF-ALL-TARGETS-RUNTIME-YIELD-UNSAFE-WALL",
+            "tests/runtime_yield_now_cooperative_fairness_audit.rs",
+            451,
+            "usage of an `unsafe` block",
+        ),
+    ];
+
+    for (fixture_id, file, line, summary_marker) in required {
+        let fixture = fixtures
+            .iter()
+            .find(|entry| string_field(entry, "fixture_id") == fixture_id)
+            .unwrap_or_else(|| panic!("missing recurring blocker fixture {fixture_id}"));
+        assert_eq!(
+            fixture["source_kind"].as_str(),
+            Some("rustc_broad_frontier_output")
+        );
+        assert_eq!(
+            string_field(fixture, "command"),
+            "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
+        );
+
+        let expected = expected_record(fixture);
+        assert_eq!(expected.decision, "blocked-external");
+        assert_eq!(expected.error_class, "rustc_compile_error");
+        assert_eq!(expected.first_failure.file, file);
+        assert_eq!(expected.first_failure.line, line);
+        assert_eq!(expected.likely_owner, "shared-main external blocker");
+        assert!(
+            expected.external_to_narrow_fuzz_target_work,
+            "{fixture_id} must be explicitly external to narrow fuzz-target work"
+        );
+        assert!(
+            expected.summary.contains(summary_marker),
+            "{fixture_id} summary should preserve observed symptom"
+        );
+        assert!(
+            string_field(fixture, "supplemental_proof_command").contains("fuzz/Cargo.toml"),
+            "{fixture_id} should preserve the narrow fuzz-target proof lane"
+        );
+    }
+}
+
+#[test]
+fn rch_topology_preflight_fixtures_capture_cargo_started_boundary() {
+    let artifact = artifact();
+    let topology_fixtures = fixtures(&artifact)
+        .iter()
+        .filter(|fixture| string_field(fixture, "source_kind") == "rch_topology_preflight_output")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        topology_fixtures.len(),
+        2,
+        "topology preflight fixtures must cover failure and Cargo-started paths"
+    );
+
+    let failure = topology_fixtures
+        .iter()
+        .find(|fixture| string_field(fixture, "fixture_id") == "VF-RCH-TOPOLOGY-PREFLIGHT-SHELL")
+        .expect("missing shell preflight failure fixture");
+    let failure_receipt = &failure["preflight_receipt"];
+    assert!(
+        !bool_field(failure_receipt, "cargo_started"),
+        "shell preflight failure must not be classified as Cargo output"
+    );
+    assert_eq!(
+        string_field(failure_receipt, "stderr_signature"),
+        "sh: 18: Syntax error: newline unexpected (expecting \")\")"
+    );
+    let failure_record = expected_record(failure);
+    assert_eq!(failure_record.decision, "blocked-external");
+    assert_eq!(failure_record.error_class, "rch_topology_preflight");
+    assert_eq!(failure_record.first_failure.target, "topology-preflight");
+    assert!(
+        failure_record.external_to_narrow_fuzz_target_work,
+        "pre-Cargo RCH topology failure is external to the source slice"
+    );
+
+    let cargo_started = topology_fixtures
+        .iter()
+        .find(|fixture| string_field(fixture, "fixture_id") == "VF-RCH-TOPOLOGY-CARGO-STARTED")
+        .expect("missing Cargo-started topology fixture");
+    assert!(
+        bool_field(&cargo_started["preflight_receipt"], "cargo_started"),
+        "Cargo-started fixture must mark the canary boundary explicitly"
+    );
+    let started_record = expected_record(cargo_started);
+    assert_eq!(started_record.decision, "pass");
+    assert_eq!(started_record.error_class, "none");
+    assert!(
+        started_record
+            .summary
+            .contains("no source proof is implied"),
+        "Cargo-started canary pass must not become a source proof claim"
+    );
+}
+
+#[test]
+fn fixtures_are_redaction_safe_and_exact() {
+    let artifact = artifact();
+    for fixture in fixtures(&artifact) {
+        let snippet = string_field(fixture, "snippet");
+        assert!(
+            !snippet.contains("/home/"),
+            "fixture snippet must not contain home-directory paths"
+        );
+        assert!(
+            !snippet.to_ascii_lowercase().contains("token"),
+            "fixture snippet must not contain token-like material"
+        );
+        let expected = expected_record(fixture);
+        if expected.first_failure.line > 0 {
+            assert!(
+                std::path::Path::new(&expected.first_failure.file).exists(),
+                "fixture file must exist: {}",
+                expected.first_failure.file
+            );
+        }
+    }
+}
+
+#[test]
+fn proof_attempt_records_have_required_asw1_metadata() {
+    let artifact = artifact();
+    for record in proof_attempt_records(&artifact) {
+        assert!(
+            !string_field(record, "record_id").is_empty(),
+            "record_id must be present"
+        );
+        assert!(
+            !string_field(record, "proof_lane_id").is_empty(),
+            "proof_lane_id must be present"
+        );
+        assert!(
+            !string_field(record, "command").is_empty(),
+            "command must be present"
+        );
+        assert!(
+            !string_field(record, "commit").is_empty(),
+            "commit must be present"
+        );
+        for key in ["tracked_modified", "deleted", "untracked"] {
+            assert!(
+                record["dirty_tree_summary"][key].is_array(),
+                "dirty_tree_summary.{key} must be an array"
+            );
+        }
+        assert!(
+            record["rch_result"]["admission"].is_string(),
+            "rch_result.admission must be recorded"
+        );
+        assert!(
+            record["rch_result"]["local_fallback_refused"].is_boolean(),
+            "rch_result.local_fallback_refused must be recorded"
+        );
+        assert!(
+            record["exit_status"].is_i64(),
+            "exit_status must be recorded"
+        );
+        assert!(
+            record["affected_files"].is_array(),
+            "affected_files must be recorded"
+        );
+    }
+}
+
+#[test]
+fn proof_attempt_error_buckets_are_grouped_and_owner_mapped() {
+    let artifact = artifact();
+    for record in proof_attempt_records(&artifact) {
+        let mut seen = BTreeSet::new();
+        for bucket in record["error_buckets"]
+            .as_array()
+            .expect("error_buckets must be an array")
+        {
+            let key = (
+                string_field(bucket, "file"),
+                string_field(bucket, "module"),
+                bucket["error_code"].as_str().unwrap_or("none").to_string(),
+            );
+            assert!(seen.insert(key), "duplicate error bucket");
+            assert!(
+                bucket["count"].as_u64().unwrap_or(0) > 0,
+                "bucket count must be positive"
+            );
+            assert!(
+                bucket["first_line"].as_u64().is_some(),
+                "bucket first_line must be present"
+            );
+            assert!(
+                bucket["likely_commit"].is_string() || bucket["likely_commit"].is_null(),
+                "bucket likely_commit must be string or null"
+            );
+            assert!(
+                bucket["likely_bead"].is_string() || bucket["likely_bead"].is_null(),
+                "bucket likely_bead must be string or null"
+            );
+            assert!(
+                !string_field(bucket, "owner").is_empty(),
+                "bucket owner must be present"
+            );
+        }
+    }
+}
+
+#[test]
+fn recorded_attempts_emit_deterministic_golden_summaries() {
+    let artifact = artifact();
+    let records = proof_attempt_records(&artifact);
+    for golden in golden_summaries(&artifact) {
+        let record_id = string_field(golden, "record_id");
+        let record = records
+            .iter()
+            .find(|record| string_field(record, "record_id") == record_id)
+            .unwrap_or_else(|| panic!("golden summary references missing record {record_id}"));
+        assert_eq!(
+            golden_summary(record),
+            string_field(golden, "expected_summary"),
+            "golden summary drifted for {record_id}"
+        );
+    }
+}
+
+#[test]
+fn blocked_records_do_not_claim_green_proof() {
+    let artifact = artifact();
+    for record in proof_attempt_records(&artifact) {
+        if string_field(record, "decision") != "pass" {
+            assert!(
+                !bool_field(record, "green_proof_claimed"),
+                "blocked or failed records must not claim green proof"
+            );
+            assert!(
+                !record["first_blocker"].is_null(),
+                "blocked or failed records must preserve the first blocker"
+            );
+        }
+    }
+}
+
+#[test]
+fn fixtures_capture_rch_attempts_and_narrow_supplemental_proofs() {
+    let artifact = artifact();
+    let fixtures = fixtures(&artifact);
+    let rch_attempts = fixtures
+        .iter()
+        .filter(|fixture| string_field(fixture, "command").starts_with("rch exec -- "))
+        .count();
+    assert!(
+        rch_attempts >= 2,
+        "expected at least two rch-backed proof attempts"
+    );
+    for fixture in fixtures {
+        let supplemental = string_field(fixture, "supplemental_proof_command");
+        assert!(
+            !supplemental.is_empty(),
+            "supplemental proof command must be recorded"
+        );
+    }
+}
+
+#[test]
+fn doc_teaches_how_to_cite_frontier_rows() {
+    let doc = doc();
+    for required in [
+        "## Validation Frontier Ledger",
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs",
+        "blocked-external",
+        "supplemental proof",
+    ] {
+        assert!(
+            doc.contains(required),
+            "proof gates doc must contain {required}"
+        );
+    }
+}
+
+#[test]
+fn close_reason_template_is_paste_ready() {
+    let artifact = artifact();
+    let template = &artifact["close_reason_template"];
+    let required_fields = template["required_fields"]
+        .as_array()
+        .expect("close_reason_template.required_fields must be an array");
+    assert!(
+        required_fields.len() >= 6,
+        "close_reason template must require enough context"
+    );
+    let example = string_field(template, "example");
+    assert!(
+        example.contains("blocked-external")
+            && example.contains("supplemental proof")
+            && example.contains("src/sync/semaphore.rs:37"),
+        "close reason example must be directly reusable"
+    );
+}

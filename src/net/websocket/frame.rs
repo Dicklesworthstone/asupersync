@@ -1,0 +1,2198 @@
+//! WebSocket frame codec according to RFC 6455.
+//!
+//! Implements the WebSocket wire format for framing messages:
+//! - Binary frame encoding/decoding
+//! - Masking (client-to-server)
+//! - Fragmentation support
+//! - Control frame validation
+//!
+//! # Frame Format (RFC 6455 Section 5.2)
+//!
+//! ```text
+//!  0                   1                   2                   3
+//!  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+//! +-+-+-+-+-------+-+-------------+-------------------------------+
+//! |F|R|R|R| opcode|M| Payload len |    Extended payload length    |
+//! |I|S|S|S|  (4)  |A|     (7)     |             (16/64)           |
+//! |N|V|V|V|       |S|             |   (if payload len==126/127)   |
+//! | |1|2|3|       |K|             |                               |
+//! +-+-+-+-+-------+-+-------------+ - - - - - - - - - - - - - - - +
+//! |     Extended payload length continued, if payload len == 127  |
+//! + - - - - - - - - - - - - - - - +-------------------------------+
+//! |                               |Masking-key, if MASK set to 1  |
+//! +-------------------------------+-------------------------------+
+//! | Masking-key (continued)       |          Payload Data         |
+//! +-------------------------------- - - - - - - - - - - - - - - - +
+//! :                     Payload Data continued ...                :
+//! + - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - +
+//! |                     Payload Data (continued)                  |
+//! +---------------------------------------------------------------+
+//! ```
+
+use crate::bytes::{BufMut, Bytes, BytesMut};
+use crate::codec::{Decoder, Encoder};
+use crate::util::{EntropySource, OsEntropy};
+use std::io;
+
+const CONTROL_FRAME_MAX_PAYLOAD_LEN: usize = 125;
+
+/// WebSocket frame opcode (4 bits).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Opcode {
+    /// Continuation frame (fragmented message).
+    Continuation = 0x0,
+    /// Text data frame.
+    Text = 0x1,
+    /// Binary data frame.
+    Binary = 0x2,
+    // 0x3-0x7 reserved for non-control frames
+    /// Connection close control frame.
+    Close = 0x8,
+    /// Ping control frame.
+    Ping = 0x9,
+    /// Pong control frame.
+    Pong = 0xA,
+    // 0xB-0xF reserved for control frames
+}
+
+impl Opcode {
+    /// Returns true if this is a control frame (Close, Ping, Pong).
+    #[must_use]
+    pub const fn is_control(self) -> bool {
+        matches!(self, Self::Close | Self::Ping | Self::Pong)
+    }
+
+    /// Returns true if this is a data frame (Continuation, Text, Binary).
+    #[must_use]
+    pub const fn is_data(self) -> bool {
+        matches!(self, Self::Continuation | Self::Text | Self::Binary)
+    }
+
+    /// Try to parse an opcode from a byte value.
+    pub fn from_u8(value: u8) -> Result<Self, WsError> {
+        match value {
+            0x0 => Ok(Self::Continuation),
+            0x1 => Ok(Self::Text),
+            0x2 => Ok(Self::Binary),
+            0x8 => Ok(Self::Close),
+            0x9 => Ok(Self::Ping),
+            0xA => Ok(Self::Pong),
+            _ => Err(WsError::InvalidOpcode(value)),
+        }
+    }
+}
+
+/// WebSocket frame.
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // RFC 6455 exposes these as independent header bits.
+pub struct Frame {
+    /// Final fragment flag (FIN bit).
+    pub fin: bool,
+    /// Reserved bit 1 (must be 0 unless extension defines meaning).
+    pub rsv1: bool,
+    /// Reserved bit 2 (must be 0 unless extension defines meaning).
+    pub rsv2: bool,
+    /// Reserved bit 3 (must be 0 unless extension defines meaning).
+    pub rsv3: bool,
+    /// Frame opcode.
+    pub opcode: Opcode,
+    /// Mask flag (client-to-server frames must be masked).
+    pub masked: bool,
+    /// Masking key (4 bytes, only present if masked).
+    pub mask_key: Option<[u8; 4]>,
+    /// Payload data.
+    pub payload: Bytes,
+}
+
+impl Frame {
+    /// Create a new text frame with the given payload.
+    #[must_use]
+    pub fn text(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Text,
+            masked: false,
+            mask_key: None,
+            payload: payload.into(),
+        }
+    }
+
+    /// Create a new binary frame with the given payload.
+    #[must_use]
+    pub fn binary(payload: impl Into<Bytes>) -> Self {
+        Self {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: false,
+            mask_key: None,
+            payload: payload.into(),
+        }
+    }
+
+    /// Create a ping frame with optional payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload exceeds the 125-byte control frame limit
+    /// (RFC 6455 section 5.5).
+    #[must_use]
+    pub fn ping(payload: impl Into<Bytes>) -> Self {
+        let payload = payload.into();
+        assert_control_payload_len("ping", payload.len());
+
+        Self {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Ping,
+            masked: false,
+            mask_key: None,
+            payload,
+        }
+    }
+
+    /// Create a pong frame with optional payload.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the payload exceeds the 125-byte control frame limit
+    /// (RFC 6455 section 5.5).
+    #[must_use]
+    pub fn pong(payload: impl Into<Bytes>) -> Self {
+        let payload = payload.into();
+        assert_control_payload_len("pong", payload.len());
+
+        Self {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Pong,
+            masked: false,
+            mask_key: None,
+            payload,
+        }
+    }
+
+    /// Create a close frame with optional status code and reason.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `code` is not valid for wire transmission per RFC 6455 §7.4,
+    /// or if the total close payload (2-byte code + reason) exceeds the
+    /// 125-byte control frame limit (RFC 6455 §5.5).
+    #[must_use]
+    pub fn close(code: Option<u16>, reason: Option<&str>) -> Self {
+        if let Some(c) = code {
+            assert!(
+                CloseCode::is_valid_code(c),
+                "close code {c} is not valid for use in a Close frame (RFC 6455 §7.4)"
+            );
+        }
+        if code.is_none() && reason.is_some() {
+            // RFC 6455 §5.5.1: a Close frame body starts with a 2-byte status
+            // code. Fail closed instead of silently inventing Normal (1000).
+            return Self {
+                fin: true,
+                rsv1: false,
+                rsv2: false,
+                rsv3: false,
+                opcode: Opcode::Close,
+                masked: false,
+                mask_key: None,
+                payload: Bytes::new(),
+            };
+        }
+        if let Some(r) = reason {
+            let total = 2 + r.len();
+            assert_control_payload_len("close", total);
+        }
+        let payload = match (code, reason) {
+            (Some(c), Some(r)) => {
+                let mut buf = BytesMut::with_capacity(2 + r.len());
+                buf.put_u16(c);
+                buf.put_slice(r.as_bytes());
+                buf.freeze()
+            }
+            (Some(c), None) => {
+                let mut buf = BytesMut::with_capacity(2);
+                buf.put_u16(c);
+                buf.freeze()
+            }
+            (None, Some(_r)) => Bytes::new(),
+            (None, None) => Bytes::new(),
+        };
+
+        Self {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload,
+        }
+    }
+}
+
+fn assert_control_payload_len(frame_kind: &str, payload_len: usize) {
+    assert!(
+        payload_len <= CONTROL_FRAME_MAX_PAYLOAD_LEN,
+        "{frame_kind} frame payload ({payload_len} bytes) exceeds 125-byte control frame limit (RFC 6455 section 5.5)"
+    );
+}
+
+/// Refuses a Ping or Pong payload over the 125-byte control frame limit, so
+/// `send` and `ping` report [`WsError::ControlFrameTooLarge`] instead of
+/// panicking in [`Frame::ping`] or [`Frame::pong`].
+pub(super) fn check_control_payload_len(payload_len: usize) -> Result<(), WsError> {
+    if payload_len > CONTROL_FRAME_MAX_PAYLOAD_LEN {
+        return Err(WsError::ControlFrameTooLarge(payload_len));
+    }
+    Ok(())
+}
+
+/// WebSocket codec errors.
+#[derive(Debug)]
+pub enum WsError {
+    /// I/O error.
+    Io(io::Error),
+    /// Invalid opcode value.
+    InvalidOpcode(u8),
+    /// Protocol violation (e.g. unexpected continuation frame).
+    ProtocolViolation(&'static str),
+    /// Reserved bits set without extension support.
+    ReservedBitsSet,
+    /// Payload exceeds maximum allowed size.
+    PayloadTooLarge {
+        /// Actual payload size in bytes.
+        size: u64,
+        /// Maximum allowed size in bytes.
+        max: usize,
+    },
+    /// Control frame payload exceeds 125 bytes.
+    ControlFrameTooLarge(usize),
+    /// Control frame is fragmented (FIN not set).
+    FragmentedControlFrame,
+    /// Client frame is not masked (protocol violation).
+    UnmaskedClientFrame,
+    /// Server frame is masked (optional error, some servers accept).
+    MaskedServerFrame,
+    /// Invalid UTF-8 in text frame.
+    InvalidUtf8,
+    /// Invalid close frame payload.
+    InvalidClosePayload,
+    /// Outbound frame cannot fit within the bounded retained write buffer.
+    OutboundBufferFull {
+        /// Bytes already pending in the retained write buffer.
+        pending: usize,
+        /// Additional encoded bytes attempted.
+        attempted: usize,
+        /// Configured maximum retained bytes.
+        max: usize,
+        /// Stable policy action string.
+        action: &'static str,
+    },
+}
+
+impl WsError {
+    /// Maps the error to the corresponding WebSocket close code.
+    #[must_use]
+    pub fn as_close_code(&self) -> CloseCode {
+        match self {
+            Self::PayloadTooLarge { .. } | Self::ControlFrameTooLarge(_) => {
+                CloseCode::MessageTooBig
+            }
+            Self::InvalidUtf8 => CloseCode::InvalidPayload,
+            Self::Io(_) => CloseCode::Abnormal,
+            Self::OutboundBufferFull { .. } => CloseCode::TryAgainLater,
+            _ => CloseCode::ProtocolError,
+        }
+    }
+}
+
+impl std::fmt::Display for WsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::InvalidOpcode(op) => write!(f, "invalid opcode: 0x{op:X}"),
+            Self::ProtocolViolation(msg) => write!(f, "protocol violation: {msg}"),
+            Self::ReservedBitsSet => write!(f, "reserved bits set without extension"),
+            Self::PayloadTooLarge { size, max } => {
+                write!(f, "payload too large: {size} bytes (max: {max})")
+            }
+            Self::ControlFrameTooLarge(size) => {
+                write!(
+                    f,
+                    "control frame payload too large: {size} bytes (max: 125)"
+                )
+            }
+            Self::FragmentedControlFrame => write!(f, "control frame cannot be fragmented"),
+            Self::UnmaskedClientFrame => write!(f, "client frame must be masked"),
+            Self::MaskedServerFrame => write!(f, "server frame should not be masked"),
+            Self::InvalidUtf8 => write!(f, "invalid UTF-8 in text frame"),
+            Self::InvalidClosePayload => write!(f, "invalid close frame payload"),
+            Self::OutboundBufferFull {
+                pending,
+                attempted,
+                max,
+                action,
+            } => write!(
+                f,
+                "outbound WebSocket write buffer full: pending {pending} bytes + attempted {attempted} bytes exceeds max {max}; action={action}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for WsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for WsError {
+    fn from(err: io::Error) -> Self {
+        Self::Io(err)
+    }
+}
+
+/// Role in the WebSocket connection (affects masking requirements).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Client role: must mask frames sent to server.
+    Client,
+    /// Server role: must not mask frames sent to client.
+    Server,
+}
+
+/// Decode state machine for the frame codec.
+#[derive(Debug)]
+enum DecodeState {
+    /// Waiting for the first 2 header bytes.
+    Header,
+    /// Reading extended payload length.
+    ExtendedLength {
+        fin: bool,
+        rsv1: bool,
+        rsv2: bool,
+        rsv3: bool,
+        opcode: Opcode,
+        masked: bool,
+        bytes_needed: usize,
+    },
+    /// Reading mask key (4 bytes).
+    MaskKey {
+        fin: bool,
+        rsv1: bool,
+        rsv2: bool,
+        rsv3: bool,
+        opcode: Opcode,
+        payload_len: u64,
+    },
+    /// Reading payload data.
+    Payload {
+        fin: bool,
+        rsv1: bool,
+        rsv2: bool,
+        rsv3: bool,
+        opcode: Opcode,
+        mask_key: Option<[u8; 4]>,
+        payload_len: u64,
+    },
+    /// Codec encountered a fatal error and is permanently poisoned.
+    Poisoned,
+}
+
+/// WebSocket frame codec.
+///
+/// Implements encoding and decoding of WebSocket frames according to RFC 6455.
+#[derive(Debug)]
+pub struct FrameCodec {
+    /// Maximum frame payload size (default: 16MB).
+    max_payload_size: usize,
+    /// Role (client or server) affects masking requirements.
+    role: Role,
+    /// Current decode state.
+    state: DecodeState,
+    /// Whether to validate reserved bits.
+    validate_reserved_bits: bool,
+    /// Negotiated RFC 7692 profile; never enabled by relaxing generic RSV checks.
+    permessage_deflate: bool,
+}
+
+impl FrameCodec {
+    /// Default maximum payload size (16 MB).
+    pub const DEFAULT_MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
+
+    /// Creates a new frame codec for the given role.
+    #[must_use]
+    pub fn new(role: Role) -> Self {
+        Self {
+            max_payload_size: Self::DEFAULT_MAX_PAYLOAD_SIZE,
+            role,
+            state: DecodeState::Header,
+            validate_reserved_bits: true,
+            permessage_deflate: false,
+        }
+    }
+
+    /// Creates a client-role frame codec.
+    #[must_use]
+    pub fn client() -> Self {
+        Self::new(Role::Client)
+    }
+
+    /// Creates a server-role frame codec.
+    #[must_use]
+    pub fn server() -> Self {
+        Self::new(Role::Server)
+    }
+
+    /// Sets the maximum payload size.
+    #[must_use]
+    pub fn max_payload_size(mut self, size: usize) -> Self {
+        self.max_payload_size = size;
+        self
+    }
+
+    /// Sets whether to validate reserved bits.
+    #[must_use]
+    pub fn validate_reserved_bits(mut self, validate: bool) -> Self {
+        self.validate_reserved_bits = validate;
+        self
+    }
+
+    pub(super) fn enable_permessage_deflate(&mut self) {
+        self.permessage_deflate = true;
+    }
+
+    pub(super) const fn permessage_deflate_enabled(&self) -> bool {
+        self.permessage_deflate
+    }
+
+    /// Encode a frame using the provided entropy source for client masking.
+    pub(crate) fn encode_with_entropy(
+        &self,
+        frame: &Frame,
+        dst: &mut BytesMut,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        let payload_len = frame.payload.len();
+
+        // Control frame validation
+        if frame.opcode.is_control() {
+            if !frame.fin {
+                return Err(WsError::FragmentedControlFrame);
+            }
+            if payload_len > CONTROL_FRAME_MAX_PAYLOAD_LEN {
+                return Err(WsError::ControlFrameTooLarge(payload_len));
+            }
+        }
+        if frame.opcode == Opcode::Close {
+            validate_close_payload_for_send(&frame.payload)?;
+        }
+
+        // Determine if we need to mask (based on role)
+        let should_mask = self.role == Role::Client;
+
+        // First byte: FIN, RSV1-3, opcode
+        let mut first_byte = frame.opcode as u8;
+        if frame.fin {
+            first_byte |= 0x80;
+        }
+        if frame.rsv1 {
+            first_byte |= 0x40;
+        }
+        if frame.rsv2 {
+            first_byte |= 0x20;
+        }
+        if frame.rsv3 {
+            first_byte |= 0x10;
+        }
+
+        // Second byte: MASK bit + payload length (7-bit or indicator)
+        let mask_bit = if should_mask { 0x80 } else { 0 };
+
+        // Calculate header size
+        let header_size =
+            2 + if payload_len > 65535 {
+                8
+            } else if payload_len > 125 {
+                2
+            } else {
+                0
+            } + if should_mask { 4 } else { 0 };
+
+        // Reserve space
+        dst.reserve(header_size + payload_len);
+
+        // Write header
+        dst.put_u8(first_byte);
+
+        if payload_len <= CONTROL_FRAME_MAX_PAYLOAD_LEN {
+            dst.put_u8(mask_bit | (payload_len as u8));
+        } else if payload_len <= 65535 {
+            dst.put_u8(mask_bit | 0x7E);
+            dst.put_u16(payload_len as u16);
+        } else {
+            dst.put_u8(mask_bit | 0x7F);
+            dst.put_u64(payload_len as u64);
+        }
+
+        // Write mask key and payload
+        if should_mask {
+            let mask_key = generate_mask_key(entropy);
+            dst.put_slice(&mask_key);
+
+            // Apply mask directly in the destination buffer to avoid double copy
+            let start = dst.len();
+            dst.put_slice(&frame.payload);
+            apply_mask(&mut dst[start..], mask_key);
+        } else {
+            dst.put_slice(&frame.payload);
+        }
+
+        Ok(())
+    }
+}
+
+impl Decoder for FrameCodec {
+    type Item = Frame;
+    type Error = WsError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match self.decode_inner(src) {
+            Err(e) => {
+                self.state = DecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+}
+
+impl FrameCodec {
+    /// Refuses all further decoding, as a decode error does. Called when a
+    /// connection is failed above the codec (message assembly), because
+    /// RFC 6455 §7.1.7 forbids processing more peer data after that.
+    pub(crate) fn poison(&mut self) {
+        self.state = DecodeState::Poisoned;
+    }
+
+    #[allow(clippy::too_many_lines)] // Single, explicit RFC 6455 decode state machine.
+    fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Frame>, WsError> {
+        loop {
+            match &self.state {
+                DecodeState::Poisoned => {
+                    return Err(WsError::ProtocolViolation(
+                        "codec is poisoned after a fatal error",
+                    ));
+                }
+                DecodeState::Header => {
+                    if src.len() < 2 {
+                        return Ok(None);
+                    }
+
+                    let first_byte = src[0];
+                    let second_byte = src[1];
+
+                    let fin = (first_byte & 0x80) != 0;
+                    let rsv1 = (first_byte & 0x40) != 0;
+                    let rsv2 = (first_byte & 0x20) != 0;
+                    let rsv3 = (first_byte & 0x10) != 0;
+                    let opcode_raw = first_byte & 0x0F;
+                    let masked = (second_byte & 0x80) != 0;
+                    let payload_len_7 = second_byte & 0x7F;
+
+                    // Validate reserved bits
+                    let compressed_data = self.permessage_deflate
+                        && matches!(opcode_raw, 1 | 2);
+                    if self.validate_reserved_bits && ((rsv1 && !compressed_data) || rsv2 || rsv3) {
+                        return Err(WsError::ReservedBitsSet);
+                    }
+
+                    let opcode = Opcode::from_u8(opcode_raw)?;
+
+                    // Masking rules (RFC 6455):
+                    // - Client->Server frames MUST be masked
+                    // - Server->Client frames MUST NOT be masked
+                    match self.role {
+                        Role::Server if !masked => return Err(WsError::UnmaskedClientFrame),
+                        Role::Client if masked => return Err(WsError::MaskedServerFrame),
+                        _ => {}
+                    }
+
+                    // Control frame validation
+                    if opcode.is_control() {
+                        if !fin {
+                            return Err(WsError::FragmentedControlFrame);
+                        }
+                        if usize::from(payload_len_7) > CONTROL_FRAME_MAX_PAYLOAD_LEN {
+                            return Err(WsError::ControlFrameTooLarge(payload_len_7 as usize));
+                        }
+                    }
+
+                    // Consume the 2-byte header
+                    let _ = src.split_to(2);
+
+                    // Determine next state based on payload length encoding
+                    match payload_len_7 {
+                        0..=125 => {
+                            let payload_len = u64::from(payload_len_7);
+                            if payload_len > self.max_payload_size as u64 {
+                                return Err(WsError::PayloadTooLarge {
+                                    size: payload_len,
+                                    max: self.max_payload_size,
+                                });
+                            }
+                            if masked {
+                                self.state = DecodeState::MaskKey {
+                                    fin,
+                                    rsv1,
+                                    rsv2,
+                                    rsv3,
+                                    opcode,
+                                    payload_len,
+                                };
+                            } else {
+                                self.state = DecodeState::Payload {
+                                    fin,
+                                    rsv1,
+                                    rsv2,
+                                    rsv3,
+                                    opcode,
+                                    mask_key: None,
+                                    payload_len,
+                                };
+                            }
+                        }
+                        126 => {
+                            self.state = DecodeState::ExtendedLength {
+                                fin,
+                                rsv1,
+                                rsv2,
+                                rsv3,
+                                opcode,
+                                masked,
+                                bytes_needed: 2,
+                            };
+                        }
+                        127 => {
+                            self.state = DecodeState::ExtendedLength {
+                                fin,
+                                rsv1,
+                                rsv2,
+                                rsv3,
+                                opcode,
+                                masked,
+                                bytes_needed: 8,
+                            };
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+
+                DecodeState::ExtendedLength {
+                    fin,
+                    rsv1,
+                    rsv2,
+                    rsv3,
+                    opcode,
+                    masked,
+                    bytes_needed,
+                } => {
+                    if src.len() < *bytes_needed {
+                        return Ok(None);
+                    }
+
+                    let payload_len = if *bytes_needed == 2 {
+                        let bytes = src.split_to(2);
+                        let len = u64::from(u16::from_be_bytes([bytes[0], bytes[1]]));
+                        // RFC 6455 §5.2: minimal encoding — 2-byte form for 126..65535
+                        if len < 126 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "non-minimal payload length encoding",
+                            ));
+                        }
+                        len
+                    } else {
+                        let bytes = src.split_to(8);
+                        let raw = u64::from_be_bytes([
+                            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6],
+                            bytes[7],
+                        ]);
+                        // RFC 6455 §5.2: most significant bit MUST be 0
+                        if raw & (1u64 << 63) != 0 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "most significant bit of 64-bit payload length must be 0",
+                            ));
+                        }
+                        // RFC 6455 §5.2: minimal encoding — 8-byte form for 65536+
+                        if raw < 65536 {
+                            self.state = DecodeState::Header;
+                            return Err(WsError::ProtocolViolation(
+                                "non-minimal payload length encoding",
+                            ));
+                        }
+                        raw
+                    };
+
+                    if payload_len > self.max_payload_size as u64 {
+                        // Reset state since we already consumed length bytes from src
+                        self.state = DecodeState::Header;
+                        return Err(WsError::PayloadTooLarge {
+                            size: payload_len,
+                            max: self.max_payload_size,
+                        });
+                    }
+
+                    let fin = *fin;
+                    let rsv1 = *rsv1;
+                    let rsv2 = *rsv2;
+                    let rsv3 = *rsv3;
+                    let opcode = *opcode;
+                    let masked = *masked;
+
+                    if masked {
+                        self.state = DecodeState::MaskKey {
+                            fin,
+                            rsv1,
+                            rsv2,
+                            rsv3,
+                            opcode,
+                            payload_len,
+                        };
+                    } else {
+                        self.state = DecodeState::Payload {
+                            fin,
+                            rsv1,
+                            rsv2,
+                            rsv3,
+                            opcode,
+                            mask_key: None,
+                            payload_len,
+                        };
+                    }
+                }
+
+                DecodeState::MaskKey {
+                    fin,
+                    rsv1,
+                    rsv2,
+                    rsv3,
+                    opcode,
+                    payload_len,
+                } => {
+                    if src.len() < 4 {
+                        return Ok(None);
+                    }
+
+                    let mask_bytes = src.split_to(4);
+                    let mut mask_key = [0u8; 4];
+                    mask_key.copy_from_slice(&mask_bytes);
+
+                    let fin = *fin;
+                    let rsv1 = *rsv1;
+                    let rsv2 = *rsv2;
+                    let rsv3 = *rsv3;
+                    let opcode = *opcode;
+                    let payload_len = *payload_len;
+
+                    self.state = DecodeState::Payload {
+                        fin,
+                        rsv1,
+                        rsv2,
+                        rsv3,
+                        opcode,
+                        mask_key: Some(mask_key),
+                        payload_len,
+                    };
+                }
+
+                DecodeState::Payload {
+                    fin,
+                    rsv1,
+                    rsv2,
+                    rsv3,
+                    opcode,
+                    mask_key,
+                    payload_len,
+                } => {
+                    let payload_len_usize =
+                        usize::try_from(*payload_len).map_err(|_| WsError::PayloadTooLarge {
+                            size: *payload_len,
+                            max: usize::MAX,
+                        })?;
+                    if src.len() < payload_len_usize {
+                        return Ok(None);
+                    }
+
+                    let mut payload = src.split_to(payload_len_usize);
+
+                    // Apply masking if present
+                    if let Some(key) = mask_key {
+                        apply_mask(&mut payload, *key);
+                    }
+
+                    if *opcode == Opcode::Close {
+                        validate_close_payload_for_receive(&payload)?;
+                    }
+
+                    let frame = Frame {
+                        fin: *fin,
+                        rsv1: *rsv1,
+                        rsv2: *rsv2,
+                        rsv3: *rsv3,
+                        opcode: *opcode,
+                        masked: mask_key.is_some(),
+                        mask_key: *mask_key,
+                        payload: payload.freeze(),
+                    };
+
+                    // Reset state for next frame
+                    self.state = DecodeState::Header;
+
+                    return Ok(Some(frame));
+                }
+            }
+        }
+    }
+}
+
+impl Encoder<Frame> for FrameCodec {
+    type Error = WsError;
+
+    fn encode(&mut self, frame: Frame, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        self.encode_with_entropy(&frame, dst, &OsEntropy)
+    }
+}
+
+/// Apply XOR masking to payload data.
+///
+/// This is used for both masking (encoding) and unmasking (decoding).
+/// The mask is applied in-place.
+pub fn apply_mask(payload: &mut [u8], mask_key: [u8; 4]) {
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte ^= mask_key[i % 4];
+    }
+}
+
+/// Generate a mask key for client-to-server frames.
+///
+/// RFC 6455 §5.3 requires masking keys to be derived from a strong source of
+/// entropy to prevent cross-protocol attacks via intermediary cache poisoning.
+fn generate_mask_key(entropy: &dyn EntropySource) -> [u8; 4] {
+    let mut key = [0u8; 4];
+    entropy.fill_bytes(&mut key);
+    key
+}
+
+fn validate_close_payload(
+    payload: &[u8],
+    is_valid_code: impl FnOnce(u16) -> bool,
+) -> Result<(), WsError> {
+    match payload.len() {
+        0 => Ok(()),
+        1 => Err(WsError::InvalidClosePayload),
+        _ => {
+            let code = u16::from_be_bytes([payload[0], payload[1]]);
+            if !is_valid_code(code) {
+                return Err(WsError::InvalidClosePayload);
+            }
+            if payload.len() > 2 {
+                std::str::from_utf8(&payload[2..]).map_err(|_| WsError::InvalidClosePayload)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_close_payload_for_send(payload: &[u8]) -> Result<(), WsError> {
+    validate_close_payload(payload, CloseCode::is_valid_code)
+}
+
+fn validate_close_payload_for_receive(payload: &[u8]) -> Result<(), WsError> {
+    validate_close_payload(payload, CloseCode::is_valid_received_code)
+}
+
+/// Close codes defined by RFC 6455.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum CloseCode {
+    /// Normal closure (1000).
+    Normal = 1000,
+    /// Going away (1001).
+    GoingAway = 1001,
+    /// Protocol error (1002).
+    ProtocolError = 1002,
+    /// Unsupported data type (1003).
+    Unsupported = 1003,
+    /// Reserved (1004).
+    Reserved = 1004,
+    /// No status received (1005) - must not be sent in a frame.
+    NoStatusReceived = 1005,
+    /// Abnormal closure (1006) - must not be sent in a frame.
+    Abnormal = 1006,
+    /// Invalid payload data (1007).
+    InvalidPayload = 1007,
+    /// Policy violation (1008).
+    PolicyViolation = 1008,
+    /// Message too big (1009).
+    MessageTooBig = 1009,
+    /// Mandatory extension missing (1010).
+    MandatoryExtension = 1010,
+    /// Internal server error (1011).
+    InternalError = 1011,
+    /// Service restart (1012) — IANA registered.
+    ServiceRestart = 1012,
+    /// Try again later (1013) — IANA registered.
+    TryAgainLater = 1013,
+    /// Bad gateway (1014) — IANA registered.
+    BadGateway = 1014,
+    /// TLS handshake failure (1015) - must not be sent in a frame.
+    TlsHandshake = 1015,
+}
+
+impl CloseCode {
+    /// Returns true if this code can be sent in a close frame.
+    #[must_use]
+    pub const fn is_sendable(self) -> bool {
+        !matches!(
+            self,
+            Self::Reserved | Self::NoStatusReceived | Self::Abnormal | Self::TlsHandshake
+        )
+    }
+
+    /// Parse a close code from a u16 value.
+    ///
+    /// Returns `None` for unknown codes in valid ranges (1000-4999).
+    /// Custom codes (3000-3999, 4000-4999) are accepted.
+    #[must_use]
+    pub fn from_u16(code: u16) -> Option<Self> {
+        match code {
+            1000 => Some(Self::Normal),
+            1001 => Some(Self::GoingAway),
+            1002 => Some(Self::ProtocolError),
+            1003 => Some(Self::Unsupported),
+            1004 => Some(Self::Reserved),
+            1005 => Some(Self::NoStatusReceived),
+            1006 => Some(Self::Abnormal),
+            1007 => Some(Self::InvalidPayload),
+            1008 => Some(Self::PolicyViolation),
+            1009 => Some(Self::MessageTooBig),
+            1010 => Some(Self::MandatoryExtension),
+            1011 => Some(Self::InternalError),
+            1012 => Some(Self::ServiceRestart),
+            1013 => Some(Self::TryAgainLater),
+            1014 => Some(Self::BadGateway),
+            1015 => Some(Self::TlsHandshake),
+            _ => None,
+        }
+    }
+
+    /// Check if a raw code value is valid for sending.
+    ///
+    /// Valid ranges per RFC 6455 + IANA registry:
+    /// - 1000-1003, 1007-1014: Standard and IANA-registered codes
+    /// - 3000-3999: Registered (IANA)
+    /// - 4000-4999: Private use
+    #[must_use]
+    pub fn is_valid_code(code: u16) -> bool {
+        matches!(code, 1000..=1003 | 1007..=1014 | 3000..=4999)
+    }
+
+    /// Check if a raw code value is valid when received from a peer.
+    ///
+    /// The receive side is more permissive than the send side per RFC 6455
+    /// §7.4.2: codes 1016-2999 are reserved for future revisions and
+    /// extensions, and a conforming endpoint must accept them even if it
+    /// does not recognise the specific value.
+    ///
+    /// Codes that must never appear on the wire (1004-1006, 1015) and
+    /// out-of-range values (0-999, 5000+) are still rejected.
+    #[must_use]
+    pub fn is_valid_received_code(code: u16) -> bool {
+        matches!(code, 1000..=1003 | 1007..=1014 | 1016..=4999)
+    }
+}
+
+impl From<CloseCode> for u16 {
+    fn from(code: CloseCode) -> Self {
+        code as Self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use insta::assert_snapshot;
+
+    fn render_wire_hex(label: &str, bytes: &[u8]) -> String {
+        let mut out = String::new();
+        out.push_str(label);
+        out.push_str(":\n");
+        for chunk in bytes.chunks(16) {
+            let line = chunk
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn test_opcode_is_control() {
+        assert!(!Opcode::Continuation.is_control());
+        assert!(!Opcode::Text.is_control());
+        assert!(!Opcode::Binary.is_control());
+        assert!(Opcode::Close.is_control());
+        assert!(Opcode::Ping.is_control());
+        assert!(Opcode::Pong.is_control());
+    }
+
+    #[test]
+    fn test_opcode_from_u8() {
+        assert_eq!(Opcode::from_u8(0x0).unwrap(), Opcode::Continuation);
+        assert_eq!(Opcode::from_u8(0x1).unwrap(), Opcode::Text);
+        assert_eq!(Opcode::from_u8(0x2).unwrap(), Opcode::Binary);
+        assert_eq!(Opcode::from_u8(0x8).unwrap(), Opcode::Close);
+        assert_eq!(Opcode::from_u8(0x9).unwrap(), Opcode::Ping);
+        assert_eq!(Opcode::from_u8(0xA).unwrap(), Opcode::Pong);
+        assert!(Opcode::from_u8(0x3).is_err());
+        assert!(Opcode::from_u8(0xF).is_err());
+    }
+
+    #[test]
+    fn test_apply_mask() {
+        let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+        let mut payload = b"Hello".to_vec();
+        let original = payload.clone();
+
+        apply_mask(&mut payload, mask_key);
+        assert_ne!(payload, original);
+
+        // Apply mask again to unmask
+        apply_mask(&mut payload, mask_key);
+        assert_eq!(payload, original);
+    }
+
+    #[test]
+    fn test_encode_decode_text_frame() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let frame = Frame::text("Hello, WebSocket!");
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        // Decode the frame (server decodes client-masked frames)
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.fin);
+        assert_eq!(parsed.opcode, Opcode::Text);
+        assert_eq!(parsed.payload.as_ref(), b"Hello, WebSocket!");
+    }
+
+    #[test]
+    fn test_encode_decode_binary_frame() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let payload: Bytes = vec![0x00, 0x01, 0x02, 0xFF].into();
+        let frame = Frame::binary(payload.clone());
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.fin);
+        assert_eq!(parsed.opcode, Opcode::Binary);
+        assert_eq!(parsed.payload, payload);
+    }
+
+    #[test]
+    fn test_encode_decode_ping_pong() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+
+        // Ping
+        let ping_request = Frame::ping("ping-data");
+        let mut buf = BytesMut::new();
+        encoder.encode(ping_request, &mut buf).unwrap();
+
+        let ping_received = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(ping_received.fin);
+        assert_eq!(ping_received.opcode, Opcode::Ping);
+        assert_eq!(ping_received.payload.as_ref(), b"ping-data");
+
+        // Pong
+        let pong_response = Frame::pong("pong-data");
+        let mut buf = BytesMut::new();
+        encoder.encode(pong_response, &mut buf).unwrap();
+
+        let pong_response = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(pong_response.fin);
+        assert_eq!(pong_response.opcode, Opcode::Pong);
+        assert_eq!(pong_response.payload.as_ref(), b"pong-data");
+    }
+
+    #[test]
+    fn ping_pong_accept_max_control_payload() {
+        let payload = Bytes::from(vec![0xA5; CONTROL_FRAME_MAX_PAYLOAD_LEN]);
+
+        let ping = Frame::ping(payload.clone());
+        assert_eq!(ping.opcode, Opcode::Ping);
+        assert_eq!(ping.payload.len(), CONTROL_FRAME_MAX_PAYLOAD_LEN);
+        assert_eq!(ping.payload, payload);
+
+        let pong = Frame::pong(payload.clone());
+        assert_eq!(pong.opcode, Opcode::Pong);
+        assert_eq!(pong.payload.len(), CONTROL_FRAME_MAX_PAYLOAD_LEN);
+        assert_eq!(pong.payload, payload);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "ping frame payload (126 bytes) exceeds 125-byte control frame limit"
+    )]
+    fn ping_rejects_oversized_control_payload() {
+        let _ = Frame::ping(Bytes::from(vec![0u8; CONTROL_FRAME_MAX_PAYLOAD_LEN + 1]));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "pong frame payload (126 bytes) exceeds 125-byte control frame limit"
+    )]
+    fn pong_rejects_oversized_control_payload() {
+        let _ = Frame::pong(Bytes::from(vec![0u8; CONTROL_FRAME_MAX_PAYLOAD_LEN + 1]));
+    }
+
+    #[test]
+    fn test_encode_decode_close_frame() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let close = Frame::close(Some(1000), Some("goodbye"));
+
+        let mut buf = BytesMut::new();
+        encoder.encode(close, &mut buf).unwrap();
+
+        let close_frame = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(close_frame.fin);
+        assert_eq!(close_frame.opcode, Opcode::Close);
+
+        // Parse close payload
+        let payload = close_frame.payload;
+        assert!(payload.len() >= 2);
+        let code = u16::from_be_bytes([payload[0], payload[1]]);
+        assert_eq!(code, 1000);
+        let reason = std::str::from_utf8(&payload[2..]).unwrap();
+        assert_eq!(reason, "goodbye");
+    }
+
+    #[test]
+    fn decoder_accepts_receive_only_close_code_range() {
+        let mut server_decoder = FrameCodec::server();
+        let mut masked_client_close =
+            BytesMut::from(&[0x88, 0x82, 0x00, 0x00, 0x00, 0x00, 0x03, 0xf8][..]);
+
+        let parsed = server_decoder
+            .decode(&mut masked_client_close)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed.opcode, Opcode::Close);
+        assert_eq!(parsed.payload.as_ref(), &1016u16.to_be_bytes());
+
+        let mut client_decoder = FrameCodec::client();
+        let mut unmasked_server_close = BytesMut::from(&[0x88, 0x02, 0x07, 0xd0][..]);
+
+        let parsed = client_decoder
+            .decode(&mut unmasked_server_close)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(parsed.opcode, Opcode::Close);
+        assert_eq!(parsed.payload.as_ref(), &2000u16.to_be_bytes());
+    }
+
+    #[test]
+    fn test_payload_length_126() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let frame = Frame::binary(Bytes::from(vec![0u8; 200])); // > 125, uses 2-byte length
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 200);
+    }
+
+    #[test]
+    fn test_payload_length_127() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let frame = Frame::binary(Bytes::from(vec![0u8; 70_000])); // > 65535, uses 8-byte length
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 70_000);
+    }
+
+    #[test]
+    fn websocket_binary_length_prefix_boundaries_match_rfc6455() {
+        let cases: &[(usize, &[u8])] = &[
+            (0, &[0x82, 0x00]),
+            (125, &[0x82, 0x7d]),
+            (126, &[0x82, 0x7e, 0x00, 0x7e]),
+            (65_535, &[0x82, 0x7e, 0xff, 0xff]),
+            (65_536, &[0x82, 0x7f, 0, 0, 0, 0, 0, 1, 0, 0]),
+        ];
+
+        for &(payload_len, expected_prefix) in cases {
+            let payload = vec![0x5a; payload_len];
+            let mut encoded = BytesMut::new();
+
+            FrameCodec::server()
+                .encode(Frame::binary(Bytes::from(payload.clone())), &mut encoded)
+                .unwrap();
+
+            assert_eq!(
+                &encoded[..expected_prefix.len()],
+                expected_prefix,
+                "RFC 6455 length prefix mismatch for payload length {payload_len}"
+            );
+            assert_eq!(encoded.len(), expected_prefix.len() + payload_len);
+            assert_eq!(&encoded[expected_prefix.len()..], payload.as_slice());
+        }
+    }
+
+    #[test]
+    fn test_client_masking() {
+        let mut client_codec = FrameCodec::client();
+        let mut server_codec = FrameCodec::server();
+
+        let frame = Frame::text("masked message");
+
+        // Client encodes (with masking)
+        let mut buf = BytesMut::new();
+        client_codec.encode(frame, &mut buf).unwrap();
+
+        // Check that the mask bit is set (second byte, high bit)
+        assert!(buf[1] & 0x80 != 0);
+
+        // Server decodes (unmasks)
+        let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.as_ref(), b"masked message");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct FixedEntropy([u8; 4]);
+
+    impl EntropySource for FixedEntropy {
+        fn fill_bytes(&self, dest: &mut [u8]) {
+            for (idx, byte) in dest.iter_mut().enumerate() {
+                *byte = self.0[idx % self.0.len()];
+            }
+        }
+
+        fn next_u64(&self) -> u64 {
+            u64::from_le_bytes([
+                self.0[0], self.0[1], self.0[2], self.0[3], self.0[0], self.0[1], self.0[2],
+                self.0[3],
+            ])
+        }
+
+        fn fork(&self, _task_id: crate::types::TaskId) -> std::sync::Arc<dyn EntropySource> {
+            std::sync::Arc::new(*self)
+        }
+
+        fn source_id(&self) -> &'static str {
+            "fixed"
+        }
+    }
+
+    #[test]
+    fn client_masking_uses_supplied_entropy_source() {
+        let client_codec = FrameCodec::client();
+        let mut server_codec = FrameCodec::server();
+        let mut buf = BytesMut::new();
+        let entropy = FixedEntropy([0x10, 0x20, 0x30, 0x40]);
+
+        client_codec
+            .encode_with_entropy(&Frame::text("mask-me"), &mut buf, &entropy)
+            .unwrap();
+
+        assert_eq!(&buf[2..6], &[0x10, 0x20, 0x30, 0x40]);
+
+        let parsed = server_codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.as_ref(), b"mask-me");
+    }
+
+    #[test]
+    fn golden_websocket_frame_wire_bytes() {
+        let mut snapshot = String::new();
+
+        let mut server_text = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::text("Hi"), &mut server_text)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_text_hi", &server_text));
+
+        let mut client_text = BytesMut::new();
+        FrameCodec::client()
+            .encode_with_entropy(
+                &Frame::text("Hi"),
+                &mut client_text,
+                &FixedEntropy([0x10, 0x20, 0x30, 0x40]),
+            )
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("client_text_hi_masked", &client_text));
+
+        let mut close_frame = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::close(Some(1000), Some("goodbye")), &mut close_frame)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_close_1000_goodbye", &close_frame));
+
+        let extended_payload = Bytes::from((0u8..=125).collect::<Vec<_>>());
+        let mut binary_len_126 = BytesMut::new();
+        FrameCodec::server()
+            .encode(Frame::binary(extended_payload), &mut binary_len_126)
+            .unwrap();
+        snapshot.push_str(&render_wire_hex("server_binary_len_126", &binary_len_126));
+
+        assert_snapshot!(&snapshot, @r"
+        server_text_hi:
+        81 02 48 69
+        client_text_hi_masked:
+        81 82 10 20 30 40 58 49
+        server_close_1000_goodbye:
+        88 09 03 e8 67 6f 6f 64 62 79 65
+        server_binary_len_126:
+        82 7e 00 7e 00 01 02 03 04 05 06 07 08 09 0a 0b
+        0c 0d 0e 0f 10 11 12 13 14 15 16 17 18 19 1a 1b
+        1c 1d 1e 1f 20 21 22 23 24 25 26 27 28 29 2a 2b
+        2c 2d 2e 2f 30 31 32 33 34 35 36 37 38 39 3a 3b
+        3c 3d 3e 3f 40 41 42 43 44 45 46 47 48 49 4a 4b
+        4c 4d 4e 4f 50 51 52 53 54 55 56 57 58 59 5a 5b
+        5c 5d 5e 5f 60 61 62 63 64 65 66 67 68 69 6a 6b
+        6c 6d 6e 6f 70 71 72 73 74 75 76 77 78 79 7a 7b
+        7c 7d
+        "
+        );
+    }
+
+    #[test]
+    fn test_control_frame_too_large() {
+        let mut codec = FrameCodec::server();
+        let payload = Bytes::from(vec![0u8; 130]); // > 125 bytes
+        let mut frame = Frame::ping(Bytes::new());
+        frame.payload = payload;
+
+        let mut buf = BytesMut::new();
+        let result = codec.encode(frame, &mut buf);
+        assert!(matches!(result, Err(WsError::ControlFrameTooLarge(_))));
+    }
+
+    #[test]
+    fn test_fragmented_control_frame_rejected() {
+        let mut codec = FrameCodec::server();
+        let mut frame = Frame::ping("data");
+        frame.fin = false; // Fragmented - invalid for control frames
+
+        let mut buf = BytesMut::new();
+        let result = codec.encode(frame, &mut buf);
+        assert!(matches!(result, Err(WsError::FragmentedControlFrame)));
+    }
+
+    #[test]
+    fn test_partial_frame_returns_none() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let frame = Frame::text("Hello");
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        // Only provide partial data
+        let partial = buf.split_to(3);
+        let mut partial = BytesMut::from(partial.as_ref());
+
+        // Should return None (need more data)
+        assert!(decoder.decode(&mut partial).unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_masked_extended_length_frame_across_chunks() {
+        let mut decoder = FrameCodec::server();
+        let mask_key = [0x11, 0x22, 0x33, 0x44];
+        let payload = vec![0x5a; 126];
+        let mut masked_payload = payload.clone();
+        apply_mask(&mut masked_payload, mask_key);
+
+        let mut wire = BytesMut::new();
+        wire.put_u8(0x82); // FIN=1, opcode=Binary.
+        wire.put_u8(0x80 | 0x7e); // MASK=1, 16-bit extended length follows.
+        wire.put_u16(payload.len() as u16);
+        wire.put_slice(&mask_key);
+        wire.put_slice(&masked_payload);
+
+        let mut incoming = BytesMut::new();
+        incoming.put_slice(&wire[..2]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[2..4]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[4..8]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert!(incoming.is_empty());
+
+        incoming.put_slice(&wire[8..wire.len() - 1]);
+        assert!(decoder.decode(&mut incoming).unwrap().is_none());
+        assert_eq!(incoming.len(), payload.len() - 1);
+
+        incoming.put_u8(wire[wire.len() - 1]);
+        let parsed = decoder.decode(&mut incoming).unwrap().unwrap();
+
+        assert!(incoming.is_empty());
+        assert!(parsed.fin);
+        assert!(parsed.masked);
+        assert_eq!(parsed.mask_key, Some(mask_key));
+        assert_eq!(parsed.opcode, Opcode::Binary);
+        assert_eq!(parsed.payload.as_ref(), payload.as_slice());
+    }
+
+    #[test]
+    fn test_empty_payload() {
+        let mut encoder = FrameCodec::client();
+        let mut decoder = FrameCodec::server();
+        let frame = Frame::binary(Bytes::new());
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert!(parsed.payload.is_empty());
+    }
+
+    #[test]
+    fn test_close_code_is_sendable() {
+        assert!(CloseCode::Normal.is_sendable());
+        assert!(CloseCode::GoingAway.is_sendable());
+        assert!(CloseCode::ProtocolError.is_sendable());
+        assert!(CloseCode::ServiceRestart.is_sendable());
+        assert!(CloseCode::TryAgainLater.is_sendable());
+        assert!(CloseCode::BadGateway.is_sendable());
+        assert!(!CloseCode::Reserved.is_sendable());
+        assert!(!CloseCode::NoStatusReceived.is_sendable());
+        assert!(!CloseCode::Abnormal.is_sendable());
+        assert!(!CloseCode::TlsHandshake.is_sendable());
+    }
+
+    #[test]
+    fn test_close_code_from_u16_iana_registered() {
+        assert_eq!(CloseCode::from_u16(1012), Some(CloseCode::ServiceRestart));
+        assert_eq!(CloseCode::from_u16(1013), Some(CloseCode::TryAgainLater));
+        assert_eq!(CloseCode::from_u16(1014), Some(CloseCode::BadGateway));
+    }
+
+    #[test]
+    fn test_is_valid_code_iana_registered() {
+        assert!(CloseCode::is_valid_code(1012));
+        assert!(CloseCode::is_valid_code(1013));
+        assert!(CloseCode::is_valid_code(1014));
+    }
+
+    #[test]
+    fn test_invalid_opcode_from_u8() {
+        // Reserved non-control opcodes.
+        for &op in &[0x03, 0x04, 0x05, 0x06, 0x07] {
+            let result = Opcode::from_u8(op);
+            assert!(matches!(result, Err(WsError::InvalidOpcode(v)) if v == op));
+        }
+        // Reserved control opcodes.
+        for &op in &[0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
+            let result = Opcode::from_u8(op);
+            assert!(matches!(result, Err(WsError::InvalidOpcode(v)) if v == op));
+        }
+    }
+
+    #[test]
+    fn test_opcode_is_data() {
+        assert!(Opcode::Text.is_data());
+        assert!(Opcode::Binary.is_data());
+        assert!(Opcode::Continuation.is_data());
+        assert!(!Opcode::Close.is_data());
+        assert!(!Opcode::Ping.is_data());
+        assert!(!Opcode::Pong.is_data());
+    }
+
+    #[test]
+    fn test_close_frame_with_code_and_reason() {
+        let frame = Frame::close(Some(1000), Some("goodbye"));
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.fin);
+        // Payload: 2 bytes (u16 code) + "goodbye" (7 bytes) = 9
+        assert_eq!(frame.payload.len(), 9);
+        assert_eq!(&frame.payload[..2], &1000u16.to_be_bytes());
+        assert_eq!(&frame.payload[2..], b"goodbye");
+    }
+
+    #[test]
+    fn test_close_frame_code_only() {
+        let frame = Frame::close(Some(1001), None);
+        assert_eq!(frame.payload.len(), 2);
+        assert_eq!(&frame.payload[..], &1001u16.to_be_bytes());
+    }
+
+    #[test]
+    fn test_close_frame_no_payload() {
+        let frame = Frame::close(None, None);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn test_ws_error_display_variants() {
+        let err = WsError::InvalidOpcode(0x0F);
+        assert!(err.to_string().contains("0xF"));
+
+        let err = WsError::ReservedBitsSet;
+        assert!(err.to_string().contains("reserved bits"));
+
+        let err = WsError::PayloadTooLarge {
+            size: 10_000,
+            max: 1024,
+        };
+        assert!(err.to_string().contains("10000"));
+        assert!(err.to_string().contains("1024"));
+
+        let err = WsError::ControlFrameTooLarge(200);
+        assert!(err.to_string().contains("200"));
+
+        let err = WsError::FragmentedControlFrame;
+        assert!(err.to_string().contains("fragmented"));
+
+        let err = WsError::UnmaskedClientFrame;
+        assert!(err.to_string().contains("masked"));
+
+        let err = WsError::InvalidUtf8;
+        assert!(err.to_string().contains("UTF-8"));
+
+        let err = WsError::InvalidClosePayload;
+        assert!(err.to_string().contains("close"));
+    }
+
+    #[test]
+    fn test_roundtrip_server_to_client() {
+        // Server sends unmasked; client decodes unmasked frames.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+        let frame = Frame::text("server says hi");
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.opcode, Opcode::Text);
+        assert!(!parsed.masked);
+        assert_eq!(parsed.payload.as_ref(), b"server says hi");
+    }
+
+    #[test]
+    fn test_decode_reserved_bits_rejected() {
+        // Craft raw wire bytes with RSV1 set — must be rejected per RFC 6455 §5.2.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, RSV1=1, opcode=Text → 0xC1; MASK=0, len=5 → 0x05
+        buf.put_u8(0xC1);
+        buf.put_u8(0x05);
+        buf.put_slice(b"Hello");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ReservedBitsSet)));
+    }
+
+    #[test]
+    fn test_decode_unmasked_client_frame_rejected() {
+        // Server codec must reject unmasked frames from client (RFC 6455 §5.1).
+        let mut codec = FrameCodec::server();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Text → 0x81; MASK=0, len=5 → 0x05 (missing mask!)
+        buf.put_u8(0x81);
+        buf.put_u8(0x05);
+        buf.put_slice(b"Hello");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::UnmaskedClientFrame)));
+    }
+
+    #[test]
+    fn test_decode_masked_server_frame_rejected() {
+        // Client codec must reject masked frames from server (RFC 6455 §5.1).
+        let mut codec = FrameCodec::client();
+        let mask_key = [0x37, 0xfa, 0x21, 0x3d];
+        let mut payload = b"Hello".to_vec();
+        apply_mask(&mut payload, mask_key);
+
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Text → 0x81; MASK=1, len=5 → 0x85.
+        buf.put_u8(0x81);
+        buf.put_u8(0x80 | payload.len() as u8);
+        buf.put_slice(&mask_key);
+        buf.put_slice(&payload);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::MaskedServerFrame)));
+    }
+
+    #[test]
+    fn test_decode_fragmented_control_rejected() {
+        // Control frames must not be fragmented (FIN must be set, RFC 6455 §5.5).
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=0, opcode=Ping → 0x09; MASK=0, len=4 → 0x04
+        buf.put_u8(0x09);
+        buf.put_u8(0x04);
+        buf.put_slice(b"ping");
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::FragmentedControlFrame)));
+    }
+
+    #[test]
+    fn test_decode_control_frame_extended_length_rejected() {
+        // Control frames cannot use extended length encoding (payload > 125, RFC 6455 §5.5).
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Ping → 0x89; MASK=0, len=126 (2-byte extended) → 0x7E
+        buf.put_u8(0x89);
+        buf.put_u8(0x7E);
+        // Extended length bytes (would indicate 200 bytes)
+        buf.put_u16(200);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ControlFrameTooLarge(_))));
+    }
+
+    #[test]
+    fn test_decode_multiple_frames_single_buffer() {
+        // Verify the state machine correctly resets between frames in a streaming buffer.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+
+        let mut buf = BytesMut::new();
+        encoder.encode(Frame::text("first"), &mut buf).unwrap();
+        encoder
+            .encode(Frame::binary(Bytes::from("second")), &mut buf)
+            .unwrap();
+
+        let frame1 = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame1.opcode, Opcode::Text);
+        assert_eq!(frame1.payload.as_ref(), b"first");
+
+        let frame2 = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame2.opcode, Opcode::Binary);
+        assert_eq!(frame2.payload.as_ref(), b"second");
+
+        // Buffer exhausted
+        assert!(decoder.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_close_frame_reason_without_code_fails_closed() {
+        // Regression: do not silently synthesize Normal (1000) when callers
+        // omit the code. That rewrites the protocol meaning of the close.
+        let frame = Frame::close(None, Some("going away"));
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn test_decode_non_minimal_2byte_length_rejected() {
+        // RFC 6455 §5.2: 2-byte extended length must encode values >= 126.
+        // A value < 126 in the 2-byte form is a protocol violation.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=126 → 0x7E
+        buf.put_u8(0x82);
+        buf.put_u8(0x7E);
+        // Extended length = 100 (non-minimal: should use 7-bit form)
+        buf.put_u16(100);
+        buf.put_slice(&[0u8; 100]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_non_minimal_8byte_length_rejected() {
+        // RFC 6455 §5.2: 8-byte extended length must encode values >= 65536.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=127 → 0x7F
+        buf.put_u8(0x82);
+        buf.put_u8(0x7F);
+        // Extended length = 200 (non-minimal: should use 2-byte form)
+        buf.put_u64(200);
+        buf.put_slice(&[0u8; 200]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_8byte_length_msb_set_rejected() {
+        // RFC 6455 §5.2: most significant bit of 64-bit length MUST be 0.
+        let mut codec = FrameCodec::client().max_payload_size(usize::MAX); // disable size limit for this test
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len_indicator=127 → 0x7F
+        buf.put_u8(0x82);
+        buf.put_u8(0x7F);
+        // 64-bit length with MSB set
+        buf.put_u64(0x8000_0000_0000_0100);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::ProtocolViolation(_))));
+    }
+
+    #[test]
+    fn test_decode_valid_2byte_length_accepted() {
+        // Ensure valid 2-byte lengths (>= 126) still decode correctly.
+        let mut encoder = FrameCodec::server();
+        let mut decoder = FrameCodec::client();
+        let payload = Bytes::from(vec![0xABu8; 126]); // exactly 126 — uses 2-byte form
+        let frame = Frame::binary(payload);
+
+        let mut buf = BytesMut::new();
+        encoder.encode(frame, &mut buf).unwrap();
+
+        let parsed = decoder.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(parsed.payload.len(), 126);
+    }
+
+    // =========================================================================
+    // Audit regression tests (asupersync-10x0x.47)
+    // =========================================================================
+
+    #[test]
+    fn decode_close_frame_1byte_payload_rejected() {
+        // RFC 6455 §5.5.1: Close frame body must be empty or start with a
+        // 2-byte status code. A 1-byte body is a protocol violation.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=1 → 0x01
+        buf.put_u8(0x88);
+        buf.put_u8(0x01);
+        buf.put_u8(0xFF); // single invalid byte
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_empty_payload_accepted() {
+        // Close frame with no body is valid per RFC 6455 §5.5.1.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=0 → 0x00
+        buf.put_u8(0x88);
+        buf.put_u8(0x00);
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert!(frame.payload.is_empty());
+    }
+
+    #[test]
+    fn decode_close_frame_2byte_payload_accepted() {
+        // Close frame with exactly 2 bytes (status code only) is valid.
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=2 → 0x02
+        buf.put_u8(0x88);
+        buf.put_u8(0x02);
+        buf.put_u16(1000); // Normal close
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(frame.payload.len(), 2);
+    }
+
+    #[test]
+    fn decode_close_frame_invalid_code_rejected() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=2 → 0x02
+        buf.put_u8(0x88);
+        buf.put_u8(0x02);
+        buf.put_u16(1005); // MUST NOT appear on the wire
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_invalid_code_poisons_codec() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+
+        // First: invalid close frame (code 1005 must not appear on wire)
+        buf.put_u8(0x88); // FIN=1, opcode=Close
+        buf.put_u8(0x02); // MASK=0, len=2
+        buf.put_u16(1005);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+
+        // Second: valid text frame — codec is poisoned after any error,
+        // so it must reject all subsequent decode attempts.
+        buf.put_u8(0x81); // FIN=1, opcode=Text
+        buf.put_u8(0x05); // MASK=0, len=5
+        buf.put_slice(b"hello");
+
+        let result2 = codec.decode(&mut buf);
+        assert!(
+            matches!(&result2, Err(WsError::ProtocolViolation(msg)) if msg.contains("poisoned")),
+            "codec must be poisoned after close validation error, got: {result2:?}"
+        );
+    }
+
+    #[test]
+    fn decode_close_frame_invalid_utf8_reason_rejected() {
+        let mut codec = FrameCodec::client();
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=4 → 0x04
+        buf.put_u8(0x88);
+        buf.put_u8(0x04);
+        buf.put_u16(1000);
+        buf.put_slice(&[0xF0, 0x28]); // malformed UTF-8 prefix
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn decode_close_frame_custom_code_with_utf8_reason_accepted() {
+        let mut codec = FrameCodec::client();
+        let reason = "custom";
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Close → 0x88; MASK=0, len=8 → 0x08
+        buf.put_u8(0x88);
+        buf.put_u8((2 + reason.len()) as u8);
+        buf.put_u16(4000);
+        buf.put_slice(reason.as_bytes());
+
+        let frame = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(frame.opcode, Opcode::Close);
+        assert_eq!(frame.payload.len(), 2 + reason.len());
+        assert_eq!(
+            u16::from_be_bytes([frame.payload[0], frame.payload[1]]),
+            4000
+        );
+        assert_eq!(&frame.payload[2..], reason.as_bytes());
+    }
+
+    #[test]
+    fn encode_manual_close_frame_invalid_code_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: {
+                let mut payload = BytesMut::with_capacity(2);
+                payload.put_u16(1005);
+                payload.freeze()
+            },
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_invalid_utf8_reason_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0x03, 0xE8, 0xF0, 0x28]),
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_one_byte_payload_rejected() {
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: Bytes::from_static(&[0xFF]),
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    fn encode_manual_close_frame_receive_only_code_rejected() {
+        // Codes 1016-2999 are valid for receiving but must not be sent
+        let mut codec = FrameCodec::server();
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            masked: false,
+            mask_key: None,
+            payload: {
+                let mut payload = BytesMut::with_capacity(2);
+                payload.put_u16(1016); // receive-only code
+                payload.freeze()
+            },
+        };
+
+        let result = codec.encode(frame, &mut BytesMut::new());
+        assert!(matches!(result, Err(WsError::InvalidClosePayload)));
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_code_1005_panics() {
+        // RFC 6455 §7.4.1: 1005 (No Status Received) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        let _ = Frame::close(Some(1005), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_code_1006_panics() {
+        // RFC 6455 §7.4.1: 1006 (Abnormal Closure) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        let _ = Frame::close(Some(1006), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_code_1015_panics() {
+        // RFC 6455 §7.4.1: 1015 (TLS Handshake) MUST NOT be set as a
+        // status code in a Close control frame by an endpoint.
+        let _ = Frame::close(Some(1015), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_code_1004_panics() {
+        // RFC 6455 §7.4.1: 1004 is reserved and MUST NOT be sent.
+        let _ = Frame::close(Some(1004), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "is not valid for use in a Close frame")]
+    fn close_frame_unassigned_received_only_code_panics() {
+        // RFC 6455 §7.4.2: 1016-2999 may be accepted when received, but
+        // endpoints implementing this spec must not send them.
+        let _ = Frame::close(Some(1016), None);
+    }
+
+    #[test]
+    fn received_close_code_1015_rejected() {
+        // RFC 6455 §7.4.1: 1015 is reserved for TLS layer only —
+        // must never appear on the wire, even when receiving.
+        assert!(!CloseCode::is_valid_received_code(1015));
+    }
+
+    #[test]
+    fn received_close_code_unassigned_accepted() {
+        // RFC 6455 §7.4.2: codes 1016-2999 are reserved for future
+        // WebSocket revisions/extensions and must be accepted.
+        assert!(CloseCode::is_valid_received_code(1016));
+        assert!(CloseCode::is_valid_received_code(2000));
+        assert!(CloseCode::is_valid_received_code(2999));
+    }
+
+    #[test]
+    fn close_frame_iana_registered_codes_accepted() {
+        // 1012, 1013, 1014 are IANA-registered close codes and must be accepted.
+        let _ = Frame::close(Some(1012), None);
+        let _ = Frame::close(Some(1013), None);
+        let _ = Frame::close(Some(1014), None);
+    }
+
+    #[test]
+    fn close_frame_valid_codes_accepted() {
+        // Verify that commonly used close codes don't panic.
+        let _ = Frame::close(Some(1000), Some("normal"));
+        let _ = Frame::close(Some(1001), None);
+        let _ = Frame::close(Some(1002), None);
+        let _ = Frame::close(Some(1003), None);
+        let _ = Frame::close(Some(1007), None);
+        let _ = Frame::close(Some(1008), None);
+        let _ = Frame::close(Some(1009), None);
+        let _ = Frame::close(Some(1010), None);
+        let _ = Frame::close(Some(1011), None);
+        // Application-defined codes
+        let _ = Frame::close(Some(4000), Some("app error"));
+    }
+
+    #[test]
+    fn payload_too_large_rejected_in_7bit_path() {
+        // Verify DoS protection: payload size exceeding max is rejected
+        // even in the 7-bit length path.
+        let mut codec = FrameCodec::client().max_payload_size(50);
+        let mut buf = BytesMut::new();
+        // FIN=1, opcode=Binary → 0x82; MASK=0, len=100 → 0x64
+        buf.put_u8(0x82);
+        buf.put_u8(100);
+        buf.put_slice(&[0u8; 100]);
+
+        let result = codec.decode(&mut buf);
+        assert!(matches!(
+            result,
+            Err(WsError::PayloadTooLarge { size: 100, max: 50 })
+        ));
+    }
+
+    #[test]
+    fn mask_involution_empty_payload() {
+        // Masking an empty payload should be a no-op.
+        let mut payload = Vec::new();
+        apply_mask(&mut payload, [0xAA, 0xBB, 0xCC, 0xDD]);
+        assert!(payload.is_empty());
+    }
+
+    #[test]
+    fn mask_involution_all_key_bytes_exercised() {
+        // Verify all 4 bytes of the mask key are used for payloads >= 4 bytes.
+        let mask_key = [0x11, 0x22, 0x33, 0x44];
+        let mut payload = vec![0x00; 5]; // 5 bytes exercises all 4 key positions + wrap
+        apply_mask(&mut payload, mask_key);
+        assert_eq!(payload, vec![0x11, 0x22, 0x33, 0x44, 0x11]);
+
+        // Applying again should restore zeros.
+        apply_mask(&mut payload, mask_key);
+        assert_eq!(payload, vec![0x00; 5]);
+    }
+
+    #[test]
+    fn codec_is_poisoned_after_decode_error() {
+        // After a decode error, the codec should enter the Poisoned state
+        // and reject all future frames.
+        let mut codec = FrameCodec::client();
+
+        // First: trigger a reserved-bits error.
+        let mut bad_buf = BytesMut::new();
+        bad_buf.put_u8(0xC1); // RSV1 set
+        bad_buf.put_u8(0x05);
+        bad_buf.put_slice(b"Hello");
+        let err = codec.decode(&mut bad_buf);
+        assert!(matches!(err, Err(WsError::ReservedBitsSet)));
+
+        // Second: feed a valid frame — codec should reject it because it's poisoned.
+        let mut good_buf = BytesMut::new();
+        good_buf.put_u8(0x81);
+        good_buf.put_u8(0x02);
+        good_buf.put_slice(b"OK");
+        let err2 = codec.decode(&mut good_buf);
+        assert!(matches!(err2, Err(WsError::ProtocolViolation(msg)) if msg.contains("poisoned")));
+    }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn opcode_debug_clone_copy_hash_eq() {
+        use std::collections::HashSet;
+        let op = Opcode::Text;
+        let dbg = format!("{op:?}");
+        assert!(dbg.contains("Text"), "{dbg}");
+        let copied = op;
+        let cloned = op;
+        assert_eq!(copied, cloned);
+
+        let mut set = HashSet::new();
+        set.insert(Opcode::Text);
+        set.insert(Opcode::Binary);
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&Opcode::Text));
+    }
+
+    #[test]
+    fn frame_debug_clone() {
+        let f = Frame::text("hello");
+        let dbg = format!("{f:?}");
+        assert!(dbg.contains("Frame"), "{dbg}");
+        let cloned = f;
+        assert_eq!(cloned.opcode, Opcode::Text);
+    }
+
+    #[test]
+    fn role_debug_clone_copy_eq() {
+        let r = Role::Client;
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("Client"), "{dbg}");
+        let copied = r;
+        let cloned = r;
+        assert_eq!(copied, cloned);
+        assert_ne!(r, Role::Server);
+    }
+
+    #[test]
+    fn close_code_debug_clone_copy_eq() {
+        let c = CloseCode::Normal;
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("Normal"), "{dbg}");
+        let copied = c;
+        let cloned = c;
+        assert_eq!(copied, cloned);
+        assert_ne!(c, CloseCode::GoingAway);
+    }
+}

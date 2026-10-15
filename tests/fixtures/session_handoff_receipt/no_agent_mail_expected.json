@@ -1,0 +1,41 @@
+{
+  "active_bead_ids": {
+    "in_progress": [],
+    "ready": [],
+    "stale_in_progress": []
+  },
+  "agent": "CopperSpring",
+  "branch": {
+    "ahead": 0,
+    "behind": 0,
+    "current": "main",
+    "is_main": true,
+    "upstream": "origin/main"
+  },
+  "dirty_clusters": [],
+  "generated_at": "2026-05-08T04:30:00Z",
+  "next_action": {
+    "category": "blocked",
+    "reason": "Agent Mail snapshot unavailable and no local ready work was found"
+  },
+  "proof_suggestions": [],
+  "rch": {
+    "available": false,
+    "queue_summary": "unavailable"
+  },
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [],
+  "reservation_snapshot": {
+    "available": false,
+    "classifications": []
+  },
+  "schema_version": "session-handoff-receipt-v1",
+  "subsystems": {
+    "agent_mail": "unavailable",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok",
+    "proof_runner": "ok",
+    "rch": "unavailable"
+  }
+}

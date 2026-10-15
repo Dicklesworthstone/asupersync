@@ -1,0 +1,50 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/failed-status.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_failed_status cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+      ],
+      "status": "failed",
+      "generated_at": "2026-05-08T05:15:00Z",
+      "stderr": "test proof_artifact_freshness_receipt_contract ... FAILED\nexit code: 101"
+    },
+    {
+      "artifact_path": "artifacts/proof/non-zero-exit-status.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_non_zero_exit cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+      ],
+      "status": "non-zero-exit",
+      "generated_at": "2026-05-08T05:16:00Z",
+      "stderr": "Process exited with code 101"
+    },
+    {
+      "artifact_path": "artifacts/proof/exit-code-101-status.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_exit_code_101 cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "touched_files": [
+        "scripts/proof_artifact_freshness_receipt.py",
+        "tests/proof_artifact_freshness_receipt_contract.rs"
+      ],
+      "status": "exit-code-101",
+      "generated_at": "2026-05-08T05:17:00Z",
+      "stderr": "Process exited with code 101"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

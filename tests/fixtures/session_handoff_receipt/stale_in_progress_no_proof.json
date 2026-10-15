@@ -1,0 +1,36 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "OlderAgent",
+        "id": "asupersync-stale1",
+        "title": "Possibly stale work",
+        "updated_at": "2026-05-07T00:00:00Z"
+      }
+    ],
+    "ready": [],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  }
+}

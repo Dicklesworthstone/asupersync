@@ -1,0 +1,69 @@
+{
+  "agent": "TopazGoose",
+  "commit_boundary": {
+    "decision": "no-staged-self-owned-paths",
+    "non_self_staged_paths": [],
+    "ordinary_index_commit_allowed": false,
+    "path_limited_commit_command": "",
+    "peer_index_preservation_required": false,
+    "reason": "no current-agent staged paths are ready to commit",
+    "self_owned_staged_paths": []
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:10:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "rows": [
+    {
+      "bead_id": "",
+      "classification": "owner-conflict",
+      "evidence": {
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T05:10:00Z",
+        "index_status": " ",
+        "message_created_ts": "2026-05-08T05:02:00Z",
+        "message_from": "CoralGorge",
+        "message_subject": "rwlock edit",
+        "reservation_expires_ts": "2026-05-08T05:56:00Z",
+        "reservation_holder": "BoldPlateau",
+        "reservation_path_pattern": "src/sync/rwlock.rs",
+        "worktree_status": "M"
+      },
+      "owner": "BoldPlateau,CoralGorge",
+      "path": "src/sync/rwlock.rs",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "send_message(thread_id='dirty-tree-ownership', to=['BoldPlateau'], subject='Dirty tree ownership check', body_md='Please confirm ownership for src/sync/rwlock.rs.')",
+        "kind": "agent-mail-contact",
+        "mutates": true
+      },
+      "staging_guidance": {
+        "decision": "do-not-stage",
+        "reason": "multiple ownership signals match the dirty path"
+      },
+      "status": " M"
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "dirty-tree-ownership-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "do_not_stage": 1,
+    "owner_conflict": 1,
+    "peer_owned": 0,
+    "safe_to_stage": 0,
+    "self_owned": 0,
+    "total_paths": 1,
+    "tracker_state": 0,
+    "unattributed": 0
+  }
+}

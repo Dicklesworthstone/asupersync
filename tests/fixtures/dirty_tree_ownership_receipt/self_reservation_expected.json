@@ -1,0 +1,69 @@
+{
+  "agent": "TopazGoose",
+  "commit_boundary": {
+    "decision": "no-staged-self-owned-paths",
+    "non_self_staged_paths": [],
+    "ordinary_index_commit_allowed": false,
+    "path_limited_commit_command": "",
+    "peer_index_preservation_required": false,
+    "reason": "no current-agent staged paths are ready to commit",
+    "self_owned_staged_paths": []
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:10:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "rows": [
+    {
+      "bead_id": "",
+      "classification": "self-owned",
+      "evidence": {
+        "current_date": "2026-05-08",
+        "generated_at": "2026-05-08T05:10:00Z",
+        "index_status": "?",
+        "message_created_ts": "",
+        "message_from": "",
+        "message_subject": "",
+        "reservation_expires_ts": "2026-05-08T06:08:00Z",
+        "reservation_holder": "TopazGoose",
+        "reservation_path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "worktree_status": "?"
+      },
+      "owner": "TopazGoose",
+      "path": "scripts/dirty_tree_ownership_receipt.py",
+      "proposed_action": {
+        "allowed_now": true,
+        "command": "git add -- scripts/dirty_tree_ownership_receipt.py",
+        "kind": "git-add-pathspec",
+        "mutates": true
+      },
+      "staging_guidance": {
+        "decision": "safe-to-stage-with-pathspec",
+        "reason": "active reservation or message indicates current agent ownership"
+      },
+      "status": "??"
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "forbidden_command_tokens": [],
+    "mutating_commands_executed": false
+  },
+  "schema_version": "dirty-tree-ownership-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "git": "ok"
+  },
+  "summary": {
+    "do_not_stage": 0,
+    "owner_conflict": 0,
+    "peer_owned": 0,
+    "safe_to_stage": 1,
+    "self_owned": 1,
+    "total_paths": 1,
+    "tracker_state": 0,
+    "unattributed": 0
+  }
+}

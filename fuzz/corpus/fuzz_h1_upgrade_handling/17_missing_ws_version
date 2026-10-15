@@ -1,0 +1,6 @@
+GET /ws HTTP/1.1
+Host: localhost
+Connection: upgrade
+Upgrade: websocket
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+

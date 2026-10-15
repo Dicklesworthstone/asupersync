@@ -1,0 +1,87 @@
+{
+  "schema_version": "lab-live-timing-platform-policy-fixture-v1",
+  "scenario_id": "lab_live_5_3.stale.browser_evidence",
+  "claim_id": "phase3.browser.support_row",
+  "surface_id": "browser_surface",
+  "expected_verdict": "stale",
+  "policy_class": "stale_evidence",
+  "time_policy_class": "provenance_only_time",
+  "scheduler_noise_class": "scheduler_noise_signal",
+  "platform_report": {
+    "surface_family": "browser_surface",
+    "host_role": "browser_host",
+    "capability_status": "evidence_stale",
+    "eligibility_verdict": "stale_not_pass",
+    "observability_status": "fresh_fixture_required",
+    "platform_prerequisites": [
+      "host_role_contract",
+      "browser_fixture_evidence",
+      "fresh_support_matrix_row"
+    ]
+  },
+  "adapter": {
+    "kind": "browser_runner_required",
+    "path": "tests/fixtures/browser-native-message-stream-consumer",
+    "entry": "check-browser-run"
+  },
+  "classification_inputs": {
+    "semantic_fields_match": false,
+    "skip_is_pass": false,
+    "stale_is_pass": false,
+    "first_failure_field": "evidence_freshness",
+    "unsupported_reason": "",
+    "evidence_age_days": 91,
+    "freshness_policy": "fresh fixture required before support promotion"
+  },
+  "failure_bundle": {
+    "seed": "seed.lab_live_5_3.browser.0004",
+    "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_timing_platform_policy cargo test -p asupersync --test lab_live_timing_platform_policy_contract -- --nocapture",
+    "platform": "browser_host",
+    "adapter": "browser_surface.policy_fixture",
+    "logs": [
+      "scenario_id",
+      "support_class",
+      "evidence_age_days",
+      "stale_reason",
+      "next_refresh_command"
+    ],
+    "replay_pointers": [
+      "artifacts/lab_live/lab_live_5_3/stale_browser_evidence/summary.json",
+      "artifacts/lab_live/lab_live_5_3/stale_browser_evidence/events.ndjson"
+    ],
+    "redaction": "browser host URLs and operator identity scrubbed before retention"
+  },
+  "expected_logs": [
+    "scenario_id",
+    "surface_family",
+    "evidence_age_days",
+    "stale_reason",
+    "verdict"
+  ],
+  "redaction": {
+    "input_samples": [
+      "https://preview.internal.example/browser-secret",
+      "browser-owner@example.com",
+      "token=browser-secret"
+    ],
+    "redacted_samples": [
+      "https://<host:redacted>/<path:redacted>",
+      "<email:redacted>",
+      "token=<redacted>"
+    ],
+    "forbidden_substrings": [
+      "preview.internal.example",
+      "browser-owner@example.com",
+      "browser-secret"
+    ]
+  },
+  "docs_alignment": [
+    "docs/lab_live_virtualized_surface_matrix.md",
+    "docs/lab_live_time_normalization_policy.md"
+  ],
+  "no_claims": [
+    "does not treat stale browser evidence as pass",
+    "does not promote service-worker or shared-worker parity",
+    "does not claim browser host timing parity"
+  ]
+}

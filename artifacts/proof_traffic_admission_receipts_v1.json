@@ -1,0 +1,119 @@
+{
+  "schema_version": "proof-traffic-admission-receipts-v1",
+  "receipt_schema_version": "proof-traffic-admission-receipt-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.2",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T06:40:00Z",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_traffic_admission_receipts_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_admission_receipt_contract.rs",
+    "rust_module": "src/audit/proof_traffic_receipt.rs",
+    "capability_artifact": "artifacts/proof_traffic_rch_capabilities_v1.json"
+  },
+  "decision_taxonomy": [
+    "run-now",
+    "queue-wait",
+    "park-rerun-required",
+    "blocked-by-peer",
+    "blocked-by-capability-drift",
+    "remote-required-refused",
+    "report-only"
+  ],
+  "classification_order": [
+    "report-only",
+    "blocked-by-capability-drift",
+    "remote-required-refused",
+    "blocked-by-peer",
+    "park-rerun-required",
+    "run-now",
+    "queue-wait"
+  ],
+  "required_report_fields": [
+    "gate_id",
+    "status",
+    "head_commit",
+    "command_intent",
+    "target_dir",
+    "selected_paths",
+    "capability_probe_version",
+    "capability_findings",
+    "rch_worker_or_refusal",
+    "retry_condition",
+    "no_claim_boundaries"
+  ],
+  "fixture_coverage": [
+    {
+      "fixture_id": "empty-queue",
+      "expected_decision": "run-now",
+      "covered_signal": "No active builds, no refusal, supported capability."
+    },
+    {
+      "fixture_id": "active-project-exclusion",
+      "expected_decision": "park-rerun-required",
+      "covered_signal": "Same-project active-work exclusion requires a later rerun."
+    },
+    {
+      "fixture_id": "worker-health-refusal",
+      "expected_decision": "park-rerun-required",
+      "covered_signal": "Worker health preflight refused admission."
+    },
+    {
+      "fixture_id": "heartbeat-fresh-progress-stale-peer",
+      "expected_decision": "blocked-by-peer",
+      "covered_signal": "Peer-owned build has a fresh heartbeat but stale progress."
+    },
+    {
+      "fixture_id": "peer-owned-stale-build",
+      "expected_decision": "blocked-by-peer",
+      "covered_signal": "Peer-owned stale-progress build is handoff evidence, not cancellation authority."
+    },
+    {
+      "fixture_id": "self-owned-stale-build",
+      "expected_decision": "park-rerun-required",
+      "covered_signal": "Self-owned stale-progress build parks the proof until terminal output exists."
+    },
+    {
+      "fixture_id": "unsupported-overlay-capability",
+      "expected_decision": "blocked-by-capability-drift",
+      "covered_signal": "Clean-overlay proof shape requested while installed RCH flags are unsupported."
+    },
+    {
+      "fixture_id": "remote-required-refusal",
+      "expected_decision": "remote-required-refused",
+      "covered_signal": "RCH_REQUIRE_REMOTE=1 refused before worker assignment."
+    },
+    {
+      "fixture_id": "healthy-active-build",
+      "expected_decision": "queue-wait",
+      "covered_signal": "Healthy active build means wait or queue, not proof success."
+    },
+    {
+      "fixture_id": "report-only",
+      "expected_decision": "report-only",
+      "covered_signal": "Dry-run reporting emits no proof command."
+    }
+  ],
+  "forbidden_recommendations": {
+    "local_cargo_fallback": true,
+    "peer_build_cancellation": true,
+    "branch_or_worktree": true,
+    "file_deletion": true
+  },
+  "handoff_bodies": {
+    "agent_mail": "Receipt renderer emits structured fields before prose.",
+    "br_comment": "Receipt renderer emits structured fields before prose."
+  },
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No peer-owned build cancellation authority.",
+    "No permission to delete files, clean worktrees, create branches, or create worktrees.",
+    "No claim that documented clean-overlay flags are available unless installed capability evidence says they are supported."
+  ]
+}

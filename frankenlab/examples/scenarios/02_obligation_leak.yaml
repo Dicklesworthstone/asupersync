@@ -1,0 +1,57 @@
+# FrankenLab Example 2: Obligation Leak Under Cancellation
+#
+# Five tasks hold obligations (SendPermit/Ack). Random cancellation
+# injection tests whether obligation cleanup is correct on all paths.
+# The obligation_leak oracle catches any leaked permits.
+#
+# Run with light chaos to inject cancellations:
+#
+#   frankenlab run 02_obligation_leak.yaml
+#   frankenlab explore 02_obligation_leak.yaml --seeds 200
+#
+schema_version: 1
+id: example-obligation-leak
+description: >
+  Five participants exchange SendPermit/Ack obligations with random
+  cancellation injection. Verifies that all obligations are properly
+  released even when tasks are cancelled mid-protocol.
+
+lab:
+  seed: 2718
+  worker_count: 4
+  trace_capacity: 8192
+  max_steps: 100000
+  panic_on_obligation_leak: true
+  panic_on_futurelock: true
+
+chaos:
+  preset: light
+
+network:
+  preset: local
+
+participants:
+  - name: coordinator
+    role: sender
+  - name: worker-1
+    role: receiver
+  - name: worker-2
+    role: receiver
+  - name: worker-3
+    role: receiver
+  - name: worker-4
+    role: receiver
+
+cancellation:
+  strategy: random_sample
+  count: 100
+
+oracles:
+  - obligation_leak
+  - task_leak
+  - loser_drain
+  - quiescence
+
+metadata:
+  category: cancellation
+  difficulty: intermediate

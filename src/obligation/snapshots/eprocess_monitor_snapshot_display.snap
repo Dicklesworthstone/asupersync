@@ -1,0 +1,5 @@
+---
+source: src/obligation/eprocess.rs
+expression: rendered
+---
+LeakMonitor[clear]: e=0.7311 threshold=100.0 obs=1 peak=1.0000 alerts=0

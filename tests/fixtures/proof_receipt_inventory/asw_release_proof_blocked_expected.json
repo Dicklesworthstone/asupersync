@@ -1,0 +1,221 @@
+{
+  "agent": "CoralGorge",
+  "asw_release_proof": {
+    "blocked_count": 1,
+    "first_blocker": {
+      "agent": "GreenMountain",
+      "bead_id": "asupersync-oxqrae.12",
+      "detail": "1 dirty peer-owned path(s) overlap proof scope",
+      "kind": "dirty-peer-file",
+      "path": "src/runtime/rch_health/mod.rs",
+      "severity": "high"
+    },
+    "human_summary": "ASW release proof blocked: 1/1 packet(s) blocked; first blocker dirty-peer-file for asupersync-oxqrae.12; 0 remote production proof(s).",
+    "packet_count": 1,
+    "packets": [
+      {
+        "admission": {
+          "receipt_id": "admission-asw12",
+          "status": "rejected"
+        },
+        "agent": "GreenMountain",
+        "bead": {
+          "status": "open",
+          "updated_at": "2026-05-24T08:20:00Z"
+        },
+        "bead_id": "asupersync-oxqrae.12",
+        "blockers": [
+          {
+            "detail": "1 dirty peer-owned path(s) overlap proof scope",
+            "kind": "dirty-peer-file",
+            "path": "src/runtime/rch_health/mod.rs",
+            "severity": "high"
+          },
+          {
+            "detail": "touched path is not covered by reservations",
+            "kind": "reservation-mismatch",
+            "path": "tests/proof_receipt_inventory_contract.rs",
+            "severity": "high"
+          },
+          {
+            "detail": "bead status is open",
+            "kind": "stale-bead-status",
+            "severity": "high"
+          },
+          {
+            "detail": "Agent Mail closeout evidence is missing",
+            "kind": "missing-mail-closeout",
+            "severity": "high"
+          },
+          {
+            "detail": "file reservations are not released",
+            "kind": "mail-reservations-not-released",
+            "severity": "high"
+          },
+          {
+            "detail": "lease reservation-24153 is pending",
+            "kind": "lease-not-committed",
+            "severity": "high"
+          },
+          {
+            "detail": "admission status is rejected",
+            "kind": "admission-not-admitted",
+            "severity": "high"
+          },
+          {
+            "detail": "handoff decision is coordinate_first",
+            "kind": "handoff-blocked",
+            "severity": "high"
+          },
+          {
+            "detail": "commit feedface0001 is not pushed to main",
+            "kind": "unpushed-commit",
+            "severity": "high"
+          },
+          {
+            "detail": "commit 0123456789ab lacks main mirror evidence",
+            "kind": "missing-main-mirror-sync",
+            "severity": "high"
+          },
+          {
+            "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test -p asupersync --test proof_receipt_inventory_contract [RCH] local (daemon unavailable)",
+            "detail": "local fallback cannot satisfy release proof",
+            "kind": "rch-local-fallback-proof",
+            "severity": "high"
+          },
+          {
+            "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test -p asupersync --test proof_receipt_inventory_contract [RCH] local (daemon unavailable)",
+            "detail": "Cargo proof lacks RCH_REQUIRE_REMOTE=1",
+            "kind": "missing-remote-required-proof",
+            "severity": "high"
+          },
+          {
+            "detail": "no remote production Cargo proof passed",
+            "kind": "missing-remote-rch-proof",
+            "severity": "high"
+          }
+        ],
+        "commits": [
+          {
+            "hash": "feedface0001",
+            "main_mirror_pushed": false,
+            "main_ref_pushed": false,
+            "pushed": false,
+            "pushed_refs": []
+          },
+          {
+            "hash": "0123456789ab",
+            "main_mirror_pushed": false,
+            "main_ref_pushed": true,
+            "pushed": true,
+            "pushed_refs": []
+          }
+        ],
+        "dirty_peer_paths": [
+          "src/runtime/rch_health/mod.rs"
+        ],
+        "evidence_counts": {
+          "commits": 2,
+          "dirty_peer_paths": 1,
+          "leases": 1,
+          "proof_classes": {
+            "production": 1
+          },
+          "remote_production_proofs": 0,
+          "reservations": 1,
+          "touched_paths": 2
+        },
+        "first_blocker": {
+          "detail": "1 dirty peer-owned path(s) overlap proof scope",
+          "kind": "dirty-peer-file",
+          "path": "src/runtime/rch_health/mod.rs",
+          "severity": "high"
+        },
+        "handoff": {
+          "capsule_id": "handoff-asw10",
+          "decision": "coordinate_first"
+        },
+        "leases": [
+          {
+            "lease_id": "reservation-24153",
+            "resource": "scripts/proof_receipt_inventory.py",
+            "status": "pending"
+          }
+        ],
+        "mail": {
+          "closeout_sent": false,
+          "reservations_released": false,
+          "thread_id": "asupersync-oxqrae.12"
+        },
+        "rch_proofs": [
+          {
+            "cargo_command": true,
+            "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_p6 cargo test -p asupersync --test proof_receipt_inventory_contract [RCH] local (daemon unavailable)",
+            "has_cargo_target_dir": true,
+            "local_fallback": true,
+            "output_excerpt": "falling back to local execution",
+            "proof_class": "production",
+            "remote": false,
+            "remote_required": false,
+            "routes_through_rch": true,
+            "status": "pass"
+          }
+        ],
+        "reservations": [
+          "scripts/proof_receipt_inventory.py"
+        ],
+        "status": "blocked",
+        "touched_paths": [
+          "scripts/proof_receipt_inventory.py",
+          "tests/proof_receipt_inventory_contract.rs"
+        ]
+      }
+    ],
+    "proof_class_counts": {
+      "production": 1
+    },
+    "ready_count": 0,
+    "release_status": "blocked",
+    "remote_production_proofs": 0,
+    "schema_version": "asw-release-proof-v1"
+  },
+  "capabilities": [],
+  "classification_counts": {},
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "asw_release_packets": 1,
+    "capabilities": 0,
+    "duplicate_capabilities": 0,
+    "helpers": 0,
+    "review_cues": 0,
+    "superseded_helpers": 0
+  }
+}

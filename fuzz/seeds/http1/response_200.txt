@@ -1,0 +1,7 @@
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Content-Length: 13
+Date: Sat, 01 Feb 2026 12:00:00 GMT
+Server: asupersync/1.0
+
+Hello, World!

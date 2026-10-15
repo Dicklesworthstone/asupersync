@@ -1,0 +1,487 @@
+//! Typed capability sets for `Cx`.
+//!
+//! The capability set is represented at the type level so that operations
+//! requiring certain effects (spawn/time/random/io/remote) can be gated
+//! at compile time.
+//!
+//! # Capability Rows
+//!
+//! A capability row is a fixed-width vector of booleans — one per effect:
+//! `[SPAWN, TIME, RANDOM, IO, REMOTE]`. The [`CapSet`] struct encodes this
+//! row as const generics, making it a zero-sized type with no runtime cost.
+//!
+//! The subset relation ([`SubsetOf`]) is the pointwise ≤ ordering on rows.
+//! Narrowing (dropping capabilities) always succeeds; widening (gaining
+//! capabilities) is a compile-time error.
+//!
+//! # Forging Prevention
+//!
+//! Capability marker traits are sealed to prevent external crates from
+//! implementing them for arbitrary types. This ensures only the runtime's
+//! `CapSet` types can grant access to gated APIs.
+//!
+//! # Narrowing is Monotone
+//!
+//! If `A: SubsetOf<B>`, then every method available on `Cx<A>` is a
+//! subset of those available on `Cx<B>`. Narrowing cannot introduce new
+//! effects because each `Has*` marker is gated on a single boolean
+//! position, and the `SubsetOf` impl requires each bit in the sub to
+//! be ≤ the corresponding bit in the super.
+//!
+//! # Trusted Roots
+//!
+//! - The runtime constructs full contexts internally (e.g., via `RuntimeState`).
+//! - Test-only constructors (e.g., `Cx::for_testing*`) are permitted for harnesses.
+//!
+//! # Compile-time rejection of widening
+//!
+//! ```compile_fail
+//! use asupersync::cx::cap::{CapSet, SubsetOf};
+//!
+//! // WebCaps (no spawn) cannot widen to GrpcCaps (has spawn):
+//! fn widen<Sub: SubsetOf<Super>, Super>() {}
+//! type WebCaps = CapSet<false, true, false, true, false>;
+//! type GrpcCaps = CapSet<true, true, false, true, false>;
+//! widen::<GrpcCaps, WebCaps>(); // ERROR: GrpcCaps is NOT a subset of WebCaps
+//! ```
+//!
+//! ```compile_fail
+//! use asupersync::cx::cap::{CapSet, None, SubsetOf};
+//!
+//! // Cannot widen from None to any capability:
+//! fn widen<Sub: SubsetOf<Super>, Super>() {}
+//! type SpawnOnly = CapSet<true, false, false, false, false>;
+//! widen::<SpawnOnly, None>(); // ERROR: SpawnOnly is NOT a subset of None
+//! ```
+
+mod sealed {
+    pub trait Sealed {}
+
+    /// Type-level capability bit for subset reasoning.
+    ///
+    /// Kept inside `sealed` so external crates cannot construct or
+    /// implement traits on these types, preserving anti-forgery.
+    pub struct Bit<const V: bool>;
+
+    /// Ordering on capability bits: `false ≤ false`, `false ≤ true`, `true ≤ true`.
+    ///
+    /// The missing impl `(Bit<true>, Bit<false>)` encodes that widening
+    /// (gaining a capability you don't have) is statically rejected.
+    pub trait Le {}
+    impl Le for (Bit<false>, Bit<false>) {}
+    impl Le for (Bit<false>, Bit<true>) {}
+    impl Le for (Bit<true>, Bit<true>) {}
+}
+
+/// Type-level capability set.
+///
+/// Each boolean controls whether the capability is present:
+/// - `SPAWN`: spawn tasks/regions
+/// - `TIME`: timers, timeouts
+/// - `RANDOM`: entropy and random values
+/// - `IO`: async I/O capability
+/// - `REMOTE`: remote task spawning
+#[derive(Debug, Clone, Copy)]
+pub struct CapSet<
+    const SPAWN: bool,
+    const TIME: bool,
+    const RANDOM: bool,
+    const IO: bool,
+    const REMOTE: bool,
+>;
+
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool>
+    sealed::Sealed for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
+{
+}
+
+/// Full capability set (default).
+pub type All = CapSet<true, true, true, true, true>;
+
+/// No capabilities.
+pub type None = CapSet<false, false, false, false, false>;
+
+// ============================================================================
+// br-asupersync-5ckssb: runtime CapMask for thread-local restriction tracking
+// ============================================================================
+
+/// Runtime capability mask, mirror of the type-level [`CapSet`].
+///
+/// Used by [`crate::cx::Cx::current`] to honor the innermost restriction
+/// pushed onto the thread-local restriction stack. Unlike [`CapSet`],
+/// which is a zero-sized type marker checked at compile time, `CapMask`
+/// is a runtime value that travels with the cx returned from `current()`
+/// so an ambient lookup cannot escape the narrowing applied by an
+/// outer `set_current_restricted` or `push_restriction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapMask(u8);
+
+impl CapMask {
+    pub(crate) const SPAWN: u8 = 1 << 0;
+    pub(crate) const TIME: u8 = 1 << 1;
+    pub(crate) const RANDOM: u8 = 1 << 2;
+    pub(crate) const IO: u8 = 1 << 3;
+    pub(crate) const REMOTE: u8 = 1 << 4;
+
+    /// All capabilities granted (default for unrestricted contexts).
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::SPAWN | Self::TIME | Self::RANDOM | Self::IO | Self::REMOTE)
+    }
+
+    /// No capabilities.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Returns true if every bit in `other` is also set in `self`.
+    #[inline]
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Returns true if `bit` is set.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Bitwise AND of two masks (intersection).
+    #[inline]
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Returns the raw bits (for debug / serialization).
+    #[inline]
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for CapMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Compute the runtime [`CapMask`] for a type-level capability set.
+///
+/// Implemented for each [`CapSet`] variant; the const-generic booleans
+/// determine which bits are set. This trait is sealed so external crates
+/// cannot fabricate a mask that exceeds the type-level capabilities of a
+/// given `Cx<C>`.
+pub trait CapSetRuntimeMask: sealed::Sealed {
+    /// The runtime mask that exactly mirrors the type-level cap row.
+    const MASK: CapMask;
+}
+
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool>
+    CapSetRuntimeMask for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
+{
+    const MASK: CapMask = CapMask(
+        (if SPAWN { CapMask::SPAWN } else { 0 })
+            | (if TIME { CapMask::TIME } else { 0 })
+            | (if RANDOM { CapMask::RANDOM } else { 0 })
+            | (if IO { CapMask::IO } else { 0 })
+            | (if REMOTE { CapMask::REMOTE } else { 0 }),
+    );
+}
+
+// Manual Default implementations for type aliases to avoid confusion
+impl Default for All {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl Default for None {
+    fn default() -> Self {
+        Self
+    }
+}
+
+/// Marker: spawn capability.
+///
+/// ```compile_fail
+/// use asupersync::cx::HasSpawn;
+///
+/// struct ExternalCaps;
+/// impl HasSpawn for ExternalCaps {}
+/// ```
+pub trait HasSpawn: sealed::Sealed {}
+impl<const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool> HasSpawn
+    for CapSet<true, TIME, RANDOM, IO, REMOTE>
+{
+}
+
+/// Marker: time capability.
+pub trait HasTime: sealed::Sealed {}
+impl<const SPAWN: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool> HasTime
+    for CapSet<SPAWN, true, RANDOM, IO, REMOTE>
+{
+}
+
+/// Marker: random/entropy capability.
+pub trait HasRandom: sealed::Sealed {}
+impl<const SPAWN: bool, const TIME: bool, const IO: bool, const REMOTE: bool> HasRandom
+    for CapSet<SPAWN, TIME, true, IO, REMOTE>
+{
+}
+
+/// Marker: I/O capability.
+pub trait HasIo: sealed::Sealed {}
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const REMOTE: bool> HasIo
+    for CapSet<SPAWN, TIME, RANDOM, true, REMOTE>
+{
+}
+
+/// Marker: remote capability.
+pub trait HasRemote: sealed::Sealed {}
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool> HasRemote
+    for CapSet<SPAWN, TIME, RANDOM, IO, true>
+{
+}
+
+/// Marker: subset relation between capability sets.
+///
+/// `Sub: SubsetOf<Super>` holds when every capability enabled in `Sub` is
+/// also enabled in `Super`. This is the pointwise ≤ ordering on boolean
+/// capability rows and guarantees that narrowing is **monotone**: you can
+/// only drop capabilities, never gain them.
+///
+/// # Monotonicity argument
+///
+/// Because `sealed::Le` is only implemented for `(false,false)`,
+/// `(false,true)`, and `(true,true)` — but *not* `(true,false)` — the
+/// compiler rejects any attempt to widen a capability set. Combined with
+/// the `Sealed` supertrait, external crates cannot forge `SubsetOf`
+/// implementations.
+///
+/// # Properties
+///
+/// - **Reflexive**: `CapSet<S,T,R,I,Re>: SubsetOf<CapSet<S,T,R,I,Re>>`
+/// - **Transitive**: if `A: SubsetOf<B>` and `B: SubsetOf<C>`, then
+///   `A: SubsetOf<C>` (follows from bit-level ≤ transitivity)
+/// - **Antisymmetric**: `A: SubsetOf<B>` and `B: SubsetOf<A>` implies A = B
+///
+/// ```compile_fail
+/// use asupersync::cx::SubsetOf;
+///
+/// struct ExternalCaps;
+/// impl SubsetOf<ExternalCaps> for ExternalCaps {}
+/// ```
+pub trait SubsetOf<Super>: sealed::Sealed {}
+
+// General pointwise subset: Sub ⊆ Super iff each capability bit in Sub ≤ Super.
+impl<
+    const S1: bool,
+    const T1: bool,
+    const R1: bool,
+    const I1: bool,
+    const RE1: bool,
+    const S2: bool,
+    const T2: bool,
+    const R2: bool,
+    const I2: bool,
+    const RE2: bool,
+> SubsetOf<CapSet<S2, T2, R2, I2, RE2>> for CapSet<S1, T1, R1, I1, RE1>
+where
+    (sealed::Bit<S1>, sealed::Bit<S2>): sealed::Le,
+    (sealed::Bit<T1>, sealed::Bit<T2>): sealed::Le,
+    (sealed::Bit<R1>, sealed::Bit<R2>): sealed::Le,
+    (sealed::Bit<I1>, sealed::Bit<I2>): sealed::Le,
+    (sealed::Bit<RE1>, sealed::Bit<RE2>): sealed::Le,
+{
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+
+    // Helper: assert a type satisfies SubsetOf at compile time.
+    fn assert_subset<Sub: SubsetOf<Super>, Super>() {}
+
+    // Helper: assert a marker trait at compile time.
+    fn assert_has_spawn<C: HasSpawn>() {}
+    fn assert_has_time<C: HasTime>() {}
+    fn assert_has_random<C: HasRandom>() {}
+    fn assert_has_io<C: HasIo>() {}
+    fn assert_has_remote<C: HasRemote>() {}
+
+    // --- Reflexivity ---
+
+    #[test]
+    fn subset_reflexive_all() {
+        assert_subset::<All, All>();
+    }
+
+    #[test]
+    fn subset_reflexive_none() {
+        assert_subset::<None, None>();
+    }
+
+    #[test]
+    fn subset_reflexive_mixed() {
+        // CapSet<true, false, true, false, true> ⊆ itself
+        assert_subset::<
+            CapSet<true, false, true, false, true>,
+            CapSet<true, false, true, false, true>,
+        >();
+    }
+
+    // --- Bottom and top ---
+
+    #[test]
+    fn none_subset_of_all() {
+        assert_subset::<None, All>();
+    }
+
+    #[test]
+    fn none_subset_of_any() {
+        assert_subset::<None, CapSet<false, true, false, false, true>>();
+        assert_subset::<None, CapSet<true, false, false, false, false>>();
+    }
+
+    #[test]
+    fn any_subset_of_all() {
+        assert_subset::<CapSet<true, false, true, false, true>, All>();
+        assert_subset::<CapSet<false, false, false, true, false>, All>();
+    }
+
+    // --- Intermediate narrowing (framework wrapper types) ---
+
+    #[test]
+    fn background_subset_of_grpc() {
+        // Background = <true, true, false, false, false>
+        // Grpc       = <true, true, false, true, false>
+        // Background ⊆ Grpc (Background drops IO)
+        type BackgroundCaps = CapSet<true, true, false, false, false>;
+        type GrpcCaps = CapSet<true, true, false, true, false>;
+        assert_subset::<BackgroundCaps, GrpcCaps>();
+    }
+
+    #[test]
+    fn web_subset_of_all() {
+        // Web = <false, true, false, true, false>
+        type WebCaps = CapSet<false, true, false, true, false>;
+        assert_subset::<WebCaps, All>();
+    }
+
+    #[test]
+    fn pure_subset_of_web() {
+        // Pure = None = <false, false, false, false, false>
+        // Web  = <false, true, false, true, false>
+        type WebCaps = CapSet<false, true, false, true, false>;
+        assert_subset::<None, WebCaps>();
+    }
+
+    #[test]
+    fn single_cap_subset_of_multi() {
+        // <false, true, false, false, false> ⊆ <true, true, false, true, false>
+        assert_subset::<
+            CapSet<false, true, false, false, false>,
+            CapSet<true, true, false, true, false>,
+        >();
+    }
+
+    // --- Transitivity (demonstrated, not mechanized) ---
+
+    #[test]
+    fn transitive_none_background_grpc() {
+        type BackgroundCaps = CapSet<true, true, false, false, false>;
+        type GrpcCaps = CapSet<true, true, false, true, false>;
+        // None ⊆ Background ⊆ Grpc, therefore None ⊆ Grpc
+        assert_subset::<None, BackgroundCaps>();
+        assert_subset::<BackgroundCaps, GrpcCaps>();
+        assert_subset::<None, GrpcCaps>();
+    }
+
+    // --- Marker traits ---
+
+    #[test]
+    fn all_has_every_capability() {
+        assert_has_spawn::<All>();
+        assert_has_time::<All>();
+        assert_has_random::<All>();
+        assert_has_io::<All>();
+        assert_has_remote::<All>();
+    }
+
+    #[test]
+    fn partial_caps_have_correct_markers() {
+        // <true, true, false, true, false> has Spawn+Time+Io but not Random/Remote
+        assert_has_spawn::<CapSet<true, true, false, true, false>>();
+        assert_has_time::<CapSet<true, true, false, true, false>>();
+        assert_has_io::<CapSet<true, true, false, true, false>>();
+    }
+
+    // --- ZST property ---
+
+    #[test]
+    fn capset_is_zero_sized() {
+        assert_eq!(std::mem::size_of::<All>(), 0);
+        assert_eq!(std::mem::size_of::<None>(), 0);
+        assert_eq!(
+            std::mem::size_of::<CapSet<true, false, true, false, true>>(),
+            0
+        );
+    }
+
+    // --- Compile-fail doctests for anti-forgery are on HasSpawn and SubsetOf above ---
+
+    // =========================================================================
+    // Wave 54 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn capset_debug_clone_copy_default() {
+        let all = All::default();
+        let dbg = format!("{all:?}");
+        assert!(dbg.contains("CapSet"), "{dbg}");
+        let copied = all;
+        let cloned = all;
+        // ZST so all instances are identical
+        let _ = (copied, cloned);
+
+        let none = None::default();
+        let dbg_none = format!("{none:?}");
+        assert!(dbg_none.contains("CapSet"), "{dbg_none}");
+    }
+
+    #[test]
+    fn default_implementations_correct() {
+        // All::default() should have all capabilities
+        let all = All::default();
+        assert_has_spawn::<All>();
+        assert_has_time::<All>();
+        assert_has_random::<All>();
+        assert_has_io::<All>();
+        assert_has_remote::<All>();
+
+        // Verify the type is actually All, not None
+        let _: All = all; // This should compile
+
+        // None::default() should have no capabilities
+        let none = None::default();
+        let _: None = none; // This should compile
+
+        // Verify they are different types at compile-time
+        fn verify_all_has_spawn(_: impl HasSpawn) {}
+        verify_all_has_spawn(all); // Should compile
+        // verify_all_has_spawn(none); // Should NOT compile
+    }
+}

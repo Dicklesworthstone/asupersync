@@ -1,0 +1,6 @@
+Compiling asupersync v0.1.0 (/data/projects/asupersync)
+Finished test profile [unoptimized + debuginfo] target(s) in 4.21s
+Running tests/proof_console_report_contract.rs
+test valid_report_shape_passes_contract_validator ... ok
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+Remote command finished: exit=0

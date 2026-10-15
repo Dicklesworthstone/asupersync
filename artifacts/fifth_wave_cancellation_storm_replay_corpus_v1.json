@@ -1,0 +1,247 @@
+{
+  "schema_version": "fifth-wave-cancellation-storm-replay-corpus-v1",
+  "bead_id": "asupersync-cancellation-storm-replay-corpus-z7hfs6",
+  "purpose": "Deterministic replay-corpus contract for cancellation storms, obligation pressure, loser drain, and region-close quiescence under swarm-scale fanout.",
+  "source_of_truth": {
+    "atlas_artifact": "artifacts/fifth_wave_swarm_control_plane_atlas_v1.json",
+    "scenario_corpus": "artifacts/swarm_workload_scenario_corpus_v1.json",
+    "scenario_contract": "tests/swarm_workload_scenario_corpus_contract.rs",
+    "trace_summary_contract": "tests/swarm_pressure_trace_summary_contract.rs",
+    "runtime_source": "src/lab/swarm_replay.rs",
+    "contract_test": "tests/fifth_wave_cancellation_storm_replay_corpus_contract.rs"
+  },
+  "proof_lane": {
+    "lane_id": "fifth-wave-cancellation-storm-replay-corpus",
+    "proof_command_id": "fifth-wave-cancellation-storm-replay-corpus-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_cancellation_storm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_cancellation_storm_replay_corpus_contract -- --nocapture",
+    "local_fallback_allowed": false,
+    "does_not_cover": [
+      "does not prove broad cancellation correctness",
+      "does not prove broad workspace health",
+      "does not replace DPOR or formal proofs",
+      "does not implement production admission policy"
+    ]
+  },
+  "required_summary_fields": [
+    "schema_version",
+    "scenario_id",
+    "seed",
+    "worker_count",
+    "cohort_count",
+    "region_count",
+    "task_count",
+    "scheduled_task_count",
+    "terminal_task_count",
+    "non_terminal_task_count",
+    "cancellation_requests",
+    "obligation_commits",
+    "obligation_aborts",
+    "timer_registrations",
+    "timer_wakeups",
+    "cancellation_drain_steps",
+    "quiescent",
+    "trace_digest",
+    "trace_event_count",
+    "invariant_violations",
+    "shrink_hint",
+    "admission_records"
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "source_scenario_id",
+    "seed",
+    "worker_count",
+    "cohort_count",
+    "region_count",
+    "scheduled_task_count",
+    "terminal_task_count",
+    "non_terminal_task_count",
+    "cancellation_requests",
+    "obligation_commits",
+    "obligation_aborts",
+    "cancellation_drain_steps",
+    "quiescent",
+    "trace_digest",
+    "trace_event_count",
+    "first_invariant_violation",
+    "shrink_hint"
+  ],
+  "invariant_catalog": [
+    {
+      "invariant_id": "runtime-quiescent",
+      "summary_field": "quiescent",
+      "pass_condition": "true",
+      "failure_routes_to": "lab/runtime quiescence owner"
+    },
+    {
+      "invariant_id": "all-tracked-tasks-terminal",
+      "summary_field": "non_terminal_task_count",
+      "pass_condition": "0",
+      "failure_routes_to": "scheduler/task lifecycle owner"
+    },
+    {
+      "invariant_id": "cancellation-request-observed",
+      "summary_field": "cancellation_requests",
+      "pass_condition": "> 0 for cancellation rows",
+      "failure_routes_to": "cancel protocol owner"
+    },
+    {
+      "invariant_id": "obligations-resolved",
+      "summary_field": "obligation_commits + obligation_aborts",
+      "pass_condition": "equals scheduled_task_count * obligations_per_task",
+      "failure_routes_to": "obligation lifecycle owner"
+    },
+    {
+      "invariant_id": "losers-drained",
+      "summary_field": "quiescent && non_terminal_task_count == 0",
+      "pass_condition": "true",
+      "failure_routes_to": "combinator/loser-drain owner"
+    },
+    {
+      "invariant_id": "deterministic-replay",
+      "summary_field": "trace_digest",
+      "pass_condition": "same input scenario produces the same digest and event log",
+      "failure_routes_to": "lab replay determinism owner"
+    }
+  ],
+  "fixture_catalog": [
+    {
+      "fixture_id": "storm-small-executable",
+      "source_scenario_id": "swarm-cancellation-storm",
+      "execution_mode": "run_in_contract",
+      "semantic_dimensions": [
+        "cancellation_storm",
+        "obligation_pressure",
+        "loser_drain",
+        "region_close_quiescence",
+        "deterministic_replay"
+      ],
+      "required_invariants": [
+        "runtime-quiescent",
+        "all-tracked-tasks-terminal",
+        "cancellation-request-observed",
+        "obligations-resolved",
+        "losers-drained",
+        "deterministic-replay"
+      ],
+      "minimum_cancellation_requests": 1,
+      "minimum_obligation_resolutions": 1,
+      "shrink": {
+        "strategy": "preserve-cancel-after-steps-and-reduce-fanout",
+        "first_region_count": 1,
+        "first_tasks_per_region": 2,
+        "preserve_fields": [
+          "seed",
+          "cancel_after_steps",
+          "cancellation_tree_depth",
+          "obligations_per_task"
+        ]
+      }
+    },
+    {
+      "fixture_id": "admission-cancel-drain-validate",
+      "source_scenario_id": "swarm-admission-cancel-drain",
+      "execution_mode": "validate_only",
+      "semantic_dimensions": [
+        "admission_cancel_drain",
+        "obligation_pressure",
+        "region_close_quiescence"
+      ],
+      "required_invariants": [
+        "runtime-quiescent",
+        "all-tracked-tasks-terminal",
+        "obligations-resolved",
+        "losers-drained"
+      ],
+      "minimum_cancellation_requests": 0,
+      "minimum_obligation_resolutions": 1,
+      "shrink": {
+        "strategy": "preserve-admission-limit-and-drain-decision",
+        "first_region_count": 1,
+        "first_tasks_per_region": 2,
+        "preserve_fields": [
+          "region_task_admission_limit",
+          "region_over_limit_decision",
+          "region_cleanup_poll_quota_per_task"
+        ]
+      }
+    },
+    {
+      "fixture_id": "healthy-baseline-contrast",
+      "source_scenario_id": "swarm-minimal-healthy-run",
+      "execution_mode": "validate_only",
+      "semantic_dimensions": [
+        "healthy_baseline",
+        "obligation_pressure",
+        "region_close_quiescence"
+      ],
+      "required_invariants": [
+        "runtime-quiescent",
+        "all-tracked-tasks-terminal",
+        "obligations-resolved",
+        "deterministic-replay"
+      ],
+      "minimum_cancellation_requests": 0,
+      "minimum_obligation_resolutions": 1,
+      "shrink": {
+        "strategy": "baseline-minimize-to-single-region",
+        "first_region_count": 1,
+        "first_tasks_per_region": 1,
+        "preserve_fields": [
+          "seed",
+          "obligations_per_task"
+        ]
+      }
+    }
+  ],
+  "failure_fixtures": [
+    {
+      "case_id": "missing-cancellation-request",
+      "mutates": "fixture_catalog[storm-small-executable].minimum_cancellation_requests",
+      "expected_failure": "cancellation storm rows must require at least one cancellation request"
+    },
+    {
+      "case_id": "missing-obligation-resolution",
+      "mutates": "required_summary_fields",
+      "expected_failure": "obligation commit and abort fields must stay required"
+    },
+    {
+      "case_id": "missing-shrink-metadata",
+      "mutates": "fixture_catalog[*].shrink",
+      "expected_failure": "every fixture must carry deterministic shrink metadata"
+    },
+    {
+      "case_id": "broad-cancellation-claim",
+      "mutates": "proof_lane.does_not_cover",
+      "expected_failure": "contract must keep broad correctness and workspace-health non-claims"
+    },
+    {
+      "case_id": "local-fallback-authorized",
+      "mutates": "proof_lane.local_fallback_allowed",
+      "expected_failure": "local Cargo fallback is never proof for this lane"
+    }
+  ],
+  "operator_report_template": {
+    "format": "ndjson",
+    "path_pattern": "target/fifth-wave/cancellation-storm-replay-corpus/{scenario_id}/report.ndjson",
+    "required_first_line_fields": [
+      "schema_version",
+      "scenario_id",
+      "source_scenario_id",
+      "proof_command_id",
+      "git_commit",
+      "rch_worker",
+      "proof_status"
+    ],
+    "required_summary_line_fields": [
+      "quiescent",
+      "non_terminal_task_count",
+      "cancellation_requests",
+      "obligation_commits",
+      "obligation_aborts",
+      "trace_digest",
+      "first_invariant_violation",
+      "shrink_hint"
+    ]
+  }
+}

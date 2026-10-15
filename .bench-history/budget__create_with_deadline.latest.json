@@ -1,0 +1,12 @@
+{
+  "cv_pct": 4.632529844521457,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 4.90180580715629,
+  "median_ns": 4.878775799187714,
+  "name": "budget/create_with_deadline",
+  "p95_ns": 5.335852197762697,
+  "p99_ns": 5.583355034371638,
+  "profile": "release-perf",
+  "std_dev_ns": 0.22707761693700101
+}

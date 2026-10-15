@@ -1,0 +1,134 @@
+{
+  "contract_version": "atlas-overhead-evidence-v1",
+  "bead_id": "asupersync-bt63nr.12",
+  "description": "Focused overhead evidence for admission-aware atlas instrumentation. The buckets deliberately separate lock-metrics disabled, lock-metrics enabled, atlas snapshot rendering, and planner cost so the result cannot be mistaken for a broad throughput proof.",
+  "source_of_truth": {
+    "evidence_contract": "artifacts/perf/asupersync-bt63nr12-atlas-overhead-evidence-v1.json",
+    "lock_contention_contract": "artifacts/lock_contention_atlas_contract_v1.json",
+    "lock_contention_test": "tests/lock_contention_atlas_contract.rs",
+    "planner_contract": "artifacts/swarm_proof_lane_planner_contract_v1.json",
+    "planner_contract_test": "tests/swarm_proof_lane_planner_contract.rs",
+    "planner_source": "src/lab/swarm_replay.rs",
+    "admission_boundary_contract": "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+    "admission_boundary_test": "tests/admission_aware_runtime_pressure_atlas_contract.rs"
+  },
+  "scope_boundary": {
+    "measures_overhead_only": true,
+    "changes_runtime_policy": false,
+    "touches_scheduler_hot_paths": false,
+    "touches_sync_hot_paths": false,
+    "touches_cancel_hot_paths": false,
+    "touches_obligation_hot_paths": false,
+    "touches_channel_hot_paths": false,
+    "phase6_flamegraph_required": false,
+    "phase6_proof_note": "No scheduler, sync, cancel, obligation, or channel implementation hot paths are edited by this evidence slice; the measurement harness lives in tests and artifacts only.",
+    "production_admission_default_enabled": false,
+    "production_backpressure_default_enabled": false,
+    "production_enablement_requires_later_policy_bead": true
+  },
+  "microharness_policy": {
+    "planner_iterations": 1024,
+    "renderer_iterations": 512,
+    "lock_iterations": 4096,
+    "asserts_thresholds": false,
+    "records_live_rch_receipts": true,
+    "interpretation": "Wall-clock microharness values are scoped to overhead attribution and regression triage. They are not scheduler-performance, throughput, conformance, or production-admission proof."
+  },
+  "required_buckets": [
+    "lock_metrics_disabled",
+    "lock_metrics_enabled",
+    "snapshot_render_json",
+    "snapshot_render_markdown",
+    "planner_cost"
+  ],
+  "buckets": [
+    {
+      "bucket_id": "lock_metrics_disabled",
+      "surface": "ContendedMutex default build without the lock-metrics feature",
+      "feature_flags": [],
+      "microharness_test": "lock_metrics_disabled_overhead_probe_reports_per_op_cost",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr12_lock_metrics_disabled CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lock_contention_atlas_contract lock_metrics_disabled_overhead_probe_reports_per_op_cost -- --nocapture",
+      "expected_signal": "ATLAS_OVERHEAD_SAMPLE bucket=lock_metrics_disabled",
+      "last_rch_receipt": {
+        "status": "measured",
+        "measured_at": "2026-06-03T02:35:46Z",
+        "worker": "vmi1156319",
+        "ops": 4096,
+        "elapsed_ns": 23126565,
+        "per_op_ns": 5646
+      }
+    },
+    {
+      "bucket_id": "lock_metrics_enabled",
+      "surface": "ContendedMutex with opt-in lock-metrics feature enabled",
+      "feature_flags": [
+        "lock-metrics"
+      ],
+      "microharness_test": "lock_metrics_enabled_overhead_probe_reports_per_op_cost",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr12_lock_metrics_enabled CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --features lock-metrics --test lock_contention_atlas_contract lock_metrics_enabled_overhead_probe_reports_per_op_cost -- --nocapture",
+      "expected_signal": "ATLAS_OVERHEAD_SAMPLE bucket=lock_metrics_enabled",
+      "last_rch_receipt": {
+        "status": "measured",
+        "measured_at": "2026-06-03T02:38:03Z",
+        "worker": "vmi1153651",
+        "ops": 4096,
+        "elapsed_ns": 67745776,
+        "per_op_ns": 16539
+      }
+    },
+    {
+      "bucket_id": "snapshot_render_json",
+      "surface": "SwarmProofLaneAtlasReport JSON renderer",
+      "feature_flags": [],
+      "microharness_test": "atlas_overhead_microharness_reports_planner_and_renderer_costs",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr12_swarm_planner_overhead CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract atlas_overhead_microharness_reports_planner_and_renderer_costs -- --nocapture",
+      "expected_signal": "ATLAS_OVERHEAD_SAMPLE bucket=snapshot_render_json",
+      "last_rch_receipt": {
+        "status": "measured",
+        "measured_at": "2026-06-03T02:33:03Z",
+        "worker": "vmi1293453",
+        "ops": 512,
+        "elapsed_ns": 26761081,
+        "per_op_ns": 52267
+      }
+    },
+    {
+      "bucket_id": "snapshot_render_markdown",
+      "surface": "SwarmProofLaneAtlasReport Markdown renderer",
+      "feature_flags": [],
+      "microharness_test": "atlas_overhead_microharness_reports_planner_and_renderer_costs",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr12_swarm_planner_overhead CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract atlas_overhead_microharness_reports_planner_and_renderer_costs -- --nocapture",
+      "expected_signal": "ATLAS_OVERHEAD_SAMPLE bucket=snapshot_render_markdown",
+      "last_rch_receipt": {
+        "status": "measured",
+        "measured_at": "2026-06-03T02:33:03Z",
+        "worker": "vmi1293453",
+        "ops": 512,
+        "elapsed_ns": 8136874,
+        "per_op_ns": 15892
+      }
+    },
+    {
+      "bucket_id": "planner_cost",
+      "surface": "plan_swarm_proof_lane admission-aware planner",
+      "feature_flags": [],
+      "microharness_test": "atlas_overhead_microharness_reports_planner_and_renderer_costs",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bt63nr12_swarm_planner_overhead CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract atlas_overhead_microharness_reports_planner_and_renderer_costs -- --nocapture",
+      "expected_signal": "ATLAS_OVERHEAD_SAMPLE bucket=planner_cost",
+      "last_rch_receipt": {
+        "status": "measured",
+        "measured_at": "2026-06-03T02:33:03Z",
+        "worker": "vmi1293453",
+        "ops": 1024,
+        "elapsed_ns": 30009819,
+        "per_op_ns": 29306
+      }
+    }
+  ],
+  "closeout_requirements": [
+    "Cite focused RCH validation for the lock-metrics disabled bucket.",
+    "Cite focused RCH validation for the lock-metrics enabled bucket.",
+    "Cite focused RCH validation for the planner and snapshot-rendering buckets.",
+    "State that production admission and production backpressure remain opt-in unless a later policy bead proves otherwise."
+  ]
+}

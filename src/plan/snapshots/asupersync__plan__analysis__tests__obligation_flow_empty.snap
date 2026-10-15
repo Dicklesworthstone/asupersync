@@ -1,0 +1,5 @@
+---
+source: src/plan/analysis.rs
+expression: "format!(\"{}\", empty_flow)"
+---
+reserves=[] [all-paths-ok]

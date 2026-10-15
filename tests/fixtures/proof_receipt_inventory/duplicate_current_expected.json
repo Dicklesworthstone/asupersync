@@ -1,0 +1,114 @@
+{
+  "agent": "CoralGorge",
+  "capabilities": [
+    {
+      "active_helper_count": 2,
+      "canonical_helper": "proof-artifact-freshness-receipt",
+      "capability_id": "artifact-freshness",
+      "draft_helper_count": 0,
+      "duplicate_active_count": 1,
+      "helper_count": 2,
+      "needs_review": true,
+      "superseded_helper_count": 0
+    }
+  ],
+  "classification_counts": {
+    "canonical": 1,
+    "duplicate-capability": 1
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [
+    {
+      "bead_id": "",
+      "capability_id": "artifact-freshness",
+      "classification": "canonical",
+      "commit": "5ad65a39f111",
+      "fixture_root": "tests/fixtures/proof_artifact_freshness_receipt",
+      "helper_id": "proof-artifact-freshness-receipt",
+      "owner": "",
+      "script_path": "scripts/proof_artifact_freshness_receipt.py",
+      "status": "shipped",
+      "summary": "Checks current HEAD, branch, and touched-file provenance for proof artifacts.",
+      "superseded_by": "",
+      "test_path": "tests/proof_artifact_freshness_receipt_contract.rs",
+      "validation": [
+        "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract"
+      ]
+    },
+    {
+      "bead_id": "",
+      "capability_id": "artifact-freshness",
+      "classification": "duplicate-capability",
+      "commit": "5ad65a39f000",
+      "fixture_root": "tests/fixtures/validation_artifact_freshness",
+      "helper_id": "validation-artifact-freshness",
+      "owner": "",
+      "script_path": "scripts/validation_artifact_freshness.py",
+      "status": "shipped",
+      "summary": "Checks whether validation artifacts overlap dirty paths.",
+      "superseded_by": "",
+      "test_path": "tests/validation_artifact_freshness_contract.py",
+      "validation": [
+        "python3 -m pytest tests/validation_artifact_freshness_contract.py"
+      ]
+    }
+  ],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [
+    {
+      "canonical_helper": "proof-artifact-freshness-receipt",
+      "capability_id": "artifact-freshness",
+      "kind": "capability-overlap",
+      "recommendation": "coordinate before adding another helper for this capability",
+      "severity": "high"
+    },
+    {
+      "capability_id": "artifact-freshness",
+      "command": "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "helper_id": "proof-artifact-freshness-receipt",
+      "kind": "missing-cargo-target-dir-validation",
+      "recommendation": "include explicit CARGO_TARGET_DIR in the rch exec env before citing this helper",
+      "severity": "high"
+    },
+    {
+      "capability_id": "artifact-freshness",
+      "command": "rch exec -- cargo test -p asupersync --test proof_artifact_freshness_receipt_contract",
+      "helper_id": "proof-artifact-freshness-receipt",
+      "kind": "missing-remote-required-validation",
+      "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
+      "severity": "high"
+    }
+  ],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "capabilities": 1,
+    "duplicate_capabilities": 1,
+    "helpers": 2,
+    "review_cues": 3,
+    "superseded_helpers": 0
+  }
+}

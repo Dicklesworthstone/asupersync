@@ -1,0 +1,81 @@
+{
+  "action_items": [
+    "next safe proposal: asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
+  ],
+  "blocked_proposals": [],
+  "forbidden_actions": {
+    "creates_fuzz_target": false,
+    "edits_fuzz_manifest": false,
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false,
+    "runs_rch": false
+  },
+  "generated_at": "2026-05-08T06:10:00Z",
+  "generated_date": "2026-05-08",
+  "input_schema_version": "fuzz-manifest-lease-queue-input-v1",
+  "manifest_path": "fuzz/Cargo.toml",
+  "manifest_reservation": {
+    "expires_ts": "",
+    "holder": "",
+    "status": "free"
+  },
+  "non_mutating": true,
+  "queue": [
+    {
+      "agent": "MaroonBear",
+      "bead_id": "asupersync-fuzz-a",
+      "blockers": [],
+      "created_ts": "2026-05-08T06:02:00Z",
+      "manifest_path": "fuzz/Cargo.toml",
+      "priority": 1,
+      "proposal_id": "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+      "queue_position": 1,
+      "recommended_action": "reserve-manifest-and-target-before-editing",
+      "status": "ready-to-reserve",
+      "target_name": "http_header_map_invariants",
+      "target_path": "fuzz/fuzz_targets/http_header_map_invariants.rs"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-fuzz-b",
+      "blockers": [],
+      "created_ts": "2026-05-08T06:01:00Z",
+      "manifest_path": "fuzz/Cargo.toml",
+      "priority": 2,
+      "proposal_id": "asupersync-fuzz-b:BlackDove:redis_resp3_map_invariants",
+      "queue_position": 2,
+      "recommended_action": "wait-for-earlier-queue-position",
+      "status": "queued-after-earlier-proposal",
+      "target_name": "redis_resp3_map_invariants",
+      "target_path": "fuzz/fuzz_targets/redis_resp3_map_invariants.rs"
+    }
+  ],
+  "ready_now": [
+    "asupersync-fuzz-a:MaroonBear:http_header_map_invariants"
+  ],
+  "safety_notes": [
+    "receipt is fixture-backed and does not call Agent Mail",
+    "manifest and target reservations must be acquired by the operator before editing",
+    "fuzz/Cargo.toml and fuzz target files are intentionally not modified"
+  ],
+  "schema_version": "fuzz-manifest-lease-queue-v1",
+  "source_counts": {
+    "active_reservations": 0,
+    "current_manifest_targets": 1,
+    "duplicate_target_names": 0,
+    "duplicate_target_paths": 0,
+    "proposals": 2,
+    "reservations": 0
+  },
+  "summary": {
+    "blocked_count": 0,
+    "passes": true,
+    "queued_count": 1,
+    "ready_count": 1,
+    "waiting_count": 0
+  },
+  "waiting_proposals": []
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "6666666666666666666666666666666666666666",
+  "selected_paths": ["./tests/fixtures/clean_overlay_proof_planner/**"],
+  "dirty_entries": [
+    {"path": "./tests/fixtures/clean_overlay_proof_planner/new_case.json", "status": "??"}
+  ],
+  "reservations": [
+    {
+      "id": 13,
+      "agent_name": "SapphireHill",
+      "path_pattern": "tests/fixtures/clean_overlay_proof_planner/*",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    }
+  ],
+  "command_intent": {
+    "description": "normalization and glob proof",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_glob cargo test -p asupersync --test clean_overlay_proof_planner_contract -- --nocapture",
+    "remote_required": true
+  }
+}

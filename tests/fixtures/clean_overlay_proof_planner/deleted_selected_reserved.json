@@ -1,0 +1,23 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "5555555555555555555555555555555555555555",
+  "selected_paths": ["src/runtime/old_planner.rs"],
+  "dirty_entries": [
+    {"path": "src/runtime/old_planner.rs", "status": " D"}
+  ],
+  "reservations": [
+    {
+      "id": 12,
+      "agent_name": "SapphireHill",
+      "path_pattern": "src/runtime/old_planner.rs",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    }
+  ],
+  "command_intent": {
+    "description": "deleted paths are not overlay inputs",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_deleted cargo test -p asupersync --lib old_planner -- --nocapture",
+    "remote_required": true
+  }
+}

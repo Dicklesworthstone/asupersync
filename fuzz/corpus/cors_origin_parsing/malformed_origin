@@ -1,0 +1,1 @@
+{"method":"Options","path":"/cors","origin_scenario":{"MalformedOrigin":{"origin":"not-a-valid-origin"}},"extra_headers":[["Host","api.example.com"]],"cors_policy_type":{"ExactOrigins":{"allowed":["https://trusted.com"]}}}

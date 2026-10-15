@@ -1,0 +1,300 @@
+{
+  "schema_version": "wasm-worker-offload-policy-v1",
+  "description": "Deterministic worker-offload policy for CPU-heavy browser runtime paths.",
+  "invariants": {
+    "structured_ownership": true,
+    "region_close_implies_quiescence": true,
+    "cancellation_protocol": "request-drain-finalize",
+    "no_obligation_leaks": true,
+    "no_ambient_authority": true
+  },
+  "offload_triggers": {
+    "min_estimated_cpu_ns": 2000000,
+    "max_main_thread_slice_ns": 1000000,
+    "queue_backpressure_threshold": 64,
+    "max_inline_retry_count": 2
+  },
+  "worker_pool": {
+    "mode": "bounded-dedicated-pool",
+    "max_workers": 4,
+    "max_inflight_jobs": 512,
+    "max_payload_bytes": 262144,
+    "idle_shutdown_ms": 30000
+  },
+  "message_protocol": {
+    "envelope_version": "worker-envelope-v1",
+    "required_fields": [
+      "message_id",
+      "decision_seq",
+      "job_id",
+      "region_id",
+      "task_id",
+      "obligation_id",
+      "op",
+      "seq_no",
+      "seed",
+      "issued_at_turn",
+      "replay_hash",
+      "payload"
+    ],
+    "request_operations": [
+      "spawn_job",
+      "poll_status",
+      "cancel_job",
+      "drain_job",
+      "finalize_job",
+      "shutdown_worker"
+    ],
+    "event_operations": [
+      "bootstrap_ready",
+      "bootstrap_failed",
+      "status_snapshot",
+      "job_completed",
+      "cancel_acknowledged",
+      "drain_completed",
+      "finalize_completed",
+      "shutdown_completed",
+      "diagnostic"
+    ],
+    "payload_transfer_modes": ["structured_clone"],
+    "owned_payload_required": true,
+    "states": [
+      "created",
+      "queued",
+      "running",
+      "cancel_requested",
+      "draining",
+      "finalizing",
+      "completed",
+      "failed"
+    ],
+    "terminal_states": ["completed", "failed"]
+  },
+  "cancellation_contract": {
+    "request_timeout_ms": 25,
+    "drain_timeout_ms": 250,
+    "finalize_timeout_ms": 250,
+    "required_events": [
+      "worker_cancel_requested",
+      "worker_cancel_acknowledged",
+      "worker_drain_started",
+      "worker_drain_completed",
+      "worker_finalize_completed"
+    ]
+  },
+  "ownership_model": {
+    "region_affinity_required": true,
+    "obligation_commit_required": true,
+    "cross_region_handoff_forbidden": true,
+    "stale_generation_behavior": "typed-error-drop-no-panic"
+  },
+  "determinism_contract": {
+    "seed_propagation_required": true,
+    "decision_seq_required": true,
+    "host_turn_id_required": true,
+    "replay_hash_required": true
+  },
+  "execution_ladder": {
+    "schema_version": "wasm-browser-execution-ladder-v1",
+    "description": "Authoritative browser execution-ladder contract for lane selection, downgrade behavior, diagnostics fields, and explicit non-goals.",
+    "authoritative_contract_sources": [
+      "docs/WASM.md",
+      "docs/wasm_browser_scheduler_semantics.md",
+      "tests/wasm_browser_feasibility_matrix.rs",
+      "tests/wasm_js_exports_coverage_contract.rs"
+    ],
+    "lanes": [
+      {
+        "id": "lane.browser.main_thread.direct_runtime",
+        "rank": 10,
+        "lane_kind": "direct_runtime",
+        "host_roles": ["browser_main_thread"],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "use_current_host_only"
+      },
+      {
+        "id": "lane.browser.dedicated_worker.direct_runtime",
+        "rank": 20,
+        "lane_kind": "direct_runtime",
+        "host_roles": ["dedicated_worker"],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "use_current_host_only"
+      },
+      {
+        "id": "lane.next.server.bridge",
+        "rank": 30,
+        "lane_kind": "bridge_only",
+        "host_roles": ["next_server"],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "host_adaptive_downgrade"
+      },
+      {
+        "id": "lane.next.edge.bridge",
+        "rank": 40,
+        "lane_kind": "bridge_only",
+        "host_roles": ["next_edge"],
+        "fallback_lane_id": "lane.unsupported",
+        "selection_mode": "host_adaptive_downgrade"
+      },
+      {
+        "id": "lane.unsupported",
+        "rank": 99,
+        "lane_kind": "unsupported",
+        "host_roles": ["service_worker", "shared_worker", "non_browser_or_unknown"],
+        "fallback_lane_id": null,
+        "selection_mode": "terminal"
+      }
+    ],
+    "host_role_classification": [
+      {
+        "id": "browser_main_thread",
+        "support_class": "direct_runtime_supported",
+        "selection_order": ["lane.browser.main_thread.direct_runtime", "lane.unsupported"],
+        "default_reason_code": "supported"
+      },
+      {
+        "id": "dedicated_worker",
+        "support_class": "direct_runtime_supported",
+        "selection_order": ["lane.browser.dedicated_worker.direct_runtime", "lane.unsupported"],
+        "default_reason_code": "supported"
+      },
+      {
+        "id": "service_worker",
+        "support_class": "unsupported",
+        "selection_order": ["lane.unsupported"],
+        "default_reason_code": "service_worker_direct_runtime_not_shipped"
+      },
+      {
+        "id": "shared_worker",
+        "support_class": "unsupported",
+        "selection_order": ["lane.unsupported"],
+        "default_reason_code": "shared_worker_direct_runtime_not_shipped"
+      },
+      {
+        "id": "next_server",
+        "support_class": "bridge_only",
+        "selection_order": ["lane.next.server.bridge", "lane.unsupported"],
+        "default_reason_code": "downgrade_to_server_bridge"
+      },
+      {
+        "id": "next_edge",
+        "support_class": "bridge_only",
+        "selection_order": ["lane.next.edge.bridge", "lane.unsupported"],
+        "default_reason_code": "downgrade_to_edge_bridge"
+      },
+      {
+        "id": "non_browser_or_unknown",
+        "support_class": "unsupported",
+        "selection_order": ["lane.unsupported"],
+        "default_reason_code": "unsupported_runtime_context"
+      }
+    ],
+    "reason_codes": {
+      "supported": ["supported"],
+      "skip": [
+        "candidate_host_role_mismatch",
+        "candidate_prerequisite_missing",
+        "candidate_lane_unhealthy"
+      ],
+      "downgrade": [
+        "downgrade_to_server_bridge",
+        "downgrade_to_edge_bridge",
+        "downgrade_to_websocket_or_fetch",
+        "downgrade_to_export_bytes_for_download"
+      ],
+      "health": ["demote_due_to_lane_health"],
+      "policy_denial": [
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
+        "shared_array_buffer_requires_cross_origin_isolation"
+      ],
+      "unsupported": [
+        "missing_global_this",
+        "missing_webassembly",
+        "unsupported_runtime_context",
+        "non_browser_runtime"
+      ]
+    },
+    "current_package_reason_aliases": {
+      "service_worker_not_yet_shipped": "service_worker_direct_runtime_not_shipped",
+      "shared_worker_not_yet_shipped": "shared_worker_direct_runtime_not_shipped",
+      "bridge_only_server_target": "downgrade_to_server_bridge",
+      "bridge_only_edge_target": "downgrade_to_edge_bridge"
+    },
+    "required_log_fields": [
+      "lane_id",
+      "lane_kind",
+      "lane_rank",
+      "host_role",
+      "support_class",
+      "reason_code",
+      "fallback_lane_id",
+      "lane_health_status",
+      "lane_health_failure_count",
+      "lane_health_retry_budget_remaining",
+      "lane_health_cooldown_until_ms",
+      "lane_health_last_trigger",
+      "demoted_lane_id",
+      "policy_schema_version",
+      "repro_command"
+    ],
+    "lane_health": {
+      "demotion_behavior": "bounded_retry_then_fail_closed",
+      "demotion_fallback_lane_id": "lane.unsupported",
+      "default_policy": {
+        "max_consecutive_failures": 2,
+        "cooldown_ms": 30000
+      },
+      "failure_triggers": [
+        "runtime_init_failure",
+        "worker_bootstrap_timeout",
+        "worker_crash",
+        "replay_integrity_failure",
+        "prerequisite_drift",
+        "overload_instability"
+      ],
+      "manual_reset_trigger": "manual_reset"
+    },
+    "repro_command_convention": {
+      "format": "pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>",
+      "must_include_tokens": ["--lane", "--host-role", "--reason"]
+    },
+    "explicit_non_goals": [
+      "service_worker_general_runtime_without_bounded_broker_contract",
+      "shared_worker_general_runtime_without_tenancy_and_lifecycle_contract",
+      "ambient_message_channel_promotion",
+      "shared_array_buffer_multi_worker_default_lane",
+      "raw_socket_filesystem_process_parity"
+    ]
+  },
+  "test_matrix": [
+    {
+      "id": "WKR-OFFLOAD-CPU-BURST",
+      "focus": "offload trigger threshold selection under burst compute",
+      "required": true
+    },
+    {
+      "id": "WKR-CANCEL-PROPAGATION",
+      "focus": "request-drain-finalize propagation through worker boundary",
+      "required": true
+    },
+    {
+      "id": "WKR-OWNERSHIP-NO-CROSS-REGION",
+      "focus": "reject cross-region ownership transfers",
+      "required": true
+    },
+    {
+      "id": "WKR-DETERMINISTIC-REPLAY",
+      "focus": "stable event/replay hash under same seed",
+      "required": true
+    },
+    {
+      "id": "WKR-PAYLOAD-BOUNDARY",
+      "focus": "payload size and queue pressure handling",
+      "required": true
+    }
+  ],
+  "output": {
+    "summary_path": "artifacts/wasm_worker_offload_summary.json"
+  }
+}

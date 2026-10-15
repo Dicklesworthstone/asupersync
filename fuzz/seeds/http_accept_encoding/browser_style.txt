@@ -1,0 +1,1 @@
+br;q=1.0, gzip;q=0.8, deflate;q=0.6

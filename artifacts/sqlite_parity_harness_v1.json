@@ -1,0 +1,2085 @@
+{
+  "schema_version": 6,
+  "phase1_bead_id": "asupersync-ym2wtv.2.1",
+  "phase2_bead_id": "asupersync-ym2wtv.2.2",
+  "phase4_bead_id": "asupersync-ym2wtv.2.4",
+  "capability_id": "CAP-SQLITE",
+  "placement": {
+    "kind": "neutral_standalone_consumer",
+    "manifest": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+    "workspace_member": false,
+    "independent_lockfile": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+    "dependency_direction": "consumer_to_asupersync_and_frankensqlite_only",
+    "asupersync_root_has_frankensqlite_edge": false,
+    "runtime_boundary": "The current adapter runs on local asupersync 0.4.9; pinned FrankenSQLite v0.1.18 runs on its published asupersync 0.3.10 dependency. The neutral consumer keeps both Cx/runtime identities explicit and normalizes only public lifecycle outcomes."
+  },
+  "phase1_pins": {
+    "asupersync": {
+      "source": "local_path",
+      "revision": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "features": [
+        "sqlite"
+      ]
+    },
+    "frankensqlite": {
+      "source": "https://github.com/Dicklesworthstone/frankensqlite.git",
+      "revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+      "release_tag": "v0.1.18",
+      "package": "fsqlite",
+      "features": [
+        "native"
+      ]
+    },
+    "lockfile_sha256": "4eb02a45afc9cca1d6149530ad83800c6e56c2cbe0c4eb07b1982d2bae503a3a",
+    "cargo_profile": "dev",
+    "target": "x86_64-unknown-linux-gnu",
+    "host": "linux-x86_64-rch-worker"
+  },
+  "phase1_vector_contract": {
+    "path": "artifacts/sqlite_conformance_vectors_v1.json",
+    "sha256": "1aebfcf33decb88cd359d507f9b504fcd5f0f35d5e47795e445bba42dcb0e856",
+    "schema_version": 1,
+    "deterministic_validation": "tests/sqlite_parity_harness_contract.rs",
+    "smoke_vector": "SQLITE-PARITY-SMOKE-001",
+    "fields": [
+      "setup",
+      "operation_sequence",
+      "expected_values",
+      "expected_errors",
+      "transaction_state",
+      "cancellation_state",
+      "resource_state",
+      "normalization",
+      "unsupported_capability"
+    ]
+  },
+  "phase1_execution": {
+    "status": "PASS",
+    "worker": "vmi1227854",
+    "remote_exit_code": 0,
+    "remote_command_elapsed_ms": 375263,
+    "clean_overlay": {
+      "base": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "overlay_paths": [],
+      "no_overlay": true
+    },
+    "command": "RCH_WORKER=vmi1227854 RCH_REQUIRE_REMOTE=1 rch exec --base 57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5 --clean-overlay --no-overlay -- env ASUPERSYNC_SOURCE_REVISION=57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_TARGET_DIR=/tmp/rch_target_sqlite_parity_consumer CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo run --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+    "evidence": {
+      "evidence_schema_version": 1,
+      "vector_schema_version": 1,
+      "suite_id": "sqlite-neutral-parity-v1",
+      "capability_id": "CAP-SQLITE",
+      "provenance": {
+        "asupersync_revision": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+        "frankensqlite_revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+        "asupersync_features": [
+          "sqlite"
+        ],
+        "frankensqlite_features": [
+          "native"
+        ],
+        "cargo_profile": "dev",
+        "target": "x86_64-unknown-linux-gnu",
+        "host": "linux-x86_64-rch-worker"
+      },
+      "engine_results": [
+        {
+          "engine": "asupersync",
+          "vectors": [
+            {
+              "vector_id": "SQLITE-PARITY-SMOKE-001",
+              "setup": [
+                {
+                  "id": "create-table",
+                  "status": "ok"
+                }
+              ],
+              "operations": [
+                {
+                  "sequence": 1,
+                  "id": "insert-two",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": 2,
+                    "values": [],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                },
+                {
+                  "sequence": 2,
+                  "id": "query-beta",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": null,
+                    "values": [
+                      {
+                        "type": "integer",
+                        "value": 2
+                      },
+                      {
+                        "type": "text",
+                        "value": "beta"
+                      }
+                    ],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                }
+              ],
+              "final_state": {
+                "transaction_state": "none",
+                "cancellation_state": "not_requested",
+                "resource_state": {
+                  "connection": "closed",
+                  "open_transactions": 0,
+                  "background_work": "none_observed"
+                }
+              },
+              "unsupported": []
+            }
+          ]
+        },
+        {
+          "engine": "frankensqlite",
+          "vectors": [
+            {
+              "vector_id": "SQLITE-PARITY-SMOKE-001",
+              "setup": [
+                {
+                  "id": "create-table",
+                  "status": "ok"
+                }
+              ],
+              "operations": [
+                {
+                  "sequence": 1,
+                  "id": "insert-two",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": 2,
+                    "values": [],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                },
+                {
+                  "sequence": 2,
+                  "id": "query-beta",
+                  "outcome": {
+                    "status": "ok",
+                    "affected_rows": null,
+                    "values": [
+                      {
+                        "type": "integer",
+                        "value": 2
+                      },
+                      {
+                        "type": "text",
+                        "value": "beta"
+                      }
+                    ],
+                    "error_class": null,
+                    "transaction_state": "none",
+                    "cancellation_state": "not_requested",
+                    "resource_state": {
+                      "connection": "open",
+                      "open_transactions": 0,
+                      "background_work": "none_observed"
+                    }
+                  }
+                }
+              ],
+              "final_state": {
+                "transaction_state": "none",
+                "cancellation_state": "not_requested",
+                "resource_state": {
+                  "connection": "closed",
+                  "open_transactions": 0,
+                  "background_work": "none_observed"
+                }
+              },
+              "unsupported": []
+            }
+          ]
+        }
+      ],
+      "comparison": {
+        "comparable": true,
+        "compared_vectors": 1,
+        "mismatches": []
+      }
+    }
+  },
+  "phase2": {
+    "scope": "open_configuration_pool_admission_blocking_bridge_cx_cancellation_shutdown_and_quiescence",
+    "pins": {
+      "asupersync": {
+        "source": "trj_overlay",
+        "revision": "10afeedb787680e3fa4209b3efc70276fe776825+sqlite-p2-final-overlay",
+        "features": [
+          "sqlite"
+        ]
+      },
+      "compatibility_runtime": {
+        "package": "asupersync",
+        "version": "0.3.10",
+        "source": "crates.io",
+        "default_features": false,
+        "role": "published runtime type identity required by FrankenSQLite v0.1.18"
+      },
+      "frankensqlite": {
+        "source": "https://github.com/Dicklesworthstone/frankensqlite.git",
+        "revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+        "release_tag": "v0.1.18",
+        "packages": [
+          "fsqlite",
+          "fsqlite-types"
+        ],
+        "features": [
+          "native",
+          "async-api"
+        ]
+      },
+      "lockfile_sha256": "b6eeaee417a1898c9a4ed5d5847746859382ead9ea19dbc5e3d210eba17d797b",
+      "cargo_profile": "dev",
+      "target": "x86_64-unknown-linux-gnu",
+      "host": "linux-x86_64-trj"
+    },
+    "vector_contract": {
+      "path": "artifacts/sqlite_conformance_vectors_v1.json",
+      "sha256": "d0b9a13962113942029b6cdc72226da1092a15d42c9cc52b873607262f2956cd",
+      "schema_version": 2,
+      "deterministic_validation": "tests/sqlite_parity_harness_contract.rs",
+      "vector_ids": [
+        "SQLITE-PARITY-P2-MEMORY-CONFIG-001",
+        "SQLITE-PARITY-P2-PATH-OPEN-002",
+        "SQLITE-PARITY-P2-OPEN-FAILURE-003",
+        "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+        "SQLITE-PARITY-P2-POOL-CANCEL-005",
+        "SQLITE-PARITY-P2-URI-UNSUPPORTED-006"
+      ],
+      "resource_invariants": [
+        "connection_closed_or_not_opened",
+        "open_transactions_zero",
+        "admission_waiters_zero",
+        "admission_permits_restored",
+        "blocking_pending_busy_active_zero_after_runtime_shutdown",
+        "region_closed"
+      ]
+    },
+    "execution": {
+      "status": "PASS",
+      "executor": "trj",
+      "remote_host": "threadripperje",
+      "exit_code": 0,
+      "remote_job_created": false,
+      "locked_compile_dev_seconds": 5.3,
+      "evidence_sha256": "bbe14ad256c84862a4fefa2bc11942cd798af13f96802083b40fa98f6dbb1a20",
+      "command": "ssh trj 'cd /data/projects/asupersync && env ASUPERSYNC_SOURCE_REVISION=10afeedb787680e3fa4209b3efc70276fe776825+sqlite-p2-final-overlay SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-trj CARGO_TARGET_DIR=/data/cargo-targets/asupersync-sqlite-parity-p2 CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 /home/ubuntu/.cargo/bin/cargo run --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml'",
+      "validation": {
+        "locked_consumer": "PASS",
+        "consumer_clippy_deny_warnings": "PASS",
+        "sqlite_parity_harness_contract": "5_passed_0_failed"
+      },
+      "evidence": {
+        "evidence_schema_version": 1,
+        "vector_schema_version": 2,
+        "suite_id": "sqlite-neutral-parity-v1",
+        "capability_id": "CAP-SQLITE",
+        "provenance": {
+          "asupersync_revision": "10afeedb787680e3fa4209b3efc70276fe776825+sqlite-p2-final-overlay",
+          "frankensqlite_revision": "92f9e9833f859ebcbe27e9fef16d9cad4372bbd7",
+          "asupersync_features": [
+            "sqlite"
+          ],
+          "frankensqlite_features": [
+            "native",
+            "async-api"
+          ],
+          "cargo_profile": "dev",
+          "target": "x86_64-unknown-linux-gnu",
+          "host": "linux-x86_64-trj"
+        },
+        "engine_results": [
+          {
+            "engine": "asupersync",
+            "vectors": [
+              {
+                "vector_id": "SQLITE-PARITY-P2-MEMORY-CONFIG-001",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "private_memory_opened",
+                  "configuration_state": "foreign_keys_on_busy_timeout_37",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "explicit_close_confirmed",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-PATH-OPEN-002",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "file_path_opened",
+                  "configuration_state": "common_defaults_accepted",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "explicit_close_confirmed",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-OPEN-FAILURE-003",
+                "outcome": {
+                  "status": "error",
+                  "error_class": "open_rejected",
+                  "open_state": "rejected",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+                "outcome": {
+                  "status": "cancelled",
+                  "error_class": "cancelled",
+                  "open_state": "cancelled_before_open",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "not_started",
+                  "cancellation_state": "native_cx_observed",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-POOL-CANCEL-005",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "private_memory_opened",
+                  "configuration_state": "common_defaults_accepted",
+                  "admission_state": "saturated_waiter_cancelled_and_capacity_restored",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "checkout_cancelled_after_parked",
+                  "close_state": "closed_with_checkout_in_flight_then_drained",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 1,
+                    "admission_available": 1,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 1,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-URI-UNSUPPORTED-006",
+                "outcome": {
+                  "status": "unsupported",
+                  "error_class": "unsupported_by_common_contract",
+                  "open_state": "not_attempted",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "not_started",
+                  "cancellation_state": "not_requested",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": [
+                  {
+                    "engine": "asupersync",
+                    "capability": "sqlite_uri_filename_open",
+                    "reason": "The incumbent P2 public surface separates validated Path open from open_in_memory and does not promise SQLite URI filename flags."
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "engine": "frankensqlite",
+            "vectors": [
+              {
+                "vector_id": "SQLITE-PARITY-P2-MEMORY-CONFIG-001",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "private_memory_opened",
+                  "configuration_state": "foreign_keys_on_busy_timeout_37",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "explicit_close_confirmed",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-PATH-OPEN-002",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "file_path_opened",
+                  "configuration_state": "common_defaults_accepted",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "explicit_close_confirmed",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-OPEN-FAILURE-003",
+                "outcome": {
+                  "status": "error",
+                  "error_class": "open_rejected",
+                  "open_state": "rejected",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "not_requested",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+                "outcome": {
+                  "status": "cancelled",
+                  "error_class": "cancelled",
+                  "open_state": "cancelled_before_open",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "not_started",
+                  "cancellation_state": "native_cx_observed",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-POOL-CANCEL-005",
+                "outcome": {
+                  "status": "ok",
+                  "error_class": null,
+                  "open_state": "private_memory_opened",
+                  "configuration_state": "common_defaults_accepted",
+                  "admission_state": "saturated_waiter_cancelled_and_capacity_restored",
+                  "blocking_bridge_state": "worker_completed",
+                  "cancellation_state": "checkout_cancelled_after_parked",
+                  "close_state": "closed_with_checkout_in_flight_then_drained",
+                  "resource_state": {
+                    "connection": "closed",
+                    "open_transactions": 0,
+                    "admission_capacity": 1,
+                    "admission_available": 1,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 1,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": []
+              },
+              {
+                "vector_id": "SQLITE-PARITY-P2-URI-UNSUPPORTED-006",
+                "outcome": {
+                  "status": "unsupported",
+                  "error_class": "unsupported_by_common_contract",
+                  "open_state": "not_attempted",
+                  "configuration_state": "not_started",
+                  "admission_state": "not_exercised",
+                  "blocking_bridge_state": "not_started",
+                  "cancellation_state": "not_requested",
+                  "close_state": "not_opened",
+                  "resource_state": {
+                    "connection": "not_opened",
+                    "open_transactions": 0,
+                    "admission_capacity": 0,
+                    "admission_available": 0,
+                    "admission_waiters": 0,
+                    "admission_cancellations": 0,
+                    "blocking_pending": 0,
+                    "blocking_busy": 0,
+                    "blocking_active": 0,
+                    "region_state": "closed",
+                    "background_work": "none_observed_after_runtime_shutdown"
+                  }
+                },
+                "unsupported": [
+                  {
+                    "engine": "frankensqlite",
+                    "capability": "sqlite_uri_filename_open",
+                    "reason": "The pinned AsyncConnection P2 surface accepts a String path but does not publish an equivalent URI filename contract."
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "comparison": {
+          "comparable": true,
+          "compared_vectors": 6,
+          "mismatches": []
+        }
+      }
+    }
+  },
+  "phase3": {
+    "bead_id": "asupersync-ym2wtv.2.3",
+    "status": "PASS_BOUNDED_COMMON_OBSERVABLE_MATRIX_WITH_EXPLICIT_DIFFERENCES_AND_UNSUPPORTED",
+    "scope": "prepared_statement_bind_reset_cache_schema_invalid_use_busy_and_cleanup",
+    "consumer_source": {
+      "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
+    },
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
+      "compared_cases": 7,
+      "case_ids": [
+        "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "SQLITE-PARITY-P3-INVALID-USE-006",
+        "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "SQLITE-PARITY-P3-BUSY-008"
+      ],
+      "normalization": {
+        "bindings": "Compare successful positional and named-placeholder execution through each engine's public positional value slice.",
+        "reuse": "Compare A/B/missing/A results without claiming equivalent private statement caches or cache telemetry.",
+        "invalid_use": "Compare malformed SQL and too-few binding rejection; preserve the observed surplus-binding difference as an explicit non-equivalent row.",
+        "cancellation": "Compare pre-cancelled no-mutation and same-connection reuse; retain Asupersync row-stream finalization as native-only evidence.",
+        "busy": "Execute lock contention directly for Asupersync and in a kill-and-reap child process for FrankenSQLite so a non-returning call is a bounded observation rather than a hung proof lane.",
+        "quiescence": "Close ordinary connections and require both parent runtimes to terminate with zero pending, busy, or active blocking work. A timed-out busy child is killed and reaped; no child-connection cleanup claim is made."
+      }
+    },
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P3-POSITIONAL-BIND-001",
+        "boundary": "positional_binding_all_public_value_types",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_parameter_binding_boundaries"
+        ],
+        "required_observations": [
+          "null_integer_real_text_and_blob_round_trip",
+          "quoted_and_multiline_text_is_bound_not_interpolated",
+          "connection_closes_on_drop"
+        ],
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-POSITIONAL-BIND-001"
+      },
+      {
+        "id": "SQLITE-PARITY-P3-NAMED-BIND-002",
+        "boundary": "named_placeholders_bound_by_sqlite_parameter_index",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_named_placeholders_bind_in_parameter_index_order"
+        ],
+        "required_observations": [
+          "named_placeholders_are_accepted",
+          "public_positional_value_slice_binds_in_sqlite_parameter_index_order",
+          "no_named_value_map_api_is_claimed"
+        ],
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-NAMED-BIND-002"
+      },
+      {
+        "id": "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "boundary": "cached_statement_reuse_and_reset",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_cached_statement_resets_between_bindings",
+          "database::sqlite::tests::sqlite_prepared_statement_reset_audit::audit_prepare_cached_statement_reuse"
+        ],
+        "required_observations": [
+          "identical_sql_reuses_prepare_cached_path",
+          "new_parameters_replace_old_bindings",
+          "row_step_state_does_not_leak_between_calls"
+        ],
+        "frankensqlite_status": "PASS_OBSERVABLE_EXECUTION_ONLY",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-RESET-CACHE-HIT-003",
+        "frankensqlite_reason": "The A/B/missing/A sequence is equal, but the pinned async surface exposes no cache telemetry, so only repeated observable execution is compared."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-CACHE-EVICTION-004",
+        "boundary": "capacity_one_cache_eviction_and_reprepare",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares"
+        ],
+        "required_observations": [
+          "identical_statement_reuse_succeeds",
+          "distinct_statement_applies_capacity_pressure",
+          "evicted_statement_reprepares_without_stale_state"
+        ],
+        "frankensqlite_status": "NO_COMMON_PUBLIC_CACHE_CAPACITY_CONTROL",
+        "frankensqlite_reason": "The pinned neutral AsyncConnection adapter does not publish a cache-capacity control equivalent to rusqlite set_prepared_statement_cache_capacity."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-SCHEMA-CHANGE-005",
+        "boundary": "cached_statement_schema_invalidation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_cached_statement_survives_schema_change",
+          "database::sqlite::tests::sqlite_prepared_statement_cache_capacity_one_reuses_evicts_and_reprepares"
+        ],
+        "required_observations": [
+          "cached_query_succeeds_before_schema_change",
+          "schema_rebuild_does_not_return_stale_row_shape_or_value",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "PASS",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-SCHEMA-CHANGE-005"
+      },
+      {
+        "id": "SQLITE-PARITY-P3-INVALID-USE-006",
+        "boundary": "malformed_sql_and_parameter_arity_errors",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_malformed_and_arity_errors_release_statement_state"
+        ],
+        "required_observations": [
+          "malformed_prepare_returns_typed_sqlite_error",
+          "too_few_parameters_return_typed_sqlite_error",
+          "asupersync_rejects_surplus_parameters_while_pinned_frankensqlite_accepts_and_ignores_them",
+          "failed_statements_release_state_and_connection_recovers"
+        ],
+        "frankensqlite_status": "PASS_WITH_EXPLICIT_SURPLUS_PARAMETER_DIFFERENCE",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-INVALID-USE-006",
+        "intentional_difference": {
+          "boundary": "surplus_parameter_binding",
+          "asupersync": "typed_sql_rejection",
+          "frankensqlite": "accepts_and_ignores_surplus_parameter"
+        }
+      },
+      {
+        "id": "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "boundary": "statement_finalize_drop_and_pre_cancel_cleanup",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_dropped_row_stream_finalizes_statement",
+          "conformance::sqlite_prepared_statements::tests::sqlite_cancelled_execute_does_not_mutate_state"
+        ],
+        "required_observations": [
+          "dropping_partial_row_stream_releases_statement",
+          "pre_cancelled_execute_does_not_mutate_database",
+          "connection_is_reusable_after_drop_and_cancel"
+        ],
+        "frankensqlite_status": "PASS_PRE_CANCEL_ONLY_NO_ROW_STREAM_BOUNDARY",
+        "frankensqlite_evidence": "SQLITE-PARITY-P3-FINALIZE-CANCEL-007",
+        "frankensqlite_reason": "Pre-cancelled no-mutation and reuse are executable and equal. The pinned AsyncConnection materializes Vec<Row> and exposes no public partial row-stream drop boundary."
+      },
+      {
+        "id": "SQLITE-PARITY-P3-BUSY-008",
+        "boundary": "prepared_statement_busy_error_and_cleanup",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "conformance::sqlite_prepared_statements::tests::sqlite_busy_error_mapping_is_preserved"
+        ],
+        "required_observations": [
+          "write_lock_is_held_by_separate_connection",
+          "blocked_statement_returns_typed_sqlite_busy_or_locked_error",
+          "holder_transaction_rolls_back"
+        ],
+        "frankensqlite_status": "BOUNDED_WATCHDOG_TIMEOUT",
+        "frankensqlite_reason": "With PRAGMA busy_timeout=0, the pinned async write did not return within five seconds. The neutral consumer killed and reaped the isolated child and makes no typed-error, reuse, or child-connection cleanup claim."
+      }
+    ],
+    "verification": {
+      "focused_conformance": {
+        "rch_job": "j-29983010363277369",
+        "worker": "ovh-a",
+        "base": "034e5ba089e192077a93052c080b17d8dfb47dcb",
+        "overlay_fingerprint": "daaf8587faa5fc6515e219e278525dacb79fe6d37bf0a6cae98153454c67b6f4",
+        "status": "PASS",
+        "passed": 9,
+        "failed": 0,
+        "scope": "sqlite_prepared_statement conformance module"
+      },
+      "focused_cache_unit": {
+        "rch_job": "j-29983010363277371",
+        "worker": "ovh-a",
+        "base": "034e5ba089e192077a93052c080b17d8dfb47dcb",
+        "overlay_fingerprint": "71261e90db43b9089c2532af57078147adbc7aad43f49a3097db6d0928363e5c",
+        "status": "PASS",
+        "passed": 5,
+        "failed": 0,
+        "scope": "capacity-one cache reuse eviction reprepare test"
+      },
+      "neutral_cross_engine_execution": {
+        "status": "PASS",
+        "rch_job": "j-29984462414544930",
+        "worker": "hz1",
+        "base": "dcfb01cfa8d3916552002d6837b9acedc7ced116",
+        "overlay_fingerprint": "a7da9decd26af4e4eb7bdced14b9e84899719cde6e2dbca340ad37437e2bd82f",
+        "overlay_paths": [
+          "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+        ],
+        "remote_exit_code": 0,
+        "remote_command_elapsed_ms": 591644,
+        "command": "RCH_REQUIRE_REMOTE=1 RCH_WORKER=hz1 rch exec --base dcfb01cfa8d3916552002d6837b9acedc7ced116 --clean-overlay --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env ASUPERSYNC_SOURCE_REVISION=dcfb01cfa8d3916552002d6837b9acedc7ced116 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 2 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+        "evidence_summary": {
+          "matrix_id": "sqlite-neutral-prepared-statement-parity-v1",
+          "compared_cases": 7,
+          "mismatches": [],
+          "intentional_difference_count": 2,
+          "unsupported_count": 2,
+          "asupersync_runtime_quiescent": true,
+          "frankensqlite_parent_runtime_quiescent": true,
+          "frankensqlite_busy_child_cleanup": "killed_and_reaped_after_5s_watchdog"
+        }
+      }
+    },
+    "no_claims": [
+      "Asupersync uses a positional SqliteValue slice even when SQL contains named placeholders; no named value-map API is claimed.",
+      "The cache-capacity row proves adapter behavior under the configured rusqlite cache; it does not make rusqlite internals normative for another engine.",
+      "FrankenSQLite async cache capacity and telemetry, and partial row-stream finalization, remain unsupported rather than being inferred from successful query results.",
+      "The surplus-parameter and bounded busy-timeout rows are intentional observed differences, not parity claims or reasons to weaken Asupersync's fail-closed behavior.",
+      "Killing and reaping the isolated busy child bounds the proof process; it does not prove that the child connection cleaned up cooperatively.",
+      "This phase does not authorize dependency cutover or public API removal."
+    ]
+  },
+  "phase4": {
+    "bead_id": "asupersync-ym2wtv.2.4",
+    "status": "PASS_BOUNDED_COMMON_MATRIX_WITH_NATIVE_CANCELLATION",
+    "scope": "deferred_immediate_exclusive_savepoint_constraint_rollback_reuse_and_quiescence",
+    "consumer_source": {
+      "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
+    },
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-transaction-parity-v1",
+      "compared_cases": 5,
+      "case_ids": [
+        "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+        "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+        "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003",
+        "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004",
+        "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005"
+      ],
+      "normalization": {
+        "transaction_modes": "Execute each engine's public deferred, immediate, and exclusive transaction-control surface without equating private transaction representations.",
+        "visible_state": "Compare ordered committed labels after the terminal operation.",
+        "conflict": "Normalize only primary-key or unique-constraint rejection to constraint_violation.",
+        "reuse": "After every terminal path, begin and roll back a fresh transaction on the same connection.",
+        "quiescence": "Close each connection, drop its matching runtime, and require zero pending, busy, or active blocking work."
+      }
+    },
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P4-MODES-001",
+        "boundary": "deferred_immediate_and_exclusive_begin_modes",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS",
+        "evidence": [
+          "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+          "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+          "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003"
+        ]
+      },
+      {
+        "id": "SQLITE-PARITY-P4-SAVEPOINT-002",
+        "boundary": "savepoint_partial_rollback_and_outer_commit",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS",
+        "evidence": [
+          "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004"
+        ]
+      },
+      {
+        "id": "SQLITE-PARITY-P4-CONFLICT-003",
+        "boundary": "constraint_error_preservation_rollback_and_reuse",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS",
+        "evidence": [
+          "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005"
+        ]
+      },
+      {
+        "id": "SQLITE-PARITY-P4-DROP-004",
+        "boundary": "unfinished_transaction_guard_drop",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "transaction_drop_rolls_back_uncommitted_work",
+          "dropped_transaction_rolls_back_before_followup_connection_operation",
+          "dropped_transaction_with_obligation_aborts_and_poisons"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_RAII_TRANSACTION_GUARD",
+        "frankensqlite_reason": "The pinned AsyncConnection transaction API is connection-scoped begin/commit/rollback and does not return a public RAII transaction guard whose drop can be compared."
+      },
+      {
+        "id": "SQLITE-PARITY-P4-CANCEL-005",
+        "boundary": "transaction_body_cancellation_and_physical_rollback_before_return",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent",
+          "sqlite_real_disk_cancel_during_immediate_tx_rolls_back_before_return",
+          "with_sqlite_transaction_cancelled_savepoint_release_poison_commit"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_CLOSURE_CANCELLATION_HOOK",
+        "frankensqlite_reason": "The pinned AsyncConnection exposes cancellable individual calls but no public closure-based transaction helper or worker-phase witness equivalent to with_sqlite_transaction."
+      },
+      {
+        "id": "SQLITE-PARITY-P4-TERMINAL-006",
+        "boundary": "explicit_commit_rollback_terminal_state_and_same_connection_reuse",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS",
+        "evidence": [
+          "all five neutral cases report open_transactions=0",
+          "all five neutral cases begin and roll back a reuse probe"
+        ],
+        "no_claim": "Neither public adapter exposes a deterministic commit-I/O or rollback-I/O failure injection hook, so injected terminal-I/O failure parity is not claimed."
+      },
+      {
+        "id": "SQLITE-PARITY-P4-POOL-007",
+        "boundary": "connection_state_safe_for_reuse_or_fail_closed_eviction",
+        "asupersync_status": "PASS_REUSE_EVICTION_NOT_CLAIMED",
+        "frankensqlite_status": "PASS_REUSE_EVICTION_NOT_CLAIMED",
+        "evidence": [
+          "all terminal paths prove a fresh transaction can begin and roll back on the same connection",
+          "all terminal paths close the connection before runtime shutdown"
+        ],
+        "no_claim": "The neutral consumer has no common public connection-pool eviction adapter, so pool checkout or eviction policy parity is not claimed."
+      },
+      {
+        "id": "SQLITE-PARITY-P4-QUIESCENCE-008",
+        "boundary": "deterministic_contention_and_runtime_quiescence",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS_BOUNDED_RUNTIME_QUIESCENCE",
+        "evidence": [
+          "busy_timeout_produces_lock_error_under_write_contention",
+          "both neutral runtimes terminate with zero pending busy and active blocking work"
+        ],
+        "no_claim": "The deterministic two-connection busy test is Asupersync typed-error authority. The P3 neutral matrix bounds the pinned FrankenSQLite non-returning write-lock attempt with an external five-second kill-and-reap watchdog; that is not a public busy-timeout or cooperative-cleanup claim."
+      }
+    ],
+    "execution": {
+      "status": "PASS",
+      "rch_job": "j-29984462414544915",
+      "worker": "ovh-a",
+      "base": "1127d64d300a2a52524b7bb4870c7a521f7d55aa",
+      "overlay_fingerprint": "27bca74d43b06c93b7fe60c8644ba2ab2167218c68e8698ba34c17cf62d7f128",
+      "overlay_paths": [
+        "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+      ],
+      "remote_exit_code": 0,
+      "remote_command_elapsed_ms": 84940,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec --base 1127d64d300a2a52524b7bb4870c7a521f7d55aa --clean-overlay --overlay-path tests/fixtures/sqlite-parity-consumer/src/main.rs -- env ASUPERSYNC_SOURCE_REVISION=1127d64d300a2a52524b7bb4870c7a521f7d55aa SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 cargo run --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+      "evidence": {
+        "bead_id": "asupersync-ym2wtv.2.4",
+        "matrix_id": "sqlite-neutral-transaction-parity-v1",
+        "status": "PASS",
+        "compared_cases": 5,
+        "asupersync": [
+          {
+            "case_id": "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+            "terminal_state": "committed",
+            "visible_labels": [
+              "deferred"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+            "terminal_state": "rolled_back",
+            "visible_labels": [],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003",
+            "terminal_state": "committed",
+            "visible_labels": [
+              "exclusive"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004",
+            "terminal_state": "committed_after_savepoint_rollback",
+            "visible_labels": [
+              "base",
+              "after"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005",
+            "terminal_state": "constraint_rejected_then_recovered",
+            "visible_labels": [],
+            "conflict_class": "constraint_violation",
+            "connection_reusable": true,
+            "open_transactions": 0
+          }
+        ],
+        "frankensqlite": [
+          {
+            "case_id": "SQLITE-PARITY-P4-DEFERRED-COMMIT-001",
+            "terminal_state": "committed",
+            "visible_labels": [
+              "deferred"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-IMMEDIATE-ROLLBACK-002",
+            "terminal_state": "rolled_back",
+            "visible_labels": [],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-EXCLUSIVE-COMMIT-003",
+            "terminal_state": "committed",
+            "visible_labels": [
+              "exclusive"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-SAVEPOINT-PARTIAL-ROLLBACK-004",
+            "terminal_state": "committed_after_savepoint_rollback",
+            "visible_labels": [
+              "base",
+              "after"
+            ],
+            "conflict_class": null,
+            "connection_reusable": true,
+            "open_transactions": 0
+          },
+          {
+            "case_id": "SQLITE-PARITY-P4-CONSTRAINT-CONFLICT-RECOVERY-005",
+            "terminal_state": "constraint_rejected_then_recovered",
+            "visible_labels": [],
+            "conflict_class": "constraint_violation",
+            "connection_reusable": true,
+            "open_transactions": 0
+          }
+        ],
+        "mismatches": []
+      }
+    },
+    "native_cancellation_support": {
+      "implementation_commit": "0fd29c849bace7769e08eb453999c7a964a37081",
+      "tests": [
+        "sqlite_real_disk_cancel_during_tx_body_rolls_back_and_leaves_file_consistent",
+        "sqlite_real_disk_cancel_during_immediate_tx_rolls_back_before_return",
+        "with_sqlite_transaction_cancelled_savepoint_release_poison_commit"
+      ],
+      "invariants": [
+        "cancelled_helper_waits_for_physical_rollback_before_return",
+        "zero_timeout_reference_begin_immediate_succeeds_immediately_after_helper_return",
+        "cancelled_rows_are_not_visible",
+        "connection_reopens_and_remains_writable",
+        "rollback_required_savepoint_exit_is_terminal_before_follow_up"
+      ]
+    },
+    "no_claims": [
+      "The neutral transaction matrix uses a deterministic constraint conflict. P3 separately proves Asupersync typed busy cleanup and records the pinned FrankenSQLite write-lock call's bounded watchdog timeout without relabeling it as parity.",
+      "The pinned FrankenSQLite adapter does not expose an equivalent closure-based cancellation hook, so native cancellation evidence is not relabeled as cross-engine parity.",
+      "This bounded matrix does not claim every drop, panic, timeout, pool, or concurrency schedule is equivalent.",
+      "This phase does not authorize dependency cutover or public API removal."
+    ]
+  },
+  "phase5": {
+    "bead_id": "asupersync-ym2wtv.2.5",
+    "status": "PASS_WITH_EXPLICIT_UNSUPPORTED_CROSS_ENGINE_CELLS",
+    "scope": "queued_running_finishing_cancellation_timeout_explicit_interrupt_shutdown_and_reuse",
+    "asupersync_source_revision": "4049a7e67aea2dad38ce25ed8ca460eed5022e2d",
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P5-QUEUED-OP-CANCEL-001",
+        "boundary": "queued_operation_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_queued_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "queued_work_never_executes",
+          "connection_owner_is_not_interrupted",
+          "cancelled_worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection has Cx cancellation but no public worker-phase hook that can prove an operation is queued behind the connection owner before cancellation."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-QUEUED-STREAM-CANCEL-002",
+        "boundary": "queued_row_stream_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_queued_stream_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "queued_stream_never_starts",
+          "connection_owner_is_not_interrupted",
+          "stream_worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection does not expose a public row-stream API or a deterministic queued-worker phase witness."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-RESERVE-CANCEL-003",
+        "boundary": "result_channel_reserve_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_reserve_race_cancellation_does_not_execute_operation"
+        ],
+        "required_observations": [
+          "cancellation_precedes_worker_spawn",
+          "operation_body_never_executes",
+          "no_unobservable_completion_is_created"
+        ],
+        "frankensqlite_status": "NOT_A_SHARED_PUBLIC_BOUNDARY",
+        "frankensqlite_reason": "Result-channel admission is an Asupersync adapter implementation boundary, not a common public engine operation."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-RUNNING-CANCEL-004",
+        "boundary": "running_statement_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::cancel_interrupts_in_flight_statement_and_drains",
+          "database::sqlite::tests::row_stream_cancel_interrupts_and_drains"
+        ],
+        "required_observations": [
+          "statement_start_is_signalled",
+          "sqlite_interrupt_is_delivered",
+          "worker_is_drained",
+          "typed_cancellation_is_returned"
+        ],
+        "frankensqlite_status": "PUBLIC_CX_CANCEL_AVAILABLE_NO_NEUTRAL_PHASE_WITNESS",
+        "frankensqlite_reason": "Pinned AsyncConnection accepts a cancellable Cx, but its public API does not expose a structural statement-start witness for a timing-independent neutral vector."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-FINISHING-CANCEL-005",
+        "boundary": "committed_result_vs_late_cancellation",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_committed_result_wins_finishing_cancellation"
+        ],
+        "required_observations": [
+          "write_commits_before_cancellation",
+          "result_publication_is_delayed",
+          "committed_result_wins",
+          "no_double_completion",
+          "committed_row_is_visible_after_reopen"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_DETERMINISTIC_PUBLIC_HOOK",
+        "frankensqlite_reason": "Pinned AsyncConnection does not expose a public hook between engine completion and async result publication."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-TIMEOUT-006",
+        "boundary": "statement_and_row_stream_timeout",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::statement_timeout_override_aborts_runaway_query",
+          "database::sqlite::tests::row_stream_statement_timeout_aborts_runaway_query"
+        ],
+        "required_observations": [
+          "runaway_statement_is_interrupted",
+          "statement_timeout_is_typed",
+          "worker_is_drained",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_PUBLIC_API",
+        "frankensqlite_reason": "Pinned AsyncConnection publishes no statement-timeout configuration or typed timeout result."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-EXPLICIT-INTERRUPT-007",
+        "boundary": "explicit_native_interrupt",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "database::sqlite::tests::sqlite_p5_explicit_interrupt_stops_statement_and_preserves_connection"
+        ],
+        "required_observations": [
+          "statement_start_is_signalled",
+          "interrupt_is_not_misreported_as_cx_cancellation",
+          "statement_stops",
+          "connection_remains_reusable"
+        ],
+        "frankensqlite_status": "UNSUPPORTED_PUBLIC_API",
+        "frankensqlite_reason": "Pinned AsyncConnection publishes no explicit interrupt handle or interrupt method."
+      },
+      {
+        "id": "SQLITE-PARITY-P5-SHUTDOWN-008",
+        "boundary": "connection_and_runtime_shutdown",
+        "asupersync_status": "PASS",
+        "asupersync_tests": [
+          "sqlite_parity_harness::clean_phase2_execution_receipt_matches_all_declared_vectors",
+          "database::sqlite::tests::sqlite_p5_queued_cancel_does_not_interrupt_connection_owner"
+        ],
+        "required_observations": [
+          "connection_closed_or_not_opened",
+          "open_transactions_zero",
+          "blocking_pending_busy_active_zero",
+          "region_closed",
+          "post_cancel_connection_reuse"
+        ],
+        "frankensqlite_status": "PASS_NEUTRAL_PHASE2",
+        "frankensqlite_reason": "The retained neutral P2 receipt closes AsyncConnection and proves its compatibility runtime blocking pool is shut down with zero pending, busy, or active work."
+      }
+    ],
+    "regression_invariants": [
+      "queued_cancellation_never_interrupts_the_connection_owner",
+      "cancelled_workers_are_drained_before_return",
+      "one_operation_has_exactly_one_terminal_completion",
+      "a_finished_result_wins_late_cancellation",
+      "no_committed_result_is_lost",
+      "connection_reuse_is_proved_after_cancel_timeout_and_interrupt",
+      "runtime_shutdown_leaves_no_blocking_work"
+    ],
+    "verification": {
+      "focused": {
+        "rch_job": "j-29983010363277355",
+        "status": "PASS",
+        "passed": 5,
+        "failed": 0,
+        "scope": "five new deterministic P5 regression tests"
+      },
+      "serialized_sqlite_module": {
+        "rch_job": "j-29983010363277358",
+        "status": "PASS",
+        "passed": 121,
+        "failed": 0,
+        "scope": "database::sqlite::tests serialized to remove unrelated parallel Lab interference"
+      },
+      "neutral_cross_engine_shutdown": {
+        "status": "PASS_RETAINED_PHASE2_RECEIPT",
+        "vector_ids": [
+          "SQLITE-PARITY-P2-CANCELLED-OPEN-004",
+          "SQLITE-PARITY-P2-POOL-CANCEL-005"
+        ]
+      }
+    },
+    "no_claims": [
+      "Unsupported FrankenSQLite cells are recorded, not normalized to PASS.",
+      "The in-repository phase witnesses are deterministic Asupersync adapter evidence, not cross-engine equivalence evidence.",
+      "This phase does not authorize a dependency cutover or claim full SQLite parity."
+    ]
+  },
+  "phase6": {
+    "bead_id": "asupersync-ym2wtv.2.6",
+    "status": "PASS_BOUNDED_COMMON_VALUES_WITH_EXPLICIT_ROW_METADATA_UNSUPPORTED",
+    "scope": "null_integer_real_text_blob_owned_rows_conversion_and_large_value_profile",
+    "consumer_source": {
+      "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+      "line_count": 3946
+    },
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-value-row-parity-v1",
+      "profile_max_value_bytes": 1048576,
+      "compared_values": 14,
+      "case_ids": [
+        "SQLITE-PARITY-P6-NULL-001",
+        "SQLITE-PARITY-P6-I64-MIN-002",
+        "SQLITE-PARITY-P6-I64-MAX-003",
+        "SQLITE-PARITY-P6-I64-BEYOND-EXACT-F64-004",
+        "SQLITE-PARITY-P6-NEGATIVE-ZERO-005",
+        "SQLITE-PARITY-P6-POSITIVE-INFINITY-006",
+        "SQLITE-PARITY-P6-NEGATIVE-INFINITY-007",
+        "SQLITE-PARITY-P6-NAN-TO-NULL-008",
+        "SQLITE-PARITY-P6-EMPTY-TEXT-009",
+        "SQLITE-PARITY-P6-UNICODE-NUL-TEXT-010",
+        "SQLITE-PARITY-P6-EMPTY-BLOB-011",
+        "SQLITE-PARITY-P6-BINARY-BLOB-012",
+        "SQLITE-PARITY-P6-LARGE-TEXT-013",
+        "SQLITE-PARITY-P6-LARGE-BLOB-014"
+      ],
+      "normalization": {
+        "null": "Compare the SQLite NULL storage class exactly; the NaN input case records SQLite's shared NaN-to-NULL behavior separately.",
+        "integer": "Compare signed 64-bit integer values exactly, including both extrema and 2^53+1 without a floating-point conversion.",
+        "real": "Compare IEEE-754 bits exactly, preserving negative zero and both infinities.",
+        "text_and_blob": "Compare bytes directly in the executable consumer; byte length and FNV-1a are diagnostic receipt fields, not equality authority.",
+        "ownership": "Retain each owned row until after explicit connection close, then verify its values.",
+        "conversion_errors": "Normalize wrong-type and out-of-bounds indexed access without flattening successful values.",
+        "quiescence": "Drop each runtime and require its blocking pool to be shut down with zero pending, busy, or active work."
+      }
+    },
+    "coverage_matrix": [
+      {
+        "id": "SQLITE-PARITY-P6-VALUES-001",
+        "boundary": "null_integer_and_real_edge_values",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-BYTES-002",
+        "boundary": "empty_unicode_embedded_nul_and_binary_values",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-LARGE-003",
+        "boundary": "one_mib_text_and_blob_profile",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-CONVERSION-004",
+        "boundary": "wrong_type_and_out_of_bounds_index_access",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      },
+      {
+        "id": "SQLITE-PARITY-P6-METADATA-005",
+        "boundary": "ordered_duplicate_preserving_column_metadata_and_name_lookup",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
+        "frankensqlite_reason": "The pinned AsyncConnection Row exposes owned values by index but no public result-column metadata or name lookup; the neutral adapter does not infer aliases from SQL text."
+      },
+      {
+        "id": "SQLITE-PARITY-P6-OWNERSHIP-006",
+        "boundary": "owned_rows_survive_explicit_close_and_runtime_quiesces",
+        "asupersync_status": "PASS",
+        "frankensqlite_status": "PASS"
+      }
+    ],
+    "execution": {
+      "status": "PASS",
+      "rch_job": "j-29984462414544922",
+      "worker": "vmi1153651",
+      "base": "285174b6814f22782c5aeb92b5b7d310a3ad3b56",
+      "overlay_fingerprint": "0bb17093b413363c0173bd544313a4aa7c34e609056c0acfcb1d4628b7f6af96",
+      "overlay_paths": [
+        "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+      ],
+      "remote_exit_code": 0,
+      "remote_command_elapsed_ms": 837396,
+      "command": "ASUPERSYNC_SOURCE_REVISION=285174b6814f22782c5aeb92b5b7d310a3ad3b56 SQLITE_PARITY_TARGET=x86_64-unknown-linux-gnu SQLITE_PARITY_HOST=linux-x86_64-rch-worker CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -j 8 --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+      "evidence_summary": {
+        "matrix_id": "sqlite-neutral-value-row-parity-v1",
+        "compared_values": 14,
+        "mismatches": [],
+        "asupersync_owned_after_close": true,
+        "frankensqlite_owned_after_close": true,
+        "asupersync_runtime_quiescent": true,
+        "frankensqlite_runtime_quiescent": true,
+        "asupersync_type_mismatch_class": "type_mismatch",
+        "frankensqlite_type_mismatch_class": "type_mismatch",
+        "asupersync_out_of_bounds_class": "index_out_of_bounds",
+        "frankensqlite_out_of_bounds_class": "index_out_of_bounds",
+        "asupersync_row_metadata": {
+          "ordered_names": [
+            "dup",
+            "Other",
+            "dup",
+            "Tail"
+          ],
+          "legacy_sorted_unique_names": [
+            "Other",
+            "Tail",
+            "dup"
+          ],
+          "first_ascii_case_insensitive_dup_index": 0,
+          "legacy_exact_dup_value": 3,
+          "missing_name_class": "column_not_found"
+        },
+        "frankensqlite_row_metadata_status": "UNSUPPORTED_NO_PUBLIC_ASYNC_ROW_METADATA",
+        "large_text": {
+          "byte_len": 1048576,
+          "fnv1a64": "73833fad05222325"
+        },
+        "large_blob": {
+          "byte_len": 1048576,
+          "fnv1a64": "1f5e0df9bc822325"
+        }
+      }
+    },
+    "no_claims": [
+      "One MiB is the bounded campaign profile, not a claimed SQLite or adapter hard maximum.",
+      "FNV-1a fingerprints are compact diagnostics; direct executable equality over exact values and bytes is the comparison authority.",
+      "The pinned FrankenSQLite async Row publishes no column-name metadata or name lookup, so those cells remain explicitly unsupported rather than inferred from SQL text.",
+      "This phase does not authorize dependency cutover, public API removal, or a claim of complete SQLite engine parity."
+    ]
+  },
+  "phase7": {
+    "bead_id": "asupersync-ym2wtv.2.7",
+    "status": "PASS",
+    "scope": "checked_sql_allow_deny_policy_public_entry_points_dual_engine_adapter_and_bounded_fuzz",
+    "threat_model": {
+      "attacker_controls": "SQL text passed to a checked SQLite API or companion adapter",
+      "protected_effects": [
+        "connection_and_transaction_control",
+        "database_attachment",
+        "filesystem_writes_through_vacuum_into",
+        "dynamic_extension_loading",
+        "parser_resource_exhaustion",
+        "multi_statement_smuggling_on_single_statement_apis"
+      ],
+      "trusted_boundary": "Callers choosing an explicit *_unchecked API own SQL provenance; ATTACH and DETACH remain disabled there.",
+      "failure_mode": "Return SqliteError::UnsafeSql before engine dispatch."
+    },
+    "policy": {
+      "policy_id": "sqlite-checked-sql-policy-v1",
+      "default_for_parseable_statements": "ALLOW_UNLESS_A_DENY_RULE_MATCHES",
+      "maximum_sql_bytes": 1048576,
+      "maximum_parser_recursion": 128,
+      "single_statement_cardinality": "EXACTLY_ONE",
+      "batch_cardinality": "ZERO_OR_MORE",
+      "parameter_policy": "BOUND_VALUES_ARE_DATA_AND_ARE_NEVER_REPARSED_AS_SQL_SYNTAX",
+      "deny_rules": [
+        {
+          "id": "SQLITE-P7-DENY-PARSER",
+          "class": "parser_rejected",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-RESOURCE",
+          "class": "byte_or_recursion_limit",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-CARDINALITY",
+          "class": "single_statement_count_not_one",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-PRAGMA",
+          "class": "pragma",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-TRANSACTION",
+          "class": "transaction_or_connection_control",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-ATTACH",
+          "class": "attach_or_detach",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-VACUUM",
+          "class": "vacuum_or_vacuum_into",
+          "decision": "DENY"
+        },
+        {
+          "id": "SQLITE-P7-DENY-EXTENSION",
+          "class": "load_extension_call",
+          "decision": "DENY"
+        }
+      ],
+      "allowed_examples": [
+        "single SELECT/INSERT/UPDATE/DELETE/DDL statement",
+        "checked batch containing parseable non-control statements",
+        "control keywords inside comments or quoted data",
+        "Unicode string data accepted by the bounded parser"
+      ]
+    },
+    "public_entry_points": [
+      {
+        "api": "SqliteConnection::execute",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::execute_batch",
+        "validator": "validate_checked_sql_batch"
+      },
+      {
+        "api": "SqliteConnection::query",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::query_row",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteConnection::query_stream",
+        "validator": "validate_checked_sql_statement"
+      },
+      {
+        "api": "SqliteTransaction::execute",
+        "validator": "delegates_to_SqliteConnection::execute"
+      },
+      {
+        "api": "SqliteTransaction::query",
+        "validator": "delegates_to_SqliteConnection::query"
+      }
+    ],
+    "neutral_adapter": {
+      "source": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "policy_function": "validate_checked_sql_statement",
+      "asupersync_path": "real SqliteConnection::query_row checked entry point",
+      "frankensqlite_path": "shared policy admission followed by AsyncConnection::query only on ALLOW",
+      "bounded_case_count": 13,
+      "case_ids": [
+        "SQLITE-PARITY-P7-ALLOW-SELECT-001",
+        "SQLITE-PARITY-P7-ALLOW-QUOTED-CONTROL-WORDS-002",
+        "SQLITE-PARITY-P7-ALLOW-UNICODE-DATA-003",
+        "SQLITE-PARITY-P7-DENY-MULTI-STATEMENT-004",
+        "SQLITE-PARITY-P7-DENY-COMMENT-PRAGMA-005",
+        "SQLITE-PARITY-P7-DENY-ATTACH-006",
+        "SQLITE-PARITY-P7-DENY-DETACH-007",
+        "SQLITE-PARITY-P7-DENY-VACUUM-INTO-008",
+        "SQLITE-PARITY-P7-DENY-TRANSACTION-CONTROL-009",
+        "SQLITE-PARITY-P7-DENY-EXTENSION-LOADING-010",
+        "SQLITE-PARITY-P7-DENY-MALFORMED-011",
+        "SQLITE-PARITY-P7-DENY-OVERSIZED-012",
+        "SQLITE-PARITY-P7-DENY-RECURSION-013"
+      ],
+      "terminal_resource_requirements": [
+        "both_connections_closed",
+        "both_runtime_blocking_pools_shutdown",
+        "pending_zero",
+        "busy_zero",
+        "active_zero"
+      ]
+    },
+    "bounded_fuzz": {
+      "test": "database::sqlite::tests::checked_sql_policy_bounded_adversarial_fuzz_is_panic_free",
+      "deterministic_cases": 4096,
+      "maximum_case_bytes": 1048585,
+      "required_result": "NO_PANIC_AND_EXPECTED_ALLOW_DENY_DECISION"
+    },
+    "verification": {
+      "sqlite_module": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558291",
+        "worker": "ovh-a",
+        "passed": 129,
+        "failed": 0,
+        "scope": "database::sqlite::tests with sqlite,test-internals"
+      },
+      "neutral_consumer": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558278",
+        "worker": "ovh-a",
+        "bounded_cases": 13,
+        "failed": 0,
+        "scope": "real Asupersync and FrankenSQLite adapter checked-SQL decisions plus terminal blocking-pool quiescence"
+      },
+      "repository_contract": {
+        "status": "PASS",
+        "rch_job": "j-29983848133558293",
+        "worker": "ovh-a",
+        "passed": 8,
+        "failed": 0,
+        "scope": "sqlite_parity_harness_contract structural and receipt validation"
+      }
+    },
+    "no_claims": [
+      "The checked policy does not make *_unchecked APIs safe for untrusted SQL.",
+      "The neutral adapter proves declared admission parity, not arbitrary engine semantic equivalence.",
+      "Dynamic extension loading is blocked defensively; this packet does not claim it was enabled by the incumbent build.",
+      "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
+    ]
+  },
+  "phase8": {
+    "bead_id": "asupersync-ym2wtv.2.8",
+    "status": "PASS_BOUNDED_STABLE_CODES_CANCELLATION_DISTINCTION_AND_RUNTIME_QUIESCENCE",
+    "scope": "additive_structured_sqlite_diagnostics_real_cross_engine_error_rows_and_terminal_runtime_cleanup",
+    "compatibility": {
+      "baseline": "v0.4.3",
+      "legacy_error_surface": "UNCHANGED",
+      "strategy": "KEEP_EXISTING_METHODS_AND_ADD_SEPARATELY_NAMED_DIAGNOSED_METHODS",
+      "public_enums_and_structs": "NEW_TYPES_ARE_NON_EXHAUSTIVE_OR_HAVE_PRIVATE_FIELDS",
+      "behavioral_boundary": "Existing SqliteError methods preserve their established result shape; structured codes are opt-in."
+    },
+    "source_contracts": [
+      {
+        "path": "src/database/sqlite.rs",
+        "sha256": "42633435d6944e432f8de8d5665132689eeefb1218551805c2b523f62f59373d",
+        "line_count": 4754
+      },
+      {
+        "path": "src/database/sqlite_tests.rs",
+        "sha256": "53c125fa94b1d82a06a39a77f8a33bf8635ab9ebbfb3bf1c59f5e097fbc6d952",
+        "line_count": 5809
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+        "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "line_count": 3946
+      }
+    ],
+    "public_diagnostic_contract": {
+      "types": [
+        "SqliteOperation",
+        "SqliteErrorCategory",
+        "SqliteRetryDisposition",
+        "SqliteErrorDiagnostic",
+        "SqliteOperationError"
+      ],
+      "diagnosed_connection_operations": [
+        "open_diagnosed",
+        "open_in_memory_diagnosed",
+        "execute_diagnosed",
+        "execute_unchecked_diagnosed",
+        "execute_batch_diagnosed",
+        "execute_batch_unchecked_diagnosed",
+        "query_diagnosed",
+        "query_unchecked_diagnosed",
+        "query_row_diagnosed",
+        "query_row_unchecked_diagnosed",
+        "begin_diagnosed",
+        "begin_immediate_diagnosed",
+        "begin_exclusive_diagnosed",
+        "set_busy_timeout_diagnosed",
+        "close_diagnosed",
+        "close_async_diagnosed"
+      ],
+      "diagnosed_transaction_operations": [
+        "commit_diagnosed",
+        "rollback_diagnosed",
+        "execute_diagnosed",
+        "query_diagnosed"
+      ],
+      "classification_source": "rusqlite ErrorCode and extended result code captured before legacy string rendering",
+      "rendering_policy": "Debug and Display omit SQL text, bound values, paths, and engine messages",
+      "source_policy": "The raw rusqlite error remains available only through the explicit engine_source accessor; automatic error-chain traversal, Debug, and Display are redacted. legacy_error is a separate explicit compatibility accessor."
+    },
+    "required_error_rows": [
+      {
+        "id": "SQLITE-PARITY-P8-OPEN-000",
+        "operation": "open",
+        "category": "io",
+        "primary_code": "SQLITE_CANTOPEN"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-PREPARE-001",
+        "operation": "prepare",
+        "category": "invalid_input",
+        "primary_code": "SQLITE_ERROR"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CONSTRAINT-002",
+        "operation": "step",
+        "category": "constraint",
+        "primary_code": "SQLITE_CONSTRAINT"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CANCEL-003",
+        "operation": "step",
+        "category": "cancelled",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-CLOSED-004",
+        "operation": "step",
+        "category": "closed",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-BIND-005",
+        "operation": "bind",
+        "category": "invalid_input",
+        "primary_code": null
+      },
+      {
+        "id": "SQLITE-PARITY-P8-TRANSACTION-006",
+        "operation": "transaction_begin",
+        "category": "invalid_input",
+        "primary_code": "SQLITE_ERROR"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-BUSY-007",
+        "operation": "step",
+        "category": "busy_or_locked",
+        "retry": "retry_operation"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-INTERRUPT-008",
+        "operation": "step",
+        "category": "interrupted",
+        "primary_code": "SQLITE_INTERRUPT"
+      },
+      {
+        "id": "SQLITE-PARITY-P8-POOL-SHUTDOWN-009",
+        "operation": "blocking_pool",
+        "category": "terminal_cleanup",
+        "primary_code": null
+      }
+    ],
+    "neutral_matrix": {
+      "matrix_id": "sqlite-neutral-stable-error-and-quiescence-v1",
+      "consumer_source": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+      "per_engine_cases": 4,
+      "directly_compared_cases": 2,
+      "compared_case_ids": [
+        "SQLITE-PARITY-P8-PREPARE-001",
+        "SQLITE-PARITY-P8-CONSTRAINT-002"
+      ],
+      "mismatches": 0,
+      "intentional_differences": [
+        "Asupersync reports caller cancellation as Outcome::Cancelled; FrankenSQLite reports its typed Interrupt error.",
+        "The inherited P3 Asupersync busy row is typed and reusable; the FrankenSQLite row may instead terminate as a bounded killed-and-reaped watchdog refusal."
+      ],
+      "terminal_requirements": [
+        "connection_reused_after_nonfatal_error",
+        "connection_explicitly_closed",
+        "open_transactions_zero",
+        "live_statements_zero",
+        "live_connections_zero",
+        "blocking_pending_zero",
+        "blocking_busy_zero",
+        "blocking_active_zero",
+        "runtime_local_quiescence"
+      ]
+    },
+    "verification": {
+      "sqlite_focused": {
+        "status": "PASS",
+        "rch_job": "j-29984462414544947",
+        "worker": "hz2",
+        "passed": 3,
+        "failed": 0,
+        "scope": "three sqlite_p8_ native tests with sqlite,test-internals"
+      },
+      "neutral_consumer": {
+        "status": "PASS",
+        "rch_job": "j-29984462414544946",
+        "worker": "ovh-a",
+        "failed": 0,
+        "scope": "real Asupersync and FrankenSQLite P8 rows plus inherited P3 lock observation and runtime-local quiescence"
+      }
+    },
+    "no_claims": [
+      "This phase does not change or remove the v0.4.3 SqliteError surface or existing method signatures.",
+      "Stable categories do not promise that every future SQLite extended result code has a dedicated category.",
+      "Preserving the raw source permits explicit engine_source inspection; ordinary SqliteOperationError Debug, Display, and automatic error-chain traversal remain redacted.",
+      "Runtime-local zero counts do not prove process-global task or resource quiescence.",
+      "The neutral matrix compares declared public rows, not arbitrary SQLite engine equivalence.",
+      "This phase does not authorize dependency cutover or removal of rusqlite or sqlparser."
+    ]
+  },
+  "phase9": {
+    "bead_id": "asupersync-ym2wtv.2.9",
+    "status": "PASS_AGGREGATE_REAL_DUAL_ENGINE_MATRIX_KEEP_INCUMBENT",
+    "scope": "single_process_real_dual_engine_execution_aggregate_matrix_and_scoped_signoff",
+    "source_contracts": [
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/Cargo.toml",
+        "sha256": "7953e64e52f24df58e76525d667a02c88bc5cc2507500f94c5033d8dbf3ec233",
+        "line_count": 18
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/Cargo.lock",
+        "sha256": "b6eeaee417a1898c9a4ed5d5847746859382ead9ea19dbc5e3d210eba17d797b",
+        "line_count": 2650
+      },
+      {
+        "path": "tests/fixtures/sqlite-parity-consumer/src/main.rs",
+        "sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "line_count": 3946
+      },
+      {
+        "path": "scripts/run_dependency_sovereignty_e2e.sh",
+        "sha256": "b2d7894ca7412f96602389a591186acf665698416aeebf4989c53f281300f72b",
+        "line_count": 1869
+      }
+    ],
+    "aggregate_matrix": {
+      "matrix_id": "sqlite-neutral-aggregate-parity-v1",
+      "execution_model": "one neutral consumer process runs the real Asupersync and pinned FrankenSQLite adapters and emits one structured evidence document",
+      "family_rows": [
+        {
+          "phase": "P2",
+          "bead_id": "asupersync-ym2wtv.2.2",
+          "family": "open_configuration_admission_and_close",
+          "directly_compared_cases": 6,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P3",
+          "bead_id": "asupersync-ym2wtv.2.3",
+          "family": "prepared_statements_bind_reset_schema_change_busy_and_cancel",
+          "directly_compared_cases": 7,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_DIFFERENCES"
+        },
+        {
+          "phase": "P4",
+          "bead_id": "asupersync-ym2wtv.2.4",
+          "family": "transactions_savepoints_rollback_and_reuse",
+          "directly_compared_cases": 5,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P5",
+          "bead_id": "asupersync-ym2wtv.2.5",
+          "family": "interrupt_timeout_and_cancellation_races",
+          "directly_compared_cases": 0,
+          "native_only_cases": 8,
+          "unexplained_divergences": 0,
+          "status": "PASS_NATIVE_WITH_EXPLICIT_FRANKENSQLITE_UNSUPPORTED_CELLS"
+        },
+        {
+          "phase": "P6",
+          "bead_id": "asupersync-ym2wtv.2.6",
+          "family": "value_row_and_conversion_semantics",
+          "directly_compared_cases": 14,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_UNSUPPORTED_METADATA"
+        },
+        {
+          "phase": "P7",
+          "bead_id": "asupersync-ym2wtv.2.7",
+          "family": "checked_sql_admission_and_adversarial_inputs",
+          "directly_compared_cases": 13,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS"
+        },
+        {
+          "phase": "P8",
+          "bead_id": "asupersync-ym2wtv.2.8",
+          "family": "stable_errors_and_terminal_quiescence",
+          "directly_compared_cases": 2,
+          "native_only_cases": 0,
+          "unexplained_divergences": 0,
+          "status": "PASS_WITH_EXPLICIT_DIFFERENCES"
+        }
+      ],
+      "directly_compared_cases": 47,
+      "native_p5_cases": 8,
+      "unexplained_divergences": 0,
+      "classified_difference_policy": "Differences and unavailable public hooks remain explicit matrix cells; they are never normalized into false parity.",
+      "terminal_resource_policy": "Every executed family closes or quarantines its connections and requires the matching runtime-local blocking pool to reach zero pending, busy, and active work."
+    },
+    "target_matrix": [
+      {
+        "target": "x86_64-unknown-linux-gnu",
+        "host_class": "linux-x86_64-rch-worker",
+        "status": "PASS",
+        "authority": "terminal remote-only P9 aggregate run"
+      },
+      {
+        "target": "aarch64-apple-darwin",
+        "host_class": "macos-arm64",
+        "status": "BLOCKED_NOT_EXECUTED",
+        "authority": "no terminal P9 host receipt"
+      },
+      {
+        "target": "x86_64-pc-windows-msvc",
+        "host_class": "windows-x86_64",
+        "status": "BLOCKED_NOT_EXECUTED",
+        "authority": "no terminal P9 host receipt"
+      },
+      {
+        "target": "wasm32-unknown-unknown",
+        "host_class": "browser-wasm",
+        "status": "UNSUPPORTED_NATIVE_SQLITE_ENGINES",
+        "authority": "both selected adapters require native SQLite execution"
+      }
+    ],
+    "execution": {
+      "scenario_id": "sqlite-parity-aggregate",
+      "step_id": "sqlite-p9-aggregate-dual-engine",
+      "remote_required": true,
+      "local_fallback": false,
+      "clean_overlay": {
+        "base": "63877809b7fd4fff4e7ae65ae187bd3caf7f2ba2",
+        "no_overlay": false,
+        "overlay_paths": [
+          "tests/fixtures/sqlite-parity-consumer/src/main.rs"
+        ],
+        "overlay_sha256": "8afbc5c2d1d11ba7bd3cef0a7c6e938a7d2b49467c1c7956af6a681ca3d16942",
+        "overlay_fingerprint": "23b0858ce11990e01b0882eadcaffa3d0c11e97a2a513b0578e64b58a9d389a7"
+      },
+      "diagnostic_attempts": [
+        {
+          "run_id": "sqlite-p9-63877809b-20260820",
+          "status": "BLOCKED_RCH_PRE_ADMISSION",
+          "remote_cargo_started": false,
+          "diagnostic": "RCH-I003 insufficient slots on the forced three-slot worker for a default four-job request"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820b",
+          "rch_job": "j-29984462414544950",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 timed out while retrieving the custom Cargo target, so this attempt is not the terminal packet authority"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820c",
+          "rch_job": "j-29984462414544951",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 130,
+          "status": "CANCELLED_BY_STUCK_DETECTOR",
+          "diagnostic": "The daemon stuck detector cancelled the quiet compile; it emitted no terminal consumer result and is not test evidence"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820c",
+          "rch_job": "j-29984462414544952",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 timed out while retrieving the inherited Cargo target, so this attempt is not the terminal packet authority"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820d",
+          "rch_job": "j-29984462414544953",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 1,
+          "wrapper_exit_code": 1,
+          "status": "TRANSPORT_TIMEOUT_DIAGNOSTIC",
+          "diagnostic": "The 1200-second SSH execution envelope expired during a cold compile; a concurrent runner edit made the local diagnostic packet non-authoritative, and no local Cargo fallback was executed"
+        },
+        {
+          "run_id": "sqlite-p9-63877809b-20260820e",
+          "rch_job": "j-29984462414544954",
+          "worker": "vmi1264463",
+          "remote_command_exit_code": 0,
+          "wrapper_exit_code": 102,
+          "status": "REMOTE_COMMAND_PASSED_PACKET_INCOMPLETE",
+          "diagnostic": "RCH-E309 again timed out while retrieving build artifacts after the consumer passed; this motivated the streamed cargo-test lane"
+        }
+      ],
+      "terminal_run": {
+        "run_id": "sqlite-p9-63877809b-20260820f",
+        "rch_job": "j-29984462414544955",
+        "worker": "vmi1264463",
+        "pipeline": "7706a9c69dd2f282",
+        "remote_command_exit_code": 0,
+        "wrapper_exit_code": 0,
+        "observed_outcome": "PASSED",
+        "remote_command_duration_ms": 900458,
+        "rch_total_duration_ms": 939528,
+        "test_totals": {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0,
+          "measured": 0,
+          "filtered_out": 0
+        },
+        "summary_path": "target/e2e-results/dependency-sovereignty/sqlite-p9-63877809b-20260820f/summary.json",
+        "summary_sha256": "5a4542ce24501d3159e1d5cfe00543e5fb32629adddf543b820ff840d2c0c3ea",
+        "scenarios_sha256": "7daa9f28f357e2162205ce9ae7fb6b1a8a202f9b7b2f00543aa983fb73987c60",
+        "artifact_manifest_sha256": "210f4832d154dd57681f20fb5a60a1d022e20298ede82363750c4c29b212d411",
+        "repro_manifest_sha256": "e8dcbd354362b8cc7adb65daab3731b3e408adb5c2b2d96835dc966422a113fc",
+        "cleanup_result": "passed",
+        "redaction_policy": "metadata-and-secret-patterns-v1"
+      }
+    },
+    "decision": {
+      "sqlite_dependency": "KEEP_CURRENT_RUSQLITE_AND_SQLPARSER",
+      "combined_graph_budget": "DEFER",
+      "cutover_authorized": false,
+      "owner_gate_invoked": false,
+      "reason": "The executed common matrix is green, but P5 and platform cells remain explicitly incomplete and the combined graph budget remains DEFER."
+    },
+    "no_claims": [
+      "This packet does not authorize a FrankenSQLite dependency cutover or removal of rusqlite or sqlparser.",
+      "The aggregate totals count only declared common rows; P5 native-only cases are reported separately and do not imply cross-engine parity.",
+      "Linux execution does not prove macOS, Windows, or browser-Wasm support.",
+      "Runtime-local zero counts do not prove process-global task or resource quiescence.",
+      "The matrix does not claim arbitrary SQL equivalence, performance parity, FrankenSQLite maturity, or release readiness outside this scoped SQLite campaign."
+    ]
+  },
+  "phase1_validation_frontier": {
+    "newer_revision": "31fc4a3b3a108dc49243157ea29fb1ddfcb06fdc",
+    "status": "BLOCKED_UPSTREAM_COMPILE",
+    "receipt": "A clean remote native-feature compile failed in fsqlite-btree because synchronous cursor adapters received Future-returning pager operations. The harness therefore pins the newest checked release tag used by this receipt instead of misreporting the current remote tip as runnable.",
+    "no_claim": "This receipt diagnoses only the selected combined graph and does not establish that every feature profile or later FrankenSQLite revision is unbuildable."
+  },
+  "phase1_verification": {
+    "consumer_clippy": {
+      "status": "PASS",
+      "remote_exit_code": 0,
+      "worker": "vmi1227854",
+      "base": "57b95c31df8bd5b2541a7427cbd6a6bccb78f2e5",
+      "command": "cargo clippy --locked --manifest-path tests/fixtures/sqlite-parity-consumer/Cargo.toml -- -D warnings"
+    },
+    "repository_contract": {
+      "status": "PASS",
+      "passed": 5,
+      "failed": 0,
+      "worker": "vmi1227854",
+      "command": "cargo test -p asupersync --test sqlite_parity_harness_contract -- --nocapture"
+    },
+    "local_structural_checks": [
+      "rustfmt --edition 2024 --check on both owned Rust files",
+      "jq empty on both owned JSON artifacts",
+      "git diff --check on all owned paths"
+    ]
+  },
+  "combined_graph_budget": {
+    "artifact": "artifacts/sqlite_combined_graph_budget_v1.json",
+    "terminal_outcome": "DEFER",
+    "reason": "The unified consumer removes the duplicate-runtime coherence defect, but the measured proposal adds 33 unique crates. Binary-size and compile-time cells remain explicitly blocked by the recorded RCH root constraint."
+  },
+  "no_claims": [
+    "No dependency cutover or rusqlite/sqlparser removal is authorized.",
+    "The six P2 vectors alone do not establish the later families; Phase 9 aggregates only the explicitly executed and classified P2-P8 cells.",
+    "Runtime-local closed and zero-count receipts do not prove process-global task or resource quiescence.",
+    "The graph-budget DEFER remains terminal for this prerequisite and is not converted to PASS by a P2 run.",
+    "No claim is made about FrankenSQLite performance, maturity, or release readiness."
+  ]
+}

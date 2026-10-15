@@ -1,0 +1,622 @@
+#![no_main]
+
+use libfuzzer_sys::fuzz_target;
+
+use asupersync::decoding::DecodingConfig;
+/// Symbol and ID deserialization fuzz testing for robustness and security.
+///
+/// This fuzz target extensively tests the typed symbol and ID deserialization
+/// functions to ensure they handle malformed, malicious, and edge-case inputs
+/// without crashes, memory leaks, or security vulnerabilities.
+///
+/// Targets the following critical parsing functions:
+/// - TypedHeader::decode() - 27-byte typed symbol header parsing
+/// - SerdeCodec::deserialize() - MessagePack, Bincode, JSON deserialization
+/// - TypedSymbol::try_from_symbol() - Type validation and symbol wrapping
+/// - TypedDecoder::decode() - Multi-symbol decoding with RaptorQ integration
+/// - ID deserialization - RegionId, TaskId, ObligationId serde parsing
+///
+/// Test cases cover:
+/// - Valid typed symbols with all supported serialization formats
+/// - Malformed headers: invalid magic, corrupted fields, oversized payloads
+/// - Type confusion attacks: mismatched type IDs, schema hash collisions
+/// - Serialization format exploits: malformed MessagePack/Bincode/JSON
+/// - ID boundary violations: arena index overflow, invalid ID constructions
+/// - Memory exhaustion: oversized payloads, deeply nested structures
+// Import the symbol and ID modules to test
+use asupersync::types::typed_symbol::{
+    Deserializer, SerdeCodec, SerializationFormat, Serializer, TYPED_SYMBOL_HEADER_LEN,
+    TYPED_SYMBOL_MAGIC, TypedDecoder, TypedSymbol,
+};
+use asupersync::types::{ObjectId, RegionId, Symbol, SymbolId, SymbolKind, TaskId};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt::Debug;
+
+const FORMAT_OFFSET: usize = 4 + 2 + 8;
+const FORMAT_MESSAGE_PACK: u8 = 1;
+const FORMAT_BINCODE: u8 = 2;
+const FORMAT_JSON: u8 = 3;
+const FORMAT_CUSTOM: u8 = 255;
+
+/// Test data structure for symbol serialization/deserialization testing
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct TestPayload {
+    id: u64,
+    name: String,
+    values: Vec<i32>,
+    metadata: HashMap<String, String>,
+}
+
+fn sample_payload() -> TestPayload {
+    TestPayload {
+        id: 42,
+        name: "test".to_string(),
+        values: vec![1, 2, 3],
+        metadata: [("key".to_string(), "value".to_string())].into(),
+    }
+}
+
+fn assert_visible_debug<T: Debug + ?Sized>(context: &str, value: &T) {
+    let rendered = format!("{value:?}");
+    assert!(
+        !rendered.is_empty(),
+        "{context} produced an empty debug representation"
+    );
+}
+
+fn observe_result<T, E>(context: &str, result: Result<T, E>)
+where
+    T: Debug,
+    E: Debug,
+{
+    match result {
+        Ok(value) => assert_visible_debug(context, &value),
+        Err(err) => assert_visible_debug(context, &err),
+    }
+}
+
+fn format_byte(format: SerializationFormat) -> u8 {
+    match format {
+        SerializationFormat::MessagePack => FORMAT_MESSAGE_PACK,
+        SerializationFormat::Bincode => FORMAT_BINCODE,
+        SerializationFormat::Json => FORMAT_JSON,
+        SerializationFormat::Custom => FORMAT_CUSTOM,
+    }
+}
+
+fn symbol_from_data(data: &[u8]) -> Symbol {
+    let object_id = ObjectId::new(1, 1);
+    Symbol::new(
+        SymbolId::new(object_id, 0, 0),
+        data.to_vec(),
+        SymbolKind::Source,
+    )
+}
+
+fn observe_typed_symbol_bytes<T: 'static>(context: &str, data: &[u8]) {
+    match TypedSymbol::<T>::try_from_symbol(symbol_from_data(data)) {
+        Ok(typed_symbol) => {
+            let metadata = (
+                typed_symbol.version(),
+                typed_symbol.payload_len(),
+                typed_symbol.format(),
+                typed_symbol.symbol().data().len(),
+            );
+            assert_visible_debug(context, &metadata);
+        }
+        Err(err) => assert_visible_debug(context, &err),
+    }
+}
+
+fn observe_deserialize<T>(
+    context: &str,
+    codec: &SerdeCodec,
+    bytes: &[u8],
+    format: SerializationFormat,
+) where
+    T: DeserializeOwned + Debug,
+{
+    observe_result::<T, _>(context, codec.deserialize(bytes, format));
+}
+
+fn valid_typed_symbol_data(format: SerializationFormat) -> Option<Vec<u8>> {
+    TypedSymbol::<TestPayload>::from_value(&sample_payload(), format)
+        .ok()
+        .map(|typed_symbol| typed_symbol.symbol().data().to_vec())
+}
+
+fn observe_format_byte(context: &str, base_symbol_data: &[u8], byte: u8) {
+    let mut symbol_data = base_symbol_data.to_vec();
+    if symbol_data.len() > FORMAT_OFFSET {
+        symbol_data[FORMAT_OFFSET] = byte;
+        observe_typed_symbol_bytes::<TestPayload>(context, &symbol_data);
+    }
+}
+
+fn observe_valid_payload_roundtrips() {
+    let codec = SerdeCodec;
+    let test_data = sample_payload();
+
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+        SerializationFormat::Json,
+    ] {
+        match codec.serialize(&test_data, format) {
+            Ok(serialized) => observe_deserialize::<TestPayload>(
+                "valid TestPayload roundtrip",
+                &codec,
+                &serialized,
+                format,
+            ),
+            Err(err) => assert_visible_debug("valid TestPayload serialization", &err),
+        }
+    }
+}
+
+fn observe_payload_deserializers(codec: &SerdeCodec, payload: &[u8], format: SerializationFormat) {
+    observe_deserialize::<RegionId>("payload as RegionId", codec, payload, format);
+    observe_deserialize::<TaskId>("payload as TaskId", codec, payload, format);
+    observe_deserialize::<u64>("payload as u64", codec, payload, format);
+
+    match format {
+        SerializationFormat::Json | SerializationFormat::Custom => {
+            observe_deserialize::<TestPayload>("payload as TestPayload", codec, payload, format);
+            observe_deserialize::<HashMap<String, String>>(
+                "payload as HashMap",
+                codec,
+                payload,
+                format,
+            );
+            observe_deserialize::<Vec<u8>>("payload as Vec<u8>", codec, payload, format);
+            observe_deserialize::<String>("payload as String", codec, payload, format);
+        }
+        SerializationFormat::MessagePack | SerializationFormat::Bincode => {}
+    }
+}
+
+/// Generate valid typed symbol headers for baseline testing
+fn generate_valid_headers(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut headers = Vec::new();
+
+    if data.is_empty() {
+        return headers;
+    }
+
+    // Basic valid header with different formats
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+        SerializationFormat::Json,
+        SerializationFormat::Custom,
+    ] {
+        let mut header = Vec::with_capacity(TYPED_SYMBOL_HEADER_LEN);
+        header.extend_from_slice(&TYPED_SYMBOL_MAGIC);
+        header.extend_from_slice(&1u16.to_le_bytes()); // Version 1
+        header.extend_from_slice(&0x1234567890abcdefu64.to_le_bytes()); // Type ID
+        header.push(format_byte(format));
+        header.extend_from_slice(&0xfedcba0987654321u64.to_le_bytes()); // Schema hash
+        header.extend_from_slice(&100u32.to_le_bytes()); // Payload length
+        headers.push(header);
+    }
+
+    // Header with data-derived values
+    if data.len() >= 8 {
+        let mut header = Vec::with_capacity(TYPED_SYMBOL_HEADER_LEN);
+        header.extend_from_slice(&TYPED_SYMBOL_MAGIC);
+        header.extend_from_slice(&u16::from_be_bytes([data[0], data[1]]).to_le_bytes()); // Version from data
+        header.extend_from_slice(&data[0..8]); // Type ID from data
+        header.push(format_byte(SerializationFormat::MessagePack));
+        header.extend_from_slice(&data[0..8]); // Schema hash from data
+        header.extend_from_slice(
+            &u32::from_be_bytes([data[4], data[5], data[6], data[7]]).to_le_bytes(),
+        ); // Payload len
+        headers.push(header);
+    }
+
+    headers
+}
+
+/// Generate malformed headers for vulnerability testing
+fn generate_malformed_headers(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut malformed = Vec::new();
+
+    // Truncated headers - various lengths
+    for len in [0, 4, 10, 15, 20, 26] {
+        malformed.push(data.get(..len.min(data.len())).unwrap_or(&[]).to_vec());
+    }
+
+    // Invalid magic bytes
+    malformed.push(vec![
+        b'F', b'A', b'K', b'E', 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0,
+        0,
+    ]);
+    malformed.push(vec![
+        0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 100, 0, 0,
+    ]);
+
+    // Invalid format bytes
+    let mut invalid_format = Vec::from(TYPED_SYMBOL_MAGIC);
+    invalid_format.extend_from_slice(&1u16.to_le_bytes()); // Version
+    invalid_format.extend_from_slice(&0x1234567890abcdefu64.to_le_bytes()); // Type ID
+    invalid_format.push(99); // Invalid format byte
+    invalid_format.extend_from_slice(&0xfedcba0987654321u64.to_le_bytes()); // Schema hash
+    invalid_format.extend_from_slice(&100u32.to_le_bytes()); // Payload length
+    malformed.push(invalid_format);
+
+    // Oversized payload lengths
+    for payload_len in [u32::MAX, 0x7fffffff, 0x10000000, 1_000_000_000] {
+        let mut oversized = Vec::from(TYPED_SYMBOL_MAGIC);
+        oversized.extend_from_slice(&1u16.to_le_bytes());
+        oversized.extend_from_slice(&0x1234567890abcdefu64.to_le_bytes());
+        oversized.push(format_byte(SerializationFormat::MessagePack));
+        oversized.extend_from_slice(&0xfedcba0987654321u64.to_le_bytes());
+        oversized.extend_from_slice(&payload_len.to_le_bytes());
+        malformed.push(oversized);
+    }
+
+    // Version edge cases
+    for version in [0, u16::MAX, 0x8000] {
+        let mut version_edge = Vec::from(TYPED_SYMBOL_MAGIC);
+        version_edge.extend_from_slice(&version.to_le_bytes());
+        version_edge.extend_from_slice(&0x1234567890abcdefu64.to_le_bytes());
+        version_edge.push(format_byte(SerializationFormat::Bincode));
+        version_edge.extend_from_slice(&0xfedcba0987654321u64.to_le_bytes());
+        version_edge.extend_from_slice(&100u32.to_le_bytes());
+        malformed.push(version_edge);
+    }
+
+    // Use input data as header content
+    if data.len() >= TYPED_SYMBOL_HEADER_LEN {
+        malformed.push(data[..TYPED_SYMBOL_HEADER_LEN].to_vec());
+    }
+
+    // Mix valid magic with corrupted data
+    if data.len() >= 23 {
+        let mut mixed = Vec::from(TYPED_SYMBOL_MAGIC);
+        mixed.extend_from_slice(&data[..23]);
+        malformed.push(mixed);
+    }
+
+    malformed
+}
+
+/// Generate serialized payloads for testing deserialization
+fn generate_serialized_payloads(data: &[u8]) -> Vec<(SerializationFormat, Vec<u8>)> {
+    let mut payloads = Vec::new();
+
+    // Use input data as raw payloads for each format
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+        SerializationFormat::Json,
+        SerializationFormat::Custom,
+    ] {
+        payloads.push((format, data.to_vec()));
+    }
+
+    // Create oversized payloads (if input is large enough)
+    if data.len() > 1000 {
+        let oversized = data[..data.len().min(100_000)].to_vec();
+        payloads.push((SerializationFormat::Json, oversized));
+    }
+
+    payloads
+}
+
+/// Test ID deserialization specifically
+fn test_id_deserialization(data: &[u8]) {
+    if data.len() < 4 {
+        return;
+    }
+
+    // Test RegionId deserialization from various formats
+    let test_region_id = RegionId::new_ephemeral(); // Create valid ID
+
+    let codec = SerdeCodec;
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Json,
+        SerializationFormat::Bincode,
+    ] {
+        // Try to deserialize valid ID
+        if let Ok(serialized) = codec.serialize(&test_region_id, format) {
+            observe_deserialize::<RegionId>("serialized RegionId", &codec, &serialized, format);
+        }
+
+        // Try to deserialize raw data as ID
+        observe_deserialize::<RegionId>("raw RegionId bytes", &codec, data, format);
+
+        // Try to deserialize truncated valid data
+        if let Ok(serialized) = codec.serialize(&test_region_id, format) {
+            for len in [1, 2, serialized.len() / 2] {
+                if len < serialized.len() {
+                    observe_deserialize::<RegionId>(
+                        "truncated RegionId",
+                        &codec,
+                        &serialized[..len],
+                        format,
+                    );
+                }
+            }
+        }
+    }
+
+    // Test TaskId deserialization
+    let test_task_id = TaskId::new_ephemeral();
+    for format in [SerializationFormat::MessagePack, SerializationFormat::Json] {
+        if let Ok(serialized) = codec.serialize(&test_task_id, format) {
+            observe_deserialize::<TaskId>("serialized TaskId", &codec, &serialized, format);
+        }
+        observe_deserialize::<TaskId>("raw TaskId bytes", &codec, data, format);
+    }
+
+    // Test ObligationId deserialization if available
+    // Note: This may not be public, so we'll test with a generic u64 ID pattern
+    let test_obligation_id = 0x1234567890abcdefu64;
+    for format in [SerializationFormat::Bincode, SerializationFormat::Json] {
+        if let Ok(serialized) = codec.serialize(&test_obligation_id, format) {
+            observe_deserialize::<u64>(
+                "serialized u64 obligation pattern",
+                &codec,
+                &serialized,
+                format,
+            );
+        }
+        observe_deserialize::<u64>("raw u64 obligation pattern", &codec, data, format);
+    }
+}
+
+/// Test typed symbol construction and validation
+fn test_typed_symbol_operations(data: &[u8]) {
+    if data.len() < TYPED_SYMBOL_HEADER_LEN + 10 {
+        return;
+    }
+
+    // Try to create symbol from raw data
+    observe_typed_symbol_bytes::<TestPayload>("raw TestPayload typed symbol", data);
+    observe_typed_symbol_bytes::<RegionId>("raw RegionId typed symbol", data);
+    observe_typed_symbol_bytes::<TaskId>("raw TaskId typed symbol", data);
+
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+        SerializationFormat::Json,
+    ] {
+        match TypedSymbol::<TestPayload>::from_value(&sample_payload(), format) {
+            Ok(typed_symbol) => {
+                let metadata = (
+                    typed_symbol.version(),
+                    typed_symbol.payload_len(),
+                    typed_symbol.format(),
+                    typed_symbol.symbol().data().len(),
+                );
+                assert_visible_debug("valid typed symbol metadata", &metadata);
+                observe_result("valid typed symbol into_value", typed_symbol.into_value());
+            }
+            Err(err) => assert_visible_debug("valid typed symbol construction", &err),
+        }
+    }
+
+    // Test TypedDecoder with constructed symbols. Typed decode is erasure-only
+    // and carries no SecurityContext, so it uses the explicit no-auth opt-out
+    // (br-asupersync-b1fojq); the fail-closed DecodingConfig::default() would
+    // otherwise reject every symbol before the decode path is exercised.
+    let mut decoder = TypedDecoder::<TestPayload>::with_config(
+        DecodingConfig::without_auth(),
+        SerializationFormat::MessagePack,
+    );
+
+    // Try to decode from malformed symbol sets
+    let symbols = Vec::<TypedSymbol<TestPayload>>::new();
+    observe_result("empty typed decoder input", decoder.decode(symbols));
+}
+
+/// Test serialization format edge cases
+fn test_serialization_formats(data: &[u8]) {
+    let codec = SerdeCodec;
+
+    // Test all format byte values
+    if let Some(base_symbol_data) = valid_typed_symbol_data(SerializationFormat::Json) {
+        for byte_val in 0u8..=255 {
+            observe_format_byte("exhaustive format byte", &base_symbol_data, byte_val);
+        }
+    }
+
+    // Test complex nested structures
+    let mut complex_data = HashMap::new();
+    if data.len() >= 4 {
+        for i in 0..4.min(data.len() / 4) {
+            let key = format!("key_{}", i);
+            let value = format!("value_{:?}", &data[i * 4..(i + 1) * 4]);
+            complex_data.insert(key, value);
+        }
+
+        for format in [
+            SerializationFormat::MessagePack,
+            SerializationFormat::Bincode,
+            SerializationFormat::Json,
+        ] {
+            if let Ok(serialized) = codec.serialize(&complex_data, format) {
+                observe_deserialize::<HashMap<String, String>>(
+                    "serialized complex HashMap",
+                    &codec,
+                    &serialized,
+                    format,
+                );
+            }
+        }
+    }
+
+    // Test deeply nested structures
+    #[derive(Debug, Serialize, Deserialize)]
+    struct Nested {
+        depth: u32,
+        data: Option<Box<Nested>>,
+        values: Vec<u8>,
+    }
+
+    let mut nested = Nested {
+        depth: 0,
+        data: None,
+        values: data.get(..10.min(data.len())).unwrap_or(&[]).to_vec(),
+    };
+
+    // Build nested structure based on input data
+    for (i, &byte) in data.iter().take(10).enumerate() {
+        let depth = match u32::try_from(i) {
+            Ok(depth) => depth,
+            Err(_) => return,
+        };
+        nested = Nested {
+            depth,
+            data: Some(Box::new(nested)),
+            values: vec![byte],
+        };
+    }
+
+    for format in [
+        SerializationFormat::MessagePack,
+        SerializationFormat::Bincode,
+    ] {
+        if let Ok(serialized) = codec.serialize(&nested, format) {
+            observe_deserialize::<Nested>("serialized nested payload", &codec, &serialized, format);
+        }
+    }
+}
+
+fuzz_target!(|data: &[u8]| {
+    // Guard against excessively large inputs to prevent OOM during testing
+    if data.len() > 1_000_000 {
+        return;
+    }
+
+    // Test 1: TypedHeader parsing with raw input data
+    observe_typed_symbol_bytes::<TestPayload>("raw input typed symbol", data);
+
+    // Test 2: Valid header parsing
+    let valid_headers = generate_valid_headers(data);
+    for header in &valid_headers {
+        observe_typed_symbol_bytes::<TestPayload>("valid generated header", header);
+    }
+
+    // Test 3: Malformed header testing (vulnerability detection)
+    let malformed_headers = generate_malformed_headers(data);
+    for header in &malformed_headers {
+        observe_typed_symbol_bytes::<TestPayload>("malformed generated header", header);
+    }
+
+    // Test 4: Serialized payload deserialization
+    observe_valid_payload_roundtrips();
+    let payloads = generate_serialized_payloads(data);
+    for (format, payload) in &payloads {
+        let codec = SerdeCodec;
+        observe_payload_deserializers(&codec, payload, *format);
+    }
+
+    // Test 5: ID deserialization specifically
+    test_id_deserialization(data);
+
+    // Test 6: TypedSymbol operations
+    test_typed_symbol_operations(data);
+
+    // Test 7: Serialization format edge cases
+    test_serialization_formats(data);
+
+    // Test 8: Combined header + payload testing
+    if data.len() >= TYPED_SYMBOL_HEADER_LEN + 10 {
+        let header_data = &data[..TYPED_SYMBOL_HEADER_LEN];
+        let payload_data = &data[TYPED_SYMBOL_HEADER_LEN..];
+
+        // Test combined parsing
+        observe_typed_symbol_bytes::<TestPayload>("combined header and payload", data);
+        observe_typed_symbol_bytes::<TestPayload>("combined header only", header_data);
+        let codec = SerdeCodec;
+        for format in [
+            SerializationFormat::MessagePack,
+            SerializationFormat::Bincode,
+            SerializationFormat::Json,
+        ] {
+            observe_payload_deserializers(&codec, payload_data, format);
+        }
+    }
+
+    // Test 9: Boundary testing - edge lengths and values
+    for split_point in [
+        TYPED_SYMBOL_HEADER_LEN,
+        TYPED_SYMBOL_HEADER_LEN / 2,
+        data.len() / 2,
+        data.len().saturating_sub(10),
+    ] {
+        if split_point < data.len() {
+            let first_part = &data[..split_point];
+            let second_part = &data[split_point..];
+
+            // Test as header
+            observe_typed_symbol_bytes::<TestPayload>("split first typed symbol", first_part);
+            observe_typed_symbol_bytes::<TestPayload>("split second typed symbol", second_part);
+
+            // Test as payload
+            let codec = SerdeCodec;
+            observe_deserialize::<u64>(
+                "split first payload",
+                &codec,
+                first_part,
+                SerializationFormat::MessagePack,
+            );
+            observe_deserialize::<u64>(
+                "split second payload",
+                &codec,
+                second_part,
+                SerializationFormat::Bincode,
+            );
+        }
+    }
+
+    // Test 10: Format byte validation exhaustively
+    if !data.is_empty()
+        && let Some(base_symbol_data) = valid_typed_symbol_data(SerializationFormat::Json)
+    {
+        for &byte in data.iter().take(256) {
+            observe_format_byte("input-derived format byte", &base_symbol_data, byte);
+        }
+    }
+
+    // Test 11: Magic number validation with various prefixes
+    if data.len() >= 4 {
+        // Test various 4-byte combinations as potential magic numbers
+        for i in 0..data.len().saturating_sub(3) {
+            let potential_magic = &data[i..i + 4];
+
+            // Create a minimal header with this magic
+            let mut test_header = potential_magic.to_vec();
+            test_header.extend(vec![0; TYPED_SYMBOL_HEADER_LEN - 4]);
+            observe_typed_symbol_bytes::<TestPayload>("potential magic header", &test_header);
+        }
+    }
+
+    // Test 12: Integer parsing edge cases from header fields
+    if data.len() >= 8 {
+        // Test various integer interpretations of the input data
+        for offset in 0..data.len().saturating_sub(8) {
+            let bytes = &data[offset..offset + 8];
+
+            // Test as version (u16)
+            if bytes.len() >= 2 {
+                let _version = u16::from_le_bytes([bytes[0], bytes[1]]);
+            }
+
+            // Test as type_id (u64)
+            let _type_id = u64::from_le_bytes([
+                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+            ]);
+
+            // Test as payload_len (u32)
+            if bytes.len() >= 4 {
+                let _payload_len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            }
+        }
+    }
+});

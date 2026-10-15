@@ -1,0 +1,10 @@
+---
+source: src/cli/progress.rs
+expression: snapshot
+---
+{
+  "indeterminate": "▶ Connecting to cluster\n",
+  "zero_percent": "⋯ [░░░░░░░░░░░░░░░░░░░░] 0.0% Queued",
+  "fifty_percent": "⋯ [██████████░░░░░░░░░░] 50.0% Syncing",
+  "one_hundred_percent": "⋯ [████████████████████] 100.0% Finalize verification"
+}

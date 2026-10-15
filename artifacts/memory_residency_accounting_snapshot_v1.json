@@ -1,0 +1,97 @@
+{
+  "schema_version": "memory-residency-accounting-snapshot-contract-v1",
+  "bead_id": "asupersync-memory-residency-control-ho2itz.3",
+  "parent_bead_id": "asupersync-memory-residency-control-ho2itz",
+  "status": "contract_guarded",
+  "generated_on": "2026-06-13",
+  "source_of_truth": {
+    "snapshot_source": "src/runtime/memory_residency.rs",
+    "runtime_export": "src/runtime/mod.rs",
+    "debug_server_source": "src/web/debug.rs",
+    "contract_test": "tests/memory_residency_accounting_snapshot_contract.rs",
+    "docs": "docs/proof/memory_residency_accounting_snapshot.md",
+    "upstream_policy_contract": "artifacts/memory_residency_policy_contract_v1.json"
+  },
+  "proof_lane": {
+    "lane_id": "memory-residency-accounting-snapshot-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_accounting_snapshot_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_accounting_snapshot_contract -- --nocapture",
+    "covers": "Read-only hot/warm/cold/fallback/no-win accounting snapshot schema, deterministic row ordering, default-disabled behavior, stale/unknown fail-closed states, debug-server endpoint wiring, docs/artifact alignment, and no-local-Cargo proof command shape.",
+    "explicit_not_covered": "Does not prove runtime correctness, throughput improvement, p999 improvement, allocator replacement, live-task migration, cache eviction behavior, broad workspace health, release readiness, or live RCH fleet availability."
+  },
+  "snapshot_schema": {
+    "runtime_schema": "asupersync.memory-residency-accounting-snapshot.v1",
+    "debug_server_endpoint": "/debug/memory-residency",
+    "tier_order": [
+      "hot",
+      "warm",
+      "cold",
+      "fallback",
+      "no_win"
+    ],
+    "aggregation_order": [
+      "runtime_total",
+      "task_records",
+      "region_records",
+      "obligation_records",
+      "retained_evidence",
+      "artifact_cache"
+    ],
+    "status_vocabulary": [
+      "disabled",
+      "fresh",
+      "stale",
+      "unknown"
+    ],
+    "source_vocabulary": [
+      "runtime_record_tables",
+      "trace_storage_budget",
+      "artifact_cache_pressure",
+      "fallback_boundary",
+      "no_win_boundary",
+      "unavailable"
+    ]
+  },
+  "integration_contract": {
+    "runtime_inspector_compatible": true,
+    "debug_server_additive": true,
+    "debug_server_default_status": "unknown",
+    "debug_server_does_not_replace_runtime_snapshot": true,
+    "continuous_accounting_loop_default": false,
+    "live_task_action": "recommend_only"
+  },
+  "consumers": [
+    "debug-server GET /debug/memory-residency",
+    "runtime-inspector payload adapters that already carry schema-versioned JSON",
+    "asupersync-memory-residency-control-ho2itz.4 replay and e2e proof lane",
+    "asupersync-memory-residency-control-ho2itz.5 operator runbook and rollback gates"
+  ],
+  "non_consumers": [
+    "RuntimeBuilder default configuration",
+    "default RuntimeConfig behavior",
+    "scheduler hot-path execution",
+    "artifact cache eviction implementation",
+    "task cancellation or migration paths",
+    "allocator selection or replacement",
+    "release-readiness signoff"
+  ],
+  "fail_closed_checks": [
+    "default_policy_disabled_status",
+    "no_continuous_accounting_loop_by_default",
+    "unknown_when_debug_provider_unavailable",
+    "stale_when_topology_evidence_stale",
+    "unknown_when_record_pool_counters_unavailable",
+    "stable_tier_order",
+    "stable_aggregation_order",
+    "byte_stable_json_serialization",
+    "debug_endpoint_additive",
+    "rch_only_cargo_proof"
+  ],
+  "no_claim_boundaries": [
+    "No runtime default behavior change.",
+    "No task drop, cancellation, migration, or allocator mutation.",
+    "No throughput, p999, memory reduction, NUMA win, cache hit-rate, or release-readiness claim.",
+    "No local Cargo fallback is approved for the focused proof.",
+    "Snapshot values are point-in-time observations, not a continuous control loop."
+  ],
+  "next_child_bead": "asupersync-memory-residency-control-ho2itz.4"
+}

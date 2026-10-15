@@ -1,0 +1,77 @@
+---
+source: tests/conformance/raptorq_proof_correctness.rs
+assertion_line: 378
+expression: scrubbed
+---
+{
+  "config": {
+    "h": 10,
+    "k": 10,
+    "l": 27,
+    "object_id": "[deterministic]",
+    "s": 7,
+    "sbn": 0,
+    "seed": "[deterministic]",
+    "symbol_size": 48
+  },
+  "content_hash": "0xf323d60bf330e358b89af734424194bdb777e8997d2c0548f2dbed1f70aafd69",
+  "elimination": {
+    "inactivated": 0,
+    "inactive_cols_preview": [],
+    "inactive_cols_truncated": false,
+    "pivot_events_preview": [],
+    "pivot_events_truncated": false,
+    "pivots": 0,
+    "row_ops": 0,
+    "strategy": "AllAtOnce",
+    "strategy_transitions": [],
+    "strategy_transitions_truncated": false
+  },
+  "outcome": {
+    "kind": "Failure",
+    "reason": {
+      "received": 23,
+      "required": 27,
+      "type": "InsufficientSymbols"
+    }
+  },
+  "peeling": {
+    "solved": 0,
+    "solved_indices_preview": [],
+    "truncated": false
+  },
+  "received": {
+    "esi_multiset_hash": "0x2c4f6467bac5812b",
+    "esis_preview": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16
+    ],
+    "repair_count": 17,
+    "source_count": 6,
+    "total": 23,
+    "truncated": false
+  },
+  "test_vector": "insufficient_k10_6symbols",
+  "version": 2
+}

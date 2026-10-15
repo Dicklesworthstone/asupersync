@@ -1,0 +1,68 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "finalized_region",
+    original: RegionSnapshot {
+        region_id: RegionId(200:15),
+        state: Closed,
+        timestamp: Time(9876543210123ns),
+        sequence: 999,
+        vector_clock: VC{},
+        origin_id: 1,
+        epoch: 1,
+        tasks: [],
+        children: [],
+        finalizer_count: 0,
+        budget: BudgetSnapshot {
+            deadline_nanos: None,
+            polls_remaining: None,
+            cost_remaining: None,
+        },
+        cancel_reason: Some(
+            "region_completed",
+        ),
+        parent: Some(
+            RegionId(199:14),
+        ),
+        metadata: [],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e415002c80000000f000000048b82d98ffb080000e703000000000000080000000000000000000000010000000000000001000000000000000000000000000000000000000000000110000000726567696f6e5f636f6d706c6574656401c70000000e000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 139,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(200:15),
+            state: Closed,
+            timestamp: Time(9876543210123ns),
+            sequence: 999,
+            vector_clock: VC{},
+            origin_id: 1,
+            epoch: 1,
+            tasks: [],
+            children: [],
+            finalizer_count: 0,
+            budget: BudgetSnapshot {
+                deadline_nanos: None,
+                polls_remaining: None,
+                cost_remaining: None,
+            },
+            cancel_reason: Some(
+                "region_completed",
+            ),
+            parent: Some(
+                RegionId(199:14),
+            ),
+            metadata: [],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "15cd28e0a0e805f9530ae1ad5d60c56cb7cdb5416cd7c0473d834b43f89cf60a",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "finalized_region",
+        description: "Finalized region with no tasks or children, representing completed lifecycle",
+        version: 2,
+        magic: "SNAP",
+    },
+}

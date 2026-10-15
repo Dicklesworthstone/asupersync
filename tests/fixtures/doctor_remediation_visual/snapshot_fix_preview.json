@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "snapshot-remediation-fix-preview",
+  "viewport_width": 132,
+  "viewport_height": 44,
+  "focused_panel": "remediation_panel",
+  "selected_node_id": "finding-01",
+  "stage_digest": "len:1|preview",
+  "visual_profile": "frankentui-preview",
+  "capture_index": 0
+}

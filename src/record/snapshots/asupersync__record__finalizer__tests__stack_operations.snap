@@ -1,0 +1,16 @@
+---
+source: src/record/finalizer.rs
+expression: finalizer_stack_operations()
+---
+empty_stack: len=0, is_empty=true, escalation=BoundedLog
+panic_stack: len=0, is_empty=true, escalation=BoundedPanic
+after_sync_push: len=1, is_empty=false
+after_async_push: len=2, is_empty=false
+after_second_sync: len=3, is_empty=false
+popped: Sync
+after_first_pop: len=2, is_empty=false
+popped: Async
+after_second_pop: len=1, is_empty=false
+popped: Sync
+after_third_pop: len=0, is_empty=true
+empty_pop: None

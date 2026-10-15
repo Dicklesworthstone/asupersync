@@ -1,0 +1,12 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: snapshot
+---
+{
+  "canonical_fingerprint_hex": "0x66b53099dca9c881",
+  "class_fingerprint_hex": "0x66b53099dca9c881",
+  "event_count": 11,
+  "fingerprints_agree": true,
+  "is_empty": false,
+  "layer_count": 7
+}

@@ -1,0 +1,47 @@
+# Obligation E-Process E-Value Trajectory (Deterministic)
+
+## E-Process Configuration
+Process ID: eproc_001_obligation_leak_check
+Initial E-Value: 1.0
+Confidence Level: 0.05 (95% confidence)
+Boundary Threshold: 0.05
+Stopping Time: Adaptive
+Test Type: Sequential Obligation Leak Detection
+
+## E-Value Trajectory
+Step | E-Value  | Type     | Description
+-----|----------|----------|---------------------------
+   0 | 1.000000 | Initial  | Process start
+   1 | 0.876543 | Update   | First obligation batch processed
+   2 | 0.754321 | Update   | Second obligation batch processed
+   3 | 0.678901 | Update   | Third obligation batch processed
+   4 | 0.567890 | Update   | Fourth obligation batch processed
+   5 | 0.456789 | Update   | Fifth obligation batch processed
+   6 | 0.345678 | Update   | Sixth obligation batch processed
+   7 | 0.234567 | Update   | Seventh obligation batch processed
+   8 | 0.123456 | Update   | Eighth obligation batch processed
+   9 | 0.087654 | Update   | Ninth obligation batch processed
+  10 | 0.065432 | Update   | Tenth obligation batch processed
+  11 | 0.054321 | Update   | Eleventh obligation batch processed
+  12 | 0.043210 | Boundary | E-value crossed boundary threshold
+  13 | 0.032109 | Reject   | Null hypothesis rejected - leak detected
+
+## Trajectory Bytes Representation
+Trajectory Bytes: 453030313ff00000000000003fa999999999999a000000003ff000000000000000000000013fec0ca3e7d1351101000000023fe82365cb35f3d801000000033fe5b98e9707182201000000043fe22c27a63736ce01000000053fdd3c07ee0b0af601000000063fd61f969e3c968901000000073fce064a9cdc443901000000083fbf9acffa7eb6bf01000000093fb6707e175d13d7010000000a3fb0c026cc1ca3a5010000000b3fabcff64cf8d717010000000c3fa61f9f01b866e4020000000d3fa0709741d084e803
+Total Bytes: 202
+
+## Statistical Analysis
+Total Steps: 14
+Boundary Crossed at Step: 12
+Final E-Value: 0.032109
+Evidence Strength: STRONG (E-value < 0.05)
+Statistical Decision: REJECT H0 (obligation leak detected)
+False Discovery Rate: 3.21%
+Power Analysis: 96.8% power to detect leak
+
+## E-Process Verdict
+Test Result: OBLIGATION_LEAK_DETECTED
+Confidence: 95%
+Evidence Type: Sequential E-test
+Recommendation: Investigate obligation cleanup in batch processing
+Alert Level: HIGH

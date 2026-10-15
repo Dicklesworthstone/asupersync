@@ -1,0 +1,29 @@
+{
+  "agent_mail": {
+    "available": false,
+    "reservations": [],
+    "status": "unavailable"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": false,
+    "queue_summary": "unavailable"
+  }
+}

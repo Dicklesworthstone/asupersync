@@ -1,0 +1,1165 @@
+//! Async framed reader combining `AsyncRead` with a `Decoder`.
+
+use crate::bytes::BytesMut;
+use crate::codec::Decoder;
+use crate::io::{AsyncRead, ReadBuf};
+use crate::stream::Stream;
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Default read buffer capacity.
+const DEFAULT_CAPACITY: usize = 8192;
+
+/// Stack buffer size for reads.
+const READ_BUF_SIZE: usize = 8192;
+/// Cooperative cap on repeated read/decode passes inside one `poll_next`.
+///
+/// Without this bound, an always-ready reader that never produces a full frame
+/// can monopolize a single executor turn indefinitely.
+const MAX_READ_PASSES_PER_POLL: usize = 32;
+
+/// Whether the buffered bytes may produce a frame or the transport must change
+/// before decoding can make progress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReadState {
+    /// Buffered input or decoder state may now produce a frame.
+    NeedsDecode,
+    /// The last decode needed more input and the transport must be polled.
+    NeedsRead,
+}
+
+/// Default upper bound, in bytes, on the partial-frame buffer
+/// retained across `poll_next` calls.
+///
+/// 8 MiB plus the default four-byte length prefix accommodates one
+/// `LengthDelimitedCodec` frame at its default `max_frame_length`.
+/// Without this bound, a slowloris-style attacker can
+/// stream just under `max_frame_length` bytes per connection without
+/// ever producing a complete frame; the buffer grows monotonically
+/// per connection and, multiplied by concurrent connections, exhausts
+/// server memory. The cooperative `MAX_READ_PASSES_PER_POLL` budget
+/// only yields the executor — it does NOT free the buffer.
+/// (br-asupersync-bj427s.)
+pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024 + 4;
+
+/// Async framed reader that applies a `Decoder` to an `AsyncRead` source.
+///
+/// Implements `Stream` where each item is a decoded frame. Data is read
+/// from the inner reader into an internal buffer, then the decoder extracts
+/// complete frames.
+///
+/// # Cancel Safety
+///
+/// `poll_next` is cancel-safe. Partial data remains in the internal buffer
+/// across cancellations. No decoded frame is lost unless it was already yielded.
+///
+/// # Memory bound (security)
+///
+/// Each instance carries a `max_buffer_len` cap (default
+/// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte length
+/// prefix). When inbound bytes would push the partial-frame buffer past
+/// this cap, `poll_next` yields
+/// `Err(InvalidData)` rather than appending — the caller MUST treat
+/// the FramedRead as terminated. Without this bound, a peer that
+/// streams bytes without ever closing a frame causes unbounded
+/// per-connection memory growth (canonical slowloris-on-framing
+/// attack — see asupersync-bj427s).
+///
+/// Configure with [`Self::with_max_buffer_len`]; a value of `0`
+/// disables enforcement (matches the no-cap convention used elsewhere
+/// in this crate).
+pub struct FramedRead<R, D> {
+    inner: R,
+    decoder: D,
+    buffer: BytesMut,
+    eof: bool,
+    read_state: ReadState,
+    max_buffer_len: usize,
+    /// br-asupersync-3asq77: once the decoder (or the read path) has
+    /// surfaced an `Err`, the stream is poisoned. Subsequent
+    /// `poll_next` calls return `Poll::Ready(None)` rather than
+    /// re-decoding the same bytes (which would yield the same error in
+    /// an infinite loop, hanging any caller using `collect` /
+    /// `for_each`). Decoder-level recovery — when the codec knows how
+    /// to advance past an offending frame — belongs in the decoder
+    /// (see `LengthDelimitedCodec::Skip` from br-asupersync-o7e5xu);
+    /// `FramedRead` itself has no way to know framing semantics, so
+    /// the only correct policy here is fail-closed.
+    poisoned: bool,
+}
+
+impl<R, D> FramedRead<R, D> {
+    /// Creates a new `FramedRead` with the default buffer capacity.
+    #[inline]
+    pub fn new(inner: R, decoder: D) -> Self {
+        Self::with_capacity(inner, decoder, DEFAULT_CAPACITY)
+    }
+
+    /// Creates a new `FramedRead` with the specified buffer capacity.
+    pub fn with_capacity(inner: R, decoder: D, capacity: usize) -> Self {
+        Self {
+            inner,
+            decoder,
+            buffer: BytesMut::with_capacity(capacity),
+            eof: false,
+            read_state: ReadState::NeedsRead,
+            max_buffer_len: DEFAULT_MAX_BUFFER_LEN,
+            poisoned: false,
+        }
+    }
+
+    /// Set the maximum byte length of the partial-frame buffer. When
+    /// inbound bytes would push the buffer past this cap, `poll_next`
+    /// yields `Err(InvalidData)` rather than appending. A value of `0`
+    /// disables enforcement entirely (matches the no-cap convention
+    /// used elsewhere in this crate). Defaults to
+    /// [`DEFAULT_MAX_BUFFER_LEN`] = an 8 MiB payload plus four-byte
+    /// length prefix.
+    /// (br-asupersync-bj427s.)
+    #[must_use]
+    pub fn with_max_buffer_len(mut self, max: usize) -> Self {
+        self.max_buffer_len = max;
+        self
+    }
+
+    /// Returns the configured maximum partial-frame buffer length in
+    /// bytes. `0` indicates no cap.
+    #[inline]
+    #[must_use]
+    pub fn max_buffer_len(&self) -> usize {
+        self.max_buffer_len
+    }
+
+    /// Returns a reference to the underlying reader.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the underlying reader.
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+
+    /// Returns a reference to the decoder.
+    #[inline]
+    #[must_use]
+    pub fn decoder(&self) -> &D {
+        &self.decoder
+    }
+
+    /// Returns a mutable reference to the decoder.
+    pub fn decoder_mut(&mut self) -> &mut D {
+        self.read_state = ReadState::NeedsDecode;
+        &mut self.decoder
+    }
+
+    /// Returns a reference to the read buffer.
+    #[inline]
+    #[must_use]
+    pub fn read_buffer(&self) -> &BytesMut {
+        &self.buffer
+    }
+
+    /// Consumes `self` and returns the inner reader.
+    #[inline]
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    /// Consumes `self` and returns the inner reader, decoder, and buffer.
+    pub fn into_parts(self) -> (R, D, BytesMut) {
+        (self.inner, self.decoder, self.buffer)
+    }
+}
+
+impl<R, D> Stream for FramedRead<R, D>
+where
+    R: AsyncRead + Unpin,
+    D: Decoder + Unpin,
+{
+    type Item = Result<D::Item, D::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+
+        // br-asupersync-3asq77: once any error has been surfaced, the
+        // stream is terminally poisoned. Re-polling must NOT re-emit
+        // the same bytes through the decoder (which would re-produce
+        // the same error in a tight infinite loop, hanging any caller
+        // that uses `collect` / `for_each`). Returning `None` at this
+        // gate is the safe fail-closed policy; decoder-level recovery
+        // (e.g. `LengthDelimitedCodec`'s Skip state) is the right
+        // place to advance past offending bytes when the codec
+        // actually knows the framing.
+        if this.poisoned {
+            return Poll::Ready(None);
+        }
+
+        let mut read_passes = 0usize;
+        let mut should_yield = false;
+
+        loop {
+            if !this.eof && this.read_state == ReadState::NeedsDecode {
+                // Try to decode only when bytes or explicit decoder mutation
+                // could have changed the previous result. EOF is handled by
+                // decode_eof below without an unchanged ordinary retry.
+                match this.decoder.decode(&mut this.buffer) {
+                    Ok(Some(item)) => return Poll::Ready(Some(Ok(item))),
+                    Ok(None) => {
+                        this.read_state = ReadState::NeedsRead;
+                        if should_yield {
+                            cx.waker().wake_by_ref();
+                            return Poll::Pending;
+                        }
+                    }
+                    Err(e) => {
+                        this.poisoned = true;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                }
+            }
+
+            // If we hit EOF, give the decoder one last chance.
+            if this.eof {
+                return match this.decoder.decode_eof(&mut this.buffer) {
+                    Ok(Some(item)) => {
+                        // A decoder may emit more than one final frame. Keep
+                        // decoding eligible so the next poll preserves the
+                        // pre-EOF state-machine behavior even though no read
+                        // can add bytes now.
+                        this.read_state = ReadState::NeedsDecode;
+                        Poll::Ready(Some(Ok(item)))
+                    }
+                    Ok(None) => Poll::Ready(None),
+                    Err(e) => {
+                        this.poisoned = true;
+                        Poll::Ready(Some(Err(e)))
+                    }
+                };
+            }
+
+            // br-asupersync-yf1bg1: cap each ordinary read at the remaining
+            // buffer capacity. This makes framing invariant to transport
+            // batching: one read containing several legal frames can no
+            // longer be rejected as though it were one oversized partial
+            // frame. At exact capacity, offer a one-byte probe rather than a
+            // zero-length ReadBuf: EOF must still reach decode_eof, IO errors
+            // retain precedence, and a real extra byte takes the existing
+            // over-cap error path below.
+            let read_len = if this.max_buffer_len == 0 {
+                READ_BUF_SIZE
+            } else {
+                this.max_buffer_len
+                    .saturating_sub(this.buffer.len())
+                    .clamp(1, READ_BUF_SIZE)
+            };
+            let mut tmp = [0u8; READ_BUF_SIZE];
+            let mut read_buf = ReadBuf::new(&mut tmp[..read_len]);
+
+            match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => {
+                    this.poisoned = true;
+                    return Poll::Ready(Some(Err(e.into())));
+                }
+                Poll::Ready(Ok(())) => {
+                    let filled = read_buf.filled();
+                    if filled.is_empty() {
+                        this.eof = true;
+                        this.read_state = ReadState::NeedsDecode;
+                        // Loop back to handle EOF decoding.
+                    } else {
+                        // br-asupersync-bj427s: bound the partial-frame
+                        // buffer BEFORE appending. Without this check,
+                        // a peer that streams bytes without ever
+                        // closing a frame causes unbounded per-
+                        // connection memory growth. The check is
+                        // intentionally PRE-append so the buffer
+                        // never crosses the cap; the caller observes
+                        // the error before any over-the-cap memory is
+                        // ever allocated. A max_buffer_len of 0
+                        // disables enforcement.
+                        if this.max_buffer_len > 0 {
+                            let projected = this.buffer.len().saturating_add(filled.len());
+                            if projected > this.max_buffer_len {
+                                let cap = this.max_buffer_len;
+                                let buffered = this.buffer.len();
+                                let added = filled.len();
+                                let err = io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "FramedRead buffer would exceed max_buffer_len: \
+                                         {buffered} + {added} = {projected} > {cap} bytes \
+                                         (slowloris-style partial-frame attack? \
+                                         see br-asupersync-bj427s)"
+                                    ),
+                                );
+                                this.poisoned = true;
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                        }
+                        this.buffer.put_slice(filled);
+                        this.read_state = ReadState::NeedsDecode;
+                        read_passes += 1;
+                        if read_passes >= MAX_READ_PASSES_PER_POLL {
+                            should_yield = true;
+                        }
+                        // Loop back to try decoding.
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl<R: std::fmt::Debug, D: std::fmt::Debug> std::fmt::Debug for FramedRead<R, D> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramedRead")
+            .field("inner", &self.inner)
+            .field("decoder", &self.decoder)
+            .field("buffer_len", &self.buffer.len())
+            .field("eof", &self.eof)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::codec::{LengthDelimitedCodec, LinesCodec, LinesCodecError};
+    use std::io;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::Waker;
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    use std::task::Wake;
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn track_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(TrackWaker(flag)))
+    }
+
+    /// A reader that yields all data immediately.
+    struct SliceReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl SliceReader {
+        fn new(data: &[u8]) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for SliceReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            let remaining = &this.data[this.pos..];
+            if remaining.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let to_copy = std::cmp::min(remaining.len(), buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            this.pos += to_copy;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct RecordingLinesCodec {
+        inner: LinesCodec,
+        decode_lengths: Arc<Mutex<Vec<usize>>>,
+    }
+
+    impl RecordingLinesCodec {
+        fn new() -> (Self, Arc<Mutex<Vec<usize>>>) {
+            let decode_lengths = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    inner: LinesCodec::new(),
+                    decode_lengths: Arc::clone(&decode_lengths),
+                },
+                decode_lengths,
+            )
+        }
+    }
+
+    impl Decoder for RecordingLinesCodec {
+        type Item = String;
+        type Error = LinesCodecError;
+
+        fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.decode_lengths
+                .lock()
+                .expect("decode-length recorder mutex poisoned")
+                .push(src.len());
+            self.inner.decode(src)
+        }
+
+        fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            self.inner.decode_eof(src)
+        }
+    }
+
+    struct MultiFrameOnEof {
+        next: usize,
+    }
+
+    impl Decoder for MultiFrameOnEof {
+        type Item = usize;
+        type Error = io::Error;
+
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            unreachable!("ordinary decode must not run before or between EOF frames")
+        }
+
+        fn decode_eof(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            if self.next == 4 {
+                return Ok(None);
+            }
+            let item = self.next;
+            self.next += 1;
+            Ok(Some(item))
+        }
+    }
+
+    struct OneByteReader {
+        data: Vec<u8>,
+        pos: usize,
+        pending_between_bytes: bool,
+        pending_next: bool,
+    }
+
+    impl OneByteReader {
+        fn new(data: &[u8], pending_between_bytes: bool) -> Self {
+            Self {
+                data: data.to_vec(),
+                pos: 0,
+                pending_between_bytes,
+                pending_next: false,
+            }
+        }
+    }
+
+    impl AsyncRead for OneByteReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.pending_between_bytes && this.pending_next {
+                this.pending_next = false;
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            if this.pos == this.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            buf.put_slice(&this.data[this.pos..=this.pos]);
+            this.pos += 1;
+            this.pending_next = this.pending_between_bytes;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct GateDecoder {
+        ready: bool,
+    }
+
+    impl Decoder for GateDecoder {
+        type Item = usize;
+        type Error = io::Error;
+
+        fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            if self.ready && !src.is_empty() {
+                let len = src.len();
+                src.clear();
+                Ok(Some(len))
+            } else {
+                Ok(None)
+            }
+        }
+    }
+
+    #[test]
+    fn framed_read_decodes_lines() {
+        let reader = SliceReader::new(b"hello\nworld\n");
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "hello"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "world"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_handles_partial_data() {
+        // Data without trailing newline is emitted by decode_eof.
+        let reader = SliceReader::new(b"partial");
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "partial"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_empty_input() {
+        let reader = SliceReader::new(b"");
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_drains_multiple_frames_from_immediate_eof() {
+        let reader = SliceReader::new(b"");
+        let mut framed = FramedRead::new(reader, MultiFrameOnEof { next: 0 });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in 0..4 {
+            assert!(matches!(
+                Pin::new(&mut framed).poll_next(&mut cx),
+                Poll::Ready(Some(Ok(item))) if item == expected
+            ));
+        }
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_read_accessors() {
+        let reader = SliceReader::new(b"");
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+
+        assert!(framed.read_buffer().is_empty());
+        let _decoder = framed.decoder();
+        let _decoder_mut = framed.decoder_mut();
+        let _reader = framed.get_ref();
+        let _reader_mut = framed.get_mut();
+    }
+
+    #[test]
+    fn framed_read_into_parts() {
+        let reader = SliceReader::new(b"leftover");
+        let framed = FramedRead::new(reader, LinesCodec::new());
+
+        let (_reader, _decoder, _buf) = framed.into_parts();
+    }
+
+    /// Reader that yields data in small chunks to test multi-read decoding.
+    struct ChunkedReader {
+        chunks: Vec<Vec<u8>>,
+        index: usize,
+    }
+
+    impl ChunkedReader {
+        fn new(chunks: Vec<&[u8]>) -> Self {
+            Self {
+                chunks: chunks.into_iter().map(<[u8]>::to_vec).collect(),
+                index: 0,
+            }
+        }
+    }
+
+    impl AsyncRead for ChunkedReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            if this.index >= this.chunks.len() {
+                return Poll::Ready(Ok(()));
+            }
+            let chunk = &this.chunks[this.index];
+            let to_copy = std::cmp::min(chunk.len(), buf.remaining());
+            buf.put_slice(&chunk[..to_copy]);
+            this.index += 1;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct ErrorReader {
+        kind: io::ErrorKind,
+    }
+
+    impl ErrorReader {
+        fn new(kind: io::ErrorKind) -> Self {
+            Self { kind }
+        }
+    }
+
+    impl AsyncRead for ErrorReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let kind = self.get_mut().kind;
+            Poll::Ready(Err(io::Error::new(kind, "framed read test error")))
+        }
+    }
+
+    struct AlwaysReadyByteReader {
+        reads: usize,
+        panic_after: usize,
+    }
+
+    impl AlwaysReadyByteReader {
+        fn new(panic_after: usize) -> Self {
+            Self {
+                reads: 0,
+                panic_after,
+            }
+        }
+    }
+
+    impl AsyncRead for AlwaysReadyByteReader {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let this = self.get_mut();
+            assert!(
+                this.reads < this.panic_after,
+                "reader was polled too many times without yielding"
+            );
+            this.reads += 1;
+            buf.put_slice(b"a");
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_read_multi_chunk() {
+        let reader = ChunkedReader::new(vec![b"hel", b"lo\nwo", b"rld\n"]);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "hello"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref s))) if s == "world"));
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(None)));
+    }
+
+    #[test]
+    fn framed_read_does_not_decode_unchanged_fragmented_line() {
+        for pending_between_bytes in [true, false] {
+            let expected = "x".repeat(MAX_READ_PASSES_PER_POLL * 2 + 5);
+            let mut wire = expected.as_bytes().to_vec();
+            wire.push(b'\n');
+            let reader = OneByteReader::new(&wire, pending_between_bytes);
+            let (decoder, decode_lengths) = RecordingLinesCodec::new();
+            let mut framed = FramedRead::new(reader, decoder);
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut decoded = None;
+
+            for _ in 0..wire.len().saturating_mul(3).saturating_add(10) {
+                match Pin::new(&mut framed).poll_next(&mut cx) {
+                    Poll::Pending => {}
+                    Poll::Ready(Some(Ok(line))) => {
+                        decoded = Some(line);
+                        break;
+                    }
+                    Poll::Ready(Some(Err(error))) => {
+                        panic!("fragmented line decode failed: {error}")
+                    }
+                    Poll::Ready(None) => panic!("fragmented line ended before delimiter"),
+                }
+            }
+
+            assert_eq!(decoded.as_deref(), Some(expected.as_str()));
+            let decode_lengths = decode_lengths
+                .lock()
+                .expect("decode-length recorder mutex poisoned");
+            assert_eq!(decode_lengths.len(), wire.len());
+            assert_eq!(decode_lengths.first(), Some(&1));
+            assert_eq!(decode_lengths.last(), Some(&wire.len()));
+            assert!(
+                decode_lengths.windows(2).all(|pair| pair[0] < pair[1]),
+                "unchanged buffer was decoded twice: {decode_lengths:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn framed_read_decoder_mut_reenables_buffered_decode() {
+        let reader = OneByteReader::new(b"xy", true);
+        let mut framed = FramedRead::new(reader, GateDecoder { ready: false });
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Pending
+        ));
+        assert_eq!(framed.read_buffer().len(), 1);
+
+        framed.decoder_mut().ready = true;
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Ok(1)))
+        ));
+    }
+
+    #[test]
+    fn framed_read_eof_does_not_retry_ordinary_decode() {
+        let wire = b"unterminated";
+        let reader = OneByteReader::new(wire, false);
+        let (decoder, decode_lengths) = RecordingLinesCodec::new();
+        let mut framed = FramedRead::new(reader, decoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(Some(Ok(ref line))) if line == "unterminated"
+        ));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+
+        let decode_lengths = decode_lengths
+            .lock()
+            .expect("decode-length recorder mutex poisoned");
+        let expected_lengths = (1..=wire.len()).collect::<Vec<_>>();
+        assert_eq!(decode_lengths.as_slice(), expected_lengths.as_slice());
+    }
+
+    #[test]
+    fn framed_read_yields_cooperatively_on_always_ready_reader() {
+        let reader = AlwaysReadyByteReader::new(MAX_READ_PASSES_PER_POLL + 1);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().reads,
+            MAX_READ_PASSES_PER_POLL,
+            "poll_next should stop after the cooperative read budget"
+        );
+        assert_eq!(
+            framed.read_buffer().len(),
+            MAX_READ_PASSES_PER_POLL,
+            "already-read bytes must stay buffered across the cooperative yield"
+        );
+    }
+
+    #[test]
+    fn framed_read_preserves_io_error_kind_from_lines_codec() {
+        let reader = ErrorReader::new(io::ErrorKind::BrokenPipe);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+            }
+            other => panic!("expected io error propagation, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    // br-asupersync-bj427s: max_buffer_len cap prevents slowloris-style
+    // partial-frame memory exhaustion.
+
+    #[test]
+    fn framed_read_default_max_buffer_len_accommodates_lengthdelimited_header() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LengthDelimitedCodec> =
+            FramedRead::new(reader, LengthDelimitedCodec::new());
+        assert_eq!(framed.max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
+        assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024 + 4);
+    }
+
+    #[test]
+    fn framed_read_with_max_buffer_len_overrides_default() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LinesCodec> =
+            FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        assert_eq!(framed.max_buffer_len(), 64);
+    }
+
+    #[test]
+    fn framed_read_max_buffer_len_zero_disables_cap() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LinesCodec> =
+            FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(0);
+        assert_eq!(framed.max_buffer_len(), 0);
+    }
+
+    #[test]
+    fn framed_read_decodes_coalesced_frames_at_per_frame_cap() {
+        // Each encoded line is exactly two bytes, matching the cap. A single
+        // transport read may coalesce all three; enforcement must apply to
+        // the undecoded partial frame, not the aggregate read batch.
+        let reader = SliceReader::new(b"a\nb\nc\n");
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(2);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in ["a", "b", "c"] {
+            let poll = Pin::new(&mut framed).poll_next(&mut cx);
+            assert!(
+                matches!(&poll, Poll::Ready(Some(Ok(line))) if line == expected),
+                "expected line {expected:?}, got {poll:?}"
+            );
+            assert!(framed.read_buffer().len() <= 2);
+        }
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_read_exact_cap_eof_frame_reaches_decode_eof() {
+        // LinesCodec accepts a final line without a delimiter at EOF. Once
+        // the buffer reaches the cap, the one-byte probe must observe EOF
+        // rather than rejecting an exact-cap legal frame.
+        let reader = SliceReader::new(b"tail");
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Some(Ok(ref line))) if line == "tail"));
+        assert!(matches!(
+            Pin::new(&mut framed).poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+    }
+
+    #[test]
+    fn framed_read_exact_cap_probe_preserves_io_error() {
+        let reader = ErrorReader::new(io::ErrorKind::ConnectionReset);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(4);
+        framed.buffer.extend_from_slice(b"tail");
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(matches!(
+            poll,
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref error))))
+                if error.kind() == io::ErrorKind::ConnectionReset
+        ));
+        assert_eq!(framed.read_buffer(), b"tail".as_slice());
+    }
+
+    #[test]
+    fn framed_read_rejects_buffer_growth_past_max_buffer_len() {
+        // Reader serves 256 bytes of "A" with NO newline → LinesCodec
+        // never produces a frame, so without the cap the buffer would
+        // accumulate forever. Cap at 64 bytes — retain exactly the cap,
+        // then let the one-byte probe prove the peer is still growing it.
+        let payload: Vec<u8> = vec![b'A'; 256];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("max_buffer_len"),
+                    "error message must reference max_buffer_len, got: {msg}"
+                );
+                assert!(
+                    msg.contains("64"),
+                    "error message must include the cap, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidData from max_buffer_len enforcement, got {other:?}"),
+        }
+        // The probe byte is never appended, so retained memory stops exactly
+        // at the configured cap.
+        assert_eq!(framed.read_buffer().len(), 64);
+    }
+
+    #[test]
+    fn framed_read_max_buffer_len_zero_allows_unbounded_growth() {
+        // With max_buffer_len=0 (cap disabled) a 1 MiB payload without
+        // any newline must accumulate into the buffer without error.
+        let payload: Vec<u8> = vec![b'A'; 1024 * 1024];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        // SliceReader will return all bytes in successive reads, then
+        // EOF. LinesCodec without a newline + EOF yields the buffered
+        // bytes as the final frame. We don't assert the exact poll
+        // outcome — only that no max_buffer_len error is raised.
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                let msg = format!("{err}");
+                assert!(
+                    !msg.contains("max_buffer_len"),
+                    "limit=0 must disable enforcement, got: {msg}"
+                );
+            }
+            _ => {} // Pending or Ready(Ok) or Ready(None) all fine
+        }
+    }
+
+    // br-asupersync-3asq77: stream-poison after decoder error prevents
+    // infinite re-emit of the same Err.
+
+    /// Decoder that always returns Err, regardless of input. Used to
+    /// drive the FramedRead poison path.
+    struct AlwaysErrDecoder;
+
+    impl Decoder for AlwaysErrDecoder {
+        type Item = ();
+        type Error = io::Error;
+
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "always-fail decoder",
+            ))
+        }
+    }
+
+    /// Decoder that returns Err only from decode_eof. Used to verify
+    /// the EOF error path also poisons the stream.
+    struct EofErrDecoder;
+
+    impl Decoder for EofErrDecoder {
+        type Item = ();
+        type Error = io::Error;
+
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            Ok(None)
+        }
+
+        fn decode_eof(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "eof-fail decoder",
+            ))
+        }
+    }
+
+    #[test]
+    fn _3asq77_decode_err_poisons_stream_then_terminates() {
+        // First poll: decoder returns Err — must surface it once.
+        // Second poll: must return None (poisoned), NOT another Err.
+        let reader = SliceReader::new(b"some bytes that would re-decode");
+        let mut framed = FramedRead::new(reader, AlwaysErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(first, Poll::Ready(Some(Err(ref e))) if e.kind() == io::ErrorKind::InvalidData),
+            "first poll must surface the decoder Err exactly once, got {first:?}"
+        );
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "second poll on a poisoned FramedRead must return None, not re-emit \
+             the same Err — got {second:?}"
+        );
+
+        // Third poll must remain terminated — verifies the poison flag
+        // is sticky across many polls.
+        let third = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(third, Poll::Ready(None)),
+            "subsequent polls on a poisoned FramedRead must keep returning \
+             None, got {third:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_decode_err_does_not_busy_loop_on_repeated_polls() {
+        // Tight loop simulating `stream::collect` / `for_each` after
+        // a decode error. Pre-poison this would have produced the same
+        // Err N times forever; post-poison the stream must terminate
+        // after exactly one Err.
+        let reader = SliceReader::new(b"x");
+        let mut framed = FramedRead::new(reader, AlwaysErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut errs = 0;
+        let mut nones = 0;
+        for _ in 0..16 {
+            match Pin::new(&mut framed).poll_next(&mut cx) {
+                Poll::Ready(Some(Err(_))) => errs += 1,
+                Poll::Ready(None) => nones += 1,
+                other => panic!("unexpected poll outcome: {other:?}"),
+            }
+        }
+        assert_eq!(errs, 1, "decoder Err must be surfaced exactly once");
+        assert_eq!(
+            nones, 15,
+            "every subsequent poll must return None (terminated stream)"
+        );
+    }
+
+    #[test]
+    fn _3asq77_decode_eof_err_also_poisons_stream() {
+        // The EOF decode path is a second Err exit — it must also
+        // poison so callers can't loop on `decode_eof` errors either.
+        let reader = SliceReader::new(b""); // immediate EOF
+        let mut framed = FramedRead::new(reader, EofErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(first, Poll::Ready(Some(Err(ref e))) if e.kind() == io::ErrorKind::InvalidData),
+            "first poll must surface the decode_eof Err once, got {first:?}"
+        );
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after a decode_eof Err, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_io_err_also_poisons_stream() {
+        // The underlying-reader error path is a third Err exit and
+        // must also poison the stream — a flaky reader that returns
+        // an io::Error then "recovers" should not re-arm the framing
+        // pipeline behind FramedRead's back.
+        let reader = ErrorReader::new(io::ErrorKind::ConnectionReset);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        match first {
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref e))))
+                if e.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("expected ConnectionReset on first poll, got {other:?}"),
+        }
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after an io error, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_max_buffer_cap_err_also_poisons_stream() {
+        // The bj427s max_buffer_len cap is the fourth Err exit — same
+        // poison contract applies, otherwise a slowloris peer that
+        // keeps the connection open after the cap fires would re-trip
+        // the cap on every poll.
+        let payload: Vec<u8> = vec![b'A'; 256];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        match first {
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref e))))
+                if e.kind() == io::ErrorKind::InvalidData => {}
+            other => panic!("expected InvalidData on first poll, got {other:?}"),
+        }
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after the max_buffer_len cap fires, \
+             got {second:?}"
+        );
+    }
+
+    #[test]
+    fn framed_read_under_cap_pass_through_unchanged() {
+        // Single frame ending in newline, well under the cap → must
+        // decode normally without triggering the buffer-cap path.
+        let payload: &[u8] = b"hello\n";
+        let reader = SliceReader::new(payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(1024);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Ok(line))) => {
+                assert_eq!(line, "hello");
+            }
+            other => panic!("expected Ready(Some(Ok(\"hello\"))), got {other:?}"),
+        }
+    }
+}

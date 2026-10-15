@@ -1,0 +1,12 @@
+{
+  "cv_pct": 15.951250745275884,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 696.1559443035591,
+  "median_ns": 666.4928531307748,
+  "name": "arena/iterate_1000",
+  "p95_ns": 930.4907575636721,
+  "p99_ns": 1034.923874765734,
+  "profile": "release-perf",
+  "std_dev_ns": 111.04558025400382
+}

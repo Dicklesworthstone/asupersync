@@ -1,0 +1,128 @@
+{
+  "schema_version": "stale-in-progress-bead-reaper-contract-v1",
+  "contract_id": "stale-in-progress-bead-reaper-contract",
+  "bead_id": "asupersync-ol11aa.9.1",
+  "helper": "scripts/stale_in_progress_bead_reaper.py",
+  "required_classifications": [
+    "stale-reopen-candidate",
+    "live-agent-excluded",
+    "recent-update-excluded",
+    "missing-timestamp-refused",
+    "malformed-row-refused",
+    "ambiguous-ownership-refused",
+    "non-in-progress-ignored"
+  ],
+  "expected_report_summary": {
+    "issue_count": 7,
+    "candidate_count": 1,
+    "would_reopen": 1,
+    "applied_reopen": 0,
+    "refused_or_excluded": 5,
+    "ignored": 1,
+    "highest_severity_issue": ""
+  },
+  "expected_apply_summary": {
+    "issue_count": 7,
+    "candidate_count": 1,
+    "would_reopen": 0,
+    "applied_reopen": 1,
+    "refused_or_excluded": 5,
+    "ignored": 1,
+    "highest_severity_issue": ""
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_stale_in_progress_bead_reaper\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test stale_in_progress_bead_reaper_contract -- --nocapture",
+    "script_self_check": "python3 scripts/stale_in_progress_bead_reaper.py --fixture artifacts/stale_in_progress_bead_reaper_contract_v1.json --generated-at 2026-06-06T14:30:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "stale-in-progress-bead-reaper-fixture-v1",
+    "fixture_id": "stale-in-progress-bead-reaper-contract-fixture",
+    "inactivity_threshold_seconds": 604800,
+    "active_agent_snapshot_id": "agent-mail-active-agents-2026-06-06T14:30:00Z",
+    "active_agents": [
+      {
+        "name": "PinkStream",
+        "active": true,
+        "last_active_at": "2026-06-06T14:18:00Z"
+      },
+      {
+        "name": "DormantAgent",
+        "active": false,
+        "last_active_at": "2026-05-01T00:00:00Z"
+      },
+      {
+        "name": "RecentlyDormant",
+        "active": false,
+        "last_active_at": "2026-06-01T00:00:00Z"
+      },
+      {
+        "name": "Timestampless",
+        "active": false,
+        "last_active_at": "2026-04-01T00:00:00Z"
+      }
+    ],
+    "issues": [
+      {
+        "id": "asupersync-stale-old",
+        "title": "Old in-progress bead assigned to an inactive known agent",
+        "status": "in_progress",
+        "assignee": "DormantAgent",
+        "updated_at": "2026-05-15T12:00:00Z",
+        "priority": 1,
+        "issue_type": "task"
+      },
+      {
+        "id": "asupersync-live-agent",
+        "title": "In-progress bead owned by a currently active agent",
+        "status": "in_progress",
+        "assignee": "PinkStream",
+        "updated_at": "2026-05-15T12:00:00Z",
+        "priority": 1,
+        "issue_type": "task"
+      },
+      {
+        "id": "asupersync-recent-update",
+        "title": "Inactive assignee but recent tracker activity",
+        "status": "in_progress",
+        "assignee": "RecentlyDormant",
+        "updated_at": "2026-06-04T14:30:00Z",
+        "priority": 2,
+        "issue_type": "task"
+      },
+      {
+        "id": "asupersync-missing-timestamp",
+        "title": "In-progress bead with missing timestamp evidence",
+        "status": "in_progress",
+        "assignee": "Timestampless",
+        "priority": 2,
+        "issue_type": "task"
+      },
+      {
+        "title": "Malformed row without an id",
+        "status": "in_progress",
+        "assignee": "DormantAgent",
+        "updated_at": "2026-05-01T00:00:00Z",
+        "priority": 2,
+        "issue_type": "task"
+      },
+      {
+        "id": "asupersync-unknown-owner",
+        "title": "In-progress bead with an assignee outside the active-agent snapshot",
+        "status": "in_progress",
+        "assignee": "UnknownAgent",
+        "updated_at": "2026-05-01T00:00:00Z",
+        "priority": 2,
+        "issue_type": "task"
+      },
+      {
+        "id": "asupersync-closed-row",
+        "title": "Closed bead should not be touched by the stale reaper",
+        "status": "closed",
+        "assignee": "DormantAgent",
+        "updated_at": "2026-05-01T00:00:00Z",
+        "priority": 2,
+        "issue_type": "task"
+      }
+    ]
+  }
+}

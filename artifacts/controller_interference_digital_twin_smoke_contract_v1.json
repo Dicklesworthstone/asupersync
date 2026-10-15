@@ -1,0 +1,51 @@
+{
+  "contract_version": "controller-interference-digital-twin-smoke-contract-v1",
+  "runner_script": "scripts/run_controller_interference_digital_twin_smoke.sh",
+  "report_artifacts": [
+    "controller_interference_digital_twin_report.json",
+    "run_report.json"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-CONTROLLER-INTERFERENCE-DIGITAL-TWIN-64C-256G",
+      "description": "Deterministic combined-controller replay for admission, batching, brownout, topology, trace-retention, and capacity controllers before accepting a signed profile bundle.",
+      "expected_verdict": "pass",
+      "required_report_fields": [
+        "schema_version",
+        "scenario_id",
+        "verdict",
+        "accepted",
+        "no_win",
+        "fallback_decision",
+        "bundle_manifest_digest_sha256",
+        "signed_mode_required",
+        "controller_versions",
+        "input_evidence_hashes",
+        "state_vectors",
+        "state_vector_hash",
+        "findings",
+        "replay_command"
+      ],
+      "acceptance": {
+        "fallback_decision": "accept_combined_policy_bundle",
+        "required_controller_rows": [
+          "admission",
+          "batching",
+          "brownout",
+          "topology",
+          "trace_retention",
+          "capacity"
+        ],
+        "required_finding_classes": [
+          "oscillation",
+          "priority_inversion",
+          "hidden_overload_transfer",
+          "conflicting_no_win",
+          "stale_evidence_reuse"
+        ],
+        "minimum_state_vectors": 6,
+        "expected_findings": 0
+      }
+    }
+  ]
+}

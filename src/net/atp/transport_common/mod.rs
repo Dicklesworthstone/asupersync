@@ -1,0 +1,57 @@
+//! Shared ATP transport helpers.
+//!
+//! `transport_common` owns transport-agnostic bounded-memory primitives that
+//! TCP, RaptorQ, and native QUIC can reuse without copying private helpers.
+
+pub mod codec;
+pub mod compression;
+pub mod delta;
+mod file_hash;
+pub mod filter;
+pub mod metadata;
+pub mod mirror;
+pub mod multi_object;
+pub mod multisource;
+pub mod progress;
+mod source_io;
+mod source_root;
+mod source_walk;
+pub mod streaming;
+
+pub use codec::{
+    ChunkCodec, ChunkCodecError, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
+    WireCodec,
+};
+pub use compression::{
+    CompressionAlgorithm, CompressionDescriptor, CompressionError, CompressionPolicy,
+    CompressionSkipReason, PreEncodeCompression, decompress_pre_encoded, maybe_compress_pre_encode,
+};
+pub use delta::{DeltaChunkWire, DeltaManifestWire};
+pub(crate) use delta::{DeltaObjectRequest, DeltaWireMode};
+pub use filter::{FilterAction, FilterDecision, FilterError, FilterRule, FilterSet};
+pub use metadata::{
+    DirectoryMetadataEntry, DirectoryMetadataManifest, DirtyPathSet, EntryMetadata, FileIdentity,
+    FileKind, MetadataApplyReport, SimilaritySignature, ZeroScanDecision, ZeroScanEntry,
+    ZeroScanFingerprint, ZeroScanHashReason, ZeroScanPlan, ZeroScanPolicy, ZeroScanPrefilter,
+    apply_entry_metadata, apply_entry_metadata_sync, capture_directory_metadata_manifest,
+    metadata_commitment, read_entry_metadata,
+};
+pub use mirror::{
+    MirrorEntryKind, MirrorError, MirrorExtra, MirrorPolicy, MirrorReport, mirror_dest,
+};
+pub use multi_object::{
+    ATP_RQ_DEFAULT_MULTI_OBJECT_BLOCK_SIZE, ATP_RQ_MAX_SOURCE_BLOCKS_PER_OBJECT, MultiObjectPlan,
+    MultiObjectShard, MultiObjectSplitConfig, MultiObjectSplitError, plan_multi_object_split,
+};
+pub use multisource::{
+    MultiSourceAuth, MultiSourceFetchPlan, MultiSourceObjectRef, MultiSourcePeer,
+    MultiSourcePlanError, MultiSourceSelectionConfig, MultiSourceSourcePlan,
+    MultiSourceStopCommand, MultiSourceStopReason, MultiSourceSymbolBias, plan_multi_source_fetch,
+};
+pub use progress::{
+    PlanEntry, PlanError, ProgressSnapshot, TransferPlan, TransferProgress, plan_transfer,
+};
+pub use streaming::{
+    EntryDigest, SourceEntry, StagedEntryReceive, StreamingError, collect_entries,
+    flat_merkle_root_from_digests, flat_merkle_root_from_slices, hash_file_streaming, hex_encode,
+};

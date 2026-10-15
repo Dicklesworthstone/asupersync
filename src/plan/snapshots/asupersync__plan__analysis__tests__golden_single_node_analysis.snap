@@ -1,0 +1,12 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3386
+expression: "format!(\"{}\", node_analysis)"
+---
+Node 0 Analysis:
+  Obligation Safety: clean (effective: clean)
+  Cancel Safety: safe
+  Budget Effect: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=0 depth=1
+  Obligation Flow: reserves=[] [all-paths-ok]
+  Overall Safe: true

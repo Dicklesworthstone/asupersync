@@ -1,0 +1,18 @@
+{
+  "name": "asupersync-service-worker-broker-consumer-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check:bundle": "node ./scripts/check-bundle.mjs",
+    "check:browser": "node ./scripts/check-browser-run.mjs"
+  },
+  "dependencies": {
+    "@asupersync/browser": "file:../packages/browser"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.51.1",
+    "vite": "^7.3.1"
+  }
+}

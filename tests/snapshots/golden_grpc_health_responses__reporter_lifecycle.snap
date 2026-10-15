@@ -1,0 +1,81 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "reporter_lifecycle_stages": [
+    {
+      "server_query": {
+        "description": "Server before reporters",
+        "is_healthy": false,
+        "query_service": "",
+        "result": "success",
+        "status_code": 3,
+        "status_text": "SERVICE_UNKNOWN"
+      },
+      "service_query": {
+        "description": "Managed service before reporter",
+        "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+        "query_service": "managed.service",
+        "result": "error"
+      },
+      "stage": "initial",
+      "version": 0
+    },
+    {
+      "reporter_is_healthy": true,
+      "reporter_status": "SERVING",
+      "server_query": {
+        "description": "Server with active reporter",
+        "is_healthy": true,
+        "query_service": "",
+        "result": "success",
+        "status_code": 1,
+        "status_text": "SERVING"
+      },
+      "service_query": {
+        "description": "Managed service - serving",
+        "is_healthy": true,
+        "query_service": "managed.service",
+        "result": "success",
+        "status_code": 1,
+        "status_text": "SERVING"
+      },
+      "stage": "reporter_active_serving",
+      "version": 1
+    },
+    {
+      "reporter_is_healthy": false,
+      "reporter_status": "NOT_SERVING",
+      "service_query": {
+        "description": "Managed service - not serving",
+        "is_healthy": false,
+        "query_service": "managed.service",
+        "result": "success",
+        "status_code": 2,
+        "status_text": "NOT_SERVING"
+      },
+      "stage": "reporter_active_not_serving",
+      "version": 2
+    },
+    {
+      "note": "Service status should be cleared when reporter drops",
+      "service_query": {
+        "description": "Managed service after reporter drop",
+        "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+        "query_service": "managed.service",
+        "result": "error"
+      },
+      "stage": "reporter_dropped",
+      "version": 3
+    }
+  ],
+  "summary": {
+    "demonstrates": [
+      "Automatic service registration on reporter creation",
+      "Status updates through reporter interface",
+      "Automatic cleanup on reporter drop",
+      "Version tracking across lifecycle"
+    ]
+  }
+}

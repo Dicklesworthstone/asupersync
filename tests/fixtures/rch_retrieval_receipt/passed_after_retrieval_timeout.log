@@ -1,0 +1,6 @@
+  2026-05-08T04:58:31.605217Z  INFO rch::hook: Executing command remotely: cargo test --test proof_runner_contract -- --nocapture
+running 22 tests
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.18s
+  2026-05-08T04:59:02.326558Z  INFO rch::hook: Remote command finished: exit=0 in 30721ms
+  2026-05-08T04:59:02.327033Z  INFO rch::hook: Retrieving build artifacts...
+timeout: sending signal TERM to command 'rch'

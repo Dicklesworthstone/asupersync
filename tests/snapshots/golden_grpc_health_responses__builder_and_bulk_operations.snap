@@ -1,0 +1,92 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "builder_services": [
+    {
+      "description": "Server status",
+      "is_healthy": true,
+      "query_service": "",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Auth service",
+      "is_healthy": true,
+      "query_service": "auth.service",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Primary database",
+      "is_healthy": true,
+      "query_service": "database.primary",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Replica database",
+      "is_healthy": false,
+      "query_service": "database.replica",
+      "result": "success",
+      "status_code": 2,
+      "status_text": "NOT_SERVING"
+    },
+    {
+      "description": "Redis cache",
+      "is_healthy": false,
+      "query_service": "cache.redis",
+      "result": "success",
+      "status_code": 0,
+      "status_text": "UNKNOWN"
+    },
+    {
+      "description": "API v1 (from add_serving)",
+      "is_healthy": true,
+      "query_service": "api.v1",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "API v2 (from add_serving)",
+      "is_healthy": true,
+      "query_service": "api.v2",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Metrics service (from add_serving)",
+      "is_healthy": true,
+      "query_service": "metrics",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    }
+  ],
+  "service_counts": {
+    "not_serving": [
+      "database.replica"
+    ],
+    "serving": [
+      "auth.service",
+      "database.primary",
+      "api.v1",
+      "api.v2",
+      "metrics"
+    ],
+    "total_services": 7,
+    "unknown": [
+      "cache.redis"
+    ]
+  },
+  "version_info": {
+    "current_version": 8,
+    "description": "Version should reflect all status changes during builder setup"
+  }
+}

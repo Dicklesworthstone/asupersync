@@ -1,0 +1,48 @@
+---
+source: src/types/budget.rs
+expression: |-
+  json!({
+      "events": [
+          {
+              "event": "created",
+              "deadline": scrub_budget_event(before.deadline),
+              "poll_quota": before.poll_quota,
+              "cost_quota": before.cost_quota,
+              "priority": before.priority,
+          },
+          {
+              "event": "consume_poll",
+              "returned": poll_before,
+              "poll_quota_after": after_poll.poll_quota,
+          },
+          {
+              "event": "consume_cost",
+              "accepted": cost_ok,
+              "cost_quota_after": after_cost.cost_quota,
+              "exhausted": after_cost.is_exhausted(),
+          }
+      ]
+  })
+---
+{
+  "events": [
+    {
+      "cost_quota": 40,
+      "deadline": "[DEADLINE]",
+      "event": "created",
+      "poll_quota": 3,
+      "priority": 180
+    },
+    {
+      "event": "consume_poll",
+      "poll_quota_after": 2,
+      "returned": 3
+    },
+    {
+      "accepted": true,
+      "cost_quota_after": 25,
+      "event": "consume_cost",
+      "exhausted": false
+    }
+  ]
+}

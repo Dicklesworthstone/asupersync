@@ -1,0 +1,82 @@
+{
+  "artifact_budget": {
+    "configured": true,
+    "limits": {
+      "max_artifact_bytes": null,
+      "max_artifact_files": 2000,
+      "max_retrieval_ms": 3000
+    },
+    "observed": {
+      "artifact_bytes": 356,
+      "artifact_file_count": 1536,
+      "retrieval_elapsed_ms": 2826
+    },
+    "proof_lane": "rch-retrieval-budget",
+    "rchignore_remediation": {
+      "next_steps": [
+        "use a lane-specific CARGO_TARGET_DIR under ${TMPDIR:-/tmp}/rch_target_<lane>",
+        "exclude transient rch scratch directories from artifact retrieval",
+        "rerun the same focused proof lane after trimming artifact fanout"
+      ],
+      "operator_note": "Keep per-lane CARGO_TARGET_DIR values under transient rch scratch paths or add equivalent bulky artifact directories to .rchignore before rerunning.",
+      "recommended_patterns": [
+        ".rch-*/",
+        ".rch_target*/"
+      ]
+    },
+    "status": "retrieval-incomplete",
+    "violations": [
+      {
+        "limit": true,
+        "metric": "retrieval_completed",
+        "observed": false,
+        "reason": "retrieval-timeout-or-incomplete"
+      }
+    ],
+    "within_budget": false
+  },
+  "classification": "passed_after_retrieval_timeout",
+  "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs cargo test --test proof_runner_contract -- --nocapture",
+  "current_date": "2026-05-08",
+  "decision": "pass-with-retrieval-blocker",
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:10:00Z",
+  "guarantee": "unspecified",
+  "log_path": "/data/projects/asupersync/tests/fixtures/rch_retrieval_receipt/multistage_target_timeout.log",
+  "markers": {
+    "artifact_bytes": 356,
+    "artifact_file_count": 1536,
+    "local_fallback": false,
+    "remote_exit_code": 0,
+    "remote_failure": false,
+    "remote_success": true,
+    "remote_success_line": 5,
+    "retrieval_completed": false,
+    "retrieval_completed_count": 1,
+    "retrieval_elapsed_ms": 2826,
+    "retrieval_partial": true,
+    "retrieval_stage_count": 2,
+    "retrieval_started": true,
+    "retrieval_started_line": 6,
+    "timeout_observed": true
+  },
+  "non_mutating": true,
+  "proof_lane": "rch-retrieval-budget",
+  "remediation": {
+    "next_steps": [
+      "capture the remote success line and test summary in the closeout",
+      "inspect retrieval excludes and CARGO_TARGET_DIR sizing before rerunning",
+      "terminate stale local wrapper/rsync only after the remote success marker is captured"
+    ],
+    "operator_note": "Record the remote command as passed only when the remote success marker is present; record artifact retrieval as a separate blocker.",
+    "summary": "remote proof passed, but artifact retrieval did not finish"
+  },
+  "schema_version": "rch-retrieval-receipt-v1",
+  "target_dir": "${TMPDIR:-/tmp}/rch_target_rch_retrieval_receipt_docs",
+  "wrapper_exit_code": 124
+}

@@ -1,0 +1,12 @@
+{
+  "cv_pct": 10.02717097548613,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 1537.517681904821,
+  "median_ns": 1515.760371123245,
+  "name": "throughput/arena_inserts/1000",
+  "p95_ns": 1759.9784066822845,
+  "p99_ns": 1798.359593469216,
+  "profile": "release-perf",
+  "std_dev_ns": 154.16952674292736
+}

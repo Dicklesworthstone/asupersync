@@ -1,0 +1,5 @@
+---
+source: src/observability/metrics.rs
+expression: serialized
+---
+{"resource":{"attributes":{"service.name":"asupersync","service.version":"0.3.1-test"}},"metrics":[{"descriptor":{"name":"requests_total","description":"Counter: requests_total","unit":"1"},"data_points":[{"timestamp_nanos":123,"value":{"Counter":7},"attributes":{}}]}]}

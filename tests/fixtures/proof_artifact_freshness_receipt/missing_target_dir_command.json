@@ -1,0 +1,23 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/missing-target-dir-command.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "touched_files": [
+        "scripts/proof_runner.py",
+        "tests/proof_runner_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:15:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

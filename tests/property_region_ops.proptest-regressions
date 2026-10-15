@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8e381a47e020fccdd9cbdb227736deb1ee154e1e6726febcf08cc675f6b38d90 # shrinks to depth = 1
+cc 56c644c7c57ee8967b7f589a2d88b0c487a20bc895e61e3aa9f1d35e9693c71c # shrinks to setup_ops = [AdvanceTime { millis: 4760 }], cancel_target = RegionSelector(0)
+cc 62fe3cacd7d69c46c06728c61315d979aac224a0220ad06baed2efdd90ce5d9a # shrinks to ops = [Cancel { region: RegionSelector(77), reason: Shutdown }]
+cc 456a6504f37626184d7bd1774312abff0c110df2e4bd9f39863a54dab90bc8b8 # shrinks to create_ops = [CloseRegion { region: RegionSelector(17) }], destroy_ops = [Cancel { region: RegionSelector(50), reason: Deadline }]
+cc d8c5b3af1fd10b9f8ed409603b5a82f27968fef34c46b64b713ab5a48fb495aa # shrinks to ops = [Cancel { region: RegionSelector(93), reason: User }]

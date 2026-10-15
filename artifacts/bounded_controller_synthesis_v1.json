@@ -1,0 +1,132 @@
+{
+  "contract_version": "bounded-controller-synthesis-v1",
+  "bead_id": "asupersync-1508v.3.5",
+  "description": "AA-03.2 bounded controller artifact synthesis from replay data and state/loss models.",
+  "runner_script": "scripts/run_bounded_controller_synthesis_smoke.sh",
+  "runner_bundle_schema_version": "bounded-controller-synthesis-smoke-bundle-v1",
+  "runner_report_schema_version": "bounded-controller-synthesis-smoke-run-report-v1",
+  "controller_domains": [
+    {
+      "domain_id": "SCHED-GOVERNOR",
+      "description": "Scheduler governor: cancel-streak limit and adaptive epoch tuning.",
+      "state_variables": ["ready_queue_len", "cancel_lane_len", "cancel_streak_current", "workers_parked"],
+      "action_set": [
+        { "action_id": "SCHED-NOOP", "description": "No change to scheduler parameters" },
+        { "action_id": "SCHED-WIDEN-STREAK", "description": "Increase cancel-streak limit by 1" },
+        { "action_id": "SCHED-NARROW-STREAK", "description": "Decrease cancel-streak limit by 1" },
+        { "action_id": "SCHED-PARK-WORKER", "description": "Park one idle worker" },
+        { "action_id": "SCHED-WAKE-WORKER", "description": "Wake one parked worker" }
+      ],
+      "loss_terms": [
+        { "term_id": "SCHED-LOSS-TAIL", "description": "p99 task latency above SLO target", "weight": 0.5 },
+        { "term_id": "SCHED-LOSS-FAIRNESS", "description": "Cancel lane starvation or monopoly", "weight": 0.3 },
+        { "term_id": "SCHED-LOSS-IDLE", "description": "Unnecessary worker park/wake churn", "weight": 0.2 }
+      ],
+      "seam_ids": ["AA01-SEAM-SCHED-GOVERNOR", "AA01-SEAM-SCHED-CANCEL-STREAK"],
+      "twin_stages": ["DT-READY-QUEUE", "DT-CANCEL-LANE"],
+      "conservative_comparator": "static cancel_streak_limit=16, no adaptive"
+    },
+    {
+      "domain_id": "ADMISSION-GATE",
+      "description": "Admission control: root region task limits and backpressure.",
+      "state_variables": ["total_tasks", "active_regions", "outstanding_obligations"],
+      "action_set": [
+        { "action_id": "ADMIT-NOOP", "description": "No change to admission limits" },
+        { "action_id": "ADMIT-TIGHTEN", "description": "Reduce max concurrent tasks by step" },
+        { "action_id": "ADMIT-RELAX", "description": "Increase max concurrent tasks by step" }
+      ],
+      "loss_terms": [
+        { "term_id": "ADMIT-LOSS-REJECT", "description": "Unnecessary task rejections", "weight": 0.4 },
+        { "term_id": "ADMIT-LOSS-OVERLOAD", "description": "Obligation leak or queue overflow", "weight": 0.4 },
+        { "term_id": "ADMIT-LOSS-LATENCY", "description": "Admission latency above target", "weight": 0.2 }
+      ],
+      "seam_ids": ["AA01-SEAM-ADMISSION-ROOT-LIMITS"],
+      "twin_stages": ["DT-ADMISSION-GATE", "DT-OBLIGATION-SETTLE"],
+      "conservative_comparator": "static root_task_limit=1024, no adaptive"
+    },
+    {
+      "domain_id": "RETRY-BACKOFF",
+      "description": "Retry backoff: exponential delay tuning for retriable operations.",
+      "state_variables": ["pending_io_registrations", "active_timers"],
+      "action_set": [
+        { "action_id": "RETRY-NOOP", "description": "No change to retry parameters" },
+        { "action_id": "RETRY-STEEPEN", "description": "Increase backoff multiplier" },
+        { "action_id": "RETRY-FLATTEN", "description": "Decrease backoff multiplier" }
+      ],
+      "loss_terms": [
+        { "term_id": "RETRY-LOSS-WASTED", "description": "Wasted retries on permanent failures", "weight": 0.3 },
+        { "term_id": "RETRY-LOSS-SLOW", "description": "Excessive backoff on transient failures", "weight": 0.4 },
+        { "term_id": "RETRY-LOSS-STORM", "description": "Retry storm amplification", "weight": 0.3 }
+      ],
+      "seam_ids": ["AA01-SEAM-RETRY-BACKOFF"],
+      "twin_stages": ["DT-RETRY-BACKOFF", "DT-IO-REACTOR"],
+      "conservative_comparator": "static exponential backoff base=100ms, max=30s"
+    }
+  ],
+  "artifact_format": {
+    "description": "Synthesized controller artifacts are AA-02 compatible.",
+    "manifest_schema_version": "controller-artifact-manifest-v1",
+    "requires_fields": [
+      "artifact_id",
+      "controller_name",
+      "controller_version",
+      "snapshot_version_range",
+      "target_seams",
+      "bounds",
+      "fallback",
+      "integrity"
+    ],
+    "policy_table_format": "JSON lookup table keyed by discretized state vector"
+  },
+  "calibration_protocol": {
+    "description": "How synthesized controllers are calibrated against replay data.",
+    "steps": [
+      "1. Select workload IDs from replay corpus",
+      "2. Run twin model with synthesized policy",
+      "3. Compare predicted vs observed loss terms",
+      "4. Compute calibration score as 1 - mean_absolute_error",
+      "5. Reject if calibration < min_calibration_score"
+    ],
+    "min_calibration_score": 0.8,
+    "holdout_fraction": 0.2
+  },
+  "structured_log_fields_required": [
+    "domain_id",
+    "controller_name",
+    "action_id",
+    "state_vector",
+    "loss_terms",
+    "total_loss",
+    "calibration_score",
+    "workload_id",
+    "snapshot_id",
+    "policy_version",
+    "comparator_baseline",
+    "improvement_ratio",
+    "within_budget",
+    "fallback_triggered"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "BCS-SMOKE-DOMAINS",
+      "description": "Validate controller domain catalog and action sets",
+      "test_filter": "domain",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract domain -- --nocapture"
+    },
+    {
+      "scenario_id": "BCS-SMOKE-LOSS",
+      "description": "Validate loss model computation and calibration protocol",
+      "test_filter": "loss",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract loss -- --nocapture"
+    },
+    {
+      "scenario_id": "BCS-SMOKE-ARTIFACT",
+      "description": "Validate artifact format compatibility with AA-02",
+      "test_filter": "artifact",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_bounded_controller_synthesis cargo test -p asupersync --test bounded_controller_synthesis_contract artifact -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.3.6"
+  ]
+}

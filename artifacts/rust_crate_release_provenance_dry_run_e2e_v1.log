@@ -1,0 +1,23 @@
+rust-crate-release-provenance-dry-run-e2e-v1
+mode=deterministic_fixture_no_live_publish
+workflow=.github/workflows/publish.yml
+contract=artifacts/rust_crate_release_provenance_contract_v1.json
+final_signoff=artifacts/rust_crate_release_provenance_final_signoff_v1.json
+operator_report=docs/rust_crate_release_provenance_final_signoff.md
+live_publish=false
+cargo_publish_dry_run=false
+result[1]=franken-kernel status=packaged record=fixture-e2e-franken-kernel-0.3.4 package_sha256=sha256:377e9087a77ad9f445ce4f7ddc4a07e7f34d900c655227d1f682114a2f7e3eea
+result[2]=franken-evidence status=packaged record=fixture-e2e-franken-evidence-0.3.4 package_sha256=sha256:2d9be9b8417c0a2f551be535ce8e16ca3c052a90d28f565bb183c93e7cd8d241
+result[3]=franken-decision status=packaged record=fixture-e2e-franken-decision-0.3.4 package_sha256=sha256:a176ebe44a9781bc52157e628b84994531a6a667b52ab4c9afd601ba4d1d8891
+result[4]=asupersync-macros status=packaged record=fixture-e2e-asupersync-macros-0.3.4 package_sha256=sha256:12070fc73e4982c856f1a482d6a6d1b6f27bcba15b8e97114315a1fdff22fd37
+result[5]=asupersync status=packaged record=fixture-e2e-asupersync-0.3.4 package_sha256=sha256:78da2c05f873fa43909c6ccc2a4d6cbc4714a3f2e5b6b2dd20b02451f8ff3832
+result[6]=asupersync-conformance status=packaged record=fixture-e2e-asupersync-conformance-0.3.4 package_sha256=sha256:41edc80f7db87c1e2af67fd8b367401c7477eb92f57d6f05c46688f61f39d5eb
+result[7]=frankenlab status=packaged record=fixture-e2e-frankenlab-0.3.4 package_sha256=sha256:b6561ce7539f0c3f0eb25f70f5aeae852fd19b071b8d1ff06d9f01c623b947b8
+result[8]=asupersync-browser-core status=packaged record=fixture-e2e-asupersync-browser-core-0.3.4 package_sha256=sha256:5aa4d2ccf99af99ad5ba0120dbb2a3ba0e4b3c0dcae687dcf61ed98a45da18ca
+result[9]=asupersync-tokio-compat status=packaged record=fixture-e2e-asupersync-tokio-compat-0.3.4 package_sha256=sha256:0302e9c0231bee59390b40a1847612073057578c1fb344d51949c703456b6a1e
+final_verdict=yellow_scoped_signoff_complete
+no_claim=does_not_prove_release_readiness
+no_claim=does_not_prove_runtime_correctness
+no_claim=does_not_prove_broad_workspace_health
+no_claim=does_not_prove_live_crates_io_publication
+no_claim=does_not_prove_real_package_tarball_integrity

@@ -1,0 +1,1193 @@
+//! Trace replayer for deterministic replay.
+//!
+//! The [`TraceReplayer`] feeds recorded decisions back into the Lab runtime
+//! to achieve exact execution replay. This is useful for:
+//!
+//! - Debugging non-deterministic issues
+//! - Reproducing test failures
+//! - Verifying execution determinism
+//!
+//! # Usage
+//!
+//! ```no_run
+//! use asupersync::trace::{ReplayMode, ReplayTrace, TraceReplayer, read_trace};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Load a trace file
+//! let (metadata, events) = read_trace("trace.bin")?;
+//! let mut trace = ReplayTrace::new(metadata);
+//! for event in events {
+//!     trace.push(event);
+//! }
+//!
+//! // Create a replayer
+//! let mut replayer = TraceReplayer::new(trace);
+//!
+//! // Replay step by step
+//! replayer.set_mode(ReplayMode::Step);
+//! while let Some(event) = replayer.step()? {
+//!     println!("Replayed: {:?}", event);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Divergence Detection
+//!
+//! The replayer detects when actual execution diverges from the recorded trace.
+//! This indicates either a bug in the code or trace corruption.
+
+use crate::trace::replay::{CompactTaskId, ReplayEvent, ReplayTrace, TraceMetadata};
+use serde::Serialize;
+use std::fmt;
+
+const REPLAY_DIVERGENCE_CODE: &str = "ASUP-E401";
+
+// =============================================================================
+// Replay Mode
+// =============================================================================
+
+/// The replay execution mode.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ReplayMode {
+    /// Run to completion without stopping.
+    #[default]
+    Run,
+    /// Stop after each event.
+    Step,
+    /// Run until a specific breakpoint is reached.
+    RunTo(Breakpoint),
+}
+
+/// A breakpoint that stops replay execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Breakpoint {
+    /// Stop at a specific tick (step number).
+    Tick(u64),
+    /// Stop when a specific task is scheduled.
+    Task(CompactTaskId),
+    /// Stop at a specific event index.
+    EventIndex(usize),
+}
+
+// =============================================================================
+// Divergence Error
+// =============================================================================
+
+/// Error indicating that execution diverged from the recorded trace.
+#[derive(Debug)]
+pub struct DivergenceError {
+    /// The event index where divergence occurred.
+    pub index: usize,
+    /// The expected event from the trace, or `None` when the trace is exhausted.
+    pub expected: Option<ReplayEvent>,
+    /// The actual event that occurred.
+    pub actual: ReplayEvent,
+    /// Additional context about the divergence.
+    pub context: String,
+}
+
+impl fmt::Display for DivergenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let expected = self.expected.as_ref().map_or_else(
+            || "<trace_exhausted>".to_string(),
+            |event| format!("{event:?}"),
+        );
+        write!(
+            f,
+            "[{REPLAY_DIVERGENCE_CODE}] replay divergence at event {}: expected {}, got {:?}. {}",
+            self.index, expected, self.actual, self.context
+        )
+    }
+}
+
+impl std::error::Error for DivergenceError {}
+
+/// Errors that can occur during replay.
+#[derive(Debug, thiserror::Error)]
+pub enum ReplayError {
+    /// Execution diverged from the trace.
+    #[error("{0}")]
+    Divergence(#[from] DivergenceError),
+
+    /// Trace ended unexpectedly.
+    #[error("trace ended unexpectedly at event {index}, expected more events")]
+    UnexpectedEnd {
+        /// The event index where the trace ended.
+        index: usize,
+    },
+
+    /// Invalid trace metadata.
+    #[error("invalid trace metadata: {0}")]
+    InvalidMetadata(String),
+
+    /// Version mismatch.
+    #[error("trace version mismatch: expected {expected}, found {found}")]
+    VersionMismatch {
+        /// Expected version.
+        expected: u32,
+        /// Found version.
+        found: u32,
+    },
+}
+
+/// Structured replay report for browser-incident and CI repro workflows.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BrowserReplayReport {
+    /// Trace identifier used by diagnostics and artifacts.
+    pub trace_id: String,
+    /// Replay schema version.
+    pub schema_version: u32,
+    /// Recording seed.
+    pub seed: u64,
+    /// Total events in trace.
+    pub event_count: usize,
+    /// Events consumed by replayer.
+    pub replayed_events: usize,
+    /// True when replay consumed all events.
+    pub completed: bool,
+    /// Optional divergence index.
+    pub divergence_index: Option<usize>,
+    /// Optional divergence summary.
+    pub divergence_context: Option<String>,
+    /// Minimal replay prefix length for divergence reproduction.
+    pub minimization_prefix_len: Option<usize>,
+    /// Percentage reduction from full trace size for the minimal prefix.
+    pub minimization_reduction_pct: Option<u64>,
+    /// Optional artifact pointer for persisted report/replay payload.
+    pub artifact_pointer: Option<String>,
+    /// Deterministic rerun command bundle.
+    pub rerun_commands: Vec<String>,
+}
+
+impl BrowserReplayReport {
+    /// Serializes report to pretty JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when JSON serialization fails.
+    pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+}
+
+// =============================================================================
+// Trace Replayer
+// =============================================================================
+
+/// Replays a recorded trace, feeding decisions back to the runtime.
+///
+/// The replayer maintains a cursor into the trace and provides the next
+/// expected event for each replay step. It can detect divergence when
+/// actual execution doesn't match the recorded trace.
+#[derive(Debug)]
+pub struct TraceReplayer {
+    /// The trace being replayed.
+    trace: ReplayTrace,
+    /// Current position in the trace.
+    current_index: usize,
+    /// Current replay mode.
+    mode: ReplayMode,
+    /// Whether we've hit a breakpoint.
+    at_breakpoint: bool,
+    /// Whether replay has completed.
+    completed: bool,
+}
+
+impl TraceReplayer {
+    /// Creates a new replayer from a trace.
+    #[must_use]
+    pub fn new(trace: ReplayTrace) -> Self {
+        Self {
+            trace,
+            current_index: 0,
+            mode: ReplayMode::Run,
+            at_breakpoint: false,
+            completed: false,
+        }
+    }
+
+    /// Returns the trace metadata.
+    #[must_use]
+    pub fn metadata(&self) -> &TraceMetadata {
+        &self.trace.metadata
+    }
+
+    /// Returns the total number of events in the trace.
+    #[must_use]
+    pub fn event_count(&self) -> usize {
+        self.trace.len()
+    }
+
+    /// Returns the current event index.
+    #[must_use]
+    pub fn current_index(&self) -> usize {
+        self.current_index
+    }
+
+    /// Returns true if replay has completed.
+    #[must_use]
+    pub fn is_completed(&self) -> bool {
+        self.completed
+    }
+
+    /// Returns true if we're at a breakpoint.
+    #[must_use]
+    pub fn at_breakpoint(&self) -> bool {
+        self.at_breakpoint
+    }
+
+    /// Sets the replay mode.
+    pub fn set_mode(&mut self, mode: ReplayMode) {
+        self.mode = mode;
+        self.at_breakpoint = false;
+    }
+
+    /// Returns the current replay mode.
+    #[must_use]
+    pub fn mode(&self) -> &ReplayMode {
+        &self.mode
+    }
+
+    /// Returns the next expected event without advancing.
+    #[must_use]
+    pub fn peek(&self) -> Option<&ReplayEvent> {
+        self.trace.events.get(self.current_index)
+    }
+
+    /// Advances to the next event and returns it.
+    ///
+    /// Returns `None` if the trace has been fully replayed.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<&ReplayEvent> {
+        if self.completed {
+            return None;
+        }
+
+        let event_index = self.current_index;
+        let Some(event) = self.trace.events.get(event_index) else {
+            self.completed = true;
+            return None;
+        };
+        let should_break = self.check_breakpoint(event, event_index + 1);
+
+        self.current_index = event_index + 1;
+
+        if self.current_index >= self.trace.len() {
+            self.completed = true;
+        }
+
+        // Check for breakpoint
+        self.at_breakpoint = should_break;
+
+        self.trace.events.get(event_index)
+    }
+
+    /// Resets the replayer to the beginning of the trace.
+    pub fn reset(&mut self) {
+        self.current_index = 0;
+        self.completed = false;
+        self.at_breakpoint = false;
+    }
+
+    /// Seeks to a specific event index.
+    ///
+    /// Returns an error if the index is beyond the end of the trace.
+    ///
+    /// Seeking to `event_count()` is allowed and positions the cursor at EOF.
+    pub fn seek(&mut self, index: usize) -> Result<(), ReplayError> {
+        if index > self.trace.len() {
+            return Err(ReplayError::UnexpectedEnd { index });
+        }
+        self.current_index = index;
+        self.completed = index == self.trace.len();
+        self.at_breakpoint = false;
+        Ok(())
+    }
+
+    /// Verifies that an actual event matches the expected recorded event.
+    ///
+    /// Returns an error with divergence details if they don't match.
+    pub fn verify(&self, actual: &ReplayEvent) -> Result<(), DivergenceError> {
+        let Some(expected) = self.peek() else {
+            return Err(DivergenceError {
+                index: self.current_index,
+                expected: None,
+                actual: actual.clone(),
+                context: "Trace ended but execution continued".to_string(),
+            });
+        };
+
+        if !events_match(expected, actual) {
+            return Err(DivergenceError {
+                index: self.current_index,
+                expected: Some(expected.clone()),
+                actual: actual.clone(),
+                context: divergence_context(expected, actual),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Verifies and advances to the next event.
+    ///
+    /// This is the main replay loop method: verify the actual event matches,
+    /// then advance.
+    pub fn verify_and_advance(&mut self, actual: &ReplayEvent) -> Result<(), ReplayError> {
+        self.verify(actual)?;
+        self.next();
+        Ok(())
+    }
+
+    /// Checks if we should stop at a breakpoint.
+    fn check_breakpoint(&self, event: &ReplayEvent, next_index: usize) -> bool {
+        if let ReplayMode::RunTo(ref breakpoint) = self.mode {
+            match breakpoint {
+                Breakpoint::EventIndex(idx) => next_index == *idx + 1,
+                Breakpoint::Tick(tick) => {
+                    if let ReplayEvent::TaskScheduled { at_tick, .. } = event {
+                        *at_tick >= *tick
+                    } else {
+                        false
+                    }
+                }
+                Breakpoint::Task(task_id) => {
+                    if let ReplayEvent::TaskScheduled { task, .. } = event {
+                        task == task_id
+                    } else {
+                        false
+                    }
+                }
+            }
+        } else {
+            matches!(self.mode, ReplayMode::Step)
+        }
+    }
+
+    /// Steps forward, respecting the current mode.
+    ///
+    /// In Step mode, advances one event and stops.
+    /// In Run mode, advances all events until completion.
+    /// In RunTo mode, advances until the breakpoint is reached.
+    pub fn step(&mut self) -> Result<Option<&ReplayEvent>, ReplayError> {
+        if self.completed {
+            return Ok(None);
+        }
+
+        self.at_breakpoint = false;
+        let event = self.next();
+
+        Ok(event)
+    }
+
+    /// Continues execution until completion or breakpoint.
+    ///
+    /// Returns the number of events processed.
+    pub fn run(&mut self) -> Result<usize, ReplayError> {
+        let mut count = 0;
+
+        while !self.completed && !self.at_breakpoint {
+            if self.next().is_some() {
+                count += 1;
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Returns all remaining events without consuming them.
+    #[must_use]
+    pub fn remaining_events(&self) -> &[ReplayEvent] {
+        if self.current_index >= self.trace.len() {
+            &[]
+        } else {
+            &self.trace.events[self.current_index..]
+        }
+    }
+
+    /// Consumes the replayer and returns the underlying trace.
+    #[must_use]
+    pub fn into_trace(self) -> ReplayTrace {
+        self.trace
+    }
+
+    /// Builds a structured replay report for CI/browser incident artifacts.
+    #[must_use]
+    pub fn browser_replay_report(
+        &self,
+        trace_id: impl Into<String>,
+        artifact_pointer: Option<impl Into<String>>,
+        rerun_commands: Vec<String>,
+        divergence: Option<&DivergenceError>,
+    ) -> BrowserReplayReport {
+        let (
+            divergence_index,
+            divergence_context,
+            minimization_prefix_len,
+            minimization_reduction_pct,
+        ) = divergence.map_or((None, None, None, None), |divergence| {
+            let prefix =
+                crate::trace::divergence::minimal_divergent_prefix(&self.trace, divergence.index);
+            let reduction_pct = minimization_reduction_pct(self.trace.len(), prefix.len());
+            let diagnostic = self.diagnose_divergence(
+                divergence,
+                &crate::trace::divergence::DiagnosticConfig::default(),
+            );
+            (
+                Some(divergence.index),
+                Some(diagnostic.to_text()),
+                Some(prefix.len()),
+                Some(reduction_pct),
+            )
+        });
+
+        BrowserReplayReport {
+            trace_id: trace_id.into(),
+            schema_version: self.trace.metadata.version,
+            seed: self.trace.metadata.seed,
+            event_count: self.trace.len(),
+            replayed_events: self.current_index,
+            completed: self.completed,
+            divergence_index,
+            divergence_context,
+            minimization_prefix_len,
+            minimization_reduction_pct,
+            artifact_pointer: artifact_pointer.map(Into::into),
+            rerun_commands,
+        }
+    }
+
+    /// Builds a structured diagnostic report for a replay divergence.
+    ///
+    /// The replayer only observes one actual event at the failure boundary, so
+    /// this uses the single-divergence diagnostic path. Call
+    /// [`crate::trace::divergence::diagnose_replay_trace_divergence`] when a
+    /// complete actual replay trace is available and actual after-context is
+    /// needed.
+    #[must_use]
+    pub fn diagnose_divergence(
+        &self,
+        divergence: &DivergenceError,
+        config: &crate::trace::divergence::DiagnosticConfig,
+    ) -> crate::trace::divergence::DivergenceReport {
+        crate::trace::divergence::diagnose_divergence(&self.trace, divergence, config)
+    }
+}
+
+fn minimization_reduction_pct(total: usize, prefix: usize) -> u64 {
+    if total == 0 || prefix >= total {
+        return 0;
+    }
+    let reduced = total - prefix;
+    ((reduced * 100) / total) as u64
+}
+
+// =============================================================================
+// Event Matching
+// =============================================================================
+
+/// Checks if two replay events match (allowing for minor differences).
+///
+/// Some fields may vary slightly between recording and replay due to
+/// timing or other factors. This function defines what constitutes a "match".
+fn events_match(expected: &ReplayEvent, actual: &ReplayEvent) -> bool {
+    use std::mem::discriminant;
+
+    // First check if they're the same variant
+    if discriminant(expected) != discriminant(actual) {
+        return false;
+    }
+
+    // For most events, exact equality is required
+    // In the future, we might want to be more lenient for certain fields
+    expected == actual
+}
+
+/// Generates helpful context for a divergence error.
+fn divergence_context(expected: &ReplayEvent, actual: &ReplayEvent) -> String {
+    match (expected, actual) {
+        (
+            ReplayEvent::TaskScheduled {
+                task: expected_task,
+                at_tick: expected_tick,
+            },
+            ReplayEvent::TaskScheduled {
+                task: actual_task,
+                at_tick: actual_tick,
+            },
+        ) => {
+            if expected_task == actual_task {
+                format!(
+                    "Task scheduled at different tick: expected {expected_tick}, got {actual_tick}"
+                )
+            } else {
+                format!(
+                    "Different task scheduled: expected {expected_task:?}, got {actual_task:?} (at tick {actual_tick})"
+                )
+            }
+        }
+        (
+            ReplayEvent::TimeAdvanced {
+                from_nanos: e_from,
+                to_nanos: e_to,
+            },
+            ReplayEvent::TimeAdvanced {
+                from_nanos: a_from,
+                to_nanos: a_to,
+            },
+        ) => {
+            format!(
+                "Time advanced differently: expected {e_from}ns -> {e_to}ns, got {a_from}ns -> {a_to}ns"
+            )
+        }
+        (
+            ReplayEvent::TaskCompleted {
+                task: e_task,
+                outcome: e_out,
+            },
+            ReplayEvent::TaskCompleted {
+                task: a_task,
+                outcome: a_out,
+            },
+        ) => {
+            if e_task == a_task {
+                format!("Different outcome: expected {e_out}, got {a_out}")
+            } else {
+                format!("Different task completed: expected {e_task:?}, got {a_task:?}")
+            }
+        }
+        _ => "Events have same type but different values".to_string(),
+    }
+}
+
+// =============================================================================
+// Event Source Trait
+// =============================================================================
+
+/// Trait for types that can provide replay events.
+///
+/// This allows the replayer to work with different event sources:
+/// - In-memory traces (`ReplayTrace`)
+/// - Streaming file readers (`TraceReader`)
+pub trait EventSource {
+    /// Returns the next event, or `None` if exhausted.
+    fn next_event(&mut self) -> Option<ReplayEvent>;
+
+    /// Returns the metadata for this trace.
+    fn metadata(&self) -> &TraceMetadata;
+}
+
+impl EventSource for ReplayTrace {
+    fn next_event(&mut self) -> Option<ReplayEvent> {
+        if self.cursor < self.events.len() {
+            let event = self.events[self.cursor].clone();
+            self.cursor += 1;
+            Some(event)
+        } else {
+            None
+        }
+    }
+
+    fn metadata(&self) -> &TraceMetadata {
+        &self.metadata
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::trace::replay::TraceMetadata;
+
+    fn make_trace(events: Vec<ReplayEvent>) -> ReplayTrace {
+        ReplayTrace {
+            metadata: TraceMetadata::new(42),
+            events,
+            cursor: 0,
+        }
+    }
+
+    #[test]
+    fn basic_replay() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        assert_eq!(replayer.event_count(), 3);
+        assert_eq!(replayer.current_index(), 0);
+        assert!(!replayer.is_completed());
+
+        // Advance through events
+        let e1 = replayer.next().cloned();
+        assert!(matches!(e1, Some(ReplayEvent::RngSeed { seed: 42 })));
+
+        let e2 = replayer.next().cloned();
+        assert!(matches!(e2, Some(ReplayEvent::TaskScheduled { .. })));
+
+        let e3 = replayer.next().cloned();
+        assert!(matches!(e3, Some(ReplayEvent::TaskCompleted { .. })));
+
+        assert!(replayer.is_completed());
+        assert!(replayer.next().is_none());
+    }
+
+    #[test]
+    fn step_mode() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::Step);
+
+        // Each step should stop
+        replayer.step().unwrap();
+        assert!(replayer.at_breakpoint());
+
+        replayer.step().unwrap();
+        assert!(replayer.at_breakpoint());
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
+    fn breakpoint_at_tick() {
+        let events = vec![
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 5,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(3),
+                at_tick: 10,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::Tick(5)));
+
+        // Run should stop at tick 5
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 2);
+        assert!(replayer.at_breakpoint());
+        assert!(!replayer.is_completed());
+    }
+
+    #[test]
+    fn breakpoint_at_event_index() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::EventIndex(1)));
+
+        // Run should stop at event index 1
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 2); // Processed events 0 and 1
+        assert!(replayer.at_breakpoint());
+    }
+
+    #[test]
+    fn verify_matching_events() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let replayer = TraceReplayer::new(make_trace(events));
+
+        // Matching event should succeed
+        let actual = ReplayEvent::RngSeed { seed: 42 };
+        assert!(replayer.verify(&actual).is_ok());
+    }
+
+    #[test]
+    fn verify_mismatching_events() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let replayer = TraceReplayer::new(make_trace(events));
+
+        // Different event should fail
+        let actual = ReplayEvent::RngSeed { seed: 99 };
+        let err = replayer.verify(&actual).unwrap_err();
+        assert_eq!(err.index, 0);
+    }
+
+    #[test]
+    fn seek_and_reset() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        // Advance partway
+        replayer.next();
+        replayer.next();
+        assert_eq!(replayer.current_index(), 2);
+
+        // Seek to beginning
+        replayer.seek(0).unwrap();
+        assert_eq!(replayer.current_index(), 0);
+        assert!(!replayer.is_completed());
+
+        // Advance to end
+        replayer.next();
+        replayer.next();
+        replayer.next();
+        assert!(replayer.is_completed());
+
+        // Reset
+        replayer.reset();
+        assert_eq!(replayer.current_index(), 0);
+        assert!(!replayer.is_completed());
+    }
+
+    #[test]
+    fn verify_and_advance() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        // Verify and advance with matching events
+        let actual1 = ReplayEvent::RngSeed { seed: 42 };
+        assert!(replayer.verify_and_advance(&actual1).is_ok());
+        assert_eq!(replayer.current_index(), 1);
+
+        let actual2 = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 0,
+        };
+        assert!(replayer.verify_and_advance(&actual2).is_ok());
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
+    fn divergence_error_formatting() {
+        let expected = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(1),
+            at_tick: 0,
+        };
+        let actual = ReplayEvent::TaskScheduled {
+            task: CompactTaskId(2),
+            at_tick: 0,
+        };
+
+        let err = DivergenceError {
+            index: 5,
+            expected: Some(expected.clone()),
+            actual: actual.clone(),
+            context: divergence_context(&expected, &actual),
+        };
+
+        let msg = format!("{err}");
+        assert!(msg.starts_with("[ASUP-E401]"));
+        assert!(msg.contains("event 5"));
+        assert!(msg.contains("Different task scheduled"));
+    }
+
+    #[test]
+    fn divergence_error_formatting_handles_trace_exhausted() {
+        let err = DivergenceError {
+            index: 7,
+            expected: None,
+            actual: ReplayEvent::RngSeed { seed: 99 },
+            context: "Trace ended but execution continued".to_string(),
+        };
+
+        let msg = format!("{err}");
+        assert!(msg.starts_with("[ASUP-E401]"));
+        assert!(msg.contains("<trace_exhausted>"));
+        assert!(msg.contains("event 7"));
+    }
+
+    #[test]
+    fn remaining_events() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        assert_eq!(replayer.remaining_events().len(), 3);
+
+        replayer.next();
+        assert_eq!(replayer.remaining_events().len(), 2);
+
+        replayer.next();
+        replayer.next();
+        assert_eq!(replayer.remaining_events().len(), 0);
+    }
+
+    #[test]
+    fn breakpoint_at_task() {
+        let events = vec![
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(2),
+                at_tick: 1,
+            },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(3),
+                at_tick: 2,
+            },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::RunTo(Breakpoint::Task(CompactTaskId(2))));
+
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 2);
+        assert!(replayer.at_breakpoint());
+        assert!(!replayer.is_completed());
+    }
+
+    #[test]
+    fn seek_out_of_bounds_returns_error() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        let err = replayer.seek(5).unwrap_err();
+        assert!(matches!(err, ReplayError::UnexpectedEnd { index: 5 }));
+    }
+
+    #[test]
+    fn seek_to_end_positions_cursor_at_eof() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+        ];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        replayer.seek(replayer.event_count()).unwrap();
+
+        assert_eq!(replayer.current_index(), 2);
+        assert!(replayer.is_completed());
+        assert!(replayer.peek().is_none());
+        assert!(replayer.remaining_events().is_empty());
+        assert!(replayer.next().is_none());
+    }
+
+    #[test]
+    fn seek_to_end_is_valid_for_empty_trace() {
+        let mut replayer = TraceReplayer::new(make_trace(vec![]));
+
+        replayer.seek(0).unwrap();
+
+        assert_eq!(replayer.current_index(), 0);
+        assert!(replayer.is_completed());
+        assert!(replayer.peek().is_none());
+        assert!(replayer.remaining_events().is_empty());
+        assert_eq!(replayer.run().unwrap(), 0);
+    }
+
+    #[test]
+    fn verify_past_end_of_trace() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let mut replayer = TraceReplayer::new(make_trace(events));
+
+        // Consume the only event
+        replayer.next();
+        assert!(replayer.is_completed());
+
+        // Verify past end should produce divergence
+        let actual = ReplayEvent::RngSeed { seed: 99 };
+        let err = replayer.verify(&actual).unwrap_err();
+        assert!(err.expected.is_none());
+        assert_eq!(err.index, 1);
+        assert!(err.context.contains("Trace ended"));
+        assert!(format!("{err}").contains("<trace_exhausted>"));
+    }
+
+    #[test]
+    fn run_mode_completes_all_events() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+            ReplayEvent::RngSeed { seed: 3 },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::Run);
+
+        let count = replayer.run().unwrap();
+        assert_eq!(count, 3);
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
+    fn empty_trace_properties() {
+        let mut replayer = TraceReplayer::new(make_trace(vec![]));
+
+        assert_eq!(replayer.event_count(), 0);
+        assert!(replayer.remaining_events().is_empty());
+        assert!(replayer.peek().is_none());
+        assert_eq!(replayer.run().unwrap(), 0);
+        assert!(replayer.is_completed());
+    }
+
+    #[test]
+    fn set_mode_clears_breakpoint_flag() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+        ];
+
+        let mut replayer = TraceReplayer::new(make_trace(events));
+        replayer.set_mode(ReplayMode::Step);
+
+        replayer.step().unwrap();
+        assert!(replayer.at_breakpoint());
+
+        // Changing mode clears the breakpoint flag
+        replayer.set_mode(ReplayMode::Run);
+        assert!(!replayer.at_breakpoint());
+    }
+
+    #[test]
+    fn into_trace_returns_original() {
+        let events = vec![ReplayEvent::RngSeed { seed: 42 }];
+        let trace = make_trace(events.clone());
+        let seed = trace.metadata.seed;
+
+        let replayer = TraceReplayer::new(trace);
+        let recovered = replayer.into_trace();
+
+        assert_eq!(recovered.metadata.seed, seed);
+        assert_eq!(recovered.events, events);
+    }
+
+    #[test]
+    fn metadata_accessible_from_replayer() {
+        let events = vec![ReplayEvent::RngSeed { seed: 99 }];
+        let trace = make_trace(events);
+        let replayer = TraceReplayer::new(trace);
+
+        assert_eq!(replayer.metadata().seed, 42);
+        assert_eq!(
+            replayer.metadata().version,
+            crate::trace::replay::REPLAY_SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn event_source_trait_cursor_advances() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 1 },
+            ReplayEvent::RngSeed { seed: 2 },
+            ReplayEvent::RngSeed { seed: 3 },
+        ];
+        let mut trace = make_trace(events);
+
+        let e1 = trace.next_event().expect("event 1");
+        assert!(matches!(e1, ReplayEvent::RngSeed { seed: 1 }));
+
+        let e2 = trace.next_event().expect("event 2");
+        assert!(matches!(e2, ReplayEvent::RngSeed { seed: 2 }));
+
+        let e3 = trace.next_event().expect("event 3");
+        assert!(matches!(e3, ReplayEvent::RngSeed { seed: 3 }));
+
+        assert!(trace.next_event().is_none());
+    }
+
+    #[test]
+    fn divergence_context_time_advanced() {
+        let expected = ReplayEvent::TimeAdvanced {
+            from_nanos: 0,
+            to_nanos: 1000,
+        };
+        let actual = ReplayEvent::TimeAdvanced {
+            from_nanos: 0,
+            to_nanos: 2000,
+        };
+
+        let ctx = divergence_context(&expected, &actual);
+        assert!(ctx.contains("Time advanced differently"));
+    }
+
+    #[test]
+    fn divergence_context_task_completed_same_task() {
+        let expected = ReplayEvent::TaskCompleted {
+            task: CompactTaskId(1),
+            outcome: 0,
+        };
+        let actual = ReplayEvent::TaskCompleted {
+            task: CompactTaskId(1),
+            outcome: 2,
+        };
+
+        let ctx = divergence_context(&expected, &actual);
+        assert!(ctx.contains("Different outcome"));
+    }
+
+    #[test]
+    fn divergence_context_different_variant_types() {
+        let expected = ReplayEvent::RngSeed { seed: 1 };
+        let actual = ReplayEvent::RngValue { value: 2 };
+
+        // events_match checks discriminant first
+        assert!(!events_match(&expected, &actual));
+    }
+
+    #[test]
+    fn peek_does_not_advance() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::RngSeed { seed: 99 },
+        ];
+        let replayer = TraceReplayer::new(make_trace(events));
+
+        let e1 = replayer.peek().cloned();
+        let e2 = replayer.peek().cloned();
+        assert_eq!(e1, e2);
+        assert_eq!(replayer.current_index(), 0);
+    }
+
+    // =========================================================================
+    // Wave 59 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn replay_mode_debug_clone_eq_default() {
+        let mode = ReplayMode::default();
+        let dbg = format!("{mode:?}");
+        assert!(dbg.contains("Run"), "{dbg}");
+        let cloned = mode.clone();
+        assert_eq!(mode, cloned);
+        assert_ne!(mode, ReplayMode::Step);
+    }
+
+    #[test]
+    fn breakpoint_debug_clone_eq() {
+        let bp = Breakpoint::Tick(42);
+        let dbg = format!("{bp:?}");
+        assert!(dbg.contains("Tick"), "{dbg}");
+        let cloned = bp.clone();
+        assert_eq!(bp, cloned);
+        assert_ne!(bp, Breakpoint::EventIndex(7));
+    }
+
+    #[test]
+    fn browser_replay_report_without_divergence_records_completion() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+        ];
+        let mut replayer = TraceReplayer::new(make_trace(events.clone()));
+        for event in &events {
+            replayer.verify_and_advance(event).expect("self-consistent");
+        }
+
+        let report = replayer.browser_replay_report(
+            "trace-browser-ok",
+            Some("artifacts/replay/browser-ok.json"),
+            vec!["asupersync lab replay --seed 42".to_string()],
+            None,
+        );
+        assert_eq!(report.trace_id, "trace-browser-ok");
+        assert_eq!(report.event_count, 2);
+        assert_eq!(report.replayed_events, 2);
+        assert!(report.completed);
+        assert!(report.divergence_index.is_none());
+        assert!(report.minimization_prefix_len.is_none());
+        assert_eq!(
+            report.artifact_pointer,
+            Some("artifacts/replay/browser-ok.json".to_string())
+        );
+
+        let json = report.to_json_pretty().expect("serialize report");
+        assert!(json.contains("trace-browser-ok"));
+        assert!(json.contains("rerun_commands"));
+    }
+
+    #[test]
+    fn browser_replay_report_with_divergence_includes_minimization_hint() {
+        let events = vec![
+            ReplayEvent::RngSeed { seed: 42 },
+            ReplayEvent::TaskScheduled {
+                task: CompactTaskId(1),
+                at_tick: 0,
+            },
+            ReplayEvent::TaskCompleted {
+                task: CompactTaskId(1),
+                outcome: 0,
+            },
+        ];
+        let replayer = TraceReplayer::new(make_trace(events));
+        let bad = ReplayEvent::RngSeed { seed: 999 };
+        let divergence = replayer.verify(&bad).expect_err("expected divergence");
+        let report = replayer.browser_replay_report(
+            "trace-browser-div",
+            None::<&str>,
+            vec!["asupersync lab replay --seed 42 --window-start 0 --window-events 1".to_string()],
+            Some(&divergence),
+        );
+        assert_eq!(report.divergence_index, Some(0));
+        assert!(report.divergence_context.is_some());
+        assert_eq!(report.minimization_prefix_len, Some(1));
+        assert_eq!(report.minimization_reduction_pct, Some(66));
+        assert!(!report.rerun_commands.is_empty());
+    }
+}

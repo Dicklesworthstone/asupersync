@@ -1,0 +1,18 @@
+[package]
+name = "fixture-fuzz"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "duplicate_target"
+path = "fuzz_targets/duplicate_target.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "duplicate_target"
+path = "fuzz_targets/duplicate_target.rs"
+test = false
+doc = false
+bench = false

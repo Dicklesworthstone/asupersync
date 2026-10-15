@@ -1,0 +1,54 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12345
+SQL: SELECT id, name, active, score FROM users WHERE score > $1
+Execution Time: 45ms
+Status: SUCCESS
+Rows Returned: 3
+
+--- Column Description ---
+Column 0: id
+  Type OID: 23
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 1
+  Format: 0
+Column 1: name
+  Type OID: 25
+  Type Size: -1
+  Table OID: 12345
+  Column ID: 2
+  Format: 0
+Column 2: active
+  Type OID: 16
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 3
+  Format: 0
+Column 3: score
+  Type OID: 701
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 4
+  Format: 0
+
+--- Sample Rows (first 3) ---
+Row 0:
+  id: 1
+  name: "Alice"
+  active: true
+  score: 95.5
+Row 1:
+  id: 2
+  name: "Bob"
+  active: false
+  score: 87.2
+Row 2:
+  id: 3
+  name: "Charlie"
+  active: true
+  score: NULL
+=====================================

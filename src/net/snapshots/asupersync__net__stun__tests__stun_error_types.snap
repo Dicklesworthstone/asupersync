@@ -1,0 +1,15 @@
+---
+source: src/net/stun.rs
+assertion_line: 598
+expression: error_types
+---
+[
+  "Timeout",
+  "InvalidResponse",
+  {
+    "Protocol": "Binding error"
+  },
+  {
+    "Network": "Connection refused"
+  }
+]

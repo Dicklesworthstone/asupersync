@@ -1,0 +1,13 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "1111111111111111111111111111111111111111",
+  "selected_paths": ["src/lib.rs"],
+  "dirty_entries": [],
+  "reservations": [],
+  "command_intent": {
+    "description": "focused lib proof for selected clean path",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_clean_overlay cargo test -p asupersync --lib selected_filter -- --nocapture",
+    "remote_required": true
+  }
+}

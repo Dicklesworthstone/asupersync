@@ -1,0 +1,415 @@
+{
+  "contract_version": "semantic-lint-rule-inventory-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.1",
+  "title": "Semantic lint rule inventory, false-positive policy, and engine selection",
+  "description": "Source-owned L1 inventory for Asupersync-specific semantic lint rules before implementation. The artifact records rule risk, preferred detection substrate, false-positive posture, allow-marker shape, owner bead, and required tests.",
+  "source_of_truth": {
+    "contract": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract_test": "tests/semantic_lint_rule_inventory_contract.rs",
+    "docs": "docs/semantic_lint_rule_inventory.md",
+    "runtime_invariants": "AGENTS.md",
+    "testing_contract": "TESTING_FOR_AGENTS.md"
+  },
+  "policy": {
+    "default_mode": "inventory_only",
+    "implementation_must_be_fail_closed": true,
+    "no_runtime_behavior_change": true,
+    "no_ambient_authority": true,
+    "allow_marker_requires_owner_bead": true,
+    "allow_marker_requires_reason": true,
+    "allow_marker_format": "asupersync-lint:allow <rule_id> reason=<short reason> owner=<bead-or-permanent-rationale>",
+    "minimum_review_for_new_rule": [
+      "rule row in this artifact",
+      "false-positive policy",
+      "owner bead",
+      "positive and negative tests",
+      "RCH-routed proof command"
+    ]
+  },
+  "allowed_values": {
+    "risk_classes": [
+      "critical",
+      "high",
+      "medium"
+    ],
+    "rule_statuses": [
+      "ready-for-implementation",
+      "requires-design"
+    ],
+    "detection_engines": [
+      "rustc-hir",
+      "ast-grep",
+      "cargo-metadata",
+      "custom-scanner",
+      "hybrid-rustc-hir-ast-grep"
+    ],
+    "false_positive_modes": [
+      "deny-by-default",
+      "warn-before-deny",
+      "inventory-only"
+    ]
+  },
+  "required_rule_ids": [
+    "await-while-holding-capability-resource",
+    "loop-without-cx-checkpoint",
+    "ambient-time-or-entropy-in-lab-sensitive-code",
+    "ignored-outcome-severity",
+    "drop-based-race-loser-handling",
+    "unbounded-cleanup-budget",
+    "core-tokio-feature-leakage"
+  ],
+  "rule_rows": [
+    {
+      "rule_id": "await-while-holding-capability-resource",
+      "title": "Await while holding obligation, permit, lease, or lock guard",
+      "risk_class": "critical",
+      "status": "requires-design",
+      "selected_engine": "rustc-hir",
+      "engine_decision": {
+        "rationale": "This rule needs type-aware guard lifetime analysis across await suspension points. Text matching is too brittle because guard names, aliases, tuple fields, and helper-returned guards vary across sync, channel, obligation, registry, and database code.",
+        "rejected_engines": [
+          {
+            "engine": "ast-grep",
+            "reason": "Can catch obvious local bindings but cannot prove guard type or drop-before-await under aliases."
+          },
+          {
+            "engine": "custom-scanner",
+            "reason": "Would duplicate compiler lifetime/type information and invite false positives."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/sync/",
+        "src/channel/",
+        "src/obligation/",
+        "src/cx/registry.rs",
+        "src/database/"
+      ],
+      "source_patterns": [
+        ".await with a live guard implementing Drop",
+        "NameLease or permit held across .await",
+        "Mutex/RwLock/ContendedMutex guard held across .await"
+      ],
+      "false_positive_policy": {
+        "mode": "warn-before-deny",
+        "expected_false_positives": [
+          "guards intentionally dropped by helper calls before await",
+          "zero-sized proof tokens without resource ownership"
+        ],
+        "allow_marker": "asupersync-lint:allow await-while-holding-capability-resource reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: lock guard held across await is rejected",
+        "positive fixture: NameLease held across await is rejected",
+        "negative fixture: explicit drop before await is accepted",
+        "allow-marker fixture requires reason and owner"
+      ]
+    },
+    {
+      "rule_id": "loop-without-cx-checkpoint",
+      "title": "Long-running loop without Cx checkpoint or bounded yield",
+      "risk_class": "high",
+      "status": "requires-design",
+      "selected_engine": "hybrid-rustc-hir-ast-grep",
+      "engine_decision": {
+        "rationale": "AST discovery can find candidate loops, but the decision needs HIR/control-flow awareness to recognize checkpoint wrappers, bounded iteration, and loop exits without forcing noisy comments into every tight loop.",
+        "rejected_engines": [
+          {
+            "engine": "ast-grep",
+            "reason": "Good candidate finder, insufficient to prove bounded loops or checkpoint wrapper calls."
+          },
+          {
+            "engine": "cargo-metadata",
+            "reason": "Feature graph data does not expose control flow."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/runtime/",
+        "src/lab/",
+        "src/transport/",
+        "src/database/",
+        "src/raptorq/"
+      ],
+      "source_patterns": [
+        "loop/while in async fn without cx.checkpoint, yield_now, budget check, or explicit bounded counter",
+        "manual polling loop without cancellation checkpoint",
+        "retry loop without budget meet or cancellation observation"
+      ],
+      "false_positive_policy": {
+        "mode": "warn-before-deny",
+        "expected_false_positives": [
+          "bounded loops where the bound is established by a helper",
+          "pure CPU loops inside explicitly documented blocking/offloaded contexts"
+        ],
+        "allow_marker": "asupersync-lint:allow loop-without-cx-checkpoint reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: infinite async loop without checkpoint is rejected",
+        "negative fixture: loop with cx.checkpoint is accepted",
+        "negative fixture: statically bounded loop is accepted",
+        "structured diagnostic names the missing checkpoint"
+      ]
+    },
+    {
+      "rule_id": "ambient-time-or-entropy-in-lab-sensitive-code",
+      "title": "Ambient wall-clock or randomness in lab-sensitive modules",
+      "risk_class": "critical",
+      "status": "ready-for-implementation",
+      "selected_engine": "ast-grep",
+      "engine_decision": {
+        "rationale": "The risky call sites are syntactically stable and should be scarce in lab/replay-sensitive modules. A lightweight AST matcher can flag std time, system entropy, thread rng, and wall_now usage with clear path-scoped allow rules.",
+        "rejected_engines": [
+          {
+            "engine": "rustc-hir",
+            "reason": "Type-aware analysis is useful later but not needed for the first high-signal path-scoped ban."
+          },
+          {
+            "engine": "custom-scanner",
+            "reason": "AST matching is less brittle than line-oriented token scanning."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/lab/",
+        "src/trace/",
+        "src/runtime/scheduler/",
+        "tests/"
+      ],
+      "source_patterns": [
+        "std::time::SystemTime::now",
+        "std::time::Instant::now",
+        "crate::time::wall_now in deterministic lab paths",
+        "rand::thread_rng or OS entropy in replay-sensitive paths"
+      ],
+      "false_positive_policy": {
+        "mode": "deny-by-default",
+        "expected_false_positives": [
+          "operator diagnostics that intentionally record host wall time outside deterministic replay",
+          "test-only comparisons that assert virtual-time normalization"
+        ],
+        "allow_marker": "asupersync-lint:allow ambient-time-or-entropy-in-lab-sensitive-code reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: SystemTime::now in src/lab is rejected",
+        "negative fixture: VirtualClock or lab now is accepted",
+        "allow fixture must include owner bead",
+        "golden diagnostic names deterministic replay risk"
+      ]
+    },
+    {
+      "rule_id": "ignored-outcome-severity",
+      "title": "Outcome severity ignored or collapsed",
+      "risk_class": "high",
+      "status": "requires-design",
+      "selected_engine": "rustc-hir",
+      "engine_decision": {
+        "rationale": "Outcome is a semantic lattice. The lint must distinguish safe transformations from code that maps Panicked or Cancelled to Ok/Err without preserving severity. That requires type-aware matching and exhaustiveness context.",
+        "rejected_engines": [
+          {
+            "engine": "ast-grep",
+            "reason": "Can spot suspicious matches but cannot reliably prove the matched type is Outcome or that severity was preserved through helpers."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/runtime/",
+        "src/supervision.rs",
+        "src/combinator/",
+        "src/lab/",
+        "src/trace/"
+      ],
+      "source_patterns": [
+        "match Outcome where Panicked or Cancelled is mapped to Ok/Err",
+        "Outcome::severity result computed and ignored",
+        "conversion from Outcome<T> to Result<T, _> without severity note"
+      ],
+      "false_positive_policy": {
+        "mode": "warn-before-deny",
+        "expected_false_positives": [
+          "test harness code intentionally constructing reduced examples",
+          "display-only summaries that preserve full outcome elsewhere"
+        ],
+        "allow_marker": "asupersync-lint:allow ignored-outcome-severity reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: Cancelled collapsed to Ok is rejected",
+        "negative fixture: severity-preserving conversion is accepted",
+        "positive fixture: ignored severity call is rejected",
+        "diagnostic suggests preserving the Outcome lattice"
+      ]
+    },
+    {
+      "rule_id": "drop-based-race-loser-handling",
+      "title": "Race loser handled by drop rather than explicit cancel and drain",
+      "risk_class": "critical",
+      "status": "requires-design",
+      "selected_engine": "hybrid-rustc-hir-ast-grep",
+      "engine_decision": {
+        "rationale": "The rule needs AST candidate discovery for select/race/drop patterns plus type-aware confirmation that the loser owns a TaskHandle, permit, or future with cancellation obligations.",
+        "rejected_engines": [
+          {
+            "engine": "ast-grep",
+            "reason": "Insufficient for handle/future ownership and defuse-drop-abort semantics."
+          },
+          {
+            "engine": "cargo-metadata",
+            "reason": "Feature graph checks cannot reason about race loser lifecycle."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/combinator/",
+        "src/cx/scope.rs",
+        "src/channel/",
+        "src/runtime/task_handle.rs"
+      ],
+      "source_patterns": [
+        "select/race branch drops the losing handle without abort or join",
+        "drop-based cancellation without explicit CancelReason",
+        "defuse_drop_abort without a paired loser-drain proof"
+      ],
+      "false_positive_policy": {
+        "mode": "warn-before-deny",
+        "expected_false_positives": [
+          "local futures that do not own runtime tasks",
+          "drop guards whose Drop implementation performs explicit cancel and drain"
+        ],
+        "allow_marker": "asupersync-lint:allow drop-based-race-loser-handling reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: loser handle is dropped without abort/join",
+        "negative fixture: loser aborts and joins with race_loser reason",
+        "negative fixture: documented drop guard proves explicit drain",
+        "diagnostic names loser-drain invariant"
+      ]
+    },
+    {
+      "rule_id": "unbounded-cleanup-budget",
+      "title": "Cleanup, drain, or finalizer work without bounded budget",
+      "risk_class": "high",
+      "status": "ready-for-implementation",
+      "selected_engine": "ast-grep",
+      "engine_decision": {
+        "rationale": "The first pass can flag direct calls to cleanup/drain/finalizer APIs in code regions that do not pass Budget, shutdown_budget, deadline, or meet-derived values. Later HIR can reduce false positives.",
+        "rejected_engines": [
+          {
+            "engine": "cargo-metadata",
+            "reason": "No feature graph property captures cleanup budget use."
+          }
+        ]
+      },
+      "target_paths": [
+        "src/supervision.rs",
+        "src/cancel/",
+        "src/runtime/",
+        "src/database/",
+        "src/http/"
+      ],
+      "source_patterns": [
+        "cleanup/drain/finalizer call without Budget argument",
+        "Duration::from_secs used as ad hoc cleanup cap outside config",
+        "shutdown path that uses Budget::INFINITE without documented owner"
+      ],
+      "false_positive_policy": {
+        "mode": "inventory-only",
+        "expected_false_positives": [
+          "pure synchronous cleanup that cannot block",
+          "test fixtures that intentionally use Budget::INFINITE"
+        ],
+        "allow_marker": "asupersync-lint:allow unbounded-cleanup-budget reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: async cleanup with Budget::INFINITE is reported",
+        "negative fixture: cleanup budget derived by meet is accepted",
+        "inventory report includes path and call expression",
+        "allow marker requires reason and owner"
+      ]
+    },
+    {
+      "rule_id": "core-tokio-feature-leakage",
+      "title": "Tokio dependency path leaks into core production feature graph",
+      "risk_class": "critical",
+      "status": "ready-for-implementation",
+      "selected_engine": "cargo-metadata",
+      "engine_decision": {
+        "rationale": "This is a dependency-graph invariant, not a source syntax invariant. Cargo metadata and cargo tree inversion are the canonical substrate, with documented carve-outs for compat, conformance, dev/test, and fuzz-only generated messages.",
+        "rejected_engines": [
+          {
+            "engine": "ast-grep",
+            "reason": "Source token checks miss transitive dependency leakage."
+          },
+          {
+            "engine": "rustc-hir",
+            "reason": "HIR sees compiled crate items, not the complete feature/dependency graph policy."
+          }
+        ]
+      },
+      "target_paths": [
+        "Cargo.toml",
+        "asupersync-tokio-compat/Cargo.toml",
+        "conformance/Cargo.toml",
+        "AGENTS.md",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json"
+      ],
+      "source_patterns": [
+        "normal-edge tokio path under default asupersync production graph",
+        "normal-edge tokio path under metrics feature graph",
+        "undocumented workspace/fuzz/test tokio path"
+      ],
+      "false_positive_policy": {
+        "mode": "deny-by-default",
+        "expected_false_positives": [
+          "documented compat crate dependency",
+          "documented conformance crate vendor-comparison dependency",
+          "fuzz-only OTLP generated-message dependency"
+        ],
+        "allow_marker": "asupersync-lint:allow core-tokio-feature-leakage reason=<short reason> owner=<bead-or-permanent-rationale>"
+      },
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+      "tests_required": [
+        "positive fixture: default normal-edge tokio path is rejected",
+        "negative fixture: compat crate carve-out is accepted with explicit scope",
+        "negative fixture: fuzz-only generated-message edge is quarantined",
+        "proof command uses RCH and cargo tree inversion"
+      ]
+    }
+  ],
+  "implementation_order": [
+    {
+      "rank": 1,
+      "rule_id": "core-tokio-feature-leakage",
+      "reason": "Existing no-tokio policy is explicit and graph-based, so implementation can be deterministic with low false-positive risk."
+    },
+    {
+      "rank": 2,
+      "rule_id": "ambient-time-or-entropy-in-lab-sensitive-code",
+      "reason": "High value for replay determinism and a syntactically stable first matcher."
+    },
+    {
+      "rank": 3,
+      "rule_id": "await-while-holding-capability-resource",
+      "reason": "Highest correctness risk, but needs type-aware design before deny mode."
+    }
+  ],
+  "docs_markers": [
+    "SEMANTIC-LINT-L1-CONTRACT",
+    "SEMANTIC-LINT-L1-RULE-TABLE",
+    "SEMANTIC-LINT-L1-ALLOW-POLICY",
+    "SEMANTIC-LINT-L1-ENGINE-DECISIONS",
+    "SEMANTIC-LINT-L1-NO-CLAIMS"
+  ],
+  "no_claims": [
+    "This artifact does not implement any lint rule.",
+    "This artifact does not certify that the current source tree is free of semantic lint violations.",
+    "This artifact does not replace compiler checks, clippy, lab oracles, RCH proof lanes, or manual review.",
+    "This artifact does not authorize local Cargo fallback for future lint proof lanes."
+  ],
+  "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_rule_inventory CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test semantic_lint_rule_inventory_contract -- --nocapture"
+}

@@ -1,0 +1,8 @@
+---
+source: tests/plan_analysis_display_goldens.rs
+expression: rendered
+---
+Clean -> clean
+MayLeak -> may-leak
+Leaked -> leaked
+Unknown -> unknown

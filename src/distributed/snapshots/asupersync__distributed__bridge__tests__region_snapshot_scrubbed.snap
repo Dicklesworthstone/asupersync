@@ -1,0 +1,35 @@
+---
+source: src/distributed/bridge.rs
+expression: scrub_region_snapshot_for_snapshot_test(&snapshot)
+---
+{
+  "budget": {
+    "cost_remaining": 34,
+    "deadline_nanos": "[deadline_nanos]",
+    "polls_remaining": 12
+  },
+  "cancel_reason": "Timeout",
+  "children": [
+    "[child_region_id]",
+    "[child_region_id]"
+  ],
+  "finalizer_count": 0,
+  "metadata": [],
+  "parent": "[parent_region_id]",
+  "region_id": "[region_id]",
+  "sequence": 1,
+  "state": "Closing",
+  "tasks": [
+    {
+      "priority": 0,
+      "state": "Running",
+      "task_id": "[task_id]"
+    },
+    {
+      "priority": 0,
+      "state": "Running",
+      "task_id": "[task_id]"
+    }
+  ],
+  "timestamp_nanos": "[timestamp_nanos]"
+}

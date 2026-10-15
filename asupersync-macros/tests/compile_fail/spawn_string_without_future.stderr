@@ -1,0 +1,5 @@
+error: spawn! task names must be followed by a future expression: spawn!("name", async { ... })
+ --> tests/compile_fail/spawn_string_without_future.rs:4:20
+  |
+4 |     let _ = spawn!("worker");
+  |                    ^^^^^^^^

@@ -1,0 +1,36 @@
+---
+source: src/conformance/mod.rs
+expression: |-
+  json!({
+      "summary": {
+          "passed": passed,
+          "failed": failed,
+      },
+      "events": scrub_conformance_report(&events),
+  })
+---
+{
+  "events": [
+    {
+      "event": "start",
+      "name": "pass_case"
+    },
+    {
+      "event": "passed",
+      "name": "pass_case"
+    },
+    {
+      "event": "start",
+      "name": "fail_case"
+    },
+    {
+      "event": "failed",
+      "message": "[MESSAGE]",
+      "name": "fail_case"
+    }
+  ],
+  "summary": {
+    "failed": 1,
+    "passed": 1
+  }
+}

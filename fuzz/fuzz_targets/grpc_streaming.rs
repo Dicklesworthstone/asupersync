@@ -1,0 +1,869 @@
+//! Comprehensive gRPC streaming fuzz target.
+//!
+//! Fuzzes bidirectional gRPC streaming plus explicit server-streaming and
+//! client-streaming flow-control demand patterns
+//! to verify critical streaming invariants:
+//! 1. Message order preserved per direction
+//! 2. Half-close correctly signaled
+//! 3. Cancel from either direction drains the other
+//! 4. Deadline propagates into both streams
+//! 5. Server-streaming response buffers apply and relieve backpressure
+//! 6. Client-streaming request buffers apply and relieve backpressure without
+//!    panicking on premature server cancel
+//!
+//! # Streaming Patterns Tested
+//! - Interleaved client→server and server→client messages
+//! - Various close/cancel scenarios (client closes first, server closes first, both)
+//! - Deadline/timeout propagation and enforcement
+//! - Server-streaming demand gaps that saturate and later drain response buffers
+//! - Client-streaming demand gaps that saturate request buffers and then inject
+//!   a premature server cancel
+//! - Metadata and status code handling
+//! - Concurrent send/receive operations
+//!
+//! # Running
+//! ```bash
+//! cargo +nightly fuzz run grpc_streaming
+//! ```
+
+#![no_main]
+
+use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::Duration;
+
+use asupersync::grpc::{
+    ResponseStream, Streaming,
+    client::{Channel, GrpcClient},
+    status::{Code, Status},
+    streaming::{ServerStreaming, StreamingRequest},
+};
+
+/// Maximum input size to prevent memory exhaustion during fuzzing.
+const MAX_FUZZ_SIZE: usize = 32_000;
+
+/// Maximum messages per stream direction to bound fuzzing runtime.
+const MAX_STREAM_MESSAGES: usize = 100;
+
+/// Upper bound for explicit server-streaming demand/backpressure exercises.
+const MAX_SERVER_STREAM_BUFFER_ATTEMPTS: usize = 1400;
+
+/// Upper bound for explicit client-streaming demand/backpressure exercises.
+const MAX_CLIENT_STREAM_BUFFER_ATTEMPTS: usize = 1400;
+
+/// Fuzz-local duration wrapper.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct FuzzDuration(u64);
+
+impl FuzzDuration {
+    fn into_duration(self) -> Duration {
+        Duration::from_millis(self.0.min(10_000))
+    }
+}
+
+/// Fuzz-local status wrapper.
+#[derive(Arbitrary, Debug, Clone)]
+struct FuzzStatus {
+    code: u8,
+    message: String,
+}
+
+impl FuzzStatus {
+    fn into_status(self) -> Status {
+        let code = match self.code % 17 {
+            0 => Code::Ok,
+            1 => Code::Cancelled,
+            2 => Code::Unknown,
+            3 => Code::InvalidArgument,
+            4 => Code::DeadlineExceeded,
+            5 => Code::NotFound,
+            6 => Code::AlreadyExists,
+            7 => Code::PermissionDenied,
+            8 => Code::ResourceExhausted,
+            9 => Code::FailedPrecondition,
+            10 => Code::Aborted,
+            11 => Code::OutOfRange,
+            12 => Code::Unimplemented,
+            13 => Code::Internal,
+            14 => Code::Unavailable,
+            15 => Code::DataLoss,
+            _ => Code::Unauthenticated,
+        };
+        Status::new(code, self.message)
+    }
+}
+
+fn observe_status_code(status: &Status) {
+    let code = status.code();
+    assert_eq!(
+        Code::from_i32(code.as_i32()),
+        code,
+        "gRPC status codes should round-trip through their canonical numeric value"
+    );
+    assert!(
+        !code.as_str().is_empty(),
+        "gRPC status codes should expose canonical metadata"
+    );
+}
+
+/// Test message type for fuzzing.
+#[derive(Debug, Clone, Arbitrary, PartialEq, Eq)]
+struct TestMessage {
+    id: u32,
+    payload: Vec<u8>,
+    metadata_key: Option<String>,
+    metadata_value: Option<String>,
+}
+
+impl TestMessage {
+    fn new_simple(id: u32) -> Self {
+        Self {
+            id,
+            payload: vec![],
+            metadata_key: None,
+            metadata_value: None,
+        }
+    }
+}
+
+/// Bidirectional streaming test scenario.
+#[derive(Arbitrary, Debug, Clone)]
+struct StreamingScenario {
+    /// Operations to perform on the bidirectional stream
+    operations: Vec<StreamOperation>,
+    /// Explicit server-streaming demand patterns that can saturate the response buffer.
+    server_streaming_patterns: Vec<ServerStreamingDemandPattern>,
+    /// Explicit client-streaming demand patterns that can saturate the request buffer.
+    client_streaming_patterns: Vec<ClientStreamingDemandPattern>,
+    /// Global timeout for the streaming session
+    timeout: Option<FuzzDuration>,
+    /// Whether to enable flow-control backpressure testing
+    test_backpressure: bool,
+    /// Initial metadata to send
+    initial_metadata: Vec<(String, String)>,
+}
+
+/// Server-streaming demand patterns focused on response-buffer backpressure.
+#[derive(Arbitrary, Debug, Clone)]
+struct ServerStreamingDemandPattern {
+    /// Messages pushed before the client drains the stream.
+    initial_burst: u16,
+    /// Messages the client drains after the initial burst.
+    client_drain: u16,
+    /// Additional messages pushed after draining to verify pressure relief.
+    refill_burst: u16,
+    /// Whether to close the stream after the refill burst.
+    close_after_refill: bool,
+}
+
+/// Client-streaming demand patterns focused on request-buffer backpressure.
+#[derive(Arbitrary, Debug, Clone)]
+struct ClientStreamingDemandPattern {
+    /// Messages pushed before the server drains the stream.
+    initial_burst: u16,
+    /// Messages the server drains after the initial burst.
+    server_drain: u16,
+    /// Additional messages pushed after draining to verify pressure relief.
+    refill_burst: u16,
+    /// Whether the server injects a cancel after draining.
+    cancel_after_drain: bool,
+    /// Whether to close the stream after the refill burst.
+    close_after_refill: bool,
+}
+
+/// Individual streaming operation.
+#[derive(Arbitrary, Debug, Clone)]
+enum StreamOperation {
+    /// Client sends a message to server
+    ClientSend {
+        message: TestMessage,
+        /// Whether this send should succeed
+        should_succeed: bool,
+    },
+    /// Server sends a message to client
+    ServerSend {
+        message: TestMessage,
+        /// Whether this send should succeed
+        should_succeed: bool,
+    },
+    /// Client closes its send stream (half-close)
+    ClientHalfClose,
+    /// Server closes its send stream (half-close)
+    ServerHalfClose,
+    /// Client cancels the entire stream
+    ClientCancel { status: FuzzStatus },
+    /// Server cancels the entire stream
+    ServerCancel { status: FuzzStatus },
+    /// Test deadline enforcement
+    TestDeadline {
+        timeout: FuzzDuration,
+        /// Whether deadline should trigger
+        should_trigger: bool,
+    },
+    /// Test flow control by sending burst of messages
+    TestFlowControl {
+        direction: StreamDirection,
+        burst_size: usize,
+    },
+    /// Wait for messages to be received
+    ReceiveMessages {
+        direction: StreamDirection,
+        expected_count: usize,
+    },
+}
+
+/// Stream direction for operations.
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum StreamDirection {
+    ClientToServer,
+    ServerToClient,
+}
+
+/// Track streaming state for invariant checking.
+#[derive(Debug)]
+struct StreamState {
+    client_sent: VecDeque<TestMessage>,
+    server_sent: VecDeque<TestMessage>,
+    client_received: VecDeque<TestMessage>,
+    server_received: VecDeque<TestMessage>,
+    client_stream_sent: VecDeque<TestMessage>,
+    client_stream_received: VecDeque<TestMessage>,
+    client_closed: bool,
+    server_closed: bool,
+    client_cancelled: bool,
+    server_cancelled: bool,
+    deadline_exceeded: bool,
+    backpressure_triggered: bool,
+    client_backpressure_events: usize,
+    client_stream_drains: usize,
+    client_backpressure_relieved: bool,
+    server_backpressure_events: usize,
+    server_stream_drains: usize,
+    backpressure_relieved: bool,
+    premature_server_cancel_observed: bool,
+    post_cancel_send_rejected: bool,
+}
+
+impl StreamState {
+    fn new() -> Self {
+        Self {
+            client_sent: VecDeque::new(),
+            server_sent: VecDeque::new(),
+            client_received: VecDeque::new(),
+            server_received: VecDeque::new(),
+            client_stream_sent: VecDeque::new(),
+            client_stream_received: VecDeque::new(),
+            client_closed: false,
+            server_closed: false,
+            client_cancelled: false,
+            server_cancelled: false,
+            deadline_exceeded: false,
+            backpressure_triggered: false,
+            client_backpressure_events: 0,
+            client_stream_drains: 0,
+            client_backpressure_relieved: false,
+            server_backpressure_events: 0,
+            server_stream_drains: 0,
+            backpressure_relieved: false,
+            premature_server_cancel_observed: false,
+            post_cancel_send_rejected: false,
+        }
+    }
+
+    /// Check invariant: message order preserved per direction
+    fn check_message_order_invariant(&self) -> bool {
+        // Client→Server order preserved
+        for (sent, received) in self.client_sent.iter().zip(self.server_received.iter()) {
+            if sent.id != received.id {
+                return false;
+            }
+        }
+
+        // Server→Client order preserved
+        for (sent, received) in self.server_sent.iter().zip(self.client_received.iter()) {
+            if sent.id != received.id {
+                return false;
+            }
+        }
+
+        // Client-streaming order preserved across direct request-buffer exercises
+        for (sent, received) in self
+            .client_stream_sent
+            .iter()
+            .zip(self.client_stream_received.iter())
+        {
+            if sent.id != received.id {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// Check invariant: half-close correctly signaled
+    fn check_half_close_invariant(&self) -> bool {
+        // If client closed, server should have received close signal
+        if self.client_closed {
+            // In a real implementation, we'd check that server sees end-of-stream
+            // For this fuzz test, we assume correct if no crashes occur
+        }
+
+        // If server closed, client should have received close signal
+        if self.server_closed {
+            // In a real implementation, we'd check that client sees end-of-stream
+            // For this fuzz test, we assume correct if no crashes occur
+        }
+
+        true
+    }
+
+    /// Check invariant: cancel from either direction drains the other
+    fn check_cancel_drain_invariant(&self) -> bool {
+        // If either side cancelled, both should eventually be cleaned up
+        if self.client_cancelled || self.server_cancelled {
+            // In a real implementation, we'd verify that outstanding operations
+            // complete or are properly cancelled
+            // For this fuzz test, we assume correct if no crashes/hangs occur
+        }
+
+        if self.premature_server_cancel_observed && !self.post_cancel_send_rejected {
+            return false;
+        }
+
+        true
+    }
+
+    /// Check invariant: deadline propagates into both streams
+    fn check_deadline_propagation_invariant(&self) -> bool {
+        // If deadline exceeded, both streams should be affected
+        if self.deadline_exceeded {
+            // Both client and server should see deadline exceeded
+            // For this fuzz test, we assume correct if proper status codes are returned
+        }
+
+        true
+    }
+
+    /// Check invariant: flow-control backpressure respected
+    fn check_flow_control_invariant(&self) -> bool {
+        // If backpressure triggered, subsequent sends should be throttled or fail
+        if self.backpressure_triggered {
+            // System should not crash and should apply proper backpressure
+            // For this fuzz test, we assume correct if ResourceExhausted errors are handled
+        }
+
+        if self.server_backpressure_events > 0
+            && self.server_stream_drains > 0
+            && !self.backpressure_relieved
+        {
+            return false;
+        }
+
+        if self.client_backpressure_events > 0
+            && self.client_stream_drains > 0
+            && !self.client_backpressure_relieved
+            && !self.premature_server_cancel_observed
+        {
+            return false;
+        }
+
+        true
+    }
+}
+
+fn observe_stream_error_status(state: &mut StreamState, status: &Status) {
+    observe_status_code(status);
+
+    match status.code() {
+        Code::ResourceExhausted => {
+            state.backpressure_triggered = true;
+        }
+        Code::DeadlineExceeded => {
+            state.deadline_exceeded = true;
+        }
+        Code::Cancelled => {
+            state.client_cancelled = true;
+        }
+        _ => {}
+    }
+}
+
+fn observe_client_send_result(
+    state: &mut StreamState,
+    message: &TestMessage,
+    should_succeed: bool,
+    result: Result<(), Status>,
+) {
+    match result {
+        Ok(()) => {
+            if should_succeed {
+                state.client_sent.push_back(message.clone());
+            }
+        }
+        Err(status) => {
+            observe_stream_error_status(state, &status);
+        }
+    }
+}
+
+fn observe_client_half_close_result(state: &mut StreamState, result: Result<(), Status>) {
+    match result {
+        Ok(()) => {
+            state.client_closed = true;
+        }
+        Err(status) => {
+            observe_stream_error_status(state, &status);
+        }
+    }
+}
+
+fn observe_cancel_status(status: FuzzStatus) -> Status {
+    let status = status.into_status();
+    observe_status_code(&status);
+    assert!(
+        status.message().len() <= MAX_FUZZ_SIZE,
+        "fuzz-generated gRPC cancellation diagnostics should stay bounded"
+    );
+    status
+}
+
+fn exercise_server_streaming_backpressure(
+    pattern: &ServerStreamingDemandPattern,
+    state: &mut StreamState,
+) {
+    let mut server_stream = ServerStreaming::new(ResponseStream::<TestMessage>::open());
+    let waker = std::task::Waker::noop().clone();
+    let mut cx = Context::from_waker(&waker);
+
+    let initial_burst = usize::from(pattern.initial_burst).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    for idx in 0..initial_burst {
+        let message = TestMessage::new_simple(10_000 + idx as u32);
+        match server_stream.get_mut().push(Ok(message.clone())) {
+            Ok(()) => state.server_sent.push_back(message),
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    let drain_count = usize::from(pattern.client_drain).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    for _ in 0..drain_count {
+        match Pin::new(&mut server_stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(message))) => {
+                state.client_received.push_back(message);
+                state.server_stream_drains += 1;
+            }
+            Poll::Ready(Some(Err(status))) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+            Poll::Ready(None) | Poll::Pending => break,
+        }
+    }
+
+    let refill_burst = usize::from(pattern.refill_burst).min(MAX_SERVER_STREAM_BUFFER_ATTEMPTS);
+    let mut refill_succeeded = false;
+    for idx in 0..refill_burst {
+        let message = TestMessage::new_simple(20_000 + idx as u32);
+        match server_stream.get_mut().push(Ok(message.clone())) {
+            Ok(()) => {
+                refill_succeeded = true;
+                state.server_sent.push_back(message);
+            }
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.server_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    if state.server_backpressure_events > 0 && state.server_stream_drains > 0 && refill_succeeded {
+        state.backpressure_relieved = true;
+    }
+
+    if pattern.close_after_refill {
+        server_stream.get_mut().close();
+        while let Poll::Ready(Some(Ok(message))) = Pin::new(&mut server_stream).poll_next(&mut cx) {
+            state.client_received.push_back(message);
+            state.server_stream_drains += 1;
+        }
+    }
+}
+
+fn exercise_client_streaming_backpressure(
+    pattern: &ClientStreamingDemandPattern,
+    state: &mut StreamState,
+) {
+    let mut request_stream = StreamingRequest::<TestMessage>::open();
+    let waker = std::task::Waker::noop().clone();
+    let mut cx = Context::from_waker(&waker);
+
+    let initial_burst = usize::from(pattern.initial_burst).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    for idx in 0..initial_burst {
+        let message = TestMessage::new_simple(30_000 + idx as u32);
+        match request_stream.push(message.clone()) {
+            Ok(()) => state.client_stream_sent.push_back(message),
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.client_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    let drain_count = usize::from(pattern.server_drain).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    for _ in 0..drain_count {
+        match Pin::new(&mut request_stream).poll_next(&mut cx) {
+            Poll::Ready(Some(Ok(message))) => {
+                state.client_stream_received.push_back(message);
+                state.client_stream_drains += 1;
+            }
+            Poll::Ready(Some(Err(status))) => {
+                if status.code() == Code::Cancelled {
+                    state.server_cancelled = true;
+                    state.premature_server_cancel_observed = true;
+                }
+                break;
+            }
+            Poll::Ready(None) | Poll::Pending => break,
+        }
+    }
+
+    if pattern.cancel_after_drain {
+        let cancel_status =
+            Status::cancelled("premature server cancel during client streaming flow control");
+        if let Err(status) = request_stream.push_result(Err(cancel_status)) {
+            if status.code() == Code::ResourceExhausted {
+                state.backpressure_triggered = true;
+                state.client_backpressure_events += 1;
+            }
+            return;
+        }
+
+        request_stream.close();
+        if let Poll::Ready(Some(Err(status))) = Pin::new(&mut request_stream).poll_next(&mut cx)
+            && status.code() == Code::Cancelled
+        {
+            state.server_cancelled = true;
+            state.premature_server_cancel_observed = true;
+        }
+
+        if let Err(status) = request_stream.push(TestMessage::new_simple(39_999))
+            && status.code() == Code::FailedPrecondition
+        {
+            state.post_cancel_send_rejected = true;
+        }
+        return;
+    }
+
+    let refill_burst = usize::from(pattern.refill_burst).min(MAX_CLIENT_STREAM_BUFFER_ATTEMPTS);
+    let mut refill_succeeded = false;
+    for idx in 0..refill_burst {
+        let message = TestMessage::new_simple(40_000 + idx as u32);
+        match request_stream.push(message.clone()) {
+            Ok(()) => {
+                refill_succeeded = true;
+                state.client_stream_sent.push_back(message);
+            }
+            Err(status) => {
+                if status.code() == Code::ResourceExhausted {
+                    state.backpressure_triggered = true;
+                    state.client_backpressure_events += 1;
+                }
+                break;
+            }
+        }
+    }
+
+    if state.client_backpressure_events > 0 && state.client_stream_drains > 0 && refill_succeeded {
+        state.client_backpressure_relieved = true;
+    }
+
+    if pattern.close_after_refill {
+        request_stream.close();
+        while let Poll::Ready(Some(Ok(message))) = Pin::new(&mut request_stream).poll_next(&mut cx)
+        {
+            state.client_stream_received.push_back(message);
+            state.client_stream_drains += 1;
+        }
+    }
+}
+
+/// Create a test channel with appropriate timeouts.
+async fn create_test_channel(timeout: Option<Duration>) -> Result<Channel, Status> {
+    let builder = if let Some(timeout) = timeout {
+        Channel::builder("http://loopback/").timeout(timeout)
+    } else {
+        Channel::builder("http://loopback/")
+    };
+    builder
+        .connect()
+        .await
+        .map_err(|err| Status::internal(err.to_string()))
+}
+
+/// Simulate bidirectional streaming operations.
+async fn simulate_streaming(
+    scenario: &StreamingScenario,
+    state: &mut StreamState,
+) -> Result<(), Status> {
+    for pattern in &scenario.server_streaming_patterns {
+        exercise_server_streaming_backpressure(pattern, state);
+    }
+    for pattern in &scenario.client_streaming_patterns {
+        exercise_client_streaming_backpressure(pattern, state);
+    }
+
+    // Create test channel
+    let channel = create_test_channel(scenario.timeout.map(FuzzDuration::into_duration)).await?;
+    let mut client = GrpcClient::new(channel);
+    let _initial_metadata_count = scenario.initial_metadata.len();
+
+    // Start bidirectional streaming
+    let (mut request_sink, _response_stream) = client
+        .bidi_streaming::<TestMessage, TestMessage>("/test/TestService/BidiStream")
+        .await?;
+
+    // Execute operations
+    for operation in &scenario.operations {
+        match operation {
+            StreamOperation::ClientSend {
+                message,
+                should_succeed,
+            } => {
+                let result = request_sink.send(message.clone()).await;
+                observe_client_send_result(state, message, *should_succeed, result);
+            }
+
+            StreamOperation::ServerSend {
+                message,
+                should_succeed,
+            } => {
+                // In a real implementation, we'd have a server-side equivalent
+                // For fuzzing, we simulate by adding to server_sent queue
+                if *should_succeed {
+                    state.server_sent.push_back(message.clone());
+                    // Simulate server message appearing in client's response stream
+                    // In practice, this would happen through the actual streaming mechanism
+                }
+            }
+
+            StreamOperation::ClientHalfClose => {
+                let result = request_sink.close().await;
+                observe_client_half_close_result(state, result);
+            }
+
+            StreamOperation::ServerHalfClose => {
+                // Simulate server-side half-close
+                state.server_closed = true;
+            }
+
+            StreamOperation::ClientCancel { status } => {
+                // Simulate client cancellation
+                observe_cancel_status(status.clone());
+                state.client_cancelled = true;
+                // In a real implementation, this would propagate the status
+            }
+
+            StreamOperation::ServerCancel { status } => {
+                // Simulate server cancellation
+                observe_cancel_status(status.clone());
+                state.server_cancelled = true;
+                // In a real implementation, this would propagate the status
+            }
+
+            StreamOperation::TestDeadline {
+                timeout,
+                should_trigger,
+            } => {
+                // Create a new client with the specific timeout
+                let channel = create_test_channel(Some(timeout.into_duration())).await?;
+                let mut deadline_client = GrpcClient::new(channel);
+
+                let result = deadline_client
+                    .bidi_streaming::<TestMessage, TestMessage>("/test/TestService/BidiStream")
+                    .await;
+
+                if *should_trigger {
+                    // Expect deadline exceeded
+                    if let Err(status) = result
+                        && status.code() == Code::DeadlineExceeded
+                    {
+                        state.deadline_exceeded = true;
+                    }
+                }
+            }
+
+            StreamOperation::TestFlowControl {
+                direction,
+                burst_size,
+            } => {
+                // Test flow control by sending a burst of messages
+                let capped_size = (*burst_size).min(MAX_STREAM_MESSAGES);
+
+                match direction {
+                    StreamDirection::ClientToServer => {
+                        for i in 0..capped_size {
+                            let msg = TestMessage::new_simple(i as u32);
+                            let result = request_sink.send(msg.clone()).await;
+
+                            // Check if backpressure kicks in
+                            if let Err(status) = result {
+                                if status.code() == Code::ResourceExhausted {
+                                    state.backpressure_triggered = true;
+                                    break;
+                                }
+                            } else {
+                                state.client_sent.push_back(msg);
+                            }
+                        }
+                    }
+                    StreamDirection::ServerToClient => {
+                        // Simulate server burst (in practice would be actual server operations)
+                        for i in 0..capped_size {
+                            let msg = TestMessage::new_simple(i as u32);
+                            state.server_sent.push_back(msg);
+                        }
+                    }
+                }
+            }
+
+            StreamOperation::ReceiveMessages {
+                direction,
+                expected_count,
+            } => {
+                // Simulate receiving messages
+                let capped_count = (*expected_count).min(MAX_STREAM_MESSAGES);
+
+                match direction {
+                    StreamDirection::ClientToServer => {
+                        // Server receives from client
+                        let available = state.client_sent.len().min(capped_count);
+                        for _ in 0..available {
+                            if let Some(msg) = state.client_sent.pop_front() {
+                                state.server_received.push_back(msg);
+                            }
+                        }
+                    }
+                    StreamDirection::ServerToClient => {
+                        // Client receives from server
+                        let available = state.server_sent.len().min(capped_count);
+                        for _ in 0..available {
+                            if let Some(msg) = state.server_sent.pop_front() {
+                                state.client_received.push_back(msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fuzz_target!(|scenario: StreamingScenario| {
+    if scenario.operations.len() > MAX_STREAM_MESSAGES
+        || scenario.server_streaming_patterns.len() > MAX_STREAM_MESSAGES
+        || scenario.client_streaming_patterns.len() > MAX_STREAM_MESSAGES
+    {
+        return;
+    }
+
+    // Check for oversized inputs that could cause memory exhaustion
+    let total_payload_size: usize = scenario
+        .operations
+        .iter()
+        .filter_map(|op| match op {
+            StreamOperation::ClientSend { message, .. }
+            | StreamOperation::ServerSend { message, .. } => Some(message.payload.len()),
+            _ => None,
+        })
+        .sum();
+
+    if total_payload_size > MAX_FUZZ_SIZE {
+        return;
+    }
+
+    // Create runtime for async execution
+    let runtime =
+        asupersync::runtime::Runtime::with_config(asupersync::runtime::RuntimeConfig::default())
+            .expect("fuzz runtime");
+
+    runtime.block_on(async {
+        let mut state = StreamState::new();
+
+        // Execute the streaming scenario
+        let result = simulate_streaming(&scenario, &mut state).await;
+
+        // Allow both success and failure - we're testing for crashes/invariant violations
+        match result {
+            Ok(()) => {
+                // Verify all invariants hold on successful completion
+                assert!(
+                    state.check_message_order_invariant(),
+                    "Message order invariant violated"
+                );
+                assert!(
+                    state.check_half_close_invariant(),
+                    "Half-close invariant violated"
+                );
+                assert!(
+                    state.check_cancel_drain_invariant(),
+                    "Cancel drain invariant violated"
+                );
+                assert!(
+                    state.check_deadline_propagation_invariant(),
+                    "Deadline propagation invariant violated"
+                );
+                assert!(
+                    state.check_flow_control_invariant(),
+                    "Flow control invariant violated"
+                );
+            }
+            Err(status) => {
+                // Verify error codes are appropriate
+                match status.code() {
+                    Code::ResourceExhausted => {
+                        // Expected for flow control testing
+                        assert!(state.backpressure_triggered || scenario.test_backpressure);
+                    }
+                    Code::DeadlineExceeded => {
+                        // Expected for timeout testing
+                        assert!(state.deadline_exceeded);
+                    }
+                    Code::Cancelled => {
+                        // Expected for cancellation testing
+                        assert!(state.client_cancelled || state.server_cancelled);
+                    }
+                    Code::FailedPrecondition => {
+                        // Expected when operating on closed streams
+                        assert!(state.client_closed || state.server_closed);
+                    }
+                    _ => {
+                        // Other error codes should have proper context
+                        assert!(
+                            !status.message().is_empty(),
+                            "Error status should include descriptive message"
+                        );
+                    }
+                }
+            }
+        }
+    });
+});

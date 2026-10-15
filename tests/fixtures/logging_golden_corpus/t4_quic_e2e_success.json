@@ -1,0 +1,30 @@
+{
+  "fixture_id": "golden-t4-quic-e2e-success",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "T4",
+  "description": "Representative success trace for QUIC/H3 e2e scenario",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "t4_quic_handshake_stream",
+    "correlation_id": "t4-quic-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "QUIC handshake and bidirectional stream transfer verified",
+    "replay_pointer": "cargo test --test tokio_quic_h3_e2e_scenario_manifest -- t4_quic_handshake --nocapture"
+  },
+  "required_fields": [
+    "schema_version",
+    "scenario_id",
+    "correlation_id",
+    "phase",
+    "outcome",
+    "detail",
+    "replay_pointer"
+  ],
+  "invariants": [
+    "All 7 schema fields present",
+    "correlation_id matches slug format",
+    "phase is one of: setup, execute, verify, teardown",
+    "outcome is one of: pass, fail, skip, error"
+  ]
+}

@@ -1,0 +1,9 @@
+Compiling asupersync v0.1.0 (/data/projects/asupersync)
+error[E0425]: cannot find value `parsed_summary` in this scope
+  --> tests/proof_runner_contract.rs:918:17
+   |
+918 |     assert_eq!(parsed_summary, expected);
+   |                 ^^^^^^^^^^^^^^ not found in this scope
+
+error: could not compile `asupersync` (test "proof_runner_contract") due to 1 previous error
+Remote command finished: exit=101

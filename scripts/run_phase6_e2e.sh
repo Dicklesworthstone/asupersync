@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Phase 6 End-to-End Test Runner
+#
+# Runs all five Phase 6 E2E suites and produces a summary report.
+# Exit code is non-zero if any required suite fails.
+#
+# Usage:
+#   ./scripts/run_phase6_e2e.sh              # run all suites
+#   ./scripts/run_phase6_e2e.sh --suite geo  # run a single suite
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+OUTPUT_DIR="${ROOT_DIR}/target/phase6-e2e"
+RCH_BIN="${RCH_BIN:-rch}"
+PHASE6_TIMEOUT="${PHASE6_TIMEOUT:-1800}"
+
+mkdir -p "$OUTPUT_DIR"
+
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RCH_TARGET_ROOT="${RCH_TARGET_ROOT:-${TMPDIR:-/tmp}/rch_target_phase6_e2e_${USER:-unknown}_${TIMESTAMP}}"
+REPORT_FILE="${OUTPUT_DIR}/report_${TIMESTAMP}.txt"
+SUMMARY_FILE="${OUTPUT_DIR}/summary_${TIMESTAMP}.json"
+
+export RUST_BACKTRACE="${RUST_BACKTRACE:-1}"
+
+if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+    echo "Required executable not found: $RCH_BIN" >&2
+    exit 1
+fi
+
+# Suite definitions: name, test target, required (1) or advisory (0)
+declare -a SUITE_NAMES=(geo homo lyap raptorq plan)
+declare -A SUITE_TARGETS=(
+    [geo]=e2e_geodesic_normalization
+    [homo]=topology_benchmark
+    [lyap]=e2e_governor_vs_baseline
+    [raptorq]=raptorq_conformance
+    [plan]=golden_outputs
+)
+declare -A SUITE_LABELS=(
+    [geo]="GEO  - Geodesic normalization"
+    [homo]="HOMO - Topology-guided exploration"
+    [lyap]="LYAP - Governor vs baseline"
+    [raptorq]="RAPTORQ - Encode/decode conformance"
+    [plan]="PLAN - Certified rewrite pipeline"
+)
+
+reject_rch_local_fallback_log() {
+    local suite_name="$1"
+    local log_file="$2"
+    local marker_file="${OUTPUT_DIR}/${suite_name}_${TIMESTAMP}_rch_local_fallback.txt"
+
+    if grep -Eq '^\[RCH\] local \(|falling back to local' "$log_file" 2>/dev/null; then
+        echo "FATAL: rch local fallback detected in suite ${suite_name}; refusing local cargo execution"
+        echo "FATAL: rch local fallback detected in suite ${suite_name}; refusing local cargo execution" >> "$REPORT_FILE"
+        echo "rch local fallback detected in suite ${suite_name}; refusing local cargo execution" > "$marker_file"
+        exit 86
+    fi
+}
+
+# Parse args
+FILTER=""
+FILTER_ARG=""
+if [[ "${1:-}" == "--suite" && -n "${2:-}" ]]; then
+    FILTER="$2"
+    FILTER_ARG=" --suite $FILTER"
+    if [[ -z "${SUITE_TARGETS[$FILTER]+x}" ]]; then
+        echo "Unknown suite: $FILTER"
+        echo "Available: ${SUITE_NAMES[*]}"
+        exit 1
+    fi
+fi
+
+echo "==== Phase 6 End-to-End Test Suites ===="
+echo "Output: ${REPORT_FILE}"
+echo "RCH target root: ${RCH_TARGET_ROOT}"
+echo ""
+
+PASS=0
+FAIL=0
+TOTAL=0
+
+pushd "${ROOT_DIR}" >/dev/null
+
+for name in "${SUITE_NAMES[@]}"; do
+    if [[ -n "$FILTER" && "$name" != "$FILTER" ]]; then
+        continue
+    fi
+
+    target="${SUITE_TARGETS[$name]}"
+    label="${SUITE_LABELS[$name]}"
+    log_file="${OUTPUT_DIR}/${name}_${TIMESTAMP}.log"
+    safe_name="${name//[^A-Za-z0-9_]/_}"
+    suite_target_dir="${RCH_TARGET_ROOT}/${safe_name}"
+
+    printf "%-45s" "$label"
+    TOTAL=$((TOTAL + 1))
+
+    set +e
+    if [[ "$name" == "raptorq" ]]; then
+        timeout "$PHASE6_TIMEOUT" env "RCH_BIN=${RCH_BIN}" "RCH_TARGET_ROOT=${suite_target_dir}" bash "${ROOT_DIR}/scripts/run_raptorq_e2e.sh" --profile full > "$log_file" 2>&1
+    else
+        timeout "$PHASE6_TIMEOUT" "$RCH_BIN" exec -- env "CARGO_TARGET_DIR=${suite_target_dir}" cargo test --test "$target" --all-features -- --nocapture > "$log_file" 2>&1
+    fi
+    rc=$?
+    set -e
+
+    reject_rch_local_fallback_log "$name" "$log_file"
+
+    passed="$(grep -c "^test .* ok$" "$log_file" 2>/dev/null || true)"
+    failed="$(grep -c "^test .* FAILED$" "$log_file" 2>/dev/null || true)"
+    if [[ -z "$passed" ]]; then
+        passed="0"
+    fi
+    if [[ -z "$failed" ]]; then
+        failed="0"
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+        echo "PASS  ($passed tests)"
+        PASS=$((PASS + 1))
+        echo "PASS  $label  ($passed tests)" >> "$REPORT_FILE"
+    else
+        echo "FAIL  ($passed passed, $failed failed)"
+        FAIL=$((FAIL + 1))
+        echo "FAIL  $label  ($passed passed, $failed failed)" >> "$REPORT_FILE"
+        echo "  Log: $log_file" >> "$REPORT_FILE"
+    fi
+done
+
+popd >/dev/null
+
+echo ""
+echo "---- Summary ----"
+echo "Suites: $TOTAL  Pass: $PASS  Fail: $FAIL"
+echo "Report: ${REPORT_FILE}"
+echo "Logs:   ${OUTPUT_DIR}/"
+
+{
+    echo ""
+    echo "Summary: $TOTAL suites, $PASS passed, $FAIL failed"
+    echo "Timestamp: $TIMESTAMP"
+} >> "$REPORT_FILE"
+
+SUITE_STATUS="failed"
+if [ "$FAIL" -eq 0 ]; then
+    SUITE_STATUS="passed"
+fi
+RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SUITE_ID="phase6_e2e"
+SCENARIO_ID="E2E-SUITE-PHASE6"
+REPRO_COMMAND="PHASE6_TIMEOUT=${PHASE6_TIMEOUT} RCH_BIN=${RCH_BIN} RCH_TARGET_ROOT='${RCH_TARGET_ROOT}' bash ${ROOT_DIR}/scripts/$(basename "$0")${FILTER_ARG}"
+
+cat > "$SUMMARY_FILE" << ENDJSON
+{
+  "schema_version": "e2e-suite-summary-v3",
+  "suite_id": "${SUITE_ID}",
+  "scenario_id": "${SCENARIO_ID}",
+  "seed": "${TEST_SEED:-0xDEADBEEF}",
+  "started_ts": "${RUN_STARTED_TS}",
+  "ended_ts": "${RUN_ENDED_TS}",
+  "status": "${SUITE_STATUS}",
+  "repro_command": "${REPRO_COMMAND}",
+  "artifact_path": "${SUMMARY_FILE}",
+  "suite": "${SUITE_ID}",
+  "timestamp": "${TIMESTAMP}",
+  "suites_total": ${TOTAL},
+  "suites_passed": ${PASS},
+  "suites_failed": ${FAIL},
+  "rch_bin": "${RCH_BIN}",
+  "rch_target_root": "${RCH_TARGET_ROOT}",
+  "report_file": "${REPORT_FILE}",
+  "output_dir": "${OUTPUT_DIR}"
+}
+ENDJSON
+
+echo "Summary: ${SUMMARY_FILE}"
+
+if [ "$FAIL" -gt 0 ]; then
+    exit 1
+fi

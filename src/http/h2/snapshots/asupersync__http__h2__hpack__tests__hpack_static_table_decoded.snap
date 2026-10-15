@@ -1,0 +1,55 @@
+---
+source: src/http/h2/hpack.rs
+assertion_line: 3869
+expression: decoded_headers
+---
+[
+    Header {
+        name: ":method",
+        value: "GET",
+    },
+    Header {
+        name: ":method",
+        value: "POST",
+    },
+    Header {
+        name: ":path",
+        value: "/",
+    },
+    Header {
+        name: ":path",
+        value: "/index.html",
+    },
+    Header {
+        name: ":scheme",
+        value: "https",
+    },
+    Header {
+        name: ":status",
+        value: "200",
+    },
+    Header {
+        name: ":status",
+        value: "404",
+    },
+    Header {
+        name: "accept-encoding",
+        value: "gzip, deflate",
+    },
+    Header {
+        name: "cache-control",
+        value: "",
+    },
+    Header {
+        name: "content-type",
+        value: "",
+    },
+    Header {
+        name: "host",
+        value: "",
+    },
+    Header {
+        name: "user-agent",
+        value: "custom",
+    },
+]

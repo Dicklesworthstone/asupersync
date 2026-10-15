@@ -1,0 +1,34 @@
+---
+source: src/runtime/state.rs
+assertion_line: 6454
+expression: region_close_to_quiescence_transition_trace_snapshot()
+---
+{
+  "events": [
+    {
+      "kind": "RegionCloseBegin",
+      "parent": null,
+      "region": "root",
+      "time": "[event_time]"
+    },
+    {
+      "kind": "RegionCloseBegin",
+      "parent": "root",
+      "region": "child",
+      "time": "[event_time]"
+    },
+    {
+      "kind": "RegionCloseComplete",
+      "parent": "root",
+      "region": "child",
+      "time": "[event_time]"
+    },
+    {
+      "kind": "RegionCloseComplete",
+      "parent": null,
+      "region": "root",
+      "time": "[event_time]"
+    }
+  ],
+  "seed": 17
+}

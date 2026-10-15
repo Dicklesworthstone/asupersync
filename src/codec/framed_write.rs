@@ -1,0 +1,712 @@
+//! Async framed writer combining `AsyncWrite` with an `Encoder`.
+
+use crate::bytes::BytesMut;
+use crate::codec::Encoder;
+use crate::io::AsyncWrite;
+use std::io;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+/// Default write buffer capacity.
+const DEFAULT_CAPACITY: usize = 8192;
+/// Default soft boundary for readiness-driven write backpressure.
+const DEFAULT_BACKPRESSURE_BOUNDARY: usize = DEFAULT_CAPACITY;
+/// Cooperative cap on repeated write passes inside one `poll_flush`.
+///
+/// Without this bound, a writer that always accepts tiny chunks can monopolize
+/// a single executor turn while draining a large encoded frame.
+const MAX_WRITE_PASSES_PER_POLL: usize = 32;
+
+/// Async framed writer that applies an `Encoder` to an `AsyncWrite` sink.
+///
+/// Items are encoded into an internal buffer, then flushed to the underlying
+/// writer. Repeated producers should call [`FramedWrite::poll_ready`] before
+/// each [`FramedWrite::start_send`]. Readiness flushes once the configured soft
+/// boundary is reached, so at most one encoded frame can take the buffer over
+/// that boundary. Call `poll_flush` to ensure all buffered data reaches the
+/// writer.
+///
+/// # Cancel Safety
+///
+/// `start_send` completes synchronously with either success or an encoder
+/// error. `poll_ready` and `poll_flush` are cancel-safe: partial writes are
+/// tracked and resumed on the next call.
+pub struct FramedWrite<W, E> {
+    inner: W,
+    encoder: E,
+    buffer: BytesMut,
+    backpressure_boundary: usize,
+}
+
+impl<W, E> FramedWrite<W, E> {
+    /// Creates a new `FramedWrite` with default buffer capacity.
+    #[inline]
+    pub fn new(inner: W, encoder: E) -> Self {
+        Self::with_capacity(inner, encoder, DEFAULT_BACKPRESSURE_BOUNDARY)
+    }
+
+    /// Creates a new `FramedWrite` with the specified buffer capacity.
+    ///
+    /// The initial backpressure boundary matches `capacity` and can be changed
+    /// independently with [`FramedWrite::set_backpressure_boundary`].
+    pub fn with_capacity(inner: W, encoder: E, capacity: usize) -> Self {
+        Self {
+            inner,
+            encoder,
+            buffer: BytesMut::with_capacity(capacity),
+            backpressure_boundary: capacity,
+        }
+    }
+
+    /// Returns a reference to the underlying writer.
+    #[inline]
+    #[must_use]
+    pub fn get_ref(&self) -> &W {
+        &self.inner
+    }
+
+    /// Returns a mutable reference to the underlying writer.
+    pub fn get_mut(&mut self) -> &mut W {
+        &mut self.inner
+    }
+
+    /// Returns a reference to the encoder.
+    #[inline]
+    #[must_use]
+    pub fn encoder(&self) -> &E {
+        &self.encoder
+    }
+
+    /// Returns a mutable reference to the encoder.
+    pub fn encoder_mut(&mut self) -> &mut E {
+        &mut self.encoder
+    }
+
+    /// Returns a reference to the write buffer.
+    #[inline]
+    #[must_use]
+    pub fn write_buffer(&self) -> &BytesMut {
+        &self.buffer
+    }
+
+    /// Sets the soft write-buffer boundary used by [`FramedWrite::poll_ready`].
+    ///
+    /// The boundary is checked before encoding the next frame. One frame may
+    /// therefore take the buffer over the configured value; readiness will not
+    /// be reported again until that buffered frame has drained. A boundary of
+    /// zero flushes before every frame.
+    #[inline]
+    pub fn set_backpressure_boundary(&mut self, boundary: usize) {
+        self.backpressure_boundary = boundary;
+    }
+
+    /// Configures the soft write-buffer boundary used by
+    /// [`FramedWrite::poll_ready`].
+    #[inline]
+    #[must_use]
+    pub fn with_backpressure_boundary(mut self, boundary: usize) -> Self {
+        self.set_backpressure_boundary(boundary);
+        self
+    }
+
+    /// Returns the soft write-buffer boundary used by
+    /// [`FramedWrite::poll_ready`].
+    #[inline]
+    #[must_use]
+    pub fn backpressure_boundary(&self) -> usize {
+        self.backpressure_boundary
+    }
+
+    /// Consumes `self` and returns the inner writer.
+    #[inline]
+    pub fn into_inner(self) -> W {
+        self.inner
+    }
+
+    /// Consumes `self` and returns the inner writer, encoder, and buffer.
+    pub fn into_parts(self) -> (W, E, BytesMut) {
+        (self.inner, self.encoder, self.buffer)
+    }
+}
+
+impl<W, E> FramedWrite<W, E> {
+    /// Encodes an item into the write buffer without polling readiness.
+    ///
+    /// This convenience method is appropriate when the caller immediately
+    /// flushes one frame. Repeated producers should use the bounded
+    /// [`FramedWrite::poll_ready`] / [`FramedWrite::start_send`] protocol.
+    pub fn send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
+    where
+        E: Encoder<I>,
+    {
+        self.start_send(item)
+    }
+
+    /// Encodes one item after [`FramedWrite::poll_ready`] reports readiness.
+    ///
+    /// The boundary is soft: this one encoded frame may exceed it. The caller
+    /// must poll readiness again before encoding another frame.
+    pub fn start_send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
+    where
+        E: Encoder<I>,
+    {
+        self.encoder.encode(item, &mut self.buffer)
+    }
+}
+
+impl<W, E> FramedWrite<W, E>
+where
+    W: AsyncWrite + Unpin,
+{
+    /// Polls whether another frame may be encoded without bypassing the
+    /// configured backpressure boundary.
+    ///
+    /// Once the current buffer reaches the boundary this flushes it before
+    /// returning readiness. A pending writer therefore prevents further
+    /// readiness-driven buffer growth.
+    pub fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.buffer.len() < self.backpressure_boundary {
+            Poll::Ready(Ok(()))
+        } else {
+            self.poll_flush(cx)
+        }
+    }
+
+    /// Flush all buffered data to the underlying writer.
+    ///
+    /// Returns `Poll::Ready(Ok(()))` when the buffer is empty and the
+    /// underlying writer has been flushed.
+    ///
+    /// If the writer reports more bytes written than it was given, returns
+    /// `InvalidData` without advancing the buffer for that write.
+    pub fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        let mut write_passes = 0usize;
+        while !self.buffer.is_empty() {
+            if write_passes >= MAX_WRITE_PASSES_PER_POLL {
+                cx.waker().wake_by_ref();
+                return Poll::Pending;
+            }
+            let remaining = self.buffer.len();
+            let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Ok(n)) if n > remaining => {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("writer reported {n} bytes written for {remaining}-byte buffer"),
+                    )));
+                }
+                Poll::Ready(Ok(n)) => n,
+            };
+            if n == 0 {
+                return Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "failed to write frame to transport",
+                )));
+            }
+            // Discard the just-written bytes without the alloc + memcpy of a
+            // throwaway `split_to` head; `advance` bumps the front offset.
+            self.buffer.advance(n);
+            write_passes += 1;
+        }
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    /// Flush all buffered data and shut down the underlying writer.
+    pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        match self.poll_flush(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            Poll::Ready(Ok(())) => {}
+        }
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl<W: std::fmt::Debug, E: std::fmt::Debug> std::fmt::Debug for FramedWrite<W, E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FramedWrite")
+            .field("inner", &self.inner)
+            .field("encoder", &self.encoder)
+            .field("buffer_len", &self.buffer.len())
+            .field("backpressure_boundary", &self.backpressure_boundary)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::codec::LinesCodec;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::Waker;
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    use std::task::Wake;
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn track_waker(flag: Arc<AtomicBool>) -> Waker {
+        Waker::from(Arc::new(TrackWaker(flag)))
+    }
+
+    /// Minimal reference adapter for the `tokio-util` 0.7.x flush loop.
+    ///
+    /// This mirrors the `FramedImpl::poll_flush` write-side behavior from
+    /// `tokio-util`'s `src/codec/framed_impl.rs` against our local
+    /// `AsyncWrite`/`Encoder` traits so conformance drift is easy to detect
+    /// without importing tokio into the core crate's test surface.
+    struct TokioUtilFramedWriteRef<W, E> {
+        inner: W,
+        encoder: E,
+        buffer: BytesMut,
+    }
+
+    impl<W, E> TokioUtilFramedWriteRef<W, E> {
+        fn new(inner: W, encoder: E) -> Self {
+            Self {
+                inner,
+                encoder,
+                buffer: BytesMut::with_capacity(DEFAULT_CAPACITY),
+            }
+        }
+
+        fn get_ref(&self) -> &W {
+            &self.inner
+        }
+
+        fn write_buffer(&self) -> &BytesMut {
+            &self.buffer
+        }
+    }
+
+    impl<W, E> TokioUtilFramedWriteRef<W, E>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        fn send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
+        where
+            E: Encoder<I>,
+        {
+            self.encoder.encode(item, &mut self.buffer)
+        }
+
+        fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            while !self.buffer.is_empty() {
+                let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(n)) => n,
+                };
+
+                if n == 0 {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write frame to transport",
+                    )));
+                }
+
+                let _ = self.buffer.split_to(n);
+            }
+
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+    }
+
+    #[test]
+    fn framed_write_encodes_and_flushes() {
+        let output: Vec<u8> = Vec::new();
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        framed.send("hello".to_string()).unwrap();
+        framed.send("world".to_string()).unwrap();
+
+        assert_eq!(&framed.write_buffer()[..], b"hello\nworld\n");
+
+        let poll = framed.poll_flush(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(framed.get_ref(), b"hello\nworld\n");
+    }
+
+    #[test]
+    fn framed_write_close() {
+        let output: Vec<u8> = Vec::new();
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        framed.send("bye".to_string()).unwrap();
+
+        let poll = framed.poll_close(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(framed.get_ref(), b"bye\n");
+    }
+
+    #[test]
+    fn framed_write_accessors() {
+        let output: Vec<u8> = Vec::new();
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(
+            framed.backpressure_boundary(),
+            DEFAULT_BACKPRESSURE_BOUNDARY
+        );
+        let _encoder = framed.encoder();
+        let _encoder_mut = framed.encoder_mut();
+        let _writer = framed.get_ref();
+        let _writer_mut = framed.get_mut();
+    }
+
+    #[test]
+    fn framed_write_capacity_sets_initial_backpressure_boundary() {
+        let framed = FramedWrite::with_capacity(Vec::<u8>::new(), LinesCodec::new(), 256);
+        assert_eq!(framed.backpressure_boundary(), 256);
+    }
+
+    #[test]
+    fn framed_write_into_parts() {
+        let output: Vec<u8> = Vec::new();
+        let framed = FramedWrite::new(output, LinesCodec::new());
+
+        let (_writer, _encoder, _buf) = framed.into_parts();
+    }
+
+    #[derive(Debug)]
+    struct GatedWriter {
+        writable: Arc<AtomicBool>,
+        inner: Vec<u8>,
+    }
+
+    impl GatedWriter {
+        fn new(writable: Arc<AtomicBool>) -> Self {
+            Self {
+                writable,
+                inner: Vec::new(),
+            }
+        }
+    }
+
+    impl AsyncWrite for GatedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            if !this.writable.load(Ordering::SeqCst) {
+                return Poll::Pending;
+            }
+            this.inner.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_readiness_bounds_pending_buffer_and_recovers() {
+        let writable = Arc::new(AtomicBool::new(false));
+        let mut framed =
+            FramedWrite::new(GatedWriter::new(Arc::clone(&writable)), LinesCodec::new())
+                .with_backpressure_boundary(8);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("abc".to_string()).unwrap();
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("def".to_string()).unwrap();
+        assert_eq!(framed.write_buffer().len(), 8);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(
+            framed.write_buffer().len(),
+            8,
+            "pending readiness must not grow the buffered prefix"
+        );
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(framed.write_buffer().len(), 8);
+
+        writable.store(true, Ordering::SeqCst);
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(&framed.get_ref().inner, b"abc\ndef\n");
+    }
+
+    #[test]
+    fn framed_write_boundary_is_soft_for_one_oversized_frame() {
+        let writable = Arc::new(AtomicBool::new(false));
+        let mut framed =
+            FramedWrite::new(GatedWriter::new(Arc::clone(&writable)), LinesCodec::new())
+                .with_backpressure_boundary(4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        framed.start_send("oversized".to_string()).unwrap();
+        let oversized_len = framed.write_buffer().len();
+        assert!(oversized_len > framed.backpressure_boundary());
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Pending));
+        assert_eq!(framed.write_buffer().len(), oversized_len);
+
+        writable.store(true, Ordering::SeqCst);
+        assert!(matches!(framed.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(framed.write_buffer().is_empty());
+    }
+
+    /// Writer that accepts only a few bytes at a time.
+    struct SlowWriter {
+        inner: Vec<u8>,
+        max_per_write: usize,
+    }
+
+    impl SlowWriter {
+        fn new(max_per_write: usize) -> Self {
+            Self {
+                inner: Vec::new(),
+                max_per_write,
+            }
+        }
+    }
+
+    impl AsyncWrite for SlowWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            let n = std::cmp::min(buf.len(), this.max_per_write);
+            this.inner.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_partial_writes() {
+        let output = SlowWriter::new(3);
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        framed.send("abcdef".to_string()).unwrap();
+
+        let poll = framed.poll_flush(&mut cx);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+
+        assert!(framed.write_buffer().is_empty());
+        assert_eq!(&framed.get_ref().inner, b"abcdef\n");
+    }
+
+    struct AlwaysReadyPartialWriter {
+        inner: Vec<u8>,
+        max_per_write: usize,
+        writes: usize,
+        panic_after: usize,
+    }
+
+    impl AlwaysReadyPartialWriter {
+        fn new(max_per_write: usize, panic_after: usize) -> Self {
+            Self {
+                inner: Vec::new(),
+                max_per_write,
+                writes: 0,
+                panic_after,
+            }
+        }
+    }
+
+    impl AsyncWrite for AlwaysReadyPartialWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            assert!(
+                this.writes < this.panic_after,
+                "writer was polled too many times without yielding"
+            );
+            this.writes += 1;
+            let n = std::cmp::min(buf.len(), this.max_per_write);
+            this.inner.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_yields_cooperatively_on_always_ready_partial_writer() {
+        let output = AlwaysReadyPartialWriter::new(1, MAX_WRITE_PASSES_PER_POLL + 1);
+        let mut framed = FramedWrite::new(output, LinesCodec::new());
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = track_waker(Arc::clone(&woke));
+        let mut cx = Context::from_waker(&waker);
+
+        framed
+            .send("x".repeat(MAX_WRITE_PASSES_PER_POLL + 8))
+            .expect("encode test frame");
+
+        let poll = framed.poll_flush(&mut cx);
+        assert!(matches!(poll, Poll::Pending));
+        assert!(
+            woke.load(Ordering::SeqCst),
+            "cooperative yield should self-wake for continued draining"
+        );
+        assert_eq!(
+            framed.get_ref().writes,
+            MAX_WRITE_PASSES_PER_POLL,
+            "poll_flush should stop after the cooperative write budget"
+        );
+        assert!(
+            !framed.write_buffer().is_empty(),
+            "buffered frame bytes must remain after the cooperative yield"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum WriteStep {
+        Write(usize),
+        WriteZero,
+    }
+
+    struct ScriptedWriter {
+        inner: Vec<u8>,
+        steps: VecDeque<WriteStep>,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = WriteStep>) -> Self {
+            Self {
+                inner: Vec::new(),
+                steps: steps.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncWrite for ScriptedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            match this
+                .steps
+                .pop_front()
+                .unwrap_or(WriteStep::Write(buf.len()))
+            {
+                WriteStep::WriteZero => Poll::Ready(Ok(0)),
+                WriteStep::Write(limit) => {
+                    let n = limit.min(buf.len());
+                    this.inner.extend_from_slice(&buf[..n]);
+                    Poll::Ready(Ok(n))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_write_zero_after_partial_progress_matches_tokio_util_reference() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut actual = FramedWrite::new(
+            ScriptedWriter::new([WriteStep::Write(3), WriteStep::WriteZero]),
+            LinesCodec::new(),
+        );
+        let mut reference = TokioUtilFramedWriteRef::new(
+            ScriptedWriter::new([WriteStep::Write(3), WriteStep::WriteZero]),
+            LinesCodec::new(),
+        );
+
+        actual
+            .send("abcdef".to_string())
+            .expect("encode actual frame");
+        reference
+            .send("abcdef".to_string())
+            .expect("encode reference frame");
+
+        let actual_err = match actual.poll_flush(&mut cx) {
+            Poll::Ready(Err(err)) => err,
+            other => panic!("expected WriteZero from actual flush, got {other:?}"),
+        };
+        let reference_err = match reference.poll_flush(&mut cx) {
+            Poll::Ready(Err(err)) => err,
+            other => panic!("expected WriteZero from reference flush, got {other:?}"),
+        };
+
+        assert_eq!(actual_err.kind(), io::ErrorKind::WriteZero);
+        assert_eq!(actual_err.kind(), reference_err.kind());
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.write_buffer()[..], &reference.write_buffer()[..]);
+        assert_eq!(
+            &actual.get_ref().inner,
+            b"abc",
+            "partial progress should commit only the written prefix"
+        );
+        assert_eq!(
+            &actual.write_buffer()[..],
+            b"def\n",
+            "remaining suffix should stay buffered after WriteZero"
+        );
+    }
+}

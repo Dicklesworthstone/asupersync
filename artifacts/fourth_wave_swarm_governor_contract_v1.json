@@ -1,0 +1,1921 @@
+{
+  "schema_version": "fourth-wave-swarm-governor-contract-v1",
+  "bead_id": "asupersync-86fe9v.1",
+  "capability_id": "fourth_wave_swarm_resource_governor_schema",
+  "artifact_path": "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+  "contract_test": "tests/fourth_wave_swarm_governor_contract.rs",
+  "generated_at_utc": "2026-06-07T04:30:00Z",
+  "policy_version": "fourth-wave-governor-policy-v1",
+  "source_of_truth": {
+    "contract": "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+    "verifier": "tests/fourth_wave_swarm_governor_contract.rs",
+    "runtime_pressure_contract": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+    "swarm_admission_contract": "artifacts/swarm_admission_decision_contract_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "large_host_topology_corpus": "artifacts/large_host_topology_corpus_v1.json",
+    "scheduler_pressure_receipts": "artifacts/scheduler_resource_pressure_profiling_receipts_v1.json",
+    "rch_health_source": "src/runtime/rch_health/mod.rs",
+    "pressure_runbook": "docs/runtime_pressure_triage_runbook.md"
+  },
+  "proof_boundary": {
+    "schema_contract_only": true,
+    "proves_policy_engine": false,
+    "proves_runtime_bridge": false,
+    "proves_real_host_throughput": false,
+    "proves_scheduler_regression_closed": false,
+    "proves_rch_fleet_health": false,
+    "adaptive_control_enabled_by_default": false,
+    "local_cargo_fallback_allowed": false,
+    "core_runtime_stdout_stderr_added": false,
+    "bounded_fixture_only": true
+  },
+  "input_schema_version": "asupersync.fourth-wave.governor-input.v1",
+  "pressure_snapshot_schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+  "decision_receipt_schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+  "required_input_classes": [
+    "bead_mail_context",
+    "capacity_snapshot",
+    "lab_replay",
+    "obligation_pressure",
+    "rch_proof_lane",
+    "region_pressure",
+    "worker_envelope"
+  ],
+  "schema_definitions": {
+    "pressure_snapshot": {
+      "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+      "required_sections": [
+        "active_region_pressure",
+        "bead_mail_workload_context",
+        "core_envelope",
+        "evidence_rows",
+        "input_artifact_hashes",
+        "lab_replay_metadata",
+        "memory_envelope",
+        "normalized_host_capacity",
+        "obligation_pressure",
+        "policy_version",
+        "rch_admission_state",
+        "snapshot_id",
+        "worker_envelope"
+      ],
+      "field_contract": {
+        "normalized_host_capacity": [
+          "available_parallelism",
+          "cgroup_cpu_quota_millis",
+          "host_profile_id",
+          "memory_total_mib",
+          "numa_node_count",
+          "physical_core_count"
+        ],
+        "worker_envelope": [
+          "active_agent_count",
+          "cache_warm_remote_workers",
+          "local_agent_slots",
+          "max_agent_count",
+          "remote_worker_slots"
+        ],
+        "core_envelope": [
+          "admit_core_budget_bps",
+          "local_core_pressure_bps",
+          "remote_core_pressure_bps",
+          "reserved_critical_cores"
+        ],
+        "memory_envelope": [
+          "artifact_cache_mib",
+          "available_mib",
+          "memory_pressure_bps",
+          "reserved_validation_mib",
+          "total_mib"
+        ],
+        "active_region_pressure": [
+          "active_region_count",
+          "queue_depth",
+          "region_limit",
+          "region_pressure_bps"
+        ],
+        "obligation_pressure": [
+          "drain_backlog",
+          "leak_suspect_count",
+          "live_obligation_count",
+          "obligation_pressure_bps"
+        ],
+        "rch_admission_state": [
+          "first_blocker",
+          "local_fallback_marker_detected",
+          "remote_required",
+          "selected_worker",
+          "workers_admissible"
+        ],
+        "bead_mail_workload_context": [
+          "ack_required_backlog",
+          "in_progress_beads",
+          "ready_beads",
+          "reserved_path_count",
+          "tracker_writable"
+        ],
+        "lab_replay_metadata": [
+          "replay_artifact",
+          "replay_backed",
+          "scenario_family",
+          "seed"
+        ]
+      }
+    },
+    "evidence_row": {
+      "required_fields": [
+        "claim_status",
+        "collected_timestamp_utc",
+        "confidence_bps",
+        "evidence_age_seconds",
+        "evidence_hash",
+        "freshness_status",
+        "local_fallback_marker_detected",
+        "redacted_subject",
+        "rejected_reason",
+        "source_class",
+        "source_id",
+        "source_schema_version",
+        "source_timestamp_utc"
+      ],
+      "stable_order_key": [
+        "source_class",
+        "source_id"
+      ]
+    },
+    "decision_receipt": {
+      "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+      "required_fields": [
+        "confidence_bps",
+        "decision_id",
+        "evidence_rows",
+        "fail_closed",
+        "input_artifact_hashes",
+        "log_fields",
+        "non_action_reason",
+        "non_claims",
+        "policy_version",
+        "rejected_rows",
+        "rule_id",
+        "selected_action",
+        "snapshot_id"
+      ]
+    }
+  },
+  "staleness_policy": {
+    "timestamp_basis": "source_timestamp_utc to collected_timestamp_utc",
+    "max_evidence_age_seconds": 900,
+    "stale_action": "fail_closed_stale_evidence"
+  },
+  "redaction_policy": {
+    "worker_identity_prefix": "rch-worker://redacted/",
+    "agent_identity_prefix": "agent-mail://redacted/",
+    "forbidden_subject_markers": [
+      ".internal",
+      "@",
+      "home/",
+      "ssh://",
+      "vmi"
+    ]
+  },
+  "deterministic_rendering": {
+    "json_policy": "canonical-json-sort-keys-no-whitespace-for-digesting",
+    "scenario_order_key": "scenario_id",
+    "evidence_row_order_key": [
+      "source_class",
+      "source_id"
+    ],
+    "decision_id_template": "fw-governor-decision/{scenario_slug}/policy-v1"
+  },
+  "allowed_decision_actions": [
+    "admit_required_work",
+    "brownout_optional_work",
+    "defer_no_remote_worker",
+    "fail_closed_advisory_only",
+    "fail_closed_local_rch_fallback",
+    "fail_closed_malformed_input",
+    "fail_closed_missing_evidence",
+    "fail_closed_stale_evidence"
+  ],
+  "decision_priority_order": [
+    {
+      "rule_id": "malformed-input",
+      "priority": 10,
+      "trigger": "pressure_snapshot.input_status != complete",
+      "selected_action": "fail_closed_malformed_input"
+    },
+    {
+      "rule_id": "missing-required-evidence",
+      "priority": 20,
+      "trigger": "required_input_class absent from evidence_rows",
+      "selected_action": "fail_closed_missing_evidence"
+    },
+    {
+      "rule_id": "local-rch-fallback",
+      "priority": 30,
+      "trigger": "any evidence row or rch state has local_fallback_marker_detected == true",
+      "selected_action": "fail_closed_local_rch_fallback"
+    },
+    {
+      "rule_id": "stale-evidence",
+      "priority": 40,
+      "trigger": "any evidence_age_seconds > staleness_policy.max_evidence_age_seconds",
+      "selected_action": "fail_closed_stale_evidence"
+    },
+    {
+      "rule_id": "advisory-only-evidence",
+      "priority": 50,
+      "trigger": "all evidence rows are advisory_only and lab_replay_metadata.replay_backed == false",
+      "selected_action": "fail_closed_advisory_only"
+    },
+    {
+      "rule_id": "remote-required-no-worker",
+      "priority": 60,
+      "trigger": "rch_admission_state.remote_required == true && rch_admission_state.workers_admissible == false",
+      "selected_action": "defer_no_remote_worker"
+    },
+    {
+      "rule_id": "brownout-optional-work",
+      "priority": 70,
+      "trigger": "memory/core/region/obligation pressure exceeds optional-work threshold",
+      "selected_action": "brownout_optional_work"
+    },
+    {
+      "rule_id": "admit-required-work",
+      "priority": 80,
+      "trigger": "fresh supported evidence with admissible remote proof capacity",
+      "selected_action": "admit_required_work"
+    }
+  ],
+  "required_log_fields": [
+    "bead_id",
+    "decision_id",
+    "first_rejected_row_reason",
+    "input_artifact_hashes",
+    "policy_version",
+    "rejected_row_count",
+    "scenario_id",
+    "selected_action",
+    "snapshot_id"
+  ],
+  "non_claims": [
+    "This contract does not enable runtime admission or brownout behavior.",
+    "This contract does not prove real-host throughput, scheduler performance, RCH fleet health, or production-safe autonomous control.",
+    "This contract does not authorize local Cargo fallback for remote-required proof lanes.",
+    "This contract does not mutate Agent Mail, Beads, reservations, git branches, or worktrees."
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "FW-GOVERNOR-ADMIT-REQUIRED-WORK",
+      "description": "Fresh replay-backed evidence, low pressure, and an admissible remote worker allow required work to proceed.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-admit-required-work",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 64,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 64000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 24,
+          "max_agent_count": 48,
+          "active_agent_count": 16,
+          "remote_worker_slots": 6,
+          "cache_warm_remote_workers": 3
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3200,
+          "remote_core_pressure_bps": 2800,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 180224,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 8192,
+          "memory_pressure_bps": 3100
+        },
+        "active_region_pressure": {
+          "active_region_count": 28,
+          "region_limit": 128,
+          "queue_depth": 18,
+          "region_pressure_bps": 2600
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 96,
+          "drain_backlog": 4,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 1800
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": true,
+          "selected_worker": "rch-worker://redacted/cache-warm-01",
+          "local_fallback_marker_detected": false,
+          "first_blocker": ""
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 2,
+          "in_progress_beads": 1,
+          "reserved_path_count": 4,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "large_host_low_pressure",
+          "seed": 860001,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-ready-clean",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "confidence_bps": 8200,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "large-host-64c-256g",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "confidence_bps": 8500,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "large-host-low-pressure-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "confidence_bps": 8600,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://large-host-low-pressure",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-drain-low",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            "confidence_bps": 8300,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "remote-required-admit",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "confidence_bps": 8400,
+            "freshness_status": "fresh",
+            "claim_status": "remote_proof",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "rch-worker://redacted/cache-warm-01",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-low",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+            "confidence_bps": 8300,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-low",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "confidence_bps": 8300,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/admit-required-work/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-admit-required-work",
+        "selected_action": "admit_required_work",
+        "non_action_reason": "",
+        "fail_closed": false,
+        "rule_id": "admit-required-work",
+        "confidence_bps": 8400,
+        "input_artifact_hashes": [
+          "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "evidence_rows": [
+          "mail-ready-clean",
+          "large-host-64c-256g",
+          "large-host-low-pressure-replay",
+          "obligation-drain-low",
+          "remote-required-admit",
+          "regions-low",
+          "worker-envelope-low"
+        ],
+        "rejected_rows": [],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-ADMIT-REQUIRED-WORK",
+          "snapshot_id": "fw-snapshot-admit-required-work",
+          "decision_id": "fw-governor-decision/admit-required-work/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "admit_required_work",
+          "input_artifact_hashes": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rejected_row_count": "0",
+          "first_rejected_row_reason": ""
+        },
+        "non_claims": [
+          "schema-only contract",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-BROWNOUT-OPTIONAL-WORK",
+      "description": "Fresh replay-backed evidence with high memory pressure sheds optional work without blocking required cleanup and proof safety surfaces.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-brownout-optional-work",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 48,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 48000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 18,
+          "max_agent_count": 36,
+          "active_agent_count": 32,
+          "remote_worker_slots": 3,
+          "cache_warm_remote_workers": 1
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 8200,
+          "remote_core_pressure_bps": 7400,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 16384,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 49152,
+          "memory_pressure_bps": 9300
+        },
+        "active_region_pressure": {
+          "active_region_count": 92,
+          "region_limit": 128,
+          "queue_depth": 58,
+          "region_pressure_bps": 8600
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 480,
+          "drain_backlog": 32,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 7200
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": true,
+          "selected_worker": "rch-worker://redacted/cache-warm-02",
+          "local_fallback_marker_detected": false,
+          "first_blocker": ""
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 6,
+          "in_progress_beads": 5,
+          "reserved_path_count": 14,
+          "ack_required_backlog": 1,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "large_host_memory_brownout",
+          "seed": 860002,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-brownout-clean",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "confidence_bps": 7600,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "large-host-64c-256g-brownout",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "confidence_bps": 7800,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "memory-brownout-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "confidence_bps": 7900,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://memory-brownout",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-drain-brownout",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+            "confidence_bps": 7600,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "remote-required-brownout",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "confidence_bps": 7700,
+            "freshness_status": "fresh",
+            "claim_status": "remote_proof",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "rch-worker://redacted/cache-warm-02",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-brownout",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+            "confidence_bps": 7600,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-brownout",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+            "confidence_bps": 7600,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/brownout-optional-work/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-brownout-optional-work",
+        "selected_action": "brownout_optional_work",
+        "non_action_reason": "optional work exceeds memory pressure budget",
+        "fail_closed": false,
+        "rule_id": "brownout-optional-work",
+        "confidence_bps": 7600,
+        "input_artifact_hashes": [
+          "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+        ],
+        "evidence_rows": [
+          "mail-brownout-clean",
+          "large-host-64c-256g-brownout",
+          "memory-brownout-replay",
+          "obligation-drain-brownout",
+          "remote-required-brownout",
+          "regions-brownout",
+          "worker-envelope-brownout"
+        ],
+        "rejected_rows": [],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-BROWNOUT-OPTIONAL-WORK",
+          "snapshot_id": "fw-snapshot-brownout-optional-work",
+          "decision_id": "fw-governor-decision/brownout-optional-work/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "brownout_optional_work",
+          "input_artifact_hashes": "sha256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+          "rejected_row_count": "0",
+          "first_rejected_row_reason": ""
+        },
+        "non_claims": [
+          "brownout recommendation only",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-DEFER-NO-REMOTE-WORKER",
+      "description": "Remote-required proof work with no admissible remote worker records a no-win defer without authorizing local Cargo fallback.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-defer-no-remote-worker",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 60,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 60000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 20,
+          "max_agent_count": 40,
+          "active_agent_count": 18,
+          "remote_worker_slots": 0,
+          "cache_warm_remote_workers": 0
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3600,
+          "remote_core_pressure_bps": 10000,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 155648,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 12288,
+          "memory_pressure_bps": 3900
+        },
+        "active_region_pressure": {
+          "active_region_count": 36,
+          "region_limit": 128,
+          "queue_depth": 22,
+          "region_pressure_bps": 3000
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 120,
+          "drain_backlog": 8,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 2200
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": false,
+          "selected_worker": "",
+          "local_fallback_marker_detected": false,
+          "first_blocker": "active_project_exclusion"
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 3,
+          "in_progress_beads": 1,
+          "reserved_path_count": 4,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "remote_required_no_worker",
+          "seed": 860003,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-no-worker",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:abababababababababababababababababababababababababababababababab",
+            "confidence_bps": 7900,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "large-host-64c-256g-no-worker",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:bcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbcbc",
+            "confidence_bps": 8000,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "no-worker-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+            "confidence_bps": 8000,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://remote-required-no-worker",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-no-worker",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:dededededededededededededededededededededededededededededededede",
+            "confidence_bps": 7900,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "remote-required-no-worker",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
+            "confidence_bps": 7800,
+            "freshness_status": "fresh",
+            "claim_status": "remote_refusal",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "rch-worker://redacted/no-worker",
+            "rejected_reason": "active_project_exclusion"
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-no-worker",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:fafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafa",
+            "confidence_bps": 7900,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-no-worker",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:1212121212121212121212121212121212121212121212121212121212121212",
+            "confidence_bps": 7900,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/defer-no-remote-worker/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-defer-no-remote-worker",
+        "selected_action": "defer_no_remote_worker",
+        "non_action_reason": "remote-required lane has no admissible remote worker; local fallback refused",
+        "fail_closed": false,
+        "rule_id": "remote-required-no-worker",
+        "confidence_bps": 7800,
+        "input_artifact_hashes": [
+          "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+        ],
+        "evidence_rows": [
+          "mail-no-worker",
+          "large-host-64c-256g-no-worker",
+          "no-worker-replay",
+          "obligation-no-worker",
+          "remote-required-no-worker",
+          "regions-no-worker",
+          "worker-envelope-no-worker"
+        ],
+        "rejected_rows": [
+          "remote-required-no-worker"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-DEFER-NO-REMOTE-WORKER",
+          "snapshot_id": "fw-snapshot-defer-no-remote-worker",
+          "decision_id": "fw-governor-decision/defer-no-remote-worker/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "defer_no_remote_worker",
+          "input_artifact_hashes": "sha256:abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+          "rejected_row_count": "1",
+          "first_rejected_row_reason": "active_project_exclusion"
+        },
+        "non_claims": [
+          "no remote proof success claimed",
+          "local fallback refused"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-FAIL-ADVISORY-ONLY",
+      "description": "Advisory-only live signals without lab or replay backing fail closed before any governor action.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-fail-advisory-only",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:1313131313131313131313131313131313131313131313131313131313131313"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 64,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 64000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 24,
+          "max_agent_count": 48,
+          "active_agent_count": 10,
+          "remote_worker_slots": 4,
+          "cache_warm_remote_workers": 2
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3000,
+          "remote_core_pressure_bps": 2800,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 190000,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 8192,
+          "memory_pressure_bps": 2800
+        },
+        "active_region_pressure": {
+          "active_region_count": 16,
+          "region_limit": 128,
+          "queue_depth": 12,
+          "region_pressure_bps": 2200
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 80,
+          "drain_backlog": 4,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 1700
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": true,
+          "selected_worker": "rch-worker://redacted/advisory-01",
+          "local_fallback_marker_detected": false,
+          "first_blocker": ""
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 1,
+          "in_progress_beads": 0,
+          "reserved_path_count": 2,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "advisory_only_live_signals",
+          "seed": 860004,
+          "replay_artifact": "",
+          "replay_backed": false
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-advisory-only",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:1414141414141414141414141414141414141414141414141414141414141414",
+            "confidence_bps": 4200,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": "advisory_without_replay"
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "capacity-advisory-only",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:1515151515151515151515151515151515151515151515151515151515151515",
+            "confidence_bps": 4300,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": "advisory_without_replay"
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "missing-replay-advisory",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:1616161616161616161616161616161616161616161616161616161616161616",
+            "confidence_bps": 0,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://missing",
+            "rejected_reason": "replay_not_present"
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-advisory-only",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:1717171717171717171717171717171717171717171717171717171717171717",
+            "confidence_bps": 4200,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": "advisory_without_replay"
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "rch-advisory-only",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:1818181818181818181818181818181818181818181818181818181818181818",
+            "confidence_bps": 4300,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "rch-worker://redacted/advisory-01",
+            "rejected_reason": "advisory_without_replay"
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-advisory-only",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:1919191919191919191919191919191919191919191919191919191919191919",
+            "confidence_bps": 4200,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": "advisory_without_replay"
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-advisory-only",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+            "confidence_bps": 4200,
+            "freshness_status": "fresh",
+            "claim_status": "advisory_only",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": "advisory_without_replay"
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/fail-advisory-only/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-fail-advisory-only",
+        "selected_action": "fail_closed_advisory_only",
+        "non_action_reason": "advisory evidence lacks lab or replay backing",
+        "fail_closed": true,
+        "rule_id": "advisory-only-evidence",
+        "confidence_bps": 0,
+        "input_artifact_hashes": [
+          "sha256:1313131313131313131313131313131313131313131313131313131313131313"
+        ],
+        "evidence_rows": [
+          "mail-advisory-only",
+          "capacity-advisory-only",
+          "missing-replay-advisory",
+          "obligation-advisory-only",
+          "rch-advisory-only",
+          "regions-advisory-only",
+          "worker-envelope-advisory-only"
+        ],
+        "rejected_rows": [
+          "mail-advisory-only",
+          "capacity-advisory-only",
+          "missing-replay-advisory",
+          "obligation-advisory-only",
+          "rch-advisory-only",
+          "regions-advisory-only",
+          "worker-envelope-advisory-only"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-FAIL-ADVISORY-ONLY",
+          "snapshot_id": "fw-snapshot-fail-advisory-only",
+          "decision_id": "fw-governor-decision/fail-advisory-only/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "fail_closed_advisory_only",
+          "input_artifact_hashes": "sha256:1313131313131313131313131313131313131313131313131313131313131313",
+          "rejected_row_count": "7",
+          "first_rejected_row_reason": "advisory_without_replay"
+        },
+        "non_claims": [
+          "advisory-only signals are not behavior proof",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-FAIL-LOCAL-RCH-FALLBACK",
+      "description": "Any local RCH fallback marker fails closed even if other pressure fields look healthy.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-fail-local-rch-fallback",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 64,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 64000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 24,
+          "max_agent_count": 48,
+          "active_agent_count": 12,
+          "remote_worker_slots": 4,
+          "cache_warm_remote_workers": 2
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3000,
+          "remote_core_pressure_bps": 2800,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 190000,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 8192,
+          "memory_pressure_bps": 2800
+        },
+        "active_region_pressure": {
+          "active_region_count": 18,
+          "region_limit": 128,
+          "queue_depth": 12,
+          "region_pressure_bps": 2200
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 82,
+          "drain_backlog": 4,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 1700
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": true,
+          "selected_worker": "rch-worker://redacted/local-fallback-marker",
+          "local_fallback_marker_detected": true,
+          "first_blocker": "local_fallback_detected"
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 1,
+          "in_progress_beads": 0,
+          "reserved_path_count": 2,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "local_fallback_marker",
+          "seed": 860005,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-local-fallback",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "capacity-local-fallback",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "local-fallback-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://local-fallback-marker",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-local-fallback",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "rch-local-fallback-marker",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:2020202020202020202020202020202020202020202020202020202020202020",
+            "confidence_bps": 0,
+            "freshness_status": "fresh",
+            "claim_status": "local_fallback",
+            "local_fallback_marker_detected": true,
+            "redacted_subject": "rch-worker://redacted/local-fallback-marker",
+            "rejected_reason": "local_fallback_detected"
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-local-fallback",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:2121212121212121212121212121212121212121212121212121212121212121",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-local-fallback",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:2323232323232323232323232323232323232323232323232323232323232323",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/fail-local-rch-fallback/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-fail-local-rch-fallback",
+        "selected_action": "fail_closed_local_rch_fallback",
+        "non_action_reason": "local RCH fallback marker detected",
+        "fail_closed": true,
+        "rule_id": "local-rch-fallback",
+        "confidence_bps": 0,
+        "input_artifact_hashes": [
+          "sha256:1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b"
+        ],
+        "evidence_rows": [
+          "mail-local-fallback",
+          "capacity-local-fallback",
+          "local-fallback-replay",
+          "obligation-local-fallback",
+          "rch-local-fallback-marker",
+          "regions-local-fallback",
+          "worker-envelope-local-fallback"
+        ],
+        "rejected_rows": [
+          "rch-local-fallback-marker"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-FAIL-LOCAL-RCH-FALLBACK",
+          "snapshot_id": "fw-snapshot-fail-local-rch-fallback",
+          "decision_id": "fw-governor-decision/fail-local-rch-fallback/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "fail_closed_local_rch_fallback",
+          "input_artifact_hashes": "sha256:1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+          "rejected_row_count": "1",
+          "first_rejected_row_reason": "local_fallback_detected"
+        },
+        "non_claims": [
+          "local fallback cannot validate remote proof",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-FAIL-MALFORMED-INPUT",
+      "description": "Malformed snapshots fail before evidence interpretation.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-fail-malformed-input",
+        "input_status": "malformed",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:2424242424242424242424242424242424242424242424242424242424242424"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "malformed",
+          "physical_core_count": 0,
+          "available_parallelism": 0,
+          "numa_node_count": 0,
+          "memory_total_mib": 0,
+          "cgroup_cpu_quota_millis": 0
+        },
+        "worker_envelope": {
+          "local_agent_slots": 0,
+          "max_agent_count": 0,
+          "active_agent_count": 0,
+          "remote_worker_slots": 0,
+          "cache_warm_remote_workers": 0
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 0,
+          "remote_core_pressure_bps": 0,
+          "reserved_critical_cores": 0,
+          "admit_core_budget_bps": 0
+        },
+        "memory_envelope": {
+          "total_mib": 0,
+          "available_mib": 0,
+          "reserved_validation_mib": 0,
+          "artifact_cache_mib": 0,
+          "memory_pressure_bps": 0
+        },
+        "active_region_pressure": {
+          "active_region_count": 0,
+          "region_limit": 0,
+          "queue_depth": 0,
+          "region_pressure_bps": 0
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 0,
+          "drain_backlog": 0,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 0
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": false,
+          "selected_worker": "",
+          "local_fallback_marker_detected": false,
+          "first_blocker": "malformed_input"
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 0,
+          "in_progress_beads": 0,
+          "reserved_path_count": 0,
+          "ack_required_backlog": 0,
+          "tracker_writable": false
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "malformed_input",
+          "seed": 0,
+          "replay_artifact": "",
+          "replay_backed": false
+        },
+        "evidence_rows": []
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/fail-malformed-input/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-fail-malformed-input",
+        "selected_action": "fail_closed_malformed_input",
+        "non_action_reason": "snapshot input_status is malformed",
+        "fail_closed": true,
+        "rule_id": "malformed-input",
+        "confidence_bps": 0,
+        "input_artifact_hashes": [
+          "sha256:2424242424242424242424242424242424242424242424242424242424242424"
+        ],
+        "evidence_rows": [],
+        "rejected_rows": [
+          "fw-snapshot-fail-malformed-input"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-FAIL-MALFORMED-INPUT",
+          "snapshot_id": "fw-snapshot-fail-malformed-input",
+          "decision_id": "fw-governor-decision/fail-malformed-input/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "fail_closed_malformed_input",
+          "input_artifact_hashes": "sha256:2424242424242424242424242424242424242424242424242424242424242424",
+          "rejected_row_count": "1",
+          "first_rejected_row_reason": "malformed_input"
+        },
+        "non_claims": [
+          "malformed input cannot drive policy",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-FAIL-MISSING-EVIDENCE",
+      "description": "A snapshot missing the required RCH proof-lane evidence class fails closed before acting on partial data.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-fail-missing-evidence",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "missing_required_input_classes": [
+          "rch_proof_lane"
+        ],
+        "input_artifact_hashes": [
+          "sha256:2525252525252525252525252525252525252525252525252525252525252525"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 64,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 64000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 24,
+          "max_agent_count": 48,
+          "active_agent_count": 12,
+          "remote_worker_slots": 4,
+          "cache_warm_remote_workers": 2
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3000,
+          "remote_core_pressure_bps": 2800,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 190000,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 8192,
+          "memory_pressure_bps": 2800
+        },
+        "active_region_pressure": {
+          "active_region_count": 18,
+          "region_limit": 128,
+          "queue_depth": 12,
+          "region_pressure_bps": 2200
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 82,
+          "drain_backlog": 4,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 1700
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": false,
+          "selected_worker": "",
+          "local_fallback_marker_detected": false,
+          "first_blocker": "missing_rch_proof_lane"
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 1,
+          "in_progress_beads": 0,
+          "reserved_path_count": 2,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "missing_evidence",
+          "seed": 860006,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-missing-evidence",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:2626262626262626262626262626262626262626262626262626262626262626",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "capacity-missing-evidence",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:2727272727272727272727272727272727272727272727272727272727272727",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "missing-evidence-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:2828282828282828282828282828282828282828282828282828282828282828",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://missing-evidence",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-missing-evidence",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:2929292929292929292929292929292929292929292929292929292929292929",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-missing-evidence",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:26:55Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 185,
+            "evidence_hash": "sha256:2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-missing-evidence",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+            "confidence_bps": 6000,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/fail-missing-evidence/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-fail-missing-evidence",
+        "selected_action": "fail_closed_missing_evidence",
+        "non_action_reason": "required evidence class rch_proof_lane is missing",
+        "fail_closed": true,
+        "rule_id": "missing-required-evidence",
+        "confidence_bps": 0,
+        "input_artifact_hashes": [
+          "sha256:2525252525252525252525252525252525252525252525252525252525252525"
+        ],
+        "evidence_rows": [
+          "mail-missing-evidence",
+          "capacity-missing-evidence",
+          "missing-evidence-replay",
+          "obligation-missing-evidence",
+          "regions-missing-evidence",
+          "worker-envelope-missing-evidence"
+        ],
+        "rejected_rows": [
+          "rch_proof_lane"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-FAIL-MISSING-EVIDENCE",
+          "snapshot_id": "fw-snapshot-fail-missing-evidence",
+          "decision_id": "fw-governor-decision/fail-missing-evidence/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "fail_closed_missing_evidence",
+          "input_artifact_hashes": "sha256:2525252525252525252525252525252525252525252525252525252525252525",
+          "rejected_row_count": "1",
+          "first_rejected_row_reason": "missing_required_input_class"
+        },
+        "non_claims": [
+          "partial evidence cannot drive policy",
+          "no runtime bridge enabled"
+        ]
+      }
+    },
+    {
+      "scenario_id": "FW-GOVERNOR-FAIL-STALE-EVIDENCE",
+      "description": "Any stale required evidence row fails closed even when the rest of the snapshot is complete.",
+      "pressure_snapshot": {
+        "schema_version": "asupersync.fourth-wave.pressure-snapshot.v1",
+        "snapshot_id": "fw-snapshot-fail-stale-evidence",
+        "input_status": "complete",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+        "input_artifact_hashes": [
+          "sha256:2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+        ],
+        "normalized_host_capacity": {
+          "host_profile_id": "large-host-64c-256g",
+          "physical_core_count": 64,
+          "available_parallelism": 64,
+          "numa_node_count": 2,
+          "memory_total_mib": 262144,
+          "cgroup_cpu_quota_millis": 64000
+        },
+        "worker_envelope": {
+          "local_agent_slots": 24,
+          "max_agent_count": 48,
+          "active_agent_count": 12,
+          "remote_worker_slots": 4,
+          "cache_warm_remote_workers": 2
+        },
+        "core_envelope": {
+          "local_core_pressure_bps": 3000,
+          "remote_core_pressure_bps": 2800,
+          "reserved_critical_cores": 8,
+          "admit_core_budget_bps": 7600
+        },
+        "memory_envelope": {
+          "total_mib": 262144,
+          "available_mib": 190000,
+          "reserved_validation_mib": 32768,
+          "artifact_cache_mib": 8192,
+          "memory_pressure_bps": 2800
+        },
+        "active_region_pressure": {
+          "active_region_count": 18,
+          "region_limit": 128,
+          "queue_depth": 12,
+          "region_pressure_bps": 2200
+        },
+        "obligation_pressure": {
+          "live_obligation_count": 82,
+          "drain_backlog": 4,
+          "leak_suspect_count": 0,
+          "obligation_pressure_bps": 1700
+        },
+        "rch_admission_state": {
+          "remote_required": true,
+          "workers_admissible": true,
+          "selected_worker": "rch-worker://redacted/stale-input",
+          "local_fallback_marker_detected": false,
+          "first_blocker": ""
+        },
+        "bead_mail_workload_context": {
+          "ready_beads": 1,
+          "in_progress_beads": 0,
+          "reserved_path_count": 2,
+          "ack_required_backlog": 0,
+          "tracker_writable": true
+        },
+        "lab_replay_metadata": {
+          "scenario_family": "stale_evidence",
+          "seed": 860007,
+          "replay_artifact": "artifacts/large_host_topology_corpus_v1.json",
+          "replay_backed": true
+        },
+        "evidence_rows": [
+          {
+            "source_class": "bead_mail_context",
+            "source_id": "mail-stale-evidence",
+            "source_schema_version": "agent-mail-reservation-summary-v1",
+            "source_timestamp_utc": "2026-06-07T04:28:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 120,
+            "evidence_hash": "sha256:2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "coordination_evidence",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "agent-mail://redacted/reservation-summary",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "capacity_snapshot",
+            "source_id": "capacity-stale-evidence",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:30Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 150,
+            "evidence_hash": "sha256:2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "host-profile://large-host-64c-256g",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "lab_replay",
+            "source_id": "stale-evidence-replay",
+            "source_schema_version": "large-host-topology-corpus-v1",
+            "source_timestamp_utc": "2026-06-07T04:26:40Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 200,
+            "evidence_hash": "sha256:2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "lab-replay://stale-evidence",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "obligation_pressure",
+            "source_id": "obligation-stale-evidence",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:27:10Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 170,
+            "evidence_hash": "sha256:3030303030303030303030303030303030303030303030303030303030303030",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "replay_backed",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://obligations",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "rch_proof_lane",
+            "source_id": "rch-stale-evidence",
+            "source_schema_version": "rch-worker-admission-receipt-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 180,
+            "evidence_hash": "sha256:3131313131313131313131313131313131313131313131313131313131313131",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "remote_proof",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "rch-worker://redacted/stale-input",
+            "rejected_reason": ""
+          },
+          {
+            "source_class": "region_pressure",
+            "source_id": "regions-stale-evidence",
+            "source_schema_version": "asupersync.runtime-pressure-snapshot.v1",
+            "source_timestamp_utc": "2026-06-07T04:00:00Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 1800,
+            "evidence_hash": "sha256:3232323232323232323232323232323232323232323232323232323232323232",
+            "confidence_bps": 0,
+            "freshness_status": "stale",
+            "claim_status": "stale",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "runtime-pressure://regions",
+            "rejected_reason": "stale_evidence"
+          },
+          {
+            "source_class": "worker_envelope",
+            "source_id": "worker-envelope-stale-evidence",
+            "source_schema_version": "proof-lane-admission-input-v1",
+            "source_timestamp_utc": "2026-06-07T04:27:20Z",
+            "collected_timestamp_utc": "2026-06-07T04:30:00Z",
+            "evidence_age_seconds": 160,
+            "evidence_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "confidence_bps": 7200,
+            "freshness_status": "fresh",
+            "claim_status": "schema_contract",
+            "local_fallback_marker_detected": false,
+            "redacted_subject": "worker-envelope://large-host-64c-256g",
+            "rejected_reason": ""
+          }
+        ]
+      },
+      "decision_receipt": {
+        "schema_version": "asupersync.fourth-wave.governor-decision-receipt.v1",
+        "decision_id": "fw-governor-decision/fail-stale-evidence/policy-v1",
+        "policy_version": "fourth-wave-governor-policy-v1",
+        "snapshot_id": "fw-snapshot-fail-stale-evidence",
+        "selected_action": "fail_closed_stale_evidence",
+        "non_action_reason": "required region pressure evidence is stale",
+        "fail_closed": true,
+        "rule_id": "stale-evidence",
+        "confidence_bps": 0,
+        "input_artifact_hashes": [
+          "sha256:2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+        ],
+        "evidence_rows": [
+          "mail-stale-evidence",
+          "capacity-stale-evidence",
+          "stale-evidence-replay",
+          "obligation-stale-evidence",
+          "rch-stale-evidence",
+          "regions-stale-evidence",
+          "worker-envelope-stale-evidence"
+        ],
+        "rejected_rows": [
+          "regions-stale-evidence"
+        ],
+        "log_fields": {
+          "bead_id": "asupersync-86fe9v.1",
+          "scenario_id": "FW-GOVERNOR-FAIL-STALE-EVIDENCE",
+          "snapshot_id": "fw-snapshot-fail-stale-evidence",
+          "decision_id": "fw-governor-decision/fail-stale-evidence/policy-v1",
+          "policy_version": "fourth-wave-governor-policy-v1",
+          "selected_action": "fail_closed_stale_evidence",
+          "input_artifact_hashes": "sha256:2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+          "rejected_row_count": "1",
+          "first_rejected_row_reason": "stale_evidence"
+        },
+        "non_claims": [
+          "stale evidence cannot drive policy",
+          "no runtime bridge enabled"
+        ]
+      }
+    }
+  ]
+}

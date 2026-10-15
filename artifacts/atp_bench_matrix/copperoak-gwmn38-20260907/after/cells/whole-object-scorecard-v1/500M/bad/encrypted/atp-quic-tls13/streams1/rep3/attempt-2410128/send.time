@@ -1,0 +1,26 @@
+[atp-quic] control: stream_pto_retransmit reason=sender_hello_pto attempt=1 frames=1 operation=receive sender handshake ack
+[atp] progress metrics direction=send transport=quic bytes=524288000 throughput_bytes_per_sec=5602372 symbols_sent=0 symbols_accepted=0 feedback_rounds=0 decode_micros=0 fanout=1 ring_peak_occupancy=n/a ring_avg_occupancy=n/a drop_count=n/a park_count=n/a
+[atp] progress quic_limiter dominant=unacked_guard dominant_micros=52872792 dominant_share_pct=56 total_stall_micros=82162559 peak_bytes_in_flight=0 peak_cwnd=12000 final_cwnd=2400 final_ssthresh=Some(2400) slow_start_exited=true min_rtt_micros=Some(1000) smoothed_rtt_micros=Some(198329) loss_timeouts=0 lost_packets=0 lost_bytes=0 retransmit_batches=25 retransmitted_stream_bytes=29517 pto_count=0 unacked_admission_cap_bytes=16777216 min_stream_send_credit_bytes=Some(713) udp_send_errors=0 sndbuf_requested=Some(16777216) sndbuf_applied=Some(8388608) rcvbuf_applied=Some(8388608)
+	Command being timed: "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX /data/tmp/copperoak-gwmn38-20260907/bin/after send /data/tmp/copperoak-gwmn38-20260907/workloads/500M.bin 10.99.0.1:54117 --transport quic --symbol-size 1141 --peer-id atpsend-486370 --max-bytes 6442450944 --no-delta --rq-round0-loss-pct 2.0 --ca /data/tmp/copperoak-gwmn38-20260907/matrix-after/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2410128/cert.pem --server-name 10.99.0.1"
+	User time (seconds): 35.32
+	System time (seconds): 6.78
+	Percent of CPU this job got: 44%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:33.59
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 40000
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 11227
+	Voluntary context switches: 1272166
+	Involuntary context switches: 61772
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 24
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

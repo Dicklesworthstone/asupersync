@@ -1,0 +1,57 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3341
+expression: "format!(\"{}\", analysis)"
+---
+Plan Analysis Report
+====================
+
+Summary: 1/6 safe, 5 obligation issue(s), 2 cancel issue(s)
+Overall Safe: false
+
+Safe Nodes (1):
+  Node 3: clean (cost: alloc=1 cancel=1 obl=0 depth=1)
+
+Obligation Issues (5):
+  Node 0: clean → may-leak (flow: reserves=["obl:permit"] must_resolve=["obl:permit"] leak_on_cancel=["obl:permit"] [all-paths-ok])
+  Node 1: clean → may-leak (flow: reserves=["obl:ack"] must_resolve=["obl:ack"] leak_on_cancel=["obl:ack"] [all-paths-ok])
+  Node 2: clean → may-leak (flow: reserves=["obl:lease"] must_resolve=["obl:lease"] leak_on_cancel=["obl:lease"] [all-paths-ok])
+  Node 4: may-leak → leaked (flow: reserves=["obl:ack", "obl:lease"] must_resolve=["obl:ack", "obl:lease"] leak_on_cancel=["obl:ack", "obl:lease"] [LEAK-RISK])
+  Node 5: may-leak → leaked (flow: reserves=["obl:permit", "obl:ack", "obl:lease"] must_resolve=["obl:permit", "obl:ack", "obl:lease"] leak_on_cancel=["obl:permit", "obl:ack", "obl:lease"] [LEAK-RISK])
+
+Cancel Issues (2):
+  Node 4: may-orphan
+  Node 5: may-orphan
+
+Detailed Node Analysis:
+----------------------
+Node 0:
+  Safety: obligation=may-leak, cancel=safe, overall=false
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=1 depth=1
+  Obligation Flow: reserves=["obl:permit"] must_resolve=["obl:permit"] leak_on_cancel=["obl:permit"] [all-paths-ok]
+Node 1:
+  Safety: obligation=may-leak, cancel=safe, overall=false
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=1 depth=1
+  Obligation Flow: reserves=["obl:ack"] must_resolve=["obl:ack"] leak_on_cancel=["obl:ack"] [all-paths-ok]
+Node 2:
+  Safety: obligation=may-leak, cancel=safe, overall=false
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=1 depth=1
+  Obligation Flow: reserves=["obl:lease"] must_resolve=["obl:lease"] leak_on_cancel=["obl:lease"] [all-paths-ok]
+Node 3:
+  Safety: obligation=clean, cancel=safe, overall=true
+  Budget: polls=[1, 1]
+  Cost: alloc=1 cancel=1 obl=0 depth=1
+  Obligation Flow: reserves=[] [all-paths-ok]
+Node 4:
+  Safety: obligation=leaked, cancel=may-orphan, overall=false
+  Budget: polls=[1, 1] par=2
+  Cost: alloc=3 cancel=1 obl=2 depth=2
+  Obligation Flow: reserves=["obl:ack", "obl:lease"] must_resolve=["obl:ack", "obl:lease"] leak_on_cancel=["obl:ack", "obl:lease"] [LEAK-RISK]
+Node 5:
+  Safety: obligation=leaked, cancel=may-orphan, overall=false
+  Budget: polls=[3, 3] par=4
+  Cost: alloc=6 cancel=3 obl=3 depth=3
+  Obligation Flow: reserves=["obl:permit", "obl:ack", "obl:lease"] must_resolve=["obl:permit", "obl:ack", "obl:lease"] leak_on_cancel=["obl:permit", "obl:ack", "obl:lease"] [LEAK-RISK]

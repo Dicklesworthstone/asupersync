@@ -1,0 +1,31 @@
+---
+source: src/types/typed_symbol.rs
+expression: |-
+  serde_json::json!({
+      "symbol_id": {
+          "object_id": "[OBJECT_ID]",
+          "sbn": symbol.symbol().sbn(),
+          "esi": symbol.symbol().esi(),
+      },
+      "kind": symbol.symbol().kind().to_string(),
+      "format": format!("{:?}", symbol.format()),
+      "version": symbol.version(),
+      "payload_len": symbol.payload_len(),
+      "value": symbol.value().expect("decode typed symbol"),
+  })
+---
+{
+  "format": "Json",
+  "kind": "source",
+  "payload_len": 24,
+  "symbol_id": {
+    "esi": 0,
+    "object_id": "[OBJECT_ID]",
+    "sbn": 0
+  },
+  "value": {
+    "id": 11,
+    "name": "typed"
+  },
+  "version": 1
+}

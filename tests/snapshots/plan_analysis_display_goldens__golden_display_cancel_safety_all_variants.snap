@@ -1,0 +1,8 @@
+---
+source: tests/plan_analysis_display_goldens.rs
+expression: rendered
+---
+Safe -> safe
+MayOrphan -> may-orphan
+Orphan -> orphan
+Unknown -> unknown

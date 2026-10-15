@@ -1,0 +1,49 @@
+---
+source: tests/raptorq_encoder_stability.rs
+assertion_line: 119
+expression: output
+---
+EncoderOutput {
+    config: EncoderTestCase {
+        k: 10,
+        symbol_size: 64,
+        seed: 305419896,
+        repair_count: 5,
+    },
+    source_symbols_hash: "9c5708539b11b95b",
+    repair_symbols: [
+        RepairSymbolData {
+            esi: 10,
+            symbol_data_hex: "7cada59ec15760e0d77be885909fa40102ed54c733da10c600788cc81626998cf9fa8cd667cd96bf3dfe6dfc7cd70e9beeb2c156b6c0fc50aa46c59795778b96",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 11,
+            symbol_data_hex: "a767adf86c3185d1f777148ac48ab7a93775121d25f1d9d0d4e7c6b5818083698e6ed02c05439cebe07d3d6dfa5ea8db744fe08d0c9be7accb350f8f1067ca03",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 12,
+            symbol_data_hex: "8e1daaa9297cc533d9431fc4c09ebc886fad24f88c57882309f9fc0ff9494ea3ea58f6f67294b100fb1e7b8634c19f60ed9eac2de8c77c1a2a7b153ce1fe0c33",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 13,
+            symbol_data_hex: "82b3fa9a41278474644208107a8991e94a45ecafb9ff31927546521db625b73140ce79d0835dfd36534fca4d15c3a793d80707a37b105e6743c10b5f1c83d5de",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 14,
+            symbol_data_hex: "5ff00a43412a02b8046cbcea1e97c8f351c02eaa3fe683b49a6bd76149387e3fb9ece005a986d40e2c985a4b93d1505fec761fced9690e0e02e018d7d90085b0",
+            symbol_length: 64,
+        },
+    ],
+    params_summary: {
+        "h": 10,
+        "k": 10,
+        "k_prime": 10,
+        "l": 27,
+        "s": 7,
+        "w": 17,
+    },
+}

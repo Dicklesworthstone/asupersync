@@ -1,0 +1,67 @@
+---
+source: src/transport/router.rs
+expression: routing_table_snapshot(&table)
+---
+{
+  "default_route": {
+    "endpoint_ids": [
+      "Endpoint(2)"
+    ],
+    "priority": 90,
+    "strategy": "FirstAvailable",
+    "ttl_ms": null
+  },
+  "dispatchable_endpoint_ids": [
+    "Endpoint(1)",
+    "Endpoint(2)"
+  ],
+  "endpoints": [
+    {
+      "address": "node-1:8080",
+      "id": "Endpoint(1)",
+      "region": "<region>",
+      "state": "Healthy",
+      "weight": 200
+    },
+    {
+      "address": "node-2:8080",
+      "id": "Endpoint(2)",
+      "region": null,
+      "state": "Degraded",
+      "weight": 50
+    },
+    {
+      "address": "node-3:8080",
+      "id": "Endpoint(3)",
+      "region": null,
+      "state": "Draining",
+      "weight": 10
+    }
+  ],
+  "route_count": 3,
+  "routes": [
+    {
+      "entry": {
+        "endpoint_ids": [
+          "Endpoint(1)",
+          "Endpoint(2)"
+        ],
+        "priority": 10,
+        "strategy": "WeightedRoundRobin",
+        "ttl_ms": 30000
+      },
+      "key": "object:<object>"
+    },
+    {
+      "entry": {
+        "endpoint_ids": [
+          "Endpoint(3)"
+        ],
+        "priority": 40,
+        "strategy": "RoundRobin",
+        "ttl_ms": null
+      },
+      "key": "region:<region>"
+    }
+  ]
+}

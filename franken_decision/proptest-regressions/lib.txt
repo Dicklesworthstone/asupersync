@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1cee252383a86e7980756d0333c6f08df91ebc33393926b8ed100d663e39ec52 # shrinks to cal = 0.0, e_proc = 0.0, ci = 1.9197653306733418
+cc a4c72404135a608bb6064d3ab6d602f7c1b7c0c9a8020a4954c92c531261b555 # shrinks to matrix = LossMatrix { state_names: ["s0", "s1"], action_names: ["a0", "a1", "a2"], values: [0.0, 0.0, 9.330579907742003, 0.0, 0.0, 0.0] }

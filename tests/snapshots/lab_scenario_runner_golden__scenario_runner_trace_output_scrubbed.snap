@@ -1,0 +1,222 @@
+---
+source: tests/lab_scenario_runner_golden.rs
+expression: |-
+  json!({
+      "happy_path": scrubbed_scenario_runner_output(&happy), "injected_failure":
+      scrubbed_scenario_runner_output(&injected_failure),
+  })
+---
+{
+  "happy_path": {
+    "certificate": {
+      "event_hash": 0,
+      "schedule_hash": 0,
+      "trace_fingerprint": 16732658632908851881
+    },
+    "oracle_report": {
+      "all_passed": true,
+      "checked": [
+        "task_leak",
+        "obligation_leak",
+        "quiescence",
+        "loser_drain",
+        "finalizer",
+        "region_tree",
+        "region_leak",
+        "ambient_authority",
+        "deadline_monotone",
+        "cancellation_protocol",
+        "cancel_correctness",
+        "cancel_debt",
+        "cancel_signal_ordering",
+        "runtime_epoch",
+        "channel_atomicity",
+        "waker_dedup",
+        "actor_leak",
+        "supervision",
+        "mailbox",
+        "rref_access",
+        "reply_linearity",
+        "registry_lease",
+        "down_order",
+        "supervisor_quiescence"
+      ],
+      "failed_count": 0,
+      "passed_count": 24
+    },
+    "replay_metadata": {
+      "effective_entropy_seed": 17448893944149198620,
+      "effective_seed": 42,
+      "event_count": 0,
+      "event_hash": 0,
+      "family": {
+        "id": "scenario-runner-happy",
+        "surface_contract_version": "scenario-runner-happy.v1",
+        "surface_id": "scenario-runner-happy"
+      },
+      "instance": {
+        "effective_seed": 42,
+        "family_id": "scenario-runner-happy",
+        "run_index": 0,
+        "runtime_kind": "lab"
+      },
+      "repro_command": "ASUPERSYNC_SEED=0x2A rch exec -- cargo test scenario-runner-happy -- --nocapture",
+      "schedule_hash": 0,
+      "steps_total": 0,
+      "trace_fingerprint": 16732658632908851881
+    },
+    "replay_trace": {
+      "events": [
+        {
+          "seed": 42,
+          "type": "RngSeed"
+        }
+      ],
+      "metadata": {
+        "config_hash": 0,
+        "recorded_at": "[scrubbed]",
+        "seed": 42,
+        "version": 1
+      }
+    },
+    "seed_lineage": {
+      "canonical_seed": 42,
+      "lab_effective_seed": 42,
+      "lab_entropy_seed": 17448893944149198620,
+      "live_effective_seed": 42,
+      "live_entropy_seed": 17448893944149198620,
+      "seed_lineage_id": "seed.scenario-runner-happy.v1",
+      "seeds_match": true
+    },
+    "summary": {
+      "faults_injected": 0,
+      "passed": true,
+      "scenario_id": "scenario-runner-happy",
+      "seed": 42
+    },
+    "trace_summary": {
+      "now_nanos": "[scrubbed]",
+      "quiescent": true,
+      "seed": 42,
+      "steps_total": 0,
+      "trace_certificate": {
+        "event_count": 0,
+        "event_hash": 0,
+        "schedule_hash": 0
+      },
+      "trace_fingerprint": 16732658632908851881,
+      "trace_len": 0
+    }
+  },
+  "injected_failure": {
+    "certificate": {
+      "event_hash": 3276863385223479650,
+      "schedule_hash": 0,
+      "trace_fingerprint": 2661968973328277092
+    },
+    "oracle_report": {
+      "all_passed": true,
+      "checked": [
+        "task_leak",
+        "obligation_leak",
+        "quiescence",
+        "loser_drain",
+        "finalizer",
+        "region_tree",
+        "region_leak",
+        "ambient_authority",
+        "deadline_monotone",
+        "cancellation_protocol",
+        "cancel_correctness",
+        "cancel_debt",
+        "cancel_signal_ordering",
+        "runtime_epoch",
+        "channel_atomicity",
+        "waker_dedup",
+        "actor_leak",
+        "supervision",
+        "mailbox",
+        "rref_access",
+        "reply_linearity",
+        "registry_lease",
+        "down_order",
+        "supervisor_quiescence"
+      ],
+      "failed_count": 0,
+      "passed_count": 24
+    },
+    "replay_metadata": {
+      "effective_entropy_seed": 17448893944149198620,
+      "effective_seed": 42,
+      "event_count": 2,
+      "event_hash": 3276863385223479650,
+      "family": {
+        "id": "scenario-runner-injected-failure",
+        "surface_contract_version": "scenario-runner-injected-failure.v1",
+        "surface_id": "scenario-runner-injected-failure"
+      },
+      "instance": {
+        "effective_seed": 42,
+        "family_id": "scenario-runner-injected-failure",
+        "run_index": 0,
+        "runtime_kind": "lab"
+      },
+      "repro_command": "ASUPERSYNC_SEED=0x2A rch exec -- cargo test scenario-runner-injected-failure -- --nocapture",
+      "schedule_hash": 0,
+      "steps_total": 0,
+      "trace_fingerprint": 2661968973328277092
+    },
+    "replay_trace": {
+      "events": [
+        {
+          "seed": 42,
+          "type": "RngSeed"
+        },
+        {
+          "from_nanos": 0,
+          "to_nanos": 10000000,
+          "type": "TimeAdvanced"
+        },
+        {
+          "from_nanos": 10000000,
+          "to_nanos": 40000000,
+          "type": "TimeAdvanced"
+        }
+      ],
+      "metadata": {
+        "config_hash": 0,
+        "recorded_at": "[scrubbed]",
+        "seed": 42,
+        "version": 1
+      }
+    },
+    "seed_lineage": {
+      "canonical_seed": 42,
+      "lab_effective_seed": 42,
+      "lab_entropy_seed": 17448893944149198620,
+      "live_effective_seed": 42,
+      "live_entropy_seed": 17448893944149198620,
+      "seed_lineage_id": "seed.scenario-runner-injected-failure.v1",
+      "seeds_match": true
+    },
+    "summary": {
+      "faults_injected": 2,
+      "passed": true,
+      "scenario_id": "scenario-runner-injected-failure",
+      "seed": 42
+    },
+    "trace_summary": {
+      "now_nanos": "[scrubbed]",
+      "quiescent": true,
+      "seed": 42,
+      "steps_total": 0,
+      "trace_certificate": {
+        "event_count": 2,
+        "event_hash": 3276863385223479650,
+        "schedule_hash": 0
+      },
+      "trace_fingerprint": 2661968973328277092,
+      "trace_len": 2
+    }
+  }
+}

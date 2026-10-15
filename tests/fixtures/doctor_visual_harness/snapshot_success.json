@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "snapshot-golden-success",
+  "viewport_width": 132,
+  "viewport_height": 44,
+  "focused_panel": "summary_panel",
+  "selected_node_id": "node-01",
+  "stage_digest": "len:3|success|success|success",
+  "visual_profile": "frankentui-stable",
+  "capture_index": 0
+}

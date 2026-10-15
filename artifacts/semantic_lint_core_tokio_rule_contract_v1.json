@@ -1,0 +1,69 @@
+{
+  "contract_version": "semantic-lint-core-tokio-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "core-tokio-feature-leakage",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "boundary_contract": "artifacts/no_tokio_feature_boundary_contract_v1.json",
+    "contract": "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_core_tokio_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_core_tokio_rule.md",
+    "positive_fixture": "tests/fixtures/semantic_lint/core_tokio/positive_default_leak.json",
+    "compat_fixture": "tests/fixtures/semantic_lint/core_tokio/negative_compat_carveout.json",
+    "fuzz_fixture": "tests/fixtures/semantic_lint/core_tokio/negative_fuzz_quarantine.json"
+  },
+  "implementation": {
+    "selected_engine": "cargo-metadata",
+    "runner_default_engine": "auto",
+    "input_contract_schema": "no-tokio-feature-boundary-contract-v1",
+    "result_schema": "semantic-lint-results-v1",
+    "classification_only": true,
+    "no_live_cargo_execution": true,
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true
+  },
+  "target_paths": [
+    "Cargo.toml",
+    "asupersync-tokio-compat/Cargo.toml",
+    "conformance/Cargo.toml",
+    "AGENTS.md",
+    "artifacts/no_tokio_feature_boundary_contract_v1.json"
+  ],
+  "classification_policy": {
+    "production_status_must_equal": "tokio_free_normal_graph",
+    "production_profiles_must_not_declare_tokio_fragments": true,
+    "quarantined_status_must_equal": "tokio_carrying_quarantined",
+    "scoped_audit_status_must_equal": "tokio_carrying_scoped_audit",
+    "carveout_rationale_must_state_not_production": true,
+    "proof_command_must_start_with": "rch exec -- env",
+    "proof_command_must_pin": "CARGO_TARGET_DIR",
+    "proof_command_must_invoke": "cargo tree",
+    "proof_command_must_reference": "tokio",
+    "production_proof_must_not_use_workspace": true,
+    "scoped_audit_proof_must_use_workspace": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/core_tokio/positive_default_leak.json",
+      "expected_verdict": "fail",
+      "expected_kind": "core_tokio_feature_leakage"
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/core_tokio/negative_compat_carveout.json",
+      "expected_verdict": "pass",
+      "expected_scoped_audit_profiles": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/core_tokio/negative_fuzz_quarantine.json",
+      "expected_verdict": "pass",
+      "expected_quarantined_profiles": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not run cargo tree or cargo metadata itself",
+    "does not replace the live no-Tokio cargo-tree proof lanes",
+    "does not prove current dependency graph state beyond the supplied boundary contract"
+  ]
+}

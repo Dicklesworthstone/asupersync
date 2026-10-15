@@ -1,0 +1,61 @@
+{
+  "active_bead_ids": {
+    "in_progress": [],
+    "ready": [
+      "asupersync-lhx6m4"
+    ],
+    "stale_in_progress": []
+  },
+  "agent": "CopperSpring",
+  "branch": {
+    "ahead": 0,
+    "behind": 0,
+    "current": "main",
+    "is_main": true,
+    "upstream": "origin/main"
+  },
+  "dirty_clusters": [],
+  "generated_at": "2026-05-08T04:30:00Z",
+  "next_action": {
+    "bead_id": "asupersync-lhx6m4",
+    "category": "proof-only",
+    "lane": "reservation-aware-work-finder",
+    "reason": "ready queue only contains a non-claimable epic; run the fallback work selector"
+  },
+  "proof_suggestions": [],
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [
+    {
+      "classification": "peer-active",
+      "exclusive": true,
+      "expires_ts": "2026-05-08T05:30:00Z",
+      "holder": "CalmSummit",
+      "path_pattern": "src/grpc/server.rs"
+    }
+  ],
+  "reservation_snapshot": {
+    "available": true,
+    "classifications": [
+      {
+        "classification": "peer-active",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:30:00Z",
+        "holder": "CalmSummit",
+        "path_pattern": "src/grpc/server.rs"
+      }
+    ]
+  },
+  "schema_version": "session-handoff-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok",
+    "proof_runner": "ok",
+    "rch": "ok"
+  }
+}

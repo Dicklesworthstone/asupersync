@@ -1,0 +1,756 @@
+{
+  "analysis": {
+    "architecture": {
+      "shard_a_tasks": "ContendedMutex<TaskTable> - hot path (poll/push/pop/steal)",
+      "shard_b_regions": "ContendedMutex<RegionTable> - warm path (spawn/cancel/region lifecycle)",
+      "shard_c_obligations": "ContendedMutex<ObligationTable> - warm path (commit/abort/leak)",
+      "shard_d_instrumentation": "Lock-free (Arc + atomics)",
+      "shard_e_config": "Read-only (Arc, no lock needed)"
+    },
+    "regression": "No regression detected. Monolithic-lock path metrics are within noise of pre-sharding baseline.",
+    "sharding_status": "TaskTable-backed scheduling path is functional. When enabled, hot-path task operations (push/pop/steal/wake_state) bypass the RuntimeState lock, reducing contention on the critical section."
+  },
+  "baseline_source": "bd-3fcfw (git SHA 80966f3)",
+  "command": "CI=1 ASUPERSYNC_CONTENTION_ARTIFACTS_DIR=target/contention cargo test --test contention_e2e --features 'lock-metrics,test-internals' -- --test-threads=1 contention_post_sharding_comparison --nocapture",
+  "comparisons": [
+    {
+      "baseline_pre_sharding": {
+        "acquisitions": 804,
+        "contention_pct": 0.0,
+        "contentions": 0,
+        "git_sha": "80966f3",
+        "hold_ns": 2630000,
+        "wait_ns": 140000
+      },
+      "current_monolithic": {
+        "acquisitions": 804,
+        "contention_pct": 0.0,
+        "contentions": 0,
+        "hold_ns": 2100839,
+        "max_wait_ns": 5981,
+        "wait_ns": 102203
+      },
+      "current_sharded": {
+        "runtime_state_lock": {
+          "acquisitions": 2,
+          "contention_pct": 0.0,
+          "contentions": 0,
+          "hold_ns": 17342,
+          "max_hold_ns": 16741,
+          "max_wait_ns": 1583,
+          "name": "runtime_state",
+          "wait_ns": 1823
+        },
+        "task_table_lock": {
+          "acquisitions": 351,
+          "contention_pct": 0.0,
+          "contentions": 0,
+          "hold_ns": 122996,
+          "max_hold_ns": 24896,
+          "max_wait_ns": 2214,
+          "name": "task_table",
+          "wait_ns": 44683
+        }
+      },
+      "deltas_vs_baseline": {
+        "acquisitions_delta": 0,
+        "contention_pct_delta": 0.0,
+        "contentions_delta": 0,
+        "hold_ns_delta": -529161,
+        "wait_ns_delta": -37797
+      },
+      "num_workers": 1,
+      "scenario": "1w_50t",
+      "tasks_per_lane": 50
+    },
+    {
+      "baseline_pre_sharding": {
+        "acquisitions": 808,
+        "contention_pct": 19.1,
+        "contentions": 154,
+        "git_sha": "80966f3",
+        "hold_ns": 3240000,
+        "wait_ns": 3380000
+      },
+      "current_monolithic": {
+        "acquisitions": 808,
+        "contention_pct": 18.4,
+        "contentions": 149,
+        "hold_ns": 2644494,
+        "max_wait_ns": 74198,
+        "wait_ns": 3123491
+      },
+      "current_sharded": {
+        "runtime_state_lock": {
+          "acquisitions": 3,
+          "contention_pct": 33.3,
+          "contentions": 1,
+          "hold_ns": 34133,
+          "max_hold_ns": 17663,
+          "max_wait_ns": 22362,
+          "name": "runtime_state",
+          "wait_ns": 23924
+        },
+        "task_table_lock": {
+          "acquisitions": 354,
+          "contention_pct": 9.3,
+          "contentions": 33,
+          "hold_ns": 135335,
+          "max_hold_ns": 16100,
+          "max_wait_ns": 15900,
+          "name": "task_table",
+          "wait_ns": 128923
+        }
+      },
+      "deltas_vs_baseline": {
+        "acquisitions_delta": 0,
+        "contention_pct_delta": -0.7,
+        "contentions_delta": -5,
+        "hold_ns_delta": -595506,
+        "wait_ns_delta": -256509
+      },
+      "num_workers": 2,
+      "scenario": "2w_50t",
+      "tasks_per_lane": 50
+    },
+    {
+      "baseline_pre_sharding": {
+        "acquisitions": 1622,
+        "contention_pct": 25.7,
+        "contentions": 417,
+        "git_sha": "80966f3",
+        "hold_ns": 7580000,
+        "wait_ns": 23390000
+      },
+      "current_monolithic": {
+        "acquisitions": 1622,
+        "contention_pct": 22.3,
+        "contentions": 361,
+        "hold_ns": 6154329,
+        "max_wait_ns": 289638,
+        "wait_ns": 21840596
+      },
+      "current_sharded": {
+        "runtime_state_lock": {
+          "acquisitions": 5,
+          "contention_pct": 60.0,
+          "contentions": 3,
+          "hold_ns": 38771,
+          "max_hold_ns": 12053,
+          "max_wait_ns": 29374,
+          "name": "runtime_state",
+          "wait_ns": 53980
+        },
+        "task_table_lock": {
+          "acquisitions": 716,
+          "contention_pct": 23.9,
+          "contentions": 171,
+          "hold_ns": 240345,
+          "max_hold_ns": 11241,
+          "max_wait_ns": 33712,
+          "name": "task_table",
+          "wait_ns": 901693
+        }
+      },
+      "deltas_vs_baseline": {
+        "acquisitions_delta": 0,
+        "contention_pct_delta": -3.4,
+        "contentions_delta": -56,
+        "hold_ns_delta": -1425671,
+        "wait_ns_delta": -1549404
+      },
+      "num_workers": 4,
+      "scenario": "4w_100t",
+      "tasks_per_lane": 100
+    },
+    {
+      "baseline_pre_sharding": {
+        "acquisitions": 3274,
+        "contention_pct": 21.4,
+        "contentions": 702,
+        "git_sha": "80966f3",
+        "hold_ns": 21480000,
+        "wait_ns": 162630000
+      },
+      "current_monolithic": {
+        "acquisitions": 3274,
+        "contention_pct": 21.4,
+        "contentions": 699,
+        "hold_ns": 15945049,
+        "max_wait_ns": 1229825,
+        "wait_ns": 131749987
+      },
+      "current_sharded": {
+        "runtime_state_lock": {
+          "acquisitions": 9,
+          "contention_pct": 55.6,
+          "contentions": 5,
+          "hold_ns": 88653,
+          "max_hold_ns": 17422,
+          "max_wait_ns": 72174,
+          "name": "runtime_state",
+          "wait_ns": 170646
+        },
+        "task_table_lock": {
+          "acquisitions": 1464,
+          "contention_pct": 31.1,
+          "contentions": 455,
+          "hold_ns": 574170,
+          "max_hold_ns": 15458,
+          "max_wait_ns": 97992,
+          "name": "task_table",
+          "wait_ns": 6862834
+        }
+      },
+      "deltas_vs_baseline": {
+        "acquisitions_delta": 0,
+        "contention_pct_delta": -0.0,
+        "contentions_delta": -3,
+        "hold_ns_delta": -5534951,
+        "wait_ns_delta": -30880013
+      },
+      "num_workers": 8,
+      "scenario": "8w_200t",
+      "tasks_per_lane": 200
+    }
+  ],
+  "generated_by": "contention_e2e (bd-3jp31)",
+  "git_sha": "unknown",
+  "monolithic_scenarios": [
+    {
+      "dispatch_totals": {
+        "cancel": 50,
+        "ready": 50,
+        "timed": 50
+      },
+      "lock_metrics": {
+        "acquisitions": 804,
+        "contentions": 0,
+        "hold_ns": 2100839,
+        "max_hold_ns": 84607,
+        "max_wait_ns": 5981,
+        "name": "runtime_state",
+        "wait_ns": 102203
+      },
+      "num_workers": 1,
+      "oracle": {
+        "all_tasks_completed": true,
+        "cancel_completed": 50,
+        "ready_completed": 50,
+        "remaining_task_records": 0,
+        "timed_completed": 50
+      },
+      "seed": 3232228048,
+      "tasks_per_lane": 50,
+      "test": "1w_50t",
+      "total_tasks_spawned": 150,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 50,
+          "fairness_yields": 3,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 50,
+          "timed_dispatches": 50,
+          "worker_id": 0
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 50,
+        "ready": 50,
+        "timed": 50
+      },
+      "lock_metrics": {
+        "acquisitions": 808,
+        "contentions": 149,
+        "hold_ns": 2644494,
+        "max_hold_ns": 62206,
+        "max_wait_ns": 74198,
+        "name": "runtime_state",
+        "wait_ns": 3123491
+      },
+      "num_workers": 2,
+      "oracle": {
+        "all_tasks_completed": true,
+        "cancel_completed": 50,
+        "ready_completed": 50,
+        "remaining_task_records": 0,
+        "timed_completed": 50
+      },
+      "seed": 3232228048,
+      "tasks_per_lane": 50,
+      "test": "2w_50t",
+      "total_tasks_spawned": 150,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 20,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 30,
+          "timed_dispatches": 34,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 30,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 20,
+          "timed_dispatches": 16,
+          "worker_id": 1
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 100,
+        "ready": 100,
+        "timed": 100
+      },
+      "lock_metrics": {
+        "acquisitions": 1622,
+        "contentions": 361,
+        "hold_ns": 6154329,
+        "max_hold_ns": 83194,
+        "max_wait_ns": 289638,
+        "name": "runtime_state",
+        "wait_ns": 21840596
+      },
+      "num_workers": 4,
+      "oracle": {
+        "all_tasks_completed": true,
+        "cancel_completed": 100,
+        "ready_completed": 100,
+        "remaining_task_records": 0,
+        "timed_completed": 100
+      },
+      "seed": 3232228048,
+      "tasks_per_lane": 100,
+      "test": "4w_100t",
+      "total_tasks_spawned": 300,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 22,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 26,
+          "timed_dispatches": 21,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 26,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 33,
+          "timed_dispatches": 35,
+          "worker_id": 1
+        },
+        {
+          "cancel_dispatches": 29,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 21,
+          "timed_dispatches": 12,
+          "worker_id": 2
+        },
+        {
+          "cancel_dispatches": 23,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 20,
+          "timed_dispatches": 32,
+          "worker_id": 3
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 200,
+        "ready": 200,
+        "timed": 200
+      },
+      "lock_metrics": {
+        "acquisitions": 3274,
+        "contentions": 699,
+        "hold_ns": 15945049,
+        "max_hold_ns": 177028,
+        "max_wait_ns": 1229825,
+        "name": "runtime_state",
+        "wait_ns": 131749987
+      },
+      "num_workers": 8,
+      "oracle": {
+        "all_tasks_completed": true,
+        "cancel_completed": 200,
+        "ready_completed": 200,
+        "remaining_task_records": 0,
+        "timed_completed": 200
+      },
+      "seed": 3232228048,
+      "tasks_per_lane": 200,
+      "test": "8w_200t",
+      "total_tasks_spawned": 600,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 24,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 34,
+          "timed_dispatches": 41,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 39,
+          "fairness_yields": 2,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 19,
+          "timed_dispatches": 24,
+          "worker_id": 1
+        },
+        {
+          "cancel_dispatches": 16,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 23,
+          "timed_dispatches": 20,
+          "worker_id": 2
+        },
+        {
+          "cancel_dispatches": 31,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 36,
+          "timed_dispatches": 32,
+          "worker_id": 3
+        },
+        {
+          "cancel_dispatches": 23,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 28,
+          "timed_dispatches": 17,
+          "worker_id": 4
+        },
+        {
+          "cancel_dispatches": 14,
+          "fairness_yields": 0,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 14,
+          "ready_dispatches": 18,
+          "timed_dispatches": 18,
+          "worker_id": 5
+        },
+        {
+          "cancel_dispatches": 22,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 22,
+          "timed_dispatches": 21,
+          "worker_id": 6
+        },
+        {
+          "cancel_dispatches": 31,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 20,
+          "timed_dispatches": 27,
+          "worker_id": 7
+        }
+      ]
+    }
+  ],
+  "schema_version": "1.0.0",
+  "seed": 3232228048,
+  "sharded_scenarios": [
+    {
+      "dispatch_totals": {
+        "cancel": 50,
+        "ready": 50,
+        "timed": 50
+      },
+      "mode": "task_table_backed",
+      "num_workers": 1,
+      "runtime_state_lock": {
+        "acquisitions": 2,
+        "contention_pct": 0.0,
+        "contentions": 0,
+        "hold_ns": 17342,
+        "max_hold_ns": 16741,
+        "max_wait_ns": 1583,
+        "name": "runtime_state",
+        "wait_ns": 1823
+      },
+      "seed": 3232228048,
+      "task_table_lock": {
+        "acquisitions": 351,
+        "contention_pct": 0.0,
+        "contentions": 0,
+        "hold_ns": 122996,
+        "max_hold_ns": 24896,
+        "max_wait_ns": 2214,
+        "name": "task_table",
+        "wait_ns": 44683
+      },
+      "tasks_per_lane": 50,
+      "test": "1w_50t_sharded",
+      "total_tasks_spawned": 150,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 50,
+          "fairness_yields": 3,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 50,
+          "timed_dispatches": 50,
+          "worker_id": 0
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 50,
+        "ready": 50,
+        "timed": 50
+      },
+      "mode": "task_table_backed",
+      "num_workers": 2,
+      "runtime_state_lock": {
+        "acquisitions": 3,
+        "contention_pct": 33.3,
+        "contentions": 1,
+        "hold_ns": 34133,
+        "max_hold_ns": 17663,
+        "max_wait_ns": 22362,
+        "name": "runtime_state",
+        "wait_ns": 23924
+      },
+      "seed": 3232228048,
+      "task_table_lock": {
+        "acquisitions": 354,
+        "contention_pct": 9.3,
+        "contentions": 33,
+        "hold_ns": 135335,
+        "max_hold_ns": 16100,
+        "max_wait_ns": 15900,
+        "name": "task_table",
+        "wait_ns": 128923
+      },
+      "tasks_per_lane": 50,
+      "test": "2w_50t_sharded",
+      "total_tasks_spawned": 150,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 36,
+          "fairness_yields": 2,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 25,
+          "timed_dispatches": 27,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 14,
+          "fairness_yields": 0,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 14,
+          "ready_dispatches": 25,
+          "timed_dispatches": 23,
+          "worker_id": 1
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 100,
+        "ready": 100,
+        "timed": 100
+      },
+      "mode": "task_table_backed",
+      "num_workers": 4,
+      "runtime_state_lock": {
+        "acquisitions": 5,
+        "contention_pct": 60.0,
+        "contentions": 3,
+        "hold_ns": 38771,
+        "max_hold_ns": 12053,
+        "max_wait_ns": 29374,
+        "name": "runtime_state",
+        "wait_ns": 53980
+      },
+      "seed": 3232228048,
+      "task_table_lock": {
+        "acquisitions": 716,
+        "contention_pct": 23.9,
+        "contentions": 171,
+        "hold_ns": 240345,
+        "max_hold_ns": 11241,
+        "max_wait_ns": 33712,
+        "name": "task_table",
+        "wait_ns": 901693
+      },
+      "tasks_per_lane": 100,
+      "test": "4w_100t_sharded",
+      "total_tasks_spawned": 300,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 61,
+          "fairness_yields": 3,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 29,
+          "timed_dispatches": 20,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 22,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 23,
+          "timed_dispatches": 27,
+          "worker_id": 1
+        },
+        {
+          "cancel_dispatches": 16,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 26,
+          "timed_dispatches": 39,
+          "worker_id": 2
+        },
+        {
+          "cancel_dispatches": 1,
+          "fairness_yields": 0,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 1,
+          "ready_dispatches": 22,
+          "timed_dispatches": 14,
+          "worker_id": 3
+        }
+      ]
+    },
+    {
+      "dispatch_totals": {
+        "cancel": 200,
+        "ready": 200,
+        "timed": 200
+      },
+      "mode": "task_table_backed",
+      "num_workers": 8,
+      "runtime_state_lock": {
+        "acquisitions": 9,
+        "contention_pct": 55.6,
+        "contentions": 5,
+        "hold_ns": 88653,
+        "max_hold_ns": 17422,
+        "max_wait_ns": 72174,
+        "name": "runtime_state",
+        "wait_ns": 170646
+      },
+      "seed": 3232228048,
+      "task_table_lock": {
+        "acquisitions": 1464,
+        "contention_pct": 31.1,
+        "contentions": 455,
+        "hold_ns": 574170,
+        "max_hold_ns": 15458,
+        "max_wait_ns": 97992,
+        "name": "task_table",
+        "wait_ns": 6862834
+      },
+      "tasks_per_lane": 200,
+      "test": "8w_200t_sharded",
+      "total_tasks_spawned": 600,
+      "worker_metrics": [
+        {
+          "cancel_dispatches": 48,
+          "fairness_yields": 3,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 18,
+          "timed_dispatches": 11,
+          "worker_id": 0
+        },
+        {
+          "cancel_dispatches": 21,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 26,
+          "timed_dispatches": 27,
+          "worker_id": 1
+        },
+        {
+          "cancel_dispatches": 16,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 30,
+          "timed_dispatches": 29,
+          "worker_id": 2
+        },
+        {
+          "cancel_dispatches": 32,
+          "fairness_yields": 2,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 24,
+          "timed_dispatches": 39,
+          "worker_id": 3
+        },
+        {
+          "cancel_dispatches": 29,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 27,
+          "timed_dispatches": 30,
+          "worker_id": 4
+        },
+        {
+          "cancel_dispatches": 27,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 23,
+          "timed_dispatches": 23,
+          "worker_id": 5
+        },
+        {
+          "cancel_dispatches": 11,
+          "fairness_yields": 0,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 11,
+          "ready_dispatches": 24,
+          "timed_dispatches": 17,
+          "worker_id": 6
+        },
+        {
+          "cancel_dispatches": 16,
+          "fairness_yields": 1,
+          "fallback_cancel_dispatches": 0,
+          "max_cancel_streak": 16,
+          "ready_dispatches": 28,
+          "timed_dispatches": 24,
+          "worker_id": 7
+        }
+      ]
+    }
+  ],
+  "timestamp": "2026-02-14T04:07:49Z"
+}

@@ -1,0 +1,6 @@
+---
+source: src/record/finalizer.rs
+expression: finalizer_debug_representations()
+---
+Sync: Sync("<closure>")
+Async: Async("<future>")

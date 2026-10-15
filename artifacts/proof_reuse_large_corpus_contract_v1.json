@@ -1,0 +1,52 @@
+{
+  "schema_version": "proof-reuse-large-corpus-contract-v1",
+  "description": "Deterministic large-corpus guard for proof reuse query projection and summary counts.",
+  "synthetic_corpus": {
+    "candidate_count": 20000,
+    "accepted_count": 1,
+    "refused_count": 14999,
+    "miss_count": 5000,
+    "source_mismatch_count": 4999,
+    "toolchain_mismatch_count": 5000,
+    "local_fallback_count": 5000,
+    "lane_mismatch_count": 5000,
+    "touched_surface_count": 3
+  },
+  "query": {
+    "row_limit": 64,
+    "expected_rows_emitted_count": 64,
+    "expected_rows_omitted_count": 19936,
+    "expected_candidate_pruned_count": 19999,
+    "chosen_proof_id": "proof:large-corpus-00000"
+  },
+  "resource_envelope": {
+    "max_query_elapsed_ms": 15000,
+    "wall_clock_timing_is_coarse": true,
+    "raw_proof_logs_must_not_be_embedded": true
+  },
+  "measurement_policy": {
+    "measured_in_rust_contract": [
+      "subprocess wall-clock elapsed_ms",
+      "corpus size",
+      "indexed receipt count",
+      "accepted/refused/miss counts",
+      "candidate pruned count",
+      "emitted/omitted detailed row counts",
+      "reason-code pruning counts",
+      "chosen proof id"
+    ],
+    "not_measured": [
+      "precise allocator RSS",
+      "per-candidate CPU cycles",
+      "real RCH network latency"
+    ],
+    "rationale": "The contract is deterministic for counts and bounded output shape. Wall-clock is a coarse regression guard only; exact performance profiling belongs in a benchmark lane."
+  },
+  "safety": {
+    "synthetic_fixtures_only": true,
+    "live_rch_output_required": false,
+    "tracker_mutation_allowed": false,
+    "branch_or_worktree_operations": false,
+    "destructive_commands_executed": false
+  }
+}

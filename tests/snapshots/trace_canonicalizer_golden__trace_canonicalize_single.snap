@@ -1,0 +1,45 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 329
+expression: golden
+---
+{
+  "scenario": "single_event",
+  "input_metadata": {
+    "event_count": 1,
+    "event_kinds": [
+      "spawn"
+    ],
+    "unique_tasks": 1,
+    "unique_regions": 1,
+    "description": "Single event - minimal valid trace"
+  },
+  "canonical_output": {
+    "depth": 1,
+    "len": 1,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 1,
+      "events_per_layer": [
+        1
+      ],
+      "max_parallelism": 1,
+      "independent_pairs": 0
+    }
+  }
+}

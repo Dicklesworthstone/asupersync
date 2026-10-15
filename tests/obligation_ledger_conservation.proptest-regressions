@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 83d4df6861b3efa5090e6ab7a00bb0dbbafebe44edfaaca7a4d6fa7e3c02d340 # shrinks to scenario = ConcurrentScenario { operations: [ObligationOperation { task_id: TaskId(1:1), region_id: RegionId(3:1), kind: SendPermit, operation_type: Acquire, delay_nanos: 0 }, ObligationOperation { task_id: TaskId(1:1), region_id: RegionId(1:1), kind: SendPermit, operation_type: FinalizeRegion { region_id: RegionId(3:1) }, delay_nanos: 0 }], initial_time: 0, use_dpor: false }

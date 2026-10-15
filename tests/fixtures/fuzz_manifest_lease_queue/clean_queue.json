@@ -1,0 +1,31 @@
+{
+  "schema_version": "fuzz-manifest-lease-queue-input-v1",
+  "manifest_path": "fuzz/Cargo.toml",
+  "current_manifest_targets": [
+    {
+      "name": "existing_protocol_roundtrip",
+      "path": "fuzz/fuzz_targets/existing_protocol_roundtrip.rs"
+    }
+  ],
+  "proposals": [
+    {
+      "proposal_id": "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+      "agent": "MaroonBear",
+      "bead_id": "asupersync-fuzz-a",
+      "target_name": "http_header_map_invariants",
+      "target_path": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+      "priority": 1,
+      "created_ts": "2026-05-08T06:02:00Z"
+    },
+    {
+      "proposal_id": "asupersync-fuzz-b:BlackDove:redis_resp3_map_invariants",
+      "agent": "BlackDove",
+      "bead_id": "asupersync-fuzz-b",
+      "target_name": "redis_resp3_map_invariants",
+      "target_path": "fuzz/fuzz_targets/redis_resp3_map_invariants.rs",
+      "priority": 2,
+      "created_ts": "2026-05-08T06:01:00Z"
+    }
+  ],
+  "reservations": []
+}

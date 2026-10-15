@@ -1,0 +1,301 @@
+{
+  "contract_version": "unified-admission-brownout-smoke-contract-v1",
+  "runner_bundle_schema_version": "unified-admission-brownout-smoke-bundle-v1",
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-UNIFIED-ADMISSION-BROWNOUT-PRECEDENCE",
+      "description": "Mixed overload replay proving tail-risk admission, cohort steering, and brownout shedding collapse into one precedence ladder.",
+      "workload_class": "precedence-ladder",
+      "output_root": "target/unified-admission-brownout-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 737373,
+      "expected_policy_profile": "unified_guardrail",
+      "fixture": {
+        "replay_count": 2,
+        "windows": [
+          {
+            "window_id": "admit_observe",
+            "offered_work_units": 80,
+            "critical_surface_units": 8,
+            "wake_to_run_p99_ns": 148000,
+            "queue_residency_p99_ns": 190000,
+            "ready_backlog_p99": 150,
+            "cancel_debt_p99": 24,
+            "retry_pressure_p99": 18,
+            "memory_pressure_bps": 7940,
+            "degradation_level": "Light",
+            "previous_brownout_phase": "normal",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [148, 132],
+            "topology_confidence_percent": 90,
+            "decision_epoch": 11,
+            "consecutive_local_defers": 0
+          },
+          {
+            "window_id": "fairness_redirect",
+            "offered_work_units": 80,
+            "critical_surface_units": 8,
+            "wake_to_run_p99_ns": 142000,
+            "queue_residency_p99_ns": 198000,
+            "ready_backlog_p99": 176,
+            "cancel_debt_p99": 28,
+            "retry_pressure_p99": 20,
+            "memory_pressure_bps": 7720,
+            "degradation_level": "None",
+            "previous_brownout_phase": "observe",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [250, 92],
+            "topology_confidence_percent": 92,
+            "decision_epoch": 11,
+            "consecutive_local_defers": 3
+          },
+          {
+            "window_id": "tail_defer_degrade",
+            "offered_work_units": 80,
+            "critical_surface_units": 8,
+            "wake_to_run_p99_ns": 228000,
+            "queue_residency_p99_ns": 318000,
+            "ready_backlog_p99": 230,
+            "cancel_debt_p99": 62,
+            "retry_pressure_p99": 34,
+            "memory_pressure_bps": 8880,
+            "degradation_level": "Moderate",
+            "previous_brownout_phase": "observe",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": ["rich_export_formatting"],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [230, 128],
+            "topology_confidence_percent": 90,
+            "decision_epoch": 12,
+            "consecutive_local_defers": 1
+          },
+          {
+            "window_id": "tail_shed_refuse",
+            "offered_work_units": 80,
+            "critical_surface_units": 8,
+            "wake_to_run_p99_ns": 330000,
+            "queue_residency_p99_ns": 430000,
+            "ready_backlog_p99": 292,
+            "cancel_debt_p99": 110,
+            "retry_pressure_p99": 58,
+            "memory_pressure_bps": 9520,
+            "degradation_level": "Heavy",
+            "previous_brownout_phase": "degrade",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [282, 88],
+            "topology_confidence_percent": 92,
+            "decision_epoch": 12,
+            "consecutive_local_defers": 4
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "admission_action_sequence": [
+          "admit",
+          "admit",
+          "defer",
+          "refuse"
+        ],
+        "admitted_units": 448,
+        "brownout_action_sequence": [
+          "observe",
+          "restore_optional",
+          "degrade_optional",
+          "shed_optional"
+        ],
+        "deferred_units": 32,
+        "degraded_surface_events": 16,
+        "fairness_escape_count": 2,
+        "fallback_reasons": [],
+        "fallback_used_count": 0,
+        "no_win_decision_count": 0,
+        "policy_phase_sequence": [
+          "observe",
+          "recovery",
+          "defer",
+          "refuse"
+        ],
+        "policy_profile": "unified_guardrail",
+        "preserved_critical_surface_units": 8,
+        "preserved_telemetry_units": 4,
+        "reason_code_sequence": [
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "brownout_observe_precedence"
+          ],
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "cohort_fairness_escape",
+            "restoration_hysteresis_satisfied"
+          ],
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "tail_risk_defer_precedence",
+            "brownout_degrade_precedence"
+          ],
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "tail_risk_shed_precedence",
+            "brownout_shed_precedence"
+          ]
+        ],
+        "refused_units": 160,
+        "replay_count": 2,
+        "restored_surface_events": 0,
+        "restored_windows": [],
+        "scenario_id": "AA-UNIFIED-ADMISSION-BROWNOUT-PRECEDENCE",
+        "schema_version": "unified-admission-brownout-projection-v1",
+        "window_count": 4,
+        "workload_class": "precedence-ladder",
+        "workload_seed": 737373
+      }
+    },
+    {
+      "scenario_id": "AA-UNIFIED-ADMISSION-BROWNOUT-RECOVERY",
+      "description": "Recovery replay proving optional surfaces restore only after brownout hysteresis while admission remains deterministic.",
+      "workload_class": "recovery-ladder",
+      "output_root": "target/unified-admission-brownout-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 848484,
+      "expected_policy_profile": "unified_guardrail",
+      "fixture": {
+        "replay_count": 1,
+        "windows": [
+          {
+            "window_id": "recovery_hysteresis",
+            "offered_work_units": 72,
+            "critical_surface_units": 6,
+            "wake_to_run_p99_ns": 118000,
+            "queue_residency_p99_ns": 126000,
+            "ready_backlog_p99": 108,
+            "cancel_debt_p99": 18,
+            "retry_pressure_p99": 12,
+            "memory_pressure_bps": 7120,
+            "degradation_level": "None",
+            "previous_brownout_phase": "degrade",
+            "brownout_recovery_streak_windows": 1,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [104, 116],
+            "topology_confidence_percent": 92,
+            "decision_epoch": 30,
+            "consecutive_local_defers": 0
+          },
+          {
+            "window_id": "steady_normal",
+            "offered_work_units": 72,
+            "critical_surface_units": 6,
+            "wake_to_run_p99_ns": 116000,
+            "queue_residency_p99_ns": 122000,
+            "ready_backlog_p99": 102,
+            "cancel_debt_p99": 16,
+            "retry_pressure_p99": 12,
+            "memory_pressure_bps": 7020,
+            "degradation_level": "None",
+            "previous_brownout_phase": "normal",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [102, 110],
+            "topology_confidence_percent": 92,
+            "decision_epoch": 31,
+            "consecutive_local_defers": 0
+          },
+          {
+            "window_id": "low_confidence_fallback",
+            "offered_work_units": 72,
+            "critical_surface_units": 6,
+            "wake_to_run_p99_ns": 124000,
+            "queue_residency_p99_ns": 130000,
+            "ready_backlog_p99": 118,
+            "cancel_debt_p99": 20,
+            "retry_pressure_p99": 14,
+            "memory_pressure_bps": 7040,
+            "degradation_level": "None",
+            "previous_brownout_phase": "normal",
+            "brownout_recovery_streak_windows": 0,
+            "already_shed_surfaces": [],
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [118, 120],
+            "topology_confidence_percent": 45,
+            "decision_epoch": 32,
+            "consecutive_local_defers": 0
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "admission_action_sequence": [
+          "admit",
+          "admit",
+          "defer"
+        ],
+        "admitted_units": 201,
+        "brownout_action_sequence": [
+          "restore_optional",
+          "keep_full_surfaces",
+          "keep_full_surfaces"
+        ],
+        "deferred_units": 15,
+        "degraded_surface_events": 0,
+        "fairness_escape_count": 0,
+        "fallback_reasons": [
+          "low_confidence_fallback"
+        ],
+        "fallback_used_count": 1,
+        "no_win_decision_count": 1,
+        "policy_phase_sequence": [
+          "recovery",
+          "normal",
+          "defer"
+        ],
+        "policy_profile": "unified_guardrail",
+        "preserved_critical_surface_units": 6,
+        "preserved_telemetry_units": 4,
+        "reason_code_sequence": [
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "restoration_hysteresis_satisfied"
+          ],
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved"
+          ],
+          [
+            "critical_surface_preserved",
+            "telemetry_minimum_preserved",
+            "low_confidence_fallback"
+          ]
+        ],
+        "refused_units": 0,
+        "replay_count": 1,
+        "restored_surface_events": 2,
+        "restored_windows": [
+          "recovery_hysteresis"
+        ],
+        "scenario_id": "AA-UNIFIED-ADMISSION-BROWNOUT-RECOVERY",
+        "schema_version": "unified-admission-brownout-projection-v1",
+        "window_count": 3,
+        "workload_class": "recovery-ladder",
+        "workload_seed": 848484
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+---
+source: src/plan/analysis.rs
+expression: "format!(\"{}\", CancelSafety::MayOrphan)"
+---
+may-orphan

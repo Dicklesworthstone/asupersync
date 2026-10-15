@@ -1,0 +1,57 @@
+{
+  "active_bead_ids": {
+    "in_progress": [],
+    "ready": [
+      "asupersync-ready1"
+    ],
+    "stale_in_progress": []
+  },
+  "agent": "CopperSpring",
+  "branch": {
+    "ahead": 0,
+    "behind": 0,
+    "current": "main",
+    "is_main": true,
+    "upstream": "origin/main"
+  },
+  "dirty_clusters": [],
+  "generated_at": "2026-05-08T04:30:00Z",
+  "next_action": {
+    "bead_id": "asupersync-ready1",
+    "category": "claim-ready-bead",
+    "reason": "ready bead exists and no blocking reservation was found"
+  },
+  "proof_suggestions": [],
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [],
+  "reservation_snapshot": {
+    "available": true,
+    "classifications": []
+  },
+  "schema_version": "session-handoff-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok",
+    "proof_runner": "ok",
+    "rch": "ok",
+    "tracker_sync": "ok"
+  },
+  "tracker_sync": {
+    "blocked": false,
+    "blocking_flags": [],
+    "db_newer": false,
+    "dirty_count": 0,
+    "jsonl_content_hash": "9eef7a83f86d14900a9771541b9a04e47ae7e2257142f409a16674aa76e3cad9",
+    "jsonl_exists": true,
+    "jsonl_newer": false,
+    "last_export_time": "2026-05-15T13:51:57.155774565+00:00",
+    "last_import_time": "2026-05-18T00:16:02.855812932+00:00",
+    "status": "ok"
+  }
+}

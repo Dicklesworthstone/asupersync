@@ -1,0 +1,274 @@
+{
+  "schema_version": "cx-authority-flow-graph-v1",
+  "artifact_path": "artifacts/cx_authority_flow_graph_v1.json",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.6",
+  "title": "Cx authority-flow graph for capability routing and ambient-effect denial",
+  "source_of_truth": {
+    "artifact": "artifacts/cx_authority_flow_graph_v1.json",
+    "docs": "docs/cx_authority_flow_graph.md",
+    "contract_test": "tests/cx_authority_flow_graph_contract.rs"
+  },
+  "source_paths": [
+    "src/cx/cap.rs",
+    "src/cx/cx.rs",
+    "src/cx/mod.rs",
+    "src/cx/wrappers.rs",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "capability_bits": [
+    {
+      "bit": "spawn",
+      "cap_trait": "HasSpawn",
+      "runtime_mask_bit": "CapMask::SPAWN",
+      "primary_methods": [
+        "Cx::spawn",
+        "Cx::spawn_in",
+        "Cx::spawn_blocking",
+        "Cx::spawn_local"
+      ],
+      "denied_when_missing": "Task creation APIs are unavailable at the type level unless Caps implements HasSpawn."
+    },
+    {
+      "bit": "time",
+      "cap_trait": "HasTime",
+      "runtime_mask_bit": "CapMask::TIME",
+      "primary_methods": [
+        "Cx::timer_driver",
+        "Cx::budget_for_timeout",
+        "Cx::remaining_budget"
+      ],
+      "denied_when_missing": "Timer-driver access returns None when the runtime mask removes time authority."
+    },
+    {
+      "bit": "random",
+      "cap_trait": "HasRandom",
+      "runtime_mask_bit": "CapMask::RANDOM",
+      "primary_methods": [
+        "entropy-scoped Cx capability rows"
+      ],
+      "denied_when_missing": "Entropy authority is not part of web, background, pure, or default restricted capability rows."
+    },
+    {
+      "bit": "io",
+      "cap_trait": "HasIo",
+      "runtime_mask_bit": "CapMask::IO",
+      "primary_methods": [
+        "Cx::io",
+        "Cx::fetch_cap"
+      ],
+      "denied_when_missing": "I/O and fetch capability accessors return None when the runtime mask removes I/O authority."
+    },
+    {
+      "bit": "remote",
+      "cap_trait": "HasRemote",
+      "runtime_mask_bit": "CapMask::REMOTE",
+      "primary_methods": [
+        "Cx::remote"
+      ],
+      "denied_when_missing": "Remote capability access returns None when the runtime mask removes remote authority."
+    }
+  ],
+  "context_rows": [
+    {
+      "context_id": "full_cx",
+      "rust_type": "Cx<AllCaps>",
+      "source_path": "src/cx/mod.rs",
+      "capabilities": [
+        "spawn",
+        "time",
+        "random",
+        "io",
+        "remote"
+      ],
+      "construction_path": "runtime-owned full context or test-only constructor",
+      "public_use": "Task entry points and runtime-owned code that require full authority."
+    },
+    {
+      "context_id": "no_caps_cx",
+      "rust_type": "Cx<NoCaps>",
+      "source_path": "src/cx/mod.rs",
+      "capabilities": [],
+      "construction_path": "Cx::restrict::<NoCaps> or Cx::set_current_restricted",
+      "public_use": "Ambient-denial and pure computation boundaries."
+    },
+    {
+      "context_id": "web_context",
+      "rust_type": "WebContext",
+      "source_path": "src/cx/wrappers.rs",
+      "capabilities": [
+        "time",
+        "io"
+      ],
+      "construction_path": "WebContext::new narrows from a capability superset through narrow()",
+      "public_use": "Web request handlers: time and I/O, without spawn, random, or remote authority."
+    },
+    {
+      "context_id": "grpc_context",
+      "rust_type": "GrpcContext",
+      "source_path": "src/cx/wrappers.rs",
+      "capabilities": [
+        "spawn",
+        "time",
+        "io"
+      ],
+      "construction_path": "GrpcContext::new narrows from a capability superset through narrow()",
+      "public_use": "Streaming RPC handlers that need structured child work plus time and I/O."
+    },
+    {
+      "context_id": "background_context",
+      "rust_type": "BackgroundContext",
+      "source_path": "src/cx/wrappers.rs",
+      "capabilities": [
+        "spawn",
+        "time"
+      ],
+      "construction_path": "BackgroundContext::new narrows from a capability superset through narrow()",
+      "public_use": "Background tasks that may spawn children and use time but cannot perform I/O, entropy, or remote effects."
+    },
+    {
+      "context_id": "pure_context",
+      "rust_type": "Cx<PureCaps>",
+      "source_path": "src/cx/wrappers.rs",
+      "capabilities": [],
+      "construction_path": "Cx values may be narrowed to PureCaps",
+      "public_use": "Pure computations and examples where effect APIs should be unavailable."
+    },
+    {
+      "context_id": "entropy_caps",
+      "rust_type": "EntropyCaps",
+      "source_path": "src/cx/wrappers.rs",
+      "capabilities": [
+        "random"
+      ],
+      "construction_path": "Cx values may be narrowed to EntropyCaps",
+      "public_use": "Entropy-only boundaries that must not inherit spawn, time, I/O, or remote effects."
+    }
+  ],
+  "flow_edges": [
+    {
+      "edge_id": "runtime-builds-full-cx",
+      "from": "runtime_state",
+      "to": "full_cx",
+      "kind": "trusted-root",
+      "source_paths": [
+        "src/cx/cx.rs",
+        "src/runtime/state.rs"
+      ],
+      "claim": "Runtime-owned construction may produce full authority."
+    },
+    {
+      "edge_id": "full-to-web-narrow",
+      "from": "full_cx",
+      "to": "web_context",
+      "kind": "type-level-narrow",
+      "source_paths": [
+        "src/cx/wrappers.rs",
+        "src/cx/cap.rs"
+      ],
+      "claim": "WebContext narrows to time plus I/O."
+    },
+    {
+      "edge_id": "full-to-grpc-narrow",
+      "from": "full_cx",
+      "to": "grpc_context",
+      "kind": "type-level-narrow",
+      "source_paths": [
+        "src/cx/wrappers.rs",
+        "src/cx/cap.rs"
+      ],
+      "claim": "GrpcContext narrows to spawn plus time plus I/O."
+    },
+    {
+      "edge_id": "full-to-background-narrow",
+      "from": "full_cx",
+      "to": "background_context",
+      "kind": "type-level-narrow",
+      "source_paths": [
+        "src/cx/wrappers.rs",
+        "src/cx/cap.rs"
+      ],
+      "claim": "BackgroundContext narrows to spawn plus time."
+    },
+    {
+      "edge_id": "any-to-no-caps-restrict",
+      "from": "full_cx",
+      "to": "no_caps_cx",
+      "kind": "runtime-mask-restrict",
+      "source_paths": [
+        "src/cx/cx.rs",
+        "src/cx/cap.rs"
+      ],
+      "claim": "Restricting to NoCaps removes every runtime-mask bit and blocks ambient effect accessors."
+    },
+    {
+      "edge_id": "ambient-current-observes-innermost-mask",
+      "from": "current_context_stack",
+      "to": "no_caps_cx",
+      "kind": "ambient-denial",
+      "source_paths": [
+        "src/cx/cx.rs"
+      ],
+      "claim": "Cx::current() returns a clone carrying the innermost restriction mask, not an unrestricted ambient context."
+    }
+  ],
+  "denied_examples": [
+    {
+      "example_id": "web-denies-spawn",
+      "context_id": "web_context",
+      "attempt": "Call Cx::spawn from WebContext::cx()",
+      "expected_denial": "compile-time missing HasSpawn bound",
+      "evidence_refs": [
+        "src/cx/wrappers.rs",
+        "src/cx/cap.rs"
+      ]
+    },
+    {
+      "example_id": "pure-denies-io",
+      "context_id": "pure_context",
+      "attempt": "Obtain I/O authority from PureCaps",
+      "expected_denial": "compile-time missing HasIo bound or runtime accessor returns None after restriction",
+      "evidence_refs": [
+        "src/cx/wrappers.rs",
+        "src/cx/cx.rs"
+      ]
+    },
+    {
+      "example_id": "restricted-current-denies-remote",
+      "context_id": "no_caps_cx",
+      "attempt": "Call Cx::current() inside set_current_restricted and then request Cx::remote()",
+      "expected_denial": "runtime mask blocks remote and Cx::remote() returns None",
+      "evidence_refs": [
+        "src/cx/cx.rs"
+      ]
+    },
+    {
+      "example_id": "background-denies-io",
+      "context_id": "background_context",
+      "attempt": "Use background task context as an I/O authority",
+      "expected_denial": "compile-time missing HasIo bound",
+      "evidence_refs": [
+        "src/cx/wrappers.rs",
+        "src/cx/cap.rs"
+      ]
+    }
+  ],
+  "docs_markers": [
+    "CX-AUTHORITY-FLOW:SOURCE",
+    "CX-AUTHORITY-FLOW:GRAPH",
+    "CX-AUTHORITY-FLOW:DENIED-EXAMPLES",
+    "CX-AUTHORITY-FLOW:NO-CLAIMS"
+  ],
+  "validation": {
+    "contract_test": "tests/cx_authority_flow_graph_contract.rs",
+    "rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cx_authority_flow_graph CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test cx_authority_flow_graph_contract -- --nocapture",
+    "no_local_cargo_fallback": true
+  },
+  "no_claims": [
+    "does not prove static whole-program security",
+    "does not prove runtime correctness outside the cited Cx capability surfaces",
+    "does not replace authority-flow adversarial tests or capability-token audits",
+    "does not prove broad workspace health, release readiness, or live RCH fleet availability",
+    "does not claim all application examples use the least-privilege wrapper"
+  ]
+}

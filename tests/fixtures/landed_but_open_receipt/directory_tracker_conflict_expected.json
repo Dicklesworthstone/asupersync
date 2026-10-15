@@ -1,0 +1,58 @@
+{
+  "agent": "CopperSpring",
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:40:00Z",
+  "repo_path": "/data/projects/asupersync",
+  "rows": [
+    {
+      "classification": "landed-awaiting-tracker",
+      "decision": "wait-for-tracker",
+      "evidence": {
+        "commit_count": 1,
+        "commit_hash": "17896bafc123",
+        "message_count": 1,
+        "proof_line_count": 2,
+        "proof_lines": [
+          "[asupersync-aj7lx3.11] Code shipped Proof passed for asupersync-aj7lx3.11 with remote success.",
+          "[br-asupersync-aj7lx3.11] add redacted timeline receipt Validation: rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract passed 6 tests."
+        ],
+        "tracker_conflicts": [
+          {
+            "expires_ts": "2026-05-08T06:40:00Z",
+            "holder": "VioletLark",
+            "path": ".beads"
+          }
+        ]
+      },
+      "id": "asupersync-aj7lx3.11",
+      "proposed_action": {
+        "allowed_now": false,
+        "command": "br close asupersync-aj7lx3.11 --reason 'Shipped in 17896bafc123' --json",
+        "kind": "br-close",
+        "requires_tracker_reservation": true
+      },
+      "rationale": "code and proof evidence exist, but tracker files are actively reserved",
+      "status": "in_progress",
+      "title": "[observability] Redacted cross-agent timeline receipt"
+    }
+  ],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "non_mutating": true
+  },
+  "schema_version": "landed-but-open-receipt-v1",
+  "source_counts": {
+    "agent_mail_messages": 1,
+    "git_commits": 1,
+    "in_progress_issues": 1,
+    "reservation_rows": 1
+  },
+  "summary": {
+    "landed-awaiting-tracker": 1
+  }
+}

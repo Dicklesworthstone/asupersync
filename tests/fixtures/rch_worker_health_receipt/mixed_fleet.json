@@ -1,0 +1,39 @@
+{
+  "workers": [
+    {
+      "name": "worker-good",
+      "reachable": true,
+      "root_free_gb": 220,
+      "tmp_free_gb": 80,
+      "recent_jobs": [
+        {
+          "classification": "remote_success",
+          "retrieval_elapsed_ms": 1500
+        }
+      ]
+    },
+    {
+      "name": "worker-warn",
+      "reachable": true,
+      "root_free_gb": 220,
+      "tmp_free_gb": 80,
+      "recent_jobs": [
+        {
+          "classification": "passed_after_retrieval_timeout"
+        }
+      ]
+    },
+    {
+      "name": "worker-bad",
+      "reachable": true,
+      "root_free_gb": 2,
+      "tmp_free_gb": 80,
+      "recent_jobs": [
+        {
+          "classification": "remote_success",
+          "retrieval_elapsed_ms": 1200
+        }
+      ]
+    }
+  ]
+}

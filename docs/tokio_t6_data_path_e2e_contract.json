@@ -1,0 +1,265 @@
+{
+  "schema_version": "1.0.0",
+  "document_id": "tokio_t6_data_path_e2e_contract",
+  "bead_id": "asupersync-2oh2u.6.13",
+  "track": "T6",
+  "title": "End-to-End Data-Path Scripts with Detailed Reliability Logging",
+  "scenarios": [
+    {
+      "id": "DP-01",
+      "title": "Pool lifecycle full path",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "stats"],
+      "test_fn": "e2e_dp_01_pool_lifecycle_full_path",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-02",
+      "title": "Pool exhaustion backpressure",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "backpressure"],
+      "test_fn": "e2e_dp_02_pool_exhaustion_backpressure",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-03",
+      "title": "Pool retry on transient connect failure",
+      "category": "retry",
+      "domains": ["pool", "fault_injection"],
+      "test_fn": "e2e_dp_03_pool_retry_transient_connect",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-04",
+      "title": "Retry exhaustion error propagation",
+      "category": "retry",
+      "domains": ["pool", "error_propagation"],
+      "test_fn": "e2e_dp_04_retry_exhaustion_error_propagation",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-05",
+      "title": "Pool close rejection",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "close"],
+      "test_fn": "e2e_dp_05_pool_close_rejection",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-06",
+      "title": "Validation failure discard + reconnect",
+      "category": "fault_injection",
+      "domains": ["pool", "validation"],
+      "test_fn": "e2e_dp_06_validation_failure_discard_reconnect",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-07",
+      "title": "Stale eviction",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "eviction"],
+      "test_fn": "e2e_dp_07_stale_eviction",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-08",
+      "title": "Retry delay formula verification",
+      "category": "retry",
+      "domains": ["backoff", "policy"],
+      "test_fn": "e2e_dp_08_retry_delay_formula",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-09",
+      "title": "Concurrent pool with interleaved faults",
+      "category": "concurrency",
+      "domains": ["pool", "fault_injection"],
+      "test_fn": "e2e_dp_09_concurrent_pool_fault_interleave",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-10",
+      "title": "Pool warm-up",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "warm_up"],
+      "test_fn": "e2e_dp_10_pool_warmup",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-11a",
+      "title": "PostgreSQL error classification data path",
+      "category": "error_classification",
+      "domains": ["postgres"],
+      "test_fn": "e2e_dp_11a_pg_error_classification_data_path",
+      "feature_gate": "postgres",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-11b",
+      "title": "MySQL error classification data path",
+      "category": "error_classification",
+      "domains": ["mysql"],
+      "test_fn": "e2e_dp_11b_mysql_error_classification_data_path",
+      "feature_gate": "mysql",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-11c",
+      "title": "SQLite error classification data path",
+      "category": "error_classification",
+      "domains": ["sqlite"],
+      "test_fn": "e2e_dp_11c_sqlite_error_classification_data_path",
+      "feature_gate": "sqlite",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-12",
+      "title": "Cross-backend error normalization",
+      "category": "error_classification",
+      "domains": ["cross_backend"],
+      "test_fn": "e2e_dp_12_cross_backend_error_normalization",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-13",
+      "title": "Messaging error variant data path",
+      "category": "error_classification",
+      "domains": ["kafka", "redis", "nats", "jetstream"],
+      "test_fn": "e2e_dp_13_messaging_error_variants",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-14",
+      "title": "Kafka producer-consumer data path",
+      "category": "messaging_data_path",
+      "domains": ["kafka"],
+      "test_fn": "e2e_dp_14_kafka_producer_consumer_data_path",
+      "feature_gate": "kafka",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-15",
+      "title": "Pool stats invariants under load",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "stats"],
+      "test_fn": "e2e_dp_15_pool_stats_invariants",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-16",
+      "title": "Retry policy builder round-trip",
+      "category": "retry",
+      "domains": ["policy"],
+      "test_fn": "e2e_dp_16_retry_policy_builder_roundtrip",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-17",
+      "title": "Discard no resource leak",
+      "category": "pool_lifecycle",
+      "domains": ["pool", "discard"],
+      "test_fn": "e2e_dp_17_discard_no_resource_leak",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-18",
+      "title": "Retry timeout integration",
+      "category": "retry",
+      "domains": ["pool", "timeout"],
+      "test_fn": "e2e_dp_18_retry_timeout_integration",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-19",
+      "title": "RetryPolicy none produces zero retries",
+      "category": "retry",
+      "domains": ["policy"],
+      "test_fn": "e2e_dp_19_retry_policy_none",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-20",
+      "title": "Full data path warm-acquire-fault-retry-recover",
+      "category": "integration",
+      "domains": ["pool", "retry", "fault_injection"],
+      "test_fn": "e2e_dp_20_full_data_path_warmup_fault_recovery",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-DOC",
+      "title": "Contract document completeness check",
+      "category": "meta",
+      "domains": ["documentation"],
+      "test_fn": "e2e_dp_contract_doc_exists_and_complete",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-JSON",
+      "title": "JSON artifact validity check",
+      "category": "meta",
+      "domains": ["documentation"],
+      "test_fn": "e2e_dp_json_artifact_valid",
+      "status": "enforced"
+    },
+    {
+      "id": "DP-SCRIPT",
+      "title": "Runner script e2e-suite-summary-v3 compliance",
+      "category": "meta",
+      "domains": ["runner"],
+      "test_fn": "e2e_dp_runner_script_exists_and_valid",
+      "status": "enforced"
+    }
+  ],
+  "reliability_logging": {
+    "correlation_id_format": "T6.13:<scenario>:step-<n>",
+    "required_signals": [
+      "correlation_id",
+      "retry_attempts",
+      "pool_stats_snapshot",
+      "error_classification",
+      "fault_injection_context"
+    ]
+  },
+  "runner": {
+    "script": "scripts/test_t6_data_path_e2e.sh",
+    "summary_schema": "e2e-suite-summary-v3",
+    "features": ["sqlite", "postgres", "mysql"],
+    "artifact_types": [
+      "correlation_ids.txt",
+      "retry_attempts.txt",
+      "pool_stats.txt",
+      "error_classifications.txt",
+      "seeds.txt",
+      "summary.json"
+    ]
+  },
+  "summary": {
+    "total_scenarios": 25,
+    "categories": {
+      "pool_lifecycle": 7,
+      "retry": 6,
+      "fault_injection": 1,
+      "concurrency": 1,
+      "error_classification": 5,
+      "messaging_data_path": 1,
+      "integration": 1,
+      "meta": 3
+    },
+    "domains_covered": [
+      "pool", "stats", "backpressure", "fault_injection", "error_propagation",
+      "close", "validation", "eviction", "backoff", "policy", "warm_up",
+      "postgres", "mysql", "sqlite", "cross_backend",
+      "kafka", "redis", "nats", "jetstream",
+      "timeout", "discard", "documentation", "runner"
+    ]
+  },
+  "dependencies": {
+    "blocked_by": [
+      {"bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit-test matrix", "status": "closed"}
+    ],
+    "blocks": [
+      {"bead": "asupersync-2oh2u.10.12", "reason": "Cross-track e2e logging schema"},
+      {"bead": "asupersync-2oh2u.11.2", "reason": "Migration cookbooks"}
+    ]
+  }
+}

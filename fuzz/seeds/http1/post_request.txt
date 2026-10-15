@@ -1,0 +1,7 @@
+POST /api/data HTTP/1.1
+Host: api.example.com
+Content-Type: application/json
+Content-Length: 27
+Accept: application/json
+
+{"key":"value","num":123}

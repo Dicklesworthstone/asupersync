@@ -1,0 +1,231 @@
+{
+  "schema_version": "fifth-wave-live-swarm-telemetry-heatmap-v1",
+  "bead_id": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+  "purpose": "Deterministic live-swarm telemetry heatmap contract for operator-readable pressure snapshots, bounded hotspot rows, stale proof warnings, and Agent Mail safe handoff text.",
+  "source_of_truth": {
+    "atlas_artifact": "artifacts/fifth_wave_swarm_control_plane_atlas_v1.json",
+    "operator_cockpit_contract": "artifacts/swarm_operator_cockpit_report_contract_v1.json",
+    "rch_freshness_broker": "artifacts/fifth_wave_rch_proof_freshness_broker_v1.json",
+    "runtime_heatmap_source": "src/lab/swarm_replay.rs",
+    "contract_test": "tests/fifth_wave_live_swarm_telemetry_heatmap_contract.rs",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "proof_lane": {
+    "lane_id": "fifth-wave-live-swarm-telemetry-heatmap",
+    "owner_bead": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+    "proof_command_id": "fifth-wave-live-swarm-telemetry-heatmap-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fifth_wave_live_swarm_telemetry_heatmap CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fifth_wave_live_swarm_telemetry_heatmap_contract -- --nocapture",
+    "target_dir": "${TMPDIR:-/tmp}/rch_target_fifth_wave_live_swarm_telemetry_heatmap",
+    "remote_required": true,
+    "local_fallback_allowed": false,
+    "covers": [
+      "heatmap_snapshot_schema",
+      "operator_report_fields",
+      "redaction_boundary",
+      "stale_evidence_warning_mapping"
+    ],
+    "does_not_cover": [
+      "does not prove live RCH fleet availability",
+      "does not implement a production dashboard",
+      "does not prove broad observability correctness",
+      "does not prove broad workspace health",
+      "does not prove performance improvement",
+      "does not prove no regression",
+      "does not authorize local Cargo fallback"
+    ]
+  },
+  "snapshot_schema": {
+    "runtime_schema_version": "asupersync.swarm-contention-heatmap-ledger.v1",
+    "required_heatmap_fields": [
+      "schema_version",
+      "ledger_id",
+      "scenario_id",
+      "baseline_id",
+      "stale_baseline",
+      "verdict",
+      "max_severity",
+      "required_fields_present",
+      "missing_required_fields",
+      "source_trace_ids",
+      "proof_command",
+      "lock_hotspots",
+      "scheduler_lane_hotspots",
+      "region_hotspots",
+      "queue_hotspots",
+      "top_hotspots",
+      "routing_hints"
+    ],
+    "required_hotspot_fields": [
+      "key",
+      "kind",
+      "severity",
+      "impact_score",
+      "p50_wait_ns",
+      "p95_wait_ns",
+      "p99_wait_ns",
+      "queue_depth_p95",
+      "queue_depth_p99",
+      "contentions",
+      "region_or_scope",
+      "evidence",
+      "owner_surface",
+      "owner_bead_hint"
+    ],
+    "required_evidence_families": [
+      "trace_summary",
+      "lock_metrics",
+      "scheduler_lanes",
+      "source_trace_ids",
+      "proof_command"
+    ],
+    "verdicts": [
+      "pass",
+      "degraded",
+      "incomplete",
+      "stale_evidence"
+    ],
+    "severities": [
+      "nominal",
+      "watch",
+      "warning",
+      "critical"
+    ],
+    "max_top_hotspots": 8,
+    "agent_mail_text_max_bytes": 2500,
+    "stable_sort_order": [
+      "severity descending",
+      "impact_score descending",
+      "kind ascending",
+      "key ascending"
+    ]
+  },
+  "redaction_boundary": {
+    "policy_id": "agent-mail-safe-redaction-v1",
+    "secret_like_value_count_required": 0,
+    "forbidden_tokens": [
+      "token=",
+      "api_key=",
+      "authorization:",
+      "password=",
+      "secret="
+    ],
+    "operator_handoff_requires_compact_text": true,
+    "destructive_cleanup_required": false,
+    "branch_or_worktree_required": false
+  },
+  "fixture_catalog": [
+    {
+      "fixture_id": "quiet-baseline",
+      "summary": "Small quiescent swarm run with nominal lock and scheduler metrics.",
+      "expected_verdict": "pass",
+      "expected_max_severity": "nominal",
+      "minimum_source_trace_ids": 1,
+      "max_top_hotspots": 8,
+      "requires_redaction_policy": "agent-mail-safe-redaction-v1"
+    },
+    {
+      "fixture_id": "saturated-scheduler-lane",
+      "summary": "Bounded high queue-depth and lock wait rows route to scheduler and sync owners without claiming performance regression.",
+      "expected_verdict": "degraded",
+      "expected_max_severity": "critical",
+      "minimum_source_trace_ids": 1,
+      "max_top_hotspots": 8,
+      "requires_redaction_policy": "agent-mail-safe-redaction-v1"
+    },
+    {
+      "fixture_id": "cancellation-storm-drain",
+      "summary": "Cancellation-heavy replay evidence remains compact and routes cancellation or region hotspots without leaking secrets.",
+      "expected_verdict": "degraded",
+      "expected_max_severity_at_least": "warning",
+      "minimum_source_trace_ids": 1,
+      "max_top_hotspots": 8,
+      "requires_redaction_policy": "agent-mail-safe-redaction-v1"
+    },
+    {
+      "fixture_id": "proof-stalled-stale-baseline",
+      "summary": "Fresh trace rows with an expired comparison baseline produce stale_evidence instead of a green pass.",
+      "expected_verdict": "stale_evidence",
+      "expected_stale_baseline": true,
+      "minimum_source_trace_ids": 1,
+      "max_top_hotspots": 8,
+      "requires_redaction_policy": "agent-mail-safe-redaction-v1"
+    }
+  ],
+  "failure_fixtures": [
+    {
+      "case_id": "missing-trace-summary",
+      "mutates": "trace_summary",
+      "expected_verdict": "incomplete",
+      "expected_missing_field": "trace_summary"
+    },
+    {
+      "case_id": "missing-lock-metrics",
+      "mutates": "lock_metrics",
+      "expected_verdict": "incomplete",
+      "expected_missing_field": "lock_metrics"
+    },
+    {
+      "case_id": "missing-scheduler-lanes",
+      "mutates": "scheduler_lanes",
+      "expected_verdict": "incomplete",
+      "expected_missing_field": "scheduler_lanes"
+    },
+    {
+      "case_id": "local-fallback-authorized",
+      "mutates": "proof_lane.local_fallback_allowed",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "proof lane must stay remote-required and refuse local fallback"
+    },
+    {
+      "case_id": "unredacted-operator-token",
+      "mutates": "redaction_boundary.forbidden_tokens",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "Agent Mail text and routing hints must not contain secret-like tokens"
+    },
+    {
+      "case_id": "broad-dashboard-claim",
+      "mutates": "proof_lane.does_not_cover",
+      "expected_verdict": "fail_closed",
+      "expected_reason": "heatmap artifact cannot claim production dashboard, broad health, or fleet availability"
+    }
+  ],
+  "operator_interpretation": [
+    {
+      "field": "verdict",
+      "authority": "fail-closed evidence state",
+      "notes": "pass only means the focused heatmap snapshot had required fields, a fresh baseline, and no warning-or-critical hotspot rows."
+    },
+    {
+      "field": "max_severity",
+      "authority": "advisory routing signal",
+      "notes": "warning and critical rows route operators to likely owners; they are not benchmark evidence."
+    },
+    {
+      "field": "stale_baseline",
+      "authority": "fail-closed freshness signal",
+      "notes": "true forces stale_evidence even when hotspot rows are otherwise healthy."
+    },
+    {
+      "field": "routing_hints",
+      "authority": "operator handoff text",
+      "notes": "hints must remain deterministic, bounded, and safe to paste into Agent Mail."
+    }
+  ],
+  "non_claims": [
+    "does not prove live RCH fleet availability",
+    "does not implement a production dashboard",
+    "does not prove broad observability correctness",
+    "does not prove broad workspace health",
+    "does not prove performance improvement",
+    "does not prove no regression",
+    "does not authorize local Cargo fallback",
+    "does not create branches, worktrees, scratch clones, or non-main refs",
+    "does not modify runtime scheduler policy"
+  ],
+  "closeout_requirements": [
+    "Focused remote RCH proof for fifth_wave_live_swarm_telemetry_heatmap_contract must pass from clean main.",
+    "Closeout may cite this artifact only for heatmap schema, bounded cardinality, redaction boundary, stale evidence mapping, and operator handoff fields.",
+    "Any broad dashboard, fleet availability, performance, no-regression, or release-readiness claim requires a separate proof lane."
+  ]
+}

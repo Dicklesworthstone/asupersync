@@ -1,0 +1,374 @@
+{
+  "schema_version": "durable-rch-proof-final-signoff-v1",
+  "bead_id": "asupersync-durable-rch-proof-submission-zxnnhe.8",
+  "parent_bead": "asupersync-durable-rch-proof-submission-zxnnhe",
+  "parent_close_policy": "parent_can_close_after_all_child_rows_have_fresh_remote_required_rch_evidence_and_the_final_signoff_contract_has_a_focused_remote_required_rch_pass",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/durable_rch_proof_final_signoff_v1.json",
+    "contract_test": "tests/durable_rch_proof_final_signoff_contract.rs",
+    "operator_runbook": "docs/proof_runner_usage.md",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "receipt_contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+    "mail_templates": "artifacts/durable_rch_proof_mail_templates_v1.json",
+    "e2e_scenarios": "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+    "submission_cli": "scripts/durable_rch_proof_submission.py",
+    "receipt_capture_cli": "scripts/durable_rch_proof_receipt.py",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "signoff_lane": {
+    "lane_id": "durable-rch-proof-final-signoff",
+    "guarantee_id": "durable-rch-final-signoff",
+    "proof_status_claim_id": "durable-rch-final-signoff",
+    "proof_command_id": "durable-rch-proof-final-signoff-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture"
+  },
+  "freshness_policy": {
+    "policy_id": "durable-rch-final-signoff-freshness-v1",
+    "freshness_window_seconds": 86400,
+    "required_child_evidence_status": "fresh-rch-pass",
+    "required_remote_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "required_branch": "main",
+    "legacy_master_sync_command": "git push origin main:master",
+    "ignored_artifact_force_add_required": true,
+    "reject_evidence_statuses": [
+      "approved-cache-hit",
+      "rerun-required",
+      "stale-evidence",
+      "blocked",
+      "no-win",
+      "unsupported"
+    ],
+    "reject_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted",
+      "falling back to local execution"
+    ]
+  },
+  "required_child_rows": [
+    {
+      "row_id": "receipt-schema-contract",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.1",
+      "close_commit": "01a40c0e9",
+      "rch_build_id": "29879655498514494",
+      "proof_command_id": "durable-rch-proof-receipt-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_proof_receipt_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_receipt_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "9 passed",
+      "artifact_paths": [
+        "artifacts/durable_rch_proof_receipt_contract_v1.json",
+        "tests/durable_rch_proof_receipt_contract.rs",
+        "tests/fixtures/durable_rch_proof_receipt/terminal_pass.json"
+      ],
+      "claim_boundary": "Receipt schema fields, fail-closed fixtures, redaction, and non-claim boundaries only."
+    },
+    {
+      "row_id": "detached-submission-lifecycle",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.2",
+      "close_commit": "e23fd5a20",
+      "rch_build_id": "29879655498514498",
+      "proof_command_id": "durable-rch-proof-submission-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_proof_submission_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_submission_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "9 passed",
+      "artifact_paths": [
+        "scripts/durable_rch_proof_submission.py",
+        "tests/durable_rch_proof_submission_contract.rs"
+      ],
+      "claim_boundary": "Submission lifecycle, source expectation capture, duplicate policy, and fail-closed local-fallback refusal only."
+    },
+    {
+      "row_id": "receipt-capture-classification",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.3",
+      "close_commit": "1cd05ee68",
+      "rch_build_id": "29879655498514500",
+      "proof_command_id": "durable-rch-proof-receipt-capture-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_proof_receipt_capture CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_receipt_capture_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "6 passed",
+      "artifact_paths": [
+        "scripts/durable_rch_proof_receipt.py",
+        "tests/durable_rch_proof_receipt_capture_contract.rs",
+        "tests/fixtures/durable_rch_proof_receipt_capture/terminal_pass.json"
+      ],
+      "claim_boundary": "Terminal receipt capture, bounded first-blocker output, stale/cancel/infra/local-fallback classification, and redaction only."
+    },
+    {
+      "row_id": "cli-status-query-cancel",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.4",
+      "close_commit": "48b9ff1b3",
+      "rch_build_id": "29879655498514503",
+      "proof_command_id": "durable-rch-proof-cli-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_cli_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_submission_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "17 passed",
+      "artifact_paths": [
+        "scripts/durable_rch_proof_submission.py",
+        "tests/durable_rch_proof_submission_contract.rs"
+      ],
+      "claim_boundary": "Submit/status/query/cancel UX and machine-readable refusal output only."
+    },
+    {
+      "row_id": "manifest-status-integration",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.5",
+      "close_commit": "d56e0c2d0",
+      "rch_build_id": "29879655498514505",
+      "proof_command_id": "durable-rch-proof-manifest-status-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_manifest_status CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "10 plus 14 passed",
+      "artifact_paths": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/proof_status_snapshot_contract.rs"
+      ],
+      "claim_boundary": "Manifest/status durable receipt candidate policy, exact-lane matching, and broad-claim refusal only."
+    },
+    {
+      "row_id": "agent-mail-templates",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.6",
+      "close_commit": "8b153e2b7",
+      "rch_build_id": "29879655498514509",
+      "proof_command_id": "durable-rch-proof-mail-templates-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_mail_templates CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_mail_templates_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "6 passed",
+      "artifact_paths": [
+        "artifacts/durable_rch_proof_mail_templates_v1.json",
+        "tests/durable_rch_proof_mail_templates_contract.rs",
+        "docs/proof_runner_usage.md"
+      ],
+      "claim_boundary": "Offline Agent Mail templates, targeted handoff wording, and no-broadcast/no-green-partial boundaries only."
+    },
+    {
+      "row_id": "deterministic-e2e-scenarios",
+      "owner_bead": "asupersync-durable-rch-proof-submission-zxnnhe.7",
+      "close_commit": "d9fa5e1fd",
+      "rch_build_id": "29879655498514516",
+      "proof_command_id": "durable-rch-proof-e2e-contract",
+      "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_e2e_contract -- --nocapture",
+      "current_evidence_status": "fresh-rch-pass",
+      "test_evidence": "7 passed",
+      "artifact_paths": [
+        "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+        "tests/durable_rch_proof_e2e_contract.rs",
+        "docs/proof_runner_usage.md",
+        "scripts/durable_rch_proof_receipt.py"
+      ],
+      "claim_boundary": "Deterministic fixture replay for durable proof scenarios only; no live fleet or release-readiness claim."
+    }
+  ],
+  "refusal_matrix": [
+    {
+      "scenario_id": "terminal_pass_citable_exact_lane",
+      "source": "e2e_scenario",
+      "terminal_classification": "pass",
+      "proof_evidence_status": "fresh-rch-pass",
+      "green_proof_allowed": true,
+      "claim_scope": "exact manifest lane only"
+    },
+    {
+      "scenario_id": "cargo_failure_not_green",
+      "source": "e2e_scenario",
+      "terminal_classification": "cargo_failure",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "first blocker only"
+    },
+    {
+      "scenario_id": "client_disconnected_partial_resumable",
+      "source": "e2e_scenario",
+      "terminal_classification": "client_disconnected_partial",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "handoff or resume only"
+    },
+    {
+      "scenario_id": "stale_progress_canceled_stale_evidence",
+      "source": "e2e_scenario",
+      "terminal_classification": "stale_progress_canceled",
+      "proof_evidence_status": "stale-evidence",
+      "green_proof_allowed": false,
+      "claim_scope": "stale evidence only"
+    },
+    {
+      "scenario_id": "heartbeat_stale_infra_blocked",
+      "source": "e2e_scenario",
+      "terminal_classification": "heartbeat_stale_infra",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "infrastructure blocker only"
+    },
+    {
+      "scenario_id": "local_fallback_refused",
+      "source": "e2e_scenario",
+      "terminal_classification": "local_fallback_refused",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "local fallback refusal only"
+    },
+    {
+      "scenario_id": "stale_head_refused_before_execution",
+      "source": "e2e_scenario",
+      "terminal_classification": "cargo_failure",
+      "proof_evidence_status": "refused",
+      "green_proof_allowed": false,
+      "claim_scope": "stale source refusal only"
+    },
+    {
+      "scenario_id": "dirty_overlap_refused_before_execution",
+      "source": "e2e_scenario",
+      "terminal_classification": "cargo_failure",
+      "proof_evidence_status": "refused",
+      "green_proof_allowed": false,
+      "claim_scope": "dirty frontier refusal only"
+    },
+    {
+      "scenario_id": "duplicate_lane_head_coalesced",
+      "source": "e2e_scenario",
+      "terminal_classification": "pending",
+      "proof_evidence_status": "rerun-required",
+      "green_proof_allowed": false,
+      "claim_scope": "running submission pointer only"
+    },
+    {
+      "scenario_id": "unsupported_broad_claim_refused",
+      "source": "e2e_scenario",
+      "terminal_classification": "pass",
+      "proof_evidence_status": "unsupported",
+      "green_proof_allowed": false,
+      "claim_scope": "unsupported broad claim refusal only"
+    },
+    {
+      "scenario_id": "wrong_command_envelope_refused",
+      "source": "e2e_scenario",
+      "terminal_classification": "pass",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "command-envelope mismatch only"
+    },
+    {
+      "scenario_id": "wrong_feature_set_refused",
+      "source": "e2e_scenario",
+      "terminal_classification": "pass",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "feature-set mismatch only"
+    },
+    {
+      "scenario_id": "operator_canceled_not_green",
+      "source": "mail_template",
+      "mail_template_id": "canceled-yielded-proof-lane",
+      "terminal_classification": "operator_canceled",
+      "proof_evidence_status": "blocked",
+      "green_proof_allowed": false,
+      "claim_scope": "canceled handoff only"
+    }
+  ],
+  "operator_recipes": [
+    {
+      "recipe_id": "submit",
+      "command": "python3 scripts/durable_rch_proof_submission.py submit --repo-root /data/projects/asupersync --lane-id durable-rch-proof-final-signoff --agent MistyMill --branch main --head-commit <HEAD> --expected-head <HEAD> --source-tree-fingerprint <TREE> --output json",
+      "may_claim_green_proof": false,
+      "purpose": "persist a detached proof submission before the RCH process is observed"
+    },
+    {
+      "recipe_id": "detach",
+      "command": "record durable_submission_id and leave the RCH worker running; do not cancel another agent's lane without explicit handoff",
+      "may_claim_green_proof": false,
+      "purpose": "make disconnection safe without converting running work into proof"
+    },
+    {
+      "recipe_id": "query",
+      "command": "python3 scripts/durable_rch_proof_submission.py query --job-store <JOB_STORE> --submission-id <SUBMISSION_ID> --claim-scope durable-rch-final-signoff --output json",
+      "may_claim_green_proof": false,
+      "purpose": "read the durable submission or terminal receipt by id"
+    },
+    {
+      "recipe_id": "cite",
+      "command": "cite only lifecycle_state=terminal_pass, terminal_classification=pass, proof_evidence_status=fresh-rch-pass, exact manifest lane, exact source HEAD, exact command fingerprint, and no local fallback markers",
+      "may_claim_green_proof": true,
+      "purpose": "turn a terminal pass receipt into narrow evidence"
+    },
+    {
+      "recipe_id": "refuse",
+      "command": "copy refusal_reason_codes, first_blocker_lines, and explicit_not_covered; do not describe blocked, stale, partial, canceled, local-fallback, or unsupported receipts as green proof",
+      "may_claim_green_proof": false,
+      "purpose": "fail closed while preserving actionable evidence"
+    },
+    {
+      "recipe_id": "cancel",
+      "command": "python3 scripts/durable_rch_proof_submission.py cancel --job-store <JOB_STORE> --submission-id <SUBMISSION_ID> --operator MistyMill --reason <REASON> --output json",
+      "may_claim_green_proof": false,
+      "purpose": "record explicit cancellation evidence without confusing it with a proof failure"
+    },
+    {
+      "recipe_id": "handoff",
+      "command": "send the handoff-to-next-agent template with durable_submission_id, manifest_lane_id, source_head, command_fingerprint, receipt marker, first blocker, refusal reasons, and query command",
+      "may_claim_green_proof": false,
+      "purpose": "move ownership without broadcast spam or hidden state"
+    }
+  ],
+  "workflow_invariants": [
+    "all commits land directly on main",
+    "after pushing main, mirror legacy master with git push origin main:master",
+    "do not create branches, worktrees, or scratch clones",
+    "do not delete files or run destructive cleanup",
+    "new artifacts under artifacts/ are ignored and require git add -f",
+    "tests are deterministic and do not require live RCH, live Agent Mail, tracker mutation, or network access"
+  ],
+  "evaluation_rules": {
+    "accepted_verdict": "pass",
+    "current_expected_verdict": "pass",
+    "allow_parent_close_when": [
+      "every required child row has current_evidence_status=fresh-rch-pass",
+      "every proof command starts with the remote-required RCH prefix",
+      "the final signoff contract has a focused remote-required RCH pass recorded in the bead closeout",
+      "partial, stale, canceled, client-disconnected, local-fallback, and unsupported broad-claim receipts are all refused as green proof",
+      "operator recipes cover submit, detach, query, cite, refuse, cancel, and handoff",
+      "main to legacy master sync expectations remain documented"
+    ],
+    "block_parent_close_when": [
+      "any child row is stale, blocked, unsupported, no-win, approved-cache-hit, or rerun-required",
+      "any receipt with partial, stale, canceled, client-disconnected, local-fallback, dirty-overlap, stale-head, wrong-feature-set, wrong-command-envelope, or unsupported broad-claim status is accepted as green proof",
+      "any recipe requires live Agent Mail, live RCH, tracker mutation, network access, branch creation, worktree creation, scratch clones, file deletion, or local Cargo fallback"
+    ]
+  },
+  "validation_frontier_notes": [
+    {
+      "row_id": "peer-owned-broad-clippy-blocker",
+      "rch_build_id": "29879655498514517",
+      "status": "external-to-final-signoff",
+      "first_blocker": "src/web/handler.rs:340 clippy::redundant_closure",
+      "owner": "LilacBass",
+      "claim_boundary": "This broad clippy blocker is not part of the durable RCH final signoff contract evidence."
+    }
+  ],
+  "current_operator_report": {
+    "report_id": "durable-rch-final-signoff-current",
+    "final_verdict": "pass",
+    "parent_close_allowed_after_focused_signoff_rch_pass": true,
+    "first_failing_row": "none",
+    "required_log_fields": [
+      "child_bead_id",
+      "proof_command_id",
+      "rch_build_id",
+      "artifact_sha256",
+      "freshness_window_seconds",
+      "final_verdict",
+      "non_claims"
+    ],
+    "summary": "All durable RCH child rows have focused remote proof recorded. The final signoff remains scoped to the durable proof-submission program and still needs the final signoff contract RCH pass in the bead closeout before closing the parent."
+  },
+  "non_claims": [
+    "does not prove live RCH fleet availability",
+    "does not prove release readiness",
+    "does not prove broad workspace health",
+    "does not prove correctness of unrelated proof lanes",
+    "does not prove broad clippy or full test release gates",
+    "does not allow local Cargo fallback as proof"
+  ]
+}

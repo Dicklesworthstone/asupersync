@@ -1,0 +1,7 @@
+---
+source: src/plan/certificate.rs
+assertion_line: 2490
+expression: "format!(\"steps: {}\\nfingerprint: {}\", minimized.steps.len(),\nminimized.fingerprint().to_hex())"
+---
+steps: 1
+fingerprint: c8c4045339eab0089d2770d3b89b54723919158e7763227c529573d9702bc083

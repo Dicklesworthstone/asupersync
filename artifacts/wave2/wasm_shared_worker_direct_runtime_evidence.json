@@ -1,0 +1,246 @@
+{
+  "schema_version": "wasm-shared-worker-direct-runtime-evidence-v1",
+  "bead_id": "asupersync-422iga",
+  "capability_id": "wasm_shared_worker_direct_runtime",
+  "title": "Shared-worker direct-runtime boundary and coordinator evidence",
+  "decision": {
+    "direct_runtime_supported": false,
+    "support_class_after": "broker/coordinator-only",
+    "decision_bead_id": "asupersync-422iga",
+    "decision_status": "resolved_broker_coordinator_only",
+    "blocker_bead_id": "asupersync-422iga",
+    "blocked_reason": "SharedWorkerGlobalScope is a multi-client coordinator host whose lifetime, port membership, and browser reclaim behavior cannot own per-client regions, obligations, scheduler state, cancellation, drain/finalize, and replay evidence as a shipped direct BrowserRuntime surface. The shipped shared-worker path is bounded coordinator attach, explicit per-client registration, detach cleanup, protocol/feature mismatch fallback, and crash/reclaim downgrade to browser main-thread or dedicated-worker direct-runtime lanes.",
+    "future_direct_runtime_promotion_rule": "Open a new owner bead and prove browser-lifetime region ownership, client fanout cancellation, drain/finalize, deterministic replay, durable recovery, and no silent remapping before changing this support class."
+  },
+  "scope": {
+    "runtime_builder": "src/runtime/builder.rs",
+    "browser_package": "packages/browser/src/index.ts",
+    "coordinator_contract": "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+    "rust_contract_test": "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs",
+    "browser_fixture": "tests/fixtures/shared-worker-consumer",
+    "runner_script": "scripts/run_wasm_shared_worker_direct_runtime_evidence.sh"
+  },
+  "required_log_fields": [
+    "bead_id",
+    "scenario_id",
+    "host_context",
+    "client_instance_id",
+    "client_kind",
+    "selected_lane",
+    "handshake_state",
+    "region_count_before",
+    "region_count_after",
+    "detach_event",
+    "cancellation_observed",
+    "fallback_selected",
+    "expected_reason",
+    "actual_reason",
+    "verdict",
+    "first_failure"
+  ],
+  "source_evidence_paths": [
+    "src/runtime/builder.rs",
+    "packages/browser/src/index.ts",
+    "README.md",
+    "docs/WASM.md",
+    "docs/integration.md",
+    "docs/wasm_shared_worker_tenancy_lifecycle_contract.md",
+    "tests/wasm_shared_worker_tenancy_lifecycle_contract.rs",
+    "tests/fixtures/shared-worker-consumer/scripts/check-browser-run.mjs",
+    "tests/fixtures/shared-worker-consumer/src/main.ts",
+    "tests/fixtures/shared-worker-consumer/src/shared-worker.ts",
+    "scripts/validate_shared_worker_consumer.sh",
+    "scripts/run_wasm_shared_worker_direct_runtime_evidence.sh",
+    "artifacts/wave2_capability_evidence_registry_v1.json"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "shared_worker_direct_runtime_fails_closed",
+      "proof_source": "rust_contract",
+      "test_markers": [
+        "runtime_builder_exposes_shared_worker_fail_closed_markers",
+        "docs_and_artifact_pin_broker_coordinator_only_decision"
+      ],
+      "host_context": "shared_worker",
+      "client_instance_id": "none",
+      "client_kind": "SharedWorkerGlobalScope",
+      "selected_lane": "lane.unsupported",
+      "handshake_state": "not_started",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "none",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "shared_worker_direct_runtime_not_shipped",
+      "actual_reason": "shared_worker_direct_runtime_not_shipped"
+    },
+    {
+      "scenario_id": "shared_worker_coordinator_preflight_supported",
+      "proof_source": "rust_contract",
+      "test_markers": [
+        "browser_package_support_surface_pins_admission_and_recovery_guards",
+        "browser_package_selection_demotes_explicit_attach_failures",
+        "shared_worker_fixture_validator_preserves_fail_closed_direct_runtime_truth"
+      ],
+      "host_context": "browser_main_thread_or_dedicated_worker",
+      "client_instance_id": "preflight-client",
+      "client_kind": "browser_page_or_dedicated_worker",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "preflight_supported",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "none",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "supported",
+      "actual_reason": "supported"
+    },
+    {
+      "scenario_id": "shared_worker_attach_baseline",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_attach_baseline",
+        "browser_scenario_id"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "page-one",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "accepted",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "terminated",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "supported",
+      "actual_reason": "supported"
+    },
+    {
+      "scenario_id": "shared_worker_multi_page_reuse",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_multi_page_reuse",
+        "reuse_page_one_client_count",
+        "reuse_page_two_client_count"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "page-one,page-two",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "accepted_two_clients",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "terminated",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "client_count=2",
+      "actual_reason": "client_count=2"
+    },
+    {
+      "scenario_id": "shared_worker_protocol_mismatch_fallback",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_protocol_mismatch_fallback",
+        "mismatch_reason"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "protocol-mismatch",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.main_thread.direct_runtime",
+      "handshake_state": "protocol_mismatch",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "none",
+      "cancellation_observed": "false",
+      "fallback_selected": "true",
+      "expected_reason": "coordinator_protocol_version_mismatch",
+      "actual_reason": "coordinator_protocol_version_mismatch"
+    },
+    {
+      "scenario_id": "shared_worker_attach_crash_fallback",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_attach_crash_fallback",
+        "crash_reason"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "crash-before-handshake",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.main_thread.direct_runtime",
+      "handshake_state": "coordinator_crashed_before_handshake",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "none",
+      "cancellation_observed": "false",
+      "fallback_selected": "true",
+      "expected_reason": "coordinator_bootstrap_failure",
+      "actual_reason": "coordinator_bootstrap_failure"
+    },
+    {
+      "scenario_id": "shared_worker_client_detach_cleanup",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_client_detach_cleanup",
+        "close_lifecycle_states"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "page-one,page-two",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "detached",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "terminated",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "terminated",
+      "actual_reason": "terminated"
+    },
+    {
+      "scenario_id": "shared_worker_client_churn_rejoin",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_client_churn_rejoin",
+        "churn_client_ids"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "page-three",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "rejoined_after_churn",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "terminated",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "client_count=1",
+      "actual_reason": "client_count=1"
+    },
+    {
+      "scenario_id": "shared_worker_crash_recovery_reconnect",
+      "proof_source": "browser_fixture",
+      "test_markers": [
+        "shared_worker_crash_recovery_reconnect",
+        "recovery_client_ids"
+      ],
+      "host_context": "browser_main_thread",
+      "client_instance_id": "crash-recovery",
+      "client_kind": "browser_page",
+      "selected_lane": "lane.browser.shared_worker.coordinator",
+      "handshake_state": "fresh_coordinator_after_crash_path",
+      "region_count_before": "0",
+      "region_count_after": "0",
+      "detach_event": "terminated",
+      "cancellation_observed": "false",
+      "fallback_selected": "false",
+      "expected_reason": "client_count=1",
+      "actual_reason": "client_count=1"
+    }
+  ],
+  "validation_commands": [
+    "bash -n scripts/run_wasm_shared_worker_direct_runtime_evidence.sh",
+    "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --contract-only --run-id contract-smoke",
+    "bash scripts/run_wasm_shared_worker_direct_runtime_evidence.sh --run-id wave2-wasm-shared-worker --timeout-sec 180",
+    "bash scripts/run_wave2_capability_evidence_registry.sh --output-root target/wave2-capability-evidence-registry"
+  ]
+}

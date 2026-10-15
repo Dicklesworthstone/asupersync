@@ -1,0 +1,155 @@
+  [2m2026-09-07T21:05:43.922860Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (0 slots remaining after reservation, speed 77.7)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:43.982782Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: 6a05b767c10ce34f)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:510 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:43.982816Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:532 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:45.152340Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-a...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:661 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:45.152431Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 6 pattern(s) from .rchignore (total: 44)[0m
+    [2;3mat[0m rch/src/transfer.rs:2028 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:45.152442Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/projects/asupersync on ovh-a (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3549 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:46.559887Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 20195 files, 948083 bytes in 1153ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:958 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:05:46.579218Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: bash -c 'set -eu
+phase="$1"
+expected_binary_sha="$2"
+source_commit="$3"
+build_fingerprint="$4"
+case "$phase" in
+  before)
+    binary=/data/tmp/copperoak-gwmn38-20260907/bin/before
+    raw=/data/tmp/copperoak-gwmn38-20260907/matrix-before
+    receipt=artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/before
+    ;;
+  after)
+    binary=/data/tmp/copperoak-gwmn38-20260907/bin/after
+    raw=/data/tmp/copperoak-gwmn38-20260907/matrix-after
+    receipt=artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/after
+    ;;
+  *) exit 2 ;;
+esac
+test ! -e "$raw"
+mkdir -p "$receipt"
+sha256sum --check <<'\''HASHES'\''
+192d6d6ebeb1a93c2a40bf564d6595ceeb500b2343ebeb2b71a9fbf9c9b93d11  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/matrix_bench.sh
+551747be3c7d74b8057a56f76021df82ae6aab0e383f1b8dedfc92c18a25f0b9  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/run_matrix_cell.sh
+b51cd8ad0e6acd5baabe6ccf3f059e727b91522c6783dff0969583035bbd471d  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/score_matrix.py
+HASHES
+python3 - "$receipt" "$binary" "$expected_binary_sha" "$source_commit" "$build_fingerprint" "$phase" <<'\''PY'\''
+import hashlib,json,pathlib,sys,datetime
+receipt,binary,expected,source,fingerprint,phase=sys.argv[1:]
+with open(binary,"rb") as handle:
+    digest=hashlib.file_digest(handle,"sha256").hexdigest()
+assert digest==expected,(digest,expected)
+context={
+  "bead":"asupersync-gwmn38","phase":phase,"worker":"ovh-a",
+  "created_at":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  "binary_path":binary,"binary_sha256":digest,"source_commit":source,
+  "rch_build_overlay_fingerprint":fingerprint,
+  "build_profile":"release (Cargo.toml: opt-level=3, fat LTO, codegen-units=1)",
+  "build_features":["atp-cli"],"rustflags":"-D warnings -C debuginfo=0",
+  "toolchain":"nightly-2026-08-31","stream_receive_window_bytes":8388608,
+  "stream_receive_window_max_bytes":8388608,"matrix_timeout_seconds":1800,
+  "workload":"500M","workload_bytes":524288000,"regimes":["good","bad"],
+  "tier":"encrypted","method":"atp-quic-tls13","reps_per_regime":3,
+  "runtime_policy_changes":False,
+  "harness_git_identity":"documented ATP_MATRIX_GIT_HEAD fallback outside a Git checkout"
+}
+with (pathlib.Path(receipt)/"run_context.json").open("x") as handle:
+    json.dump(context,handle,indent=2)
+    handle.write("\n")
+print(json.dumps(context))
+PY
+set +e
+sudo -n env BIN="$binary" ATP_MATRIX_GIT_HEAD="$source_commit" ATP_QUIC_STREAM_RECV_WINDOW=8388608 ATP_QUIC_STREAM_RECV_WINDOW_MAX=8388608 ATP_MATRIX_TIMEOUT=1800 WORKERS=4 STREAMS=1 SYMBOL_SIZE=1200 bash /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/matrix_bench.sh --execute --generate-workloads --run-cell-command '\''bash /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/run_matrix_cell.sh'\'' --out "$raw" --work-dir /data/tmp/copperoak-gwmn38-20260907/workloads --workloads 500M --regimes good,bad --tiers encrypted --methods atp-quic-tls13 --reps 3 --fail-on-mismatch
+matrix_status=$?
+set -e
+if test -d "$raw"; then
+  rsync -am --include='\''*/'\'' --include='\''*.jsonl'\'' --include='\''*.md'\'' --include='\''*.log'\'' --include='\''*.time'\'' --include='\''?_rss'\'' --exclude='\''*'\'' "$raw/" "$receipt/"
+fi
+python3 - "$receipt" "$matrix_status" <<'\''PY'\''
+import json,pathlib,sys
+receipt,status=sys.argv[1:]
+with (pathlib.Path(receipt)/"terminal_status.json").open("x") as handle:
+    json.dump({"matrix_exit_code":int(status)},handle)
+    handle.write("\n")
+PY
+exit "$matrix_status"
+' copperoak-quic-bench after 89d74be1353d4cb233f54a2e911b111b2b9b5ff18422b43c67fb7d159e31717a 97335c1cd5167972262e30a6d902edc6d44dfca9 fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1018 [2;3mon[0m ThreadId(1)
+
+/data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/matrix_bench.sh: OK
+/data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/run_matrix_cell.sh: OK
+/data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/score_matrix.py: OK
+{"bead": "asupersync-gwmn38", "phase": "after", "worker": "ovh-a", "created_at": "2026-09-07T21:05:47.194283+00:00", "binary_path": "/data/tmp/copperoak-gwmn38-20260907/bin/after", "binary_sha256": "89d74be1353d4cb233f54a2e911b111b2b9b5ff18422b43c67fb7d159e31717a", "source_commit": "97335c1cd5167972262e30a6d902edc6d44dfca9", "rch_build_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195", "build_profile": "release (Cargo.toml: opt-level=3, fat LTO, codegen-units=1)", "build_features": ["atp-cli"], "rustflags": "-D warnings -C debuginfo=0", "toolchain": "nightly-2026-08-31", "stream_receive_window_bytes": 8388608, "stream_receive_window_max_bytes": 8388608, "matrix_timeout_seconds": 1800, "workload": "500M", "workload_bytes": 524288000, "regimes": ["good", "bad"], "tier": "encrypted", "method": "atp-quic-tls13", "reps_per_regime": 3, "runtime_policy_changes": false, "harness_git_identity": "documented ATP_MATRIX_GIT_HEAD fallback outside a Git checkout"}
+2026-09-07T21:05:47Z [cell 500M/good/encrypted/atp-quic-tls13 rep=1] link up (netem both ends): delay 25ms loss 0.1% rate 200mbit  port=50022
+2026-09-07T21:07:00Z [cell 500M/good/encrypted/atp-quic-tls13 rep=1] DONE wall=70.194878s status=ok sha_ok=true rounds=0 peak_rss_kb=55040 streams=1
+2026-09-07T21:07:01Z [cell 500M/good/encrypted/atp-quic-tls13 rep=2] link up (netem both ends): delay 25ms loss 0.1% rate 200mbit  port=56129
+2026-09-07T21:08:24Z [cell 500M/good/encrypted/atp-quic-tls13 rep=2] DONE wall=79.801207s status=ok sha_ok=true rounds=0 peak_rss_kb=64692 streams=1
+2026-09-07T21:08:24Z [cell 500M/good/encrypted/atp-quic-tls13 rep=3] link up (netem both ends): delay 25ms loss 0.1% rate 200mbit  port=51402
+2026-09-07T21:09:37Z [cell 500M/good/encrypted/atp-quic-tls13 rep=3] DONE wall=69.193863s status=ok sha_ok=true rounds=0 peak_rss_kb=65572 streams=1
+2026-09-07T21:09:37Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=1] link up (netem both ends): delay 80ms 20ms loss 2% rate 50mbit  port=53020
+2026-09-07T21:11:13Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=1] DONE wall=92.517481s status=ok sha_ok=true rounds=0 peak_rss_kb=40216 streams=1
+2026-09-07T21:11:13Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=2] link up (netem both ends): delay 80ms 20ms loss 2% rate 50mbit  port=57036
+2026-09-07T21:12:49Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=2] DONE wall=92.233274s status=ok sha_ok=true rounds=0 peak_rss_kb=39804 streams=1
+2026-09-07T21:12:50Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=3] link up (netem both ends): delay 80ms 20ms loss 2% rate 50mbit  port=54117
+2026-09-07T21:14:27Z [cell 500M/bad/encrypted/atp-quic-tls13 rep=3] DONE wall=93.747573s status=ok sha_ok=true rounds=0 peak_rss_kb=40000 streams=1
+# ATP vs rsync matrix scorecard
+
+Integrity policy: ratios compare ATP only against optimally tuned rsync in the same workload, regime, and crypto tier. Failed SHA, incomplete rows, and mismatched current auth postures are not admitted to headline ratios.
+
+## Per-cell method medians
+
+| workload | regime | tier | method | ATP streams | reps | ok | correctness | median wall s | cv_pct | cv flag | sender peak RSS KB | sender avg RSS KB | receiver peak RSS KB | receiver avg RSS KB | combined peak RSS KB | combined avg RSS KB | feedback rounds |
+|---|---|---|---|---:|---:|---:|---|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 500M | bad | encrypted | atp-quic-tls13 | n/a | 3 | 3 | sha+status ok | 92.517 | 0.87 | stable | 40000 | 49107 | 28148 | 35559 | 40000 | 49107 | 0 |
+| 500M | good | encrypted | atp-quic-tls13 | n/a | 3 | 3 | sha+status ok | 70.195 | 8.02 | noisy | 64692 | 72906 | 25508 | 32334 | 64692 | 72906 | 0 |
+
+## Noise warnings
+
+Rows with cv_pct > 5.0 are noisy and should not be treated as clean wins without rerun evidence.
+
+| workload | regime | tier | method | ATP streams | cv_pct | ok/reps |
+|---|---|---|---|---:|---:|---:|
+| 500M | good | encrypted | atp-quic-tls13 | n/a | 8.02 | 3/3 |
+
+## ATP vs rsync ratios
+
+Only crypto-symmetric, same-cell ATP-vs-rsync pairs are admitted here.
+
+| workload | regime | tier | ATP method | ATP streams | rsync method | wall ratio ATP/rsync | speedup rsync/ATP | sender peak RSS ratio | sender avg RSS ratio | receiver peak RSS ratio | receiver avg RSS ratio | combined peak RSS ratio | combined avg RSS ratio | ATP feedback rounds |
+|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+
+## Per-regime geomean
+
+| regime | geomean wall ratio ATP/rsync |
+|---|---:|
+
+## Crypto-symmetry warnings
+
+No crypto-asymmetric ATP/rsync pairs were present.
+
+## Auth-posture exclusions
+
+No rows were excluded for missing or mismatched authentication posture.
+
+## Failed or incomplete rows
+
+No failed SHA or incomplete rows were present.
+  [2m2026-09-07T21:14:28.024603Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 521445ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1150 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T21:14:29.095721Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mResult dir 'artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/after' retrieved in 1037ms (65 files, 902 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4603 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-a (525.2s)
+{"api_version":"1.0","command":"bash -c 'set -eu\nphase=\"$1\"\nexpected_binary_sha=\"$2\"\nsource_commit=\"$3\"\nbuild_fingerprint=\"$4\"\ncase \"$phase\" in\n  before)\n    binary=/data/tmp/copperoak-gwmn38-20260907/bin/before\n    raw=/data/tmp/copperoak-gwmn38-20260907/matrix-before\n    receipt=artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/before\n    ;;\n  after)\n    binary=/data/tmp/copperoak-gwmn38-20260907/bin/after\n    raw=/data/tmp/copperoak-gwmn38-20260907/matrix-after\n    receipt=artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/after\n    ;;\n  *) exit 2 ;;\nesac\ntest ! -e \"$raw\"\nmkdir -p \"$receipt\"\nsha256sum --check <<'\\''HASHES'\\''\n192d6d6ebeb1a93c2a40bf564d6595ceeb500b2343ebeb2b71a9fbf9c9b93d11  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/matrix_bench.sh\n551747be3c7d74b8057a56f76021df82ae6aab0e383f1b8dedfc92c18a25f0b9  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/run_matrix_cell.sh\nb51cd8ad0e6acd5baabe6ccf3f059e727b91522c6783dff0969583035bbd471d  /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/score_matrix.py\nHASHES\npython3 - \"$receipt\" \"$binary\" \"$expected_binary_sha\" \"$source_commit\" \"$build_fingerprint\" \"$phase\" <<'\\''PY'\\''\nimport hashlib,json,pathlib,sys,datetime\nreceipt,binary,expected,source,fingerprint,phase=sys.argv[1:]\nwith open(binary,\"rb\") as handle:\n    digest=hashlib.file_digest(handle,\"sha256\").hexdigest()\nassert digest==expected,(digest,expected)\ncontext={\n  \"bead\":\"asupersync-gwmn38\",\"phase\":phase,\"worker\":\"ovh-a\",\n  \"created_at\":datetime.datetime.now(datetime.timezone.utc).isoformat(),\n  \"binary_path\":binary,\"binary_sha256\":digest,\"source_commit\":source,\n  \"rch_build_overlay_fingerprint\":fingerprint,\n  \"build_profile\":\"release (Cargo.toml: opt-level=3, fat LTO, codegen-units=1)\",\n  \"build_features\":[\"atp-cli\"],\"rustflags\":\"-D warnings -C debuginfo=0\",\n  \"toolchain\":\"nightly-2026-08-31\",\"stream_receive_window_bytes\":8388608,\n  \"stream_receive_window_max_bytes\":8388608,\"matrix_timeout_seconds\":1800,\n  \"workload\":\"500M\",\"workload_bytes\":524288000,\"regimes\":[\"good\",\"bad\"],\n  \"tier\":\"encrypted\",\"method\":\"atp-quic-tls13\",\"reps_per_regime\":3,\n  \"runtime_policy_changes\":False,\n  \"harness_git_identity\":\"documented ATP_MATRIX_GIT_HEAD fallback outside a Git checkout\"\n}\nwith (pathlib.Path(receipt)/\"run_context.json\").open(\"x\") as handle:\n    json.dump(context,handle,indent=2)\n    handle.write(\"\\n\")\nprint(json.dumps(context))\nPY\nset +e\nsudo -n env BIN=\"$binary\" ATP_MATRIX_GIT_HEAD=\"$source_commit\" ATP_QUIC_STREAM_RECV_WINDOW=8388608 ATP_QUIC_STREAM_RECV_WINDOW_MAX=8388608 ATP_MATRIX_TIMEOUT=1800 WORKERS=4 STREAMS=1 SYMBOL_SIZE=1200 bash /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/matrix_bench.sh --execute --generate-workloads --run-cell-command '\\''bash /data/tmp/copperoak-gwmn38-20260907/runner/scripts/atp_bench/run_matrix_cell.sh'\\'' --out \"$raw\" --work-dir /data/tmp/copperoak-gwmn38-20260907/workloads --workloads 500M --regimes good,bad --tiers encrypted --methods atp-quic-tls13 --reps 3 --fail-on-mismatch\nmatrix_status=$?\nset -e\nif test -d \"$raw\"; then\n  rsync -am --include='\\''*/'\\'' --include='\\''*.jsonl'\\'' --include='\\''*.md'\\'' --include='\\''*.log'\\'' --include='\\''*.time'\\'' --include='\\''?_rss'\\'' --exclude='\\''*'\\'' \"$raw/\" \"$receipt/\"\nfi\npython3 - \"$receipt\" \"$matrix_status\" <<'\\''PY'\\''\nimport json,pathlib,sys\nreceipt,status=sys.argv[1:]\nwith (pathlib.Path(receipt)/\"terminal_status.json\").open(\"x\") as handle:\n    json.dump({\"matrix_exit_code\":int(status)},handle)\n    handle.write(\"\\n\")\nPY\nexit \"$matrix_status\"\n' copperoak-quic-bench after 89d74be1353d4cb233f54a2e911b111b2b9b5ff18422b43c67fb7d159e31717a 97335c1cd5167972262e30a6d902edc6d44dfca9 fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195","outcome":"completed","location":"remote","worker_id":"ovh-a","remote_exit_code":0,"duration_ms":546295,"timing":{"classify":null,"select":null,"sync_up":1153,"exec":521445,"sync_down":null,"cleanup":null,"total":null},"result_dirs":[{"path":"artifacts/atp_bench_matrix/copperoak-gwmn38-20260907/after","files":65,"bytes":902,"status":"ok"}]}

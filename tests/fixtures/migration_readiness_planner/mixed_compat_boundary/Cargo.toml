@@ -1,0 +1,10 @@
+[package]
+name = "mixed-compat-boundary-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+asupersync = { path = "../../../.." }
+axum = "0.7"
+hyper = "1"
+tower = "0.5"

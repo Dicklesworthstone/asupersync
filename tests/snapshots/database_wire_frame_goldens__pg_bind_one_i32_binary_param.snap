@@ -1,0 +1,7 @@
+---
+source: tests/database_wire_frame_goldens.rs
+expression: hexdump(&msg)
+---
+0000  42 00 00 00 18 00 00 00  01 00 01 00 01 00 00 00  |B...............|
+0010  04 00 00 00 2a 00 01 00  00                       |....*....|
+(25 bytes)

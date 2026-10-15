@@ -1,0 +1,23 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/superseded-head.json",
+      "git_sha": "1111111111111111111111111111111111111111",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_superseded_head cargo test --test stale_in_progress_receipt_contract -- --nocapture",
+      "touched_files": [
+        "scripts/stale_in_progress_receipt.py",
+        "tests/stale_in_progress_receipt_contract.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:08:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

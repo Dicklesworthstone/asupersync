@@ -1,0 +1,90 @@
+{
+  "commit": "feedface0",
+  "current_date": "2026-05-10",
+  "fixture_path": "tests/fixtures/closeout_verifier/missing_remote_required_validation.json",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-10T08:35:00Z",
+  "non_mutating": true,
+  "overall_status": "fail",
+  "rows": [
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main",
+        "expected_commit": "feedface0",
+        "observed_commit": "feedface0"
+      },
+      "row_id": "main_pushed",
+      "status": "pass",
+      "summary": "origin/main points at the closeout commit"
+    },
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main origin/master",
+        "expected_commit": "feedface0",
+        "origin_main": "feedface0",
+        "origin_master": "feedface0"
+      },
+      "row_id": "master_synced",
+      "status": "pass",
+      "summary": "origin/master is synced to origin/main at the closeout commit"
+    },
+    {
+      "evidence": {
+        "bead_id": "asupersync-missing-remote-required",
+        "command": "br show asupersync-missing-remote-required --json",
+        "observed_status": "closed"
+      },
+      "row_id": "bead_closed",
+      "status": "pass",
+      "summary": "bead asupersync-missing-remote-required is closed"
+    },
+    {
+      "evidence": {
+        "expected_commit": "feedface0",
+        "matched_message_ids": [
+          1008
+        ],
+        "thread_id": "asupersync-missing-remote-required"
+      },
+      "row_id": "closeout_mail",
+      "status": "pass",
+      "summary": "closeout mail found for the slice"
+    },
+    {
+      "evidence": {
+        "active_reservations": [],
+        "agent": "GentleCitadel"
+      },
+      "row_id": "reservations_released",
+      "status": "pass",
+      "summary": "no active closeout-owner reservations remain"
+    },
+    {
+      "evidence": {
+        "closeout_validation_reported": null,
+        "mail_mentions_validation": true,
+        "missing_remote_required_cargo_segments": [
+          "Validation: rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_missing_remote cargo test passed. Released reservations."
+        ]
+      },
+      "remediation": "rerun and report Cargo validation as RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=... cargo ...",
+      "row_id": "validation_reported",
+      "status": "fail",
+      "summary": "validation evidence omits RCH_REQUIRE_REMOTE=1 for rch Cargo proof"
+    }
+  ],
+  "schema_version": "closeout-verifier-v1",
+  "slice_id": "asupersync-missing-remote-required",
+  "slice_mode": "bead-backed",
+  "summary": {
+    "fail": 1,
+    "pass": 5,
+    "warn": 0
+  }
+}

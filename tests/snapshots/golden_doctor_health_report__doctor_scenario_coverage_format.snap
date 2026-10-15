@@ -1,0 +1,12 @@
+---
+source: tests/golden_doctor_health_report.rs
+expression: coverage_report
+---
+{
+  "schema_version": "1.0.0",
+  "selection_mode": "all",
+  "requested_by": "golden-test",
+  "seed": "0",
+  "failure_clusters": [],
+  "runs": []
+}

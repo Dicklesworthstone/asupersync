@@ -1,0 +1,31 @@
+{
+  "private": true,
+  "name": "asupersync-monorepo",
+  "version": "0.3.5",
+  "description": "Asupersync Browser Edition workspace root",
+  "scripts": {
+    "build:wasm": "bash scripts/build_browser_core_artifacts.sh prod",
+    "build:wasm:dev": "bash scripts/build_browser_core_artifacts.sh dev",
+    "build:wasm:minimal": "bash scripts/build_browser_core_artifacts.sh minimal",
+    "build:packages": "pnpm -r --filter '!@asupersync/browser-core' run build",
+    "build": "pnpm run build:wasm && pnpm run build:packages",
+    "build:dev": "pnpm run build:wasm:dev && pnpm run build:packages",
+    "clean": "bash scripts/clean_packages.sh",
+    "typecheck": "pnpm -r run typecheck",
+    "test:browser-core:host": "node --unhandled-rejections=strict --experimental-vm-modules --test scripts/test_browser_webtransport_lifecycle.mjs",
+    "validate": "pnpm run test:browser-core:host && bash scripts/validate_package_build.sh && bash scripts/validate_npm_pack_smoke.sh",
+    "validate:next-consumer": "bash scripts/validate_next_turbopack_consumer.sh",
+    "validate:vite-consumer": "bash scripts/validate_vite_vanilla_consumer.sh",
+    "validate:webpack-consumer": "bash scripts/validate_webpack_consumer.sh"
+  },
+  "engines": {
+    "node": ">=18.12.0",
+    "pnpm": ">=10.34.3"
+  },
+  "packageManager": "pnpm@10.34.3",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "sharp"
+    ]
+  }
+}

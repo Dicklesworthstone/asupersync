@@ -1,0 +1,12 @@
+---
+source: tests/codec_wire_frame_goldens.rs
+expression: "(\n            \"first_line\",\n            first,\n            \"remaining_bytes\",\n            buf.len(),\n            \"remaining_str\",\n            std::str::from_utf8(&buf).unwrap_or(\"<invalid utf8>\").to_string()\n        )"
+---
+(
+    "first_line",
+    "hello",
+    "remaining_bytes",
+    6,
+    "remaining_str",
+    "world\n",
+)

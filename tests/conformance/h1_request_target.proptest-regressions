@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f21c40a712dba07843a46ff70308606fb63386f93f4f2e54830235a5ae779ab8 # shrinks to other_method = Get
+cc f7d5613621e33ec8b57791c4320c700ed97f6aa123e9c0d64cd0ef55a258c272 # shrinks to method = Get, valid_uri = "/a", invalid_uri = "//invalid"
+cc a93dee4a1394bc0eff6c0553899d7e6435c7ae18bfb6e51e50cc72d1ec9b5178 # shrinks to authority_uri = "aaa.com:1024", origin_uri = "/a", absolute_uri = "http://aaa.com/a"
+cc 9f82d183c9a78065b1bc57fb8c321b078e7ddec249e862a121d09b0bad9e2aa1 # shrinks to method = Get, valid_uri = "/a", invalid_uri = "http://"

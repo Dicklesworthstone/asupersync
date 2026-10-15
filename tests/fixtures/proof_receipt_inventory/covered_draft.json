@@ -1,0 +1,18 @@
+{
+  "helpers": [
+    {
+      "capability_id": "proof-runner-execute",
+      "commit": "",
+      "fixture_root": "tests/fixtures/proof_runner",
+      "helper_id": "proof-runner-execute-receipt-draft",
+      "owner": "CalmSummit",
+      "script_path": "scripts/proof_runner.py",
+      "status": "draft",
+      "summary": "Draft receipt exercises proof runner execute mode against reviewed fixture outputs.",
+      "test_path": "tests/proof_runner_contract.rs",
+      "validation": [
+        "rch exec -- cargo test -p asupersync --test proof_runner_contract"
+      ]
+    }
+  ]
+}

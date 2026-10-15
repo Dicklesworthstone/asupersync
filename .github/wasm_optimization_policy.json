@@ -1,0 +1,129 @@
+{
+  "schema_version": "wasm-optimization-policy-v1",
+  "description": "Deterministic optimization pipeline contract for browser-targeted wasm artifacts.",
+  "budget_contract": {
+    "source_document": "WASM_SIZE_PERF_BUDGETS.md",
+    "allowed_budget_profiles": [
+      "core-min",
+      "core-trace",
+      "full-dev"
+    ]
+  },
+  "invariants": {
+    "target": "wasm32-unknown-unknown",
+    "required_features": [
+      "wasm-browser-preview",
+      "getrandom/wasm_js"
+    ],
+    "forbidden_features": [
+      "cli",
+      "io-uring",
+      "tls",
+      "tls-native-roots",
+      "tls-webpki-roots",
+      "sqlite",
+      "postgres",
+      "mysql",
+      "kafka"
+    ]
+  },
+  "profiles": [
+    {
+      "id": "wasm-browser-dev",
+      "variant": "dev",
+      "budget_profile": "full-dev",
+      "cargo": {
+        "release": false,
+        "no_default_features": true,
+        "features": [
+          "wasm-browser-preview",
+          "getrandom/wasm_js"
+        ]
+      },
+      "rustflags": [
+        "-Copt-level=1",
+        "-Cdebuginfo=2",
+        "-Cpanic=abort"
+      ],
+      "wasm_opt": {
+        "enabled": false,
+        "passes": []
+      },
+      "artifact": {
+        "source": "target/wasm32-unknown-unknown/debug/asupersync.wasm",
+        "optimized": "artifacts/wasm/dev/asupersync.dev.wasm"
+      },
+      "tradeoff": "Prioritize debuggability and compile speed over binary size."
+    },
+    {
+      "id": "wasm-browser-canary",
+      "variant": "canary",
+      "budget_profile": "core-trace",
+      "cargo": {
+        "release": true,
+        "no_default_features": true,
+        "features": [
+          "wasm-browser-preview",
+          "getrandom/wasm_js"
+        ]
+      },
+      "rustflags": [
+        "-Copt-level=s",
+        "-Cdebuginfo=1",
+        "-Ccodegen-units=1",
+        "-Cpanic=abort"
+      ],
+      "wasm_opt": {
+        "enabled": true,
+        "passes": [
+          "-O2",
+          "--enable-bulk-memory",
+          "--enable-sign-ext",
+          "--strip-dwarf"
+        ]
+      },
+      "artifact": {
+        "source": "target/wasm32-unknown-unknown/release/asupersync.wasm",
+        "optimized": "artifacts/wasm/canary/asupersync.canary.wasm"
+      },
+      "tradeoff": "Balance size and latency with enough symbols retained for canary triage."
+    },
+    {
+      "id": "wasm-browser-release",
+      "variant": "release",
+      "budget_profile": "core-min",
+      "cargo": {
+        "release": true,
+        "no_default_features": true,
+        "features": [
+          "wasm-browser-preview",
+          "getrandom/wasm_js"
+        ]
+      },
+      "rustflags": [
+        "-Copt-level=z",
+        "-Clto=fat",
+        "-Ccodegen-units=1",
+        "-Cpanic=abort",
+        "-Cstrip=symbols"
+      ],
+      "wasm_opt": {
+        "enabled": true,
+        "passes": [
+          "-Oz",
+          "--strip-dwarf",
+          "--strip-producers",
+          "--vacuum"
+        ]
+      },
+      "artifact": {
+        "source": "target/wasm32-unknown-unknown/release/asupersync.wasm",
+        "optimized": "artifacts/wasm/release/asupersync.release.wasm"
+      },
+      "tradeoff": "Prioritize smallest artifact while preserving deterministic runtime semantics."
+    }
+  ],
+  "output": {
+    "summary_path": "artifacts/wasm_optimization_pipeline_summary.json"
+  }
+}

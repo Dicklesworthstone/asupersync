@@ -1,0 +1,25 @@
+{
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-aj7lx3.11",
+        "title": "[observability] Redacted cross-agent timeline receipt",
+        "status": "in_progress"
+      }
+    ]
+  },
+  "git": {
+    "commits": [
+      {
+        "hash": "aaaaaaaaaaaa",
+        "created_ts": "2026-05-08T05:31:00Z",
+        "subject": "[br-asupersync-other] unrelated receipt",
+        "body": "Validation passed for another bead."
+      }
+    ]
+  },
+  "agent_mail": {
+    "messages": [],
+    "reservations": []
+  }
+}

@@ -1,0 +1,299 @@
+{
+  "contract_version": "transport-frontier-benchmark-v1",
+  "bead_id": "asupersync-1508v.8.4",
+  "runner_bundle_schema_version": "transport-frontier-benchmark-smoke-bundle-v1",
+  "runner_report_schema_version": "transport-frontier-benchmark-smoke-run-report-v1",
+  "runner_suite_summary_schema_version": "transport-frontier-benchmark-smoke-suite-summary-v1",
+  "runner_script": "scripts/run_transport_frontier_benchmark_smoke.sh",
+  "runner_bundle_required_fields": [
+    "schema",
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "run_id",
+    "mode",
+    "command",
+    "timestamp",
+    "artifact_path",
+    "runner_script",
+    "bundle_manifest_path",
+    "planned_run_log_path",
+    "planned_run_report_path",
+    "rch_routed"
+  ],
+  "runner_report_required_fields": [
+    "schema",
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "run_id",
+    "mode",
+    "command",
+    "artifact_path",
+    "runner_script",
+    "bundle_manifest_path",
+    "run_log_path",
+    "run_report_path",
+    "output_dir",
+    "rch_routed",
+    "started_at",
+    "finished_at",
+    "exit_code"
+  ],
+  "runner_suite_summary_required_fields": [
+    "schema",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "runner_script",
+    "output_dir",
+    "summary_path",
+    "started_at",
+    "finished_at",
+    "status",
+    "scenario_count",
+    "scenario_ids",
+    "all_rch_routed",
+    "suite_exit_code",
+    "scenarios"
+  ],
+  "runner_suite_summary_scenario_required_fields": [
+    "scenario_id",
+    "description",
+    "workload_id",
+    "validation_surface",
+    "focus_dimension_ids",
+    "command",
+    "output_dir",
+    "bundle_manifest_path",
+    "run_log_path",
+    "run_report_path",
+    "status",
+    "exit_code",
+    "rch_routed"
+  ],
+  "transport_components": [
+    {
+      "component_id": "symbol-sink-stream",
+      "description": "Async send/recv traits for transport",
+      "owner_files": ["src/transport/sink.rs", "src/transport/stream.rs"]
+    },
+    {
+      "component_id": "multipath-aggregator",
+      "description": "Path selection, deduplication, and reordering",
+      "owner_files": ["src/transport/aggregator.rs"]
+    },
+    {
+      "component_id": "routing-dispatch",
+      "description": "Routing table, load balancing, and dispatch",
+      "owner_files": ["src/transport/router.rs"]
+    },
+    {
+      "component_id": "sim-network",
+      "description": "Deterministic network behavior for reproducible testing",
+      "owner_files": ["src/transport/mo\u0063k.rs"]
+    }
+  ],
+  "benchmark_dimensions": [
+    {
+      "dimension_id": "rtt-tail-latency",
+      "metrics": ["p50_us", "p95_us", "p99_us", "p999_us"],
+      "description": "Round-trip latency under varying load"
+    },
+    {
+      "dimension_id": "goodput-under-loss",
+      "metrics": ["throughput_msgs_sec", "recovery_overhead_pct"],
+      "description": "Effective throughput as a function of loss rate"
+    },
+    {
+      "dimension_id": "fairness",
+      "metrics": ["fairness_index", "min_flow_share_pct"],
+      "description": "Jain's fairness and starvation detection"
+    },
+    {
+      "dimension_id": "cpu-per-packet",
+      "metrics": ["cpu_cycles_per_msg", "cache_miss_rate"],
+      "description": "Per-message CPU cost"
+    },
+    {
+      "dimension_id": "failure-handling",
+      "metrics": ["recovery_time_ms", "handoff_latency_ms"],
+      "description": "Recovery and migration latency"
+    },
+    {
+      "dimension_id": "operator-visibility",
+      "metrics": ["log_field_count", "metric_granularity"],
+      "description": "Structured observability completeness"
+    }
+  ],
+  "workload_vocabulary": [
+    {
+      "workload_id": "TW-BURST",
+      "description": "Burst loss recovery",
+      "pattern": "1000 msgs, 5% burst loss"
+    },
+    {
+      "workload_id": "TW-REORDER",
+      "description": "Packet reordering",
+      "pattern": "1000 msgs, 10% reorder probability"
+    },
+    {
+      "workload_id": "TW-HANDOFF",
+      "description": "Path migration during active flow",
+      "pattern": "Active flow, primary path fails at 50%"
+    },
+    {
+      "workload_id": "TW-OVERLOAD",
+      "description": "Backpressure under overload",
+      "pattern": "Sender rate 2x receiver capacity"
+    },
+    {
+      "workload_id": "TW-MULTIPATH",
+      "description": "Multi-path aggregation",
+      "pattern": "3 paths, varying quality (10ms/50ms/200ms)"
+    },
+    {
+      "workload_id": "TW-FAIRNESS",
+      "description": "Concurrent flow fairness",
+      "pattern": "10 flows sharing bottleneck"
+    }
+  ],
+  "experiments": [
+    {
+      "experiment_id": "receiver-driven-rpc",
+      "description": "Grant-based flow control for low-latency RPC",
+      "hypothesis": "Reduces tail latency by eliminating sender-side congestion control delay",
+      "key_dimensions": ["rtt-tail-latency", "fairness", "cpu-per-packet"]
+    },
+    {
+      "experiment_id": "multipath-transport",
+      "description": "Simultaneous use of multiple network paths",
+      "hypothesis": "Improves goodput under partial failures",
+      "key_dimensions": ["goodput-under-loss", "failure-handling"]
+    },
+    {
+      "experiment_id": "coded-transport",
+      "description": "FEC/RLNC for loss recovery without retransmission",
+      "hypothesis": "Trades bandwidth for latency (eliminates retransmission RTTs)",
+      "key_dimensions": ["rtt-tail-latency", "goodput-under-loss", "cpu-per-packet"]
+    }
+  ],
+  "structured_log_fields_required": [
+    "experiment_id",
+    "workload_id",
+    "benchmark_correlation_id",
+    "path_count",
+    "experimental_gate_id",
+    "path_policy_id",
+    "effective_path_policy_id",
+    "requested_path_count",
+    "fallback_path_count",
+    "selected_path_count",
+    "selected_path_ids",
+    "fallback_path_ids",
+    "fallback_policy_id",
+    "path_downgrade_reason",
+    "downgrade_reason",
+    "coding_policy_id",
+    "effective_coding_policy_id",
+    "loss_rate_pct",
+    "throughput_msgs_sec",
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "p999_us",
+    "cpu_cycles_per_msg",
+    "fairness_index",
+    "recovery_time_ms",
+    "verdict"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA08-SMOKE-WORKLOAD-VOCAB",
+      "description": "Verify workload vocabulary completeness and fields",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::workload_vocabulary_has_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "workload",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_WORKLOAD_VOCAB cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals workload -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-BENCHMARK-DIMS",
+      "description": "Verify benchmark dimension catalog and metrics",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::benchmark_dimensions_have_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "dimension",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_BENCHMARK_DIMS cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals dimension -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-EXPERIMENTS",
+      "description": "Verify experiment catalog and hypothesis fields",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::experiment_catalog_has_expected_ids",
+      "focus_dimension_ids": ["operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "experiment",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_EXPERIMENTS cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals experiment -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-SIM-NETWORK",
+      "description": "Verify SimNetwork deterministic behavior works",
+      "workload_id": "TW-FAIRNESS",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::sim_network_fully_connected_creates_paths",
+      "focus_dimension_ids": ["fairness", "operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "sim_network",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_SIM_NETWORK cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals sim_network -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-FAIRNESS-FLOW-BALANCE",
+      "description": "Verify deterministic round-robin flow balance stays at the fair-share target",
+      "workload_id": "TW-FAIRNESS",
+      "validation_surface": "src/transport/tests.rs::test_transport_workload_tw_fairness_round_robin_balance",
+      "focus_dimension_ids": ["fairness", "operator-visibility"],
+      "test_binary": null,
+      "test_filter": "transport_workload_tw_fairness_round_robin_balance",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_FAIRNESS_FLOW_BALANCE cargo test -p asupersync --features test-internals transport_workload_tw_fairness_round_robin_balance -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-HANDOFF-FALLBACK",
+      "description": "Verify deterministic fallback metadata for a primary-path handoff/failover slice",
+      "workload_id": "TW-HANDOFF",
+      "validation_surface": "src/transport/aggregator.rs::tests::test_path_set_primary_only_exposes_conservative_fallback",
+      "focus_dimension_ids": ["failure-handling", "operator-visibility"],
+      "test_binary": null,
+      "test_filter": "test_path_set_primary_only_exposes_conservative_fallback",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_HANDOFF_FALLBACK cargo test -p asupersync --features test-internals test_path_set_primary_only_exposes_conservative_fallback -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-OVERLOAD-SIGNAL",
+      "description": "Verify dispatcher overload is surfaced deterministically without hidden retries",
+      "workload_id": "TW-OVERLOAD",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::symbol_dispatcher_overload_rejected_deterministically",
+      "focus_dimension_ids": ["failure-handling", "operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "symbol_dispatcher_overload_rejected_deterministically",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_OVERLOAD_SIGNAL cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals symbol_dispatcher_overload_rejected_deterministically -- --nocapture"
+    },
+    {
+      "scenario_id": "AA08-SMOKE-OPERATOR-VISIBILITY",
+      "description": "Verify dry-run bundles expose replay metadata and artifact pointers deterministically",
+      "workload_id": "TW-MULTIPATH",
+      "validation_surface": "tests/transport_frontier_benchmark_contract.rs::runner_dry_run_emits_replay_metadata_bundle",
+      "focus_dimension_ids": ["operator-visibility"],
+      "test_binary": "transport_frontier_benchmark_contract",
+      "test_filter": "runner_dry_run_emits_replay_metadata_bundle",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_transport_frontier_AA08_SMOKE_OPERATOR_VISIBILITY cargo test -p asupersync --test transport_frontier_benchmark_contract --features test-internals runner_dry_run_emits_replay_metadata_bundle -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.8.5"
+  ]
+}

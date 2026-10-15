@@ -1,0 +1,204 @@
+{
+  "schema_version": "1.0.0",
+  "diff_id": "testing.coverage_matrix.diff.v1",
+  "generated_by": "asupersync-3narc.1.1",
+  "source_matrix": {
+    "testing_md_path": "TESTING.md",
+    "testing_section": "Coverage Audit Matrix (bd-2alu)",
+    "comparison_scope": "Subsystem rows and invariant/test linkage semantics"
+  },
+  "generation_evidence": {
+    "source_artifacts": [
+      "TESTING.md",
+      "formal/lean/coverage/invariant_status_inventory.json",
+      "formal/lean/coverage/invariant_theorem_test_link_map.json",
+      "formal/lean/coverage/lean_coverage_matrix.schema.json",
+      "formal/lean/coverage/lean_coverage_matrix.sample.json"
+    ],
+    "validation_commands": [
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_testing_matrix_docs cargo test --test lean_baseline_report -- --nocapture",
+      "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_formal_lean_testing_matrix_docs cargo test --test lean_coverage_matrix_schema -- --nocapture"
+    ]
+  },
+  "row_mappings": [
+    {
+      "subsystem": "Runtime + scheduler",
+      "testing_refs": {
+        "unit": ["src/runtime/scheduler/three_lane.rs::test_cancel_priority_over_ready"],
+        "integration": ["tests/scheduler_lane_fairness.rs::test_ready_not_starved_by_cancel_flood"],
+        "e2e": ["tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.structured_concurrency.single_owner", "inv.region_close.quiescence"],
+        "status": "partial"
+      },
+      "delta_summary": "Lean artifacts capture invariants and theorem witnesses, but not an explicit subsystem row key for runtime/scheduler."
+    },
+    {
+      "subsystem": "Cancellation + obligations",
+      "testing_refs": {
+        "unit": ["src/cancel/symbol_cancel.rs::test_token_cancel_once"],
+        "integration": ["tests/cancellation_conformance.rs::cancel_request_on_running_task"],
+        "e2e": [
+          "tests/e2e/combinator/cancel_correctness/obligation_cleanup.rs::test_loser_permit_resolved"
+        ]
+      },
+      "lean_alignment": {
+        "invariant_ids": [
+          "inv.cancel.protocol",
+          "inv.obligation.no_leaks",
+          "inv.race.losers_drained"
+        ],
+        "status": "partial"
+      },
+      "delta_summary": "Coverage exists for cancel protocol and obligation lifecycle, but race-loser drain remains unproven in Lean."
+    },
+    {
+      "subsystem": "Channels + sync primitives",
+      "testing_refs": {
+        "unit": ["src/channel/mpsc.rs::basic_send_recv"],
+        "integration": ["tests/channel_conformance.rs::run_conformance_tests"],
+        "e2e": ["tests/e2e_messaging.rs::e2e_mpsc_queue_delivery"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.obligation.no_leaks", "inv.cancel.protocol"],
+        "status": "partial"
+      },
+      "delta_summary": "No dedicated subsystem-level channel/sync row exists in Lean matrix artifacts; coverage is inferred through shared invariants."
+    },
+    {
+      "subsystem": "IO + reactor + time",
+      "testing_refs": {
+        "unit": ["src/runtime/reactor/registration.rs::drop_deregisters"],
+        "integration": ["tests/io_cancellation.rs::io_cancel_001_cancel_during_read"],
+        "e2e": ["tests/e2e_fs.rs::e2e_file_create_write_read_roundtrip"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.cancel.protocol"],
+        "status": "partial"
+      },
+      "delta_summary": "IO/reactor/time paths are tested in Rust but are not represented as first-class subsystem rows in Lean coverage artifacts."
+    },
+    {
+      "subsystem": "Net + HTTP + H2 + WebSocket + gRPC",
+      "testing_refs": {
+        "unit": ["src/http/h1/codec.rs::decode_simple_get"],
+        "integration": ["tests/http_verification.rs::body_full_lifecycle"],
+        "e2e": ["tests/e2e_web.rs::e2e_route_resolution_and_method_dispatch"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.authority.no_ambient"],
+        "status": "partial"
+      },
+      "delta_summary": "Network/protocol subsystem is covered by Rust tests; Lean currently lacks protocol-subsystem-specific coverage rows."
+    },
+    {
+      "subsystem": "RaptorQ codec + pipelines",
+      "testing_refs": {
+        "unit": ["src/raptorq/decoder.rs::decode_all_source_symbols"],
+        "integration": ["tests/raptorq_conformance.rs::roundtrip_no_loss"],
+        "e2e": ["tests/raptorq_conformance.rs::roundtrip_no_loss"]
+      },
+      "lean_alignment": {
+        "invariant_ids": [],
+        "status": "missing"
+      },
+      "delta_summary": "No explicit RaptorQ-specific invariant rows exist in Lean matrix artifacts; coverage is currently Rust-only."
+    },
+    {
+      "subsystem": "Distributed + remote",
+      "testing_refs": {
+        "unit": ["src/remote.rs::node_id_basics"],
+        "integration": ["tests/e2e_distributed.rs::e2e_full_encode_distribute_recover_pipeline"],
+        "e2e": ["tests/e2e_distributed.rs::e2e_full_encode_distribute_recover_pipeline"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.obligation.no_leaks", "inv.authority.no_ambient"],
+        "status": "partial"
+      },
+      "delta_summary": "Distributed/remote semantics map indirectly through global invariants but do not have dedicated subsystem matrix rows."
+    },
+    {
+      "subsystem": "Trace + record + replay + DPOR",
+      "testing_refs": {
+        "unit": ["src/trace/file.rs::write_and_read_roundtrip"],
+        "integration": ["tests/replay_debugging.rs::trace_file_roundtrip_matches_recorded_events"],
+        "e2e": ["tests/e2e_geodesic_normalization.rs::e2e_normalization_deterministic_report"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.structured_concurrency.single_owner"],
+        "status": "partial"
+      },
+      "delta_summary": "Trace/replay/DPOR behavior is exercised heavily in Rust tests; Lean coverage currently references it through broader invariant families only."
+    },
+    {
+      "subsystem": "Security + capabilities",
+      "testing_refs": {
+        "unit": ["src/security/authenticated.rs::test_new_verified"],
+        "integration": ["tests/security_invariants.rs::invariant_max_concurrent_streams_bounded"],
+        "e2e": ["tests/e2e_web.rs::e2e_route_resolution_and_method_dispatch"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.authority.no_ambient"],
+        "status": "partial"
+      },
+      "delta_summary": "Capability security has a canonical invariant, but Lean status is still unproven and lacks subsystem-explicit rows."
+    },
+    {
+      "subsystem": "Lab runtime + testing infra",
+      "testing_refs": {
+        "unit": ["src/lab/runtime.rs::empty_runtime_is_quiescent"],
+        "integration": ["tests/lab_determinism.rs::test_lab_deterministic_scheduling_same_seed"],
+        "e2e": ["tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence"]
+      },
+      "lean_alignment": {
+        "invariant_ids": ["inv.cancel.protocol", "inv.race.losers_drained"],
+        "status": "partial"
+      },
+      "delta_summary": "Lab-runtime determinism and oracle behavior are validated in Rust; Lean mapping is indirect through protocol/invariant witnesses."
+    },
+    {
+      "subsystem": "Config + CLI + observability",
+      "testing_refs": {
+        "unit": ["src/config.rs::default_config_valid"],
+        "integration": ["tests/builder_verification.rs::builder_verify_001_default_build"],
+        "e2e": ["tests/e2e_console.rs::console_plain_text_never_mode_no_ansi"]
+      },
+      "lean_alignment": {
+        "invariant_ids": [],
+        "status": "missing"
+      },
+      "delta_summary": "Config/CLI/observability rows in TESTING.md currently have no direct Lean matrix coverage entries."
+    }
+  ],
+  "unresolved_deltas": [
+    {
+      "id": "delta.subsystem_row_ids.missing",
+      "severity": "high",
+      "detail": "Lean coverage artifacts do not currently encode subsystem-level row IDs aligned with TESTING.md matrix rows.",
+      "recommended_action": "Extend the canonical Lean matrix artifact with explicit subsystem row keys and deterministic ownership metadata for all TESTING.md subsystems.",
+      "owner_bead": "asupersync-3narc.1.1"
+    },
+    {
+      "id": "delta.raptorq_subsystem.unmapped",
+      "severity": "medium",
+      "detail": "RaptorQ subsystem tests are present in TESTING.md but have no explicit Lean invariant mapping row.",
+      "recommended_action": "Add a refinement or invariant coverage row family for RaptorQ correctness/determinism and link to existing conformance suites.",
+      "owner_bead": "asupersync-3narc.2.7"
+    },
+    {
+      "id": "delta.config_cli_observability.unmapped",
+      "severity": "medium",
+      "detail": "Config/CLI/observability coverage is documented in TESTING.md without a corresponding Lean matrix alignment target.",
+      "recommended_action": "Define policy-level alignment rows for config/CLI/observability or explicitly mark them out-of-scope for Lean coverage with rationale.",
+      "owner_bead": "asupersync-3narc.1.3"
+    },
+    {
+      "id": "delta.automation.regeneration_contract",
+      "severity": "low",
+      "detail": "No deterministic CI test currently validates the TESTING.md-to-Lean diff artifact shape and subsystem coverage completeness.",
+      "recommended_action": "Keep this artifact under test in tests/lean_baseline_report.rs and include it in Track-A refresh workflows.",
+      "owner_bead": "asupersync-3narc.4.1"
+    }
+  ]
+}

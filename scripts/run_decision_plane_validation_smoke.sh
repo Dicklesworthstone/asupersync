@@ -1,0 +1,486 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Schema anchors for contract invariants:
+# - decision-plane-validation-smoke-bundle-v1
+# - decision-plane-validation-smoke-run-report-v1
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+CONTRACT_ARTIFACT="${PROJECT_ROOT}/artifacts/decision_plane_validation_v1.json"
+OUTPUT_ROOT="${DECISION_PLANE_SMOKE_OUTPUT_DIR:-${PROJECT_ROOT}/target/decision-plane-validation-smoke}"
+ARTIFACT_MIRROR_ROOT="${DECISION_PLANE_SMOKE_ARTIFACT_ROOT:-${PROJECT_ROOT}/.decision-plane-validation-smoke-artifacts}"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
+LIST_ONLY=0
+DRY_RUN=1
+COMMAND_TIMEOUT_SECONDS="${DECISION_PLANE_SMOKE_TIMEOUT_SECONDS:-120}"
+RCH_BIN="${RCH_BIN:-rch}"
+RCH_LOCAL_FALLBACK_PATTERN='^\[RCH\] local \(|falling back to local|local fallback|fallback to local|executing locally'
+
+declare -a SELECTED_SCENARIOS=()
+
+usage() {
+    cat <<'USAGE'
+Usage: ./scripts/run_decision_plane_validation_smoke.sh [options]
+
+Options:
+  --list                    List scenario IDs and exit
+  --scenario <id>           Run one scenario (repeatable)
+  --output-root <dir>       Override output root
+  --dry-run                 Emit manifests without executing (default)
+  --execute                 Execute cargo test scenarios
+  --timeout-seconds <n>     Bound each executed scenario command (default: 120)
+  -h, --help                Show help
+USAGE
+}
+
+require_tools() {
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "FATAL: jq is required for decision plane validation smoke runner" >&2
+        exit 1
+    fi
+    if ! [[ "$COMMAND_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+        echo "FATAL: --timeout-seconds must be a positive integer" >&2
+        exit 1
+    fi
+    if [ ! -f "$CONTRACT_ARTIFACT" ]; then
+        echo "FATAL: contract artifact missing at ${CONTRACT_ARTIFACT}" >&2
+        exit 1
+    fi
+    if ! command -v "$RCH_BIN" >/dev/null 2>&1; then
+        echo "FATAL: rch is required and was not found at: ${RCH_BIN}" >&2
+        exit 1
+    fi
+    if [[ "$DRY_RUN" -eq 0 ]] && ! command -v timeout >/dev/null 2>&1; then
+        echo "FATAL: timeout is required for --execute mode" >&2
+        exit 1
+    fi
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+contract_version() {
+    jq -r '.contract_version' "$CONTRACT_ARTIFACT"
+}
+
+bundle_schema_version() {
+    jq -r '.runner_bundle_schema_version' "$CONTRACT_ARTIFACT"
+}
+
+report_schema_version() {
+    jq -r '.runner_report_schema_version' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_schema_version() {
+    jq -r '.controller_snapshot_ledger.schema_version' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_top_level_fields_json() {
+    jq -c '.controller_snapshot_ledger.top_level_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_controller_fields_json() {
+    jq -c '.controller_snapshot_ledger.controller_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_snapshot_ledger_planner_render_order_json() {
+    jq -c '.controller_snapshot_ledger.planner_render_order' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_matrix_schema_version() {
+    jq -r '.controller_interference_matrix.schema_version' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_catalog_json() {
+    jq -c '.controller_interference_matrix.controllers' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_pair_rules_json() {
+    jq -c '.controller_interference_matrix.pair_rules' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_env_fingerprint_fields_json() {
+    jq -c '.controller_interference_matrix.env_fingerprint_fields' "$CONTRACT_ARTIFACT"
+}
+
+controller_interference_decision_trace_fields_json() {
+    jq -c '.controller_interference_matrix.decision_trace_fields' "$CONTRACT_ARTIFACT"
+}
+
+markers_json_from_lines() {
+    if [[ "$#" -eq 0 ]]; then
+        printf '[]'
+        return
+    fi
+    printf '%s\n' "$@" | jq -R . | jq -s -c .
+}
+
+list_scenarios() {
+    jq -r '.smoke_scenarios[] | [.scenario_id, .description] | @tsv' "$CONTRACT_ARTIFACT" \
+        | while IFS=$'\t' read -r sid desc; do
+            printf '%-38s %s\n' "$sid" "$desc"
+        done
+}
+
+load_scenario_json() {
+    local sid="$1"
+    jq -c --arg sid "$sid" '.smoke_scenarios[] | select(.scenario_id == $sid)' "$CONTRACT_ARTIFACT"
+}
+
+append_result() {
+    local entry="$1"
+    if [[ -z "${RESULTS_JSON:-}" ]]; then
+        RESULTS_JSON="$entry"
+    else
+        RESULTS_JSON="${RESULTS_JSON},${entry}"
+    fi
+}
+
+build_command_args() {
+    local sid="$1"
+    local output_name="$2"
+    local -n output_ref="$output_name"
+    local safe_sid="${sid//[^A-Za-z0-9_]/_}"
+    local scenario_filter
+    local -a extra_env=()
+
+    case "$sid" in
+        AA023-SMOKE-TRANSITIONS)
+            scenario_filter="transition"
+            ;;
+        AA023-SMOKE-ROLLBACKS)
+            scenario_filter="rollback"
+            ;;
+        AA023-SMOKE-EVIDENCE)
+            scenario_filter="evidence"
+            ;;
+        AA023-SMOKE-CONTROLLER-LEDGER)
+            scenario_filter="controller_snapshot_ledger"
+            extra_env=(
+                "ASUPERSYNC_CONTROLLER_LEDGER_STDOUT=1"
+                "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_STDOUT=1"
+            )
+            ;;
+        AA023-SMOKE-CONTROLLER-INTERFERENCE)
+            scenario_filter="controller_interference"
+            extra_env=(
+                "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_STDOUT=1"
+                "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_STDOUT=1"
+            )
+            ;;
+        *)
+            echo "FATAL: unsupported scenario command mapping: ${sid}" >&2
+            return 1
+            ;;
+    esac
+
+    output_ref=(
+        "$RCH_BIN"
+        exec
+        --
+        env
+        "CARGO_INCREMENTAL=0"
+        "CARGO_PROFILE_TEST_DEBUG=0"
+        "RUSTFLAGS=-D warnings -C debuginfo=0"
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_decision_plane_validation_${safe_sid}"
+        "${extra_env[@]}"
+        "${CARGO_BIN:-cargo}"
+        test
+        -p
+        asupersync
+        --test
+        decision_plane_validation_contract
+        "$scenario_filter"
+        --
+        --nocapture
+    )
+}
+
+manifest_path_value() {
+    local path="$1"
+    if [[ "$path" == "${PROJECT_ROOT}/"* ]]; then
+        printf '%s\n' "${path#${PROJECT_ROOT}/}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+extract_log_json_artifact() {
+    local prefix="$1"
+    local log_file="$2"
+    local output_file="$3"
+    local line payload
+    line="$(grep -F "$prefix" "$log_file" | tail -n1 || true)"
+    if [[ -z "$line" ]]; then
+        return 1
+    fi
+    payload="${line#"$prefix"}"
+    printf '%s\n' "$payload" | jq '.' > "$output_file"
+}
+
+run_scenario() {
+    local sid="$1"
+    local scenario_json
+    scenario_json="$(load_scenario_json "$sid")"
+    if [[ -z "$scenario_json" ]]; then
+        echo "FATAL: unknown scenario id: ${sid}" >&2
+        return 1
+    fi
+
+    local description command expected_artifacts required_log_markers_json
+    local -a required_log_markers=()
+    local -a missing_log_markers=()
+    local -a command_args=()
+    description="$(jq -r '.description' <<<"$scenario_json")"
+    expected_artifacts="$(jq -c '.expected_artifacts // []' <<<"$scenario_json")"
+    required_log_markers_json="$(jq -c '.required_log_markers // []' <<<"$scenario_json")"
+    mapfile -t required_log_markers < <(jq -r '.required_log_markers[]? // empty' <<<"$scenario_json")
+    build_command_args "$sid" command_args
+    printf -v command '%q ' "${command_args[@]}"
+    command="${command% }"
+
+    local scenario_dir="${RUN_DIR}/${sid}"
+    local log_file="${scenario_dir}/run.log"
+    local summary_file="${scenario_dir}/bundle_manifest.json"
+    local artifact_mirror_dir="${ARTIFACT_MIRROR_ROOT}/run_${TIMESTAMP}/${sid}"
+    local controller_ledger_artifact="${artifact_mirror_dir}/controller_snapshot_ledger.json"
+    local planner_rows_artifact="${artifact_mirror_dir}/controller_snapshot_planner_rows.json"
+    local controller_interference_matrix_artifact="${artifact_mirror_dir}/controller_interference_matrix.json"
+    local controller_interference_report_artifact="${artifact_mirror_dir}/controller_interference_report.json"
+    local started_ts ended_ts status rc command_exit_code final_exit_code
+    local timeout_observed rch_remote_success_observed markers_ok missing_log_markers_json
+
+    mkdir -p "$scenario_dir" "$artifact_mirror_dir"
+    started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+    echo ">>> Running scenario ${sid}"
+    echo "    description: ${description}"
+    echo "    command: ${command}"
+
+    rc=0
+    command_exit_code=0
+    final_exit_code=0
+    timeout_observed=false
+    rch_remote_success_observed=false
+    markers_ok=1
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        printf 'DRY_RUN scenario=%s\n' "$sid" | tee "$log_file" >/dev/null
+        status="dry_run"
+    else
+        (
+            cd "$PROJECT_ROOT"
+            timeout --kill-after=10s "${COMMAND_TIMEOUT_SECONDS}s" "${command_args[@]}"
+        ) > "$log_file" 2>&1 || command_exit_code=$?
+        if grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN" "$log_file" 2>/dev/null; then
+            command_exit_code=86
+            printf 'FATAL: rch local fallback detected; refusing local cargo execution\n' >>"$log_file"
+        fi
+        if [[ "$command_exit_code" -eq 124 || "$command_exit_code" -eq 125 || "$command_exit_code" -eq 137 || "$command_exit_code" -eq 143 ]]; then
+            timeout_observed=true
+        fi
+        if grep -Fq "Remote command finished: exit=0" "$log_file" && grep -Fq "test result: ok" "$log_file"; then
+            rch_remote_success_observed=true
+        fi
+        for marker in "${required_log_markers[@]}"; do
+            if ! grep -Fq -- "$marker" "$log_file"; then
+                missing_log_markers+=("$marker")
+            fi
+        done
+        if [[ "${#missing_log_markers[@]}" -ne 0 ]]; then
+            markers_ok=0
+        fi
+
+        if [[ "$command_exit_code" -eq 0 || "$rch_remote_success_observed" == "true" ]]; then
+            if [[ "$sid" == "AA023-SMOKE-CONTROLLER-LEDGER" ]]; then
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_LEDGER_JSON=" "$log_file" "$controller_ledger_artifact"; then
+                    echo "FATAL: controller ledger artifact marker missing from run log" >> "$log_file"
+                    markers_ok=0
+                    missing_log_markers+=("ASUPERSYNC_CONTROLLER_LEDGER_JSON=")
+                fi
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=" "$log_file" "$planner_rows_artifact"; then
+                    echo "FATAL: planner rows artifact marker missing from run log" >> "$log_file"
+                    markers_ok=0
+                    missing_log_markers+=("ASUPERSYNC_CONTROLLER_LEDGER_PLANNER_ROWS_JSON=")
+                fi
+            elif [[ "$sid" == "AA023-SMOKE-CONTROLLER-INTERFERENCE" ]]; then
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=" "$log_file" "$controller_interference_matrix_artifact"; then
+                    echo "FATAL: controller interference matrix marker missing from run log" >> "$log_file"
+                    markers_ok=0
+                    missing_log_markers+=("ASUPERSYNC_CONTROLLER_INTERFERENCE_MATRIX_JSON=")
+                fi
+                if ! extract_log_json_artifact "ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=" "$log_file" "$controller_interference_report_artifact"; then
+                    echo "FATAL: controller interference report marker missing from run log" >> "$log_file"
+                    markers_ok=0
+                    missing_log_markers+=("ASUPERSYNC_CONTROLLER_INTERFERENCE_REPORT_JSON=")
+                fi
+            fi
+        fi
+
+        if [[ "$command_exit_code" -eq 0 && "$markers_ok" -eq 1 ]]; then
+            status="passed"
+        elif [[ "$timeout_observed" == "true" && "$rch_remote_success_observed" == "true" && "$markers_ok" -eq 1 ]]; then
+            status="passed_after_rch_retrieval_timeout"
+        else
+            status="failed"
+            final_exit_code="$command_exit_code"
+            if [[ "$final_exit_code" -eq 0 ]]; then
+                final_exit_code=1
+            fi
+        fi
+    fi
+    missing_log_markers_json="$(markers_json_from_lines "${missing_log_markers[@]}")"
+
+    ended_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    {
+        printf '\nAA023_TIMEOUT seconds=%s observed=%s command_exit_code=%s\n' "$COMMAND_TIMEOUT_SECONDS" "$timeout_observed" "$command_exit_code"
+        printf 'AA023_RCH_REMOTE_SUCCESS observed=%s\n' "$rch_remote_success_observed"
+        for marker in "${required_log_markers[@]}"; do
+            if [[ "$DRY_RUN" -eq 1 ]]; then
+                printf 'AA023_MARKER_CHECK status=skipped marker=%s\n' "$marker"
+            elif printf '%s\n' "${missing_log_markers[@]}" | grep -Fxq -- "$marker"; then
+                printf 'AA023_MARKER_CHECK status=missing marker=%s\n' "$marker"
+            else
+                printf 'AA023_MARKER_CHECK status=present marker=%s\n' "$marker"
+            fi
+        done
+        printf 'AA023_SCENARIO_STATUS scenario=%s status=%s final_exit_code=%s\n' "$sid" "$status" "$final_exit_code"
+    } >>"$log_file"
+
+    cat >"$summary_file" <<JSON
+{
+  "schema_version": "$(json_escape "$(bundle_schema_version)")",
+  "contract_version": "$(json_escape "$(contract_version)")",
+  "controller_snapshot_ledger_schema_version": "$(json_escape "$(controller_snapshot_ledger_schema_version)")",
+  "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
+  "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
+  "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
+  "controller_interference_matrix_schema_version": "$(json_escape "$(controller_interference_matrix_schema_version)")",
+  "controller_interference_catalog": $(controller_interference_catalog_json),
+  "controller_interference_pair_rules": $(controller_interference_pair_rules_json),
+  "controller_interference_env_fingerprint_fields": $(controller_interference_env_fingerprint_fields_json),
+  "controller_interference_decision_trace_fields": $(controller_interference_decision_trace_fields_json),
+  "scenario_id": "$(json_escape "$sid")",
+  "description": "$(json_escape "$description")",
+  "command": "$(json_escape "$command")",
+  "timeout_seconds": ${COMMAND_TIMEOUT_SECONDS},
+  "command_exit_code": ${command_exit_code},
+  "timeout_observed": ${timeout_observed},
+  "rch_remote_success_observed": ${rch_remote_success_observed},
+  "required_log_markers": ${required_log_markers_json},
+  "missing_log_markers": ${missing_log_markers_json},
+  "expected_artifacts": ${expected_artifacts},
+  "controller_snapshot_ledger_artifact_path": $( [[ -f "$controller_ledger_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_ledger_artifact")")" || printf 'null' ),
+  "controller_snapshot_planner_rows_artifact_path": $( [[ -f "$planner_rows_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$planner_rows_artifact")")" || printf 'null' ),
+  "controller_interference_matrix_artifact_path": $( [[ -f "$controller_interference_matrix_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_interference_matrix_artifact")")" || printf 'null' ),
+  "controller_interference_report_artifact_path": $( [[ -f "$controller_interference_report_artifact" ]] && printf '"%s"' "$(json_escape "$(manifest_path_value "$controller_interference_report_artifact")")" || printf 'null' ),
+  "artifact_path": "$(json_escape "$summary_file")",
+  "run_log_path": "$(json_escape "$log_file")",
+  "status": "$(json_escape "$status")",
+  "exit_code": ${final_exit_code},
+  "started_ts": "$(json_escape "$started_ts")",
+  "ended_ts": "$(json_escape "$ended_ts")"
+}
+JSON
+
+    append_result "$(jq -c '.' "$summary_file")"
+
+    [[ "$final_exit_code" -eq 0 ]]
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --list)
+            LIST_ONLY=1
+            shift
+            ;;
+        --scenario)
+            SELECTED_SCENARIOS+=("${2:-}")
+            shift 2
+            ;;
+        --output-root)
+            OUTPUT_ROOT="${2:-}"
+            RUN_DIR="${OUTPUT_ROOT}/run_${TIMESTAMP}"
+            shift 2
+            ;;
+        --dry-run)
+            DRY_RUN=1
+            shift
+            ;;
+        --execute)
+            DRY_RUN=0
+            shift
+            ;;
+        --timeout-seconds)
+            COMMAND_TIMEOUT_SECONDS="${2:-}"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+
+require_tools
+
+if [[ "$LIST_ONLY" -eq 1 ]]; then
+    list_scenarios
+    exit 0
+fi
+
+if [[ "${#SELECTED_SCENARIOS[@]}" -eq 0 ]]; then
+    mapfile -t SELECTED_SCENARIOS < <(jq -r '.smoke_scenarios[].scenario_id' "$CONTRACT_ARTIFACT")
+fi
+
+mkdir -p "$RUN_DIR"
+RESULTS_JSON=""
+OVERALL_RC=0
+
+for sid in "${SELECTED_SCENARIOS[@]}"; do
+    if ! run_scenario "$sid"; then
+        OVERALL_RC=1
+    fi
+done
+
+RUN_REPORT="${RUN_DIR}/run_report.json"
+cat >"$RUN_REPORT" <<JSON
+{
+  "schema_version": "$(json_escape "$(report_schema_version)")",
+  "contract_version": "$(json_escape "$(contract_version)")",
+  "controller_snapshot_ledger_schema_version": "$(json_escape "$(controller_snapshot_ledger_schema_version)")",
+  "controller_snapshot_ledger_top_level_fields": $(controller_snapshot_ledger_top_level_fields_json),
+  "controller_snapshot_ledger_controller_fields": $(controller_snapshot_ledger_controller_fields_json),
+  "controller_snapshot_ledger_planner_render_order": $(controller_snapshot_ledger_planner_render_order_json),
+  "controller_interference_matrix_schema_version": "$(json_escape "$(controller_interference_matrix_schema_version)")",
+  "controller_interference_catalog": $(controller_interference_catalog_json),
+  "controller_interference_pair_rules": $(controller_interference_pair_rules_json),
+  "controller_interference_env_fingerprint_fields": $(controller_interference_env_fingerprint_fields_json),
+  "controller_interference_decision_trace_fields": $(controller_interference_decision_trace_fields_json),
+  "artifact_path": "$(json_escape "$RUN_REPORT")",
+  "run_dir": "$(json_escape "$RUN_DIR")",
+  "selected_scenarios": $(jq -nc --argjson ids "$(printf '%s\n' "${SELECTED_SCENARIOS[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')" '$ids'),
+  "dry_run": $( [[ "$DRY_RUN" -eq 1 ]] && printf 'true' || printf 'false' ),
+  "results": [${RESULTS_JSON}],
+  "status": "$([ "$OVERALL_RC" -eq 0 ] && printf "passed" || printf "failed")"
+}
+JSON
+
+echo ""
+echo "==================================================================="
+echo "         DECISION PLANE VALIDATION SMOKE SUMMARY                   "
+echo "==================================================================="
+echo "  Run dir:   ${RUN_DIR}"
+echo "  Report:    ${RUN_REPORT}"
+echo "  Mode:      $([ "$DRY_RUN" -eq 1 ] && printf "DRY-RUN" || printf "EXECUTE")"
+echo "  Status:    $([ "$OVERALL_RC" -eq 0 ] && printf "PASSED" || printf "FAILED")"
+echo "==================================================================="
+
+exit "$OVERALL_RC"

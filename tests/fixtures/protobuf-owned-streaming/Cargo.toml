@@ -1,0 +1,10 @@
+[package]
+name = "protobuf-owned-streaming-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+asupersync = { path = "../../..", default-features = false, features = ["proc-macros"] }
+
+[workspace]

@@ -1,0 +1,38 @@
+---
+source: src/runtime/scheduler/decision_contract.rs
+expression: |-
+  scrub_decision_output(json!({
+      "action_index": outcome.action_index,
+      "action_name": outcome.action_name,
+      "expected_loss": outcome.expected_loss,
+      "fallback_active": outcome.fallback_active,
+      "audit_entry": outcome.audit_entry,
+  }))
+---
+{
+  "action_index": 2,
+  "action_name": "conservative_schedule",
+  "audit_entry": {
+    "action_chosen": "conservative_schedule",
+    "calibration_score": 0.91,
+    "contract_name": "scheduler",
+    "decision_id": "[DECISION_ID]",
+    "expected_loss": 6.859999999999999,
+    "expected_loss_by_action": {
+      "aggressive_schedule": 22.08,
+      "balanced_schedule": 11.26,
+      "conservative_schedule": 6.859999999999999
+    },
+    "fallback_active": false,
+    "posterior_snapshot": [
+      0.12,
+      0.18,
+      0.2,
+      0.5
+    ],
+    "trace_id": "[TRACE_ID]",
+    "ts_unix_ms": "[TS_MS]"
+  },
+  "expected_loss": 6.859999999999999,
+  "fallback_active": false
+}

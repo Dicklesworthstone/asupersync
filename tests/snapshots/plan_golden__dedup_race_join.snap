@@ -1,0 +1,89 @@
+---
+source: tests/plan_golden.rs
+expression: output
+---
+--- BEFORE ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "shared",
+        },
+        Leaf {
+            label: "a",
+        },
+        Leaf {
+            label: "b",
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Race {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}
+--- REWRITE REPORT ---
+1. DedupRaceJoin: deduped shared child 0 across 2 joins ([PLAN_ID] -> [PLAN_ID])
+
+--- AFTER ---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "shared",
+        },
+        Leaf {
+            label: "a",
+        },
+        Leaf {
+            label: "b",
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Race {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Race {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+        Join {
+            children: [
+                PlanId([ID]),
+                PlanId([ID]),
+            ],
+        },
+    ],
+    root: Some(
+        PlanId([ID]),
+    ),
+}

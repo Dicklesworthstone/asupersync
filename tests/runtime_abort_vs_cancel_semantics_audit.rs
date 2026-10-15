@@ -1,0 +1,2925 @@
+//! Audit + regression test for `TaskHandle::abort` vs
+//! `Cx::cancel*` semantics.
+//!
+//! Operator's question: "abort is hard-kill (bypass drop
+//! guards), cancel is graceful (deliver via cancel-bit).
+//! Verify these are distinct paths and abort doesn't
+//! accidentally trigger cancel-handlers. Per asupersync
+//! spec."
+//!
+//! Audit findings:
+//!
+//!   The operator's framing contains a **category error**:
+//!   asupersync has NO "hard-kill bypass drop guards"
+//!   pathway. A safe Rust executor can stop polling and drop
+//!   a future, which runs its destructors, but it cannot kill
+//!   an executing thread or bypass Rust drop glue. Such a
+//!   bypass would require an unsafe or process-level escape
+//!   outside this runtime's contract.
+//!
+//!   Both `TaskHandle::abort()` and `Cx::cancel*()` are
+//!   **graceful cancellations via the SAME fast_cancel
+//!   atomic store**. Drop guards / destructors / Drop impls
+//!   ALL run normally — there's no "bypass" path. The
+//!   familiar `abort` name does not imply Tokio's task-drop
+//!   behavior: Asupersync wakes and repolls user code so it
+//!   can acknowledge, drain, and return a typed result.
+//!
+//!   Both paths set:
+//!     - `inner.cancel_requested = true`
+//!     - `inner.fast_cancel.store(true, Release)`
+//!     - `inner.cancel_reason = Some(reason)` (or strengthen
+//!       existing)
+//!
+//!   `Cx::cancel*()` captures and dispatches its cancel Waker
+//!   directly. Runtime-managed `TaskHandle` cancellation has
+//!   one extra ownership boundary: the caller updates only
+//!   checkpoint-visible Cx state and enqueues a callback-free
+//!   command. The runtime transitions the authoritative
+//!   TaskRecord, publishes the cancel lane, and only then
+//!   dispatches panic-isolated Waker effects. The cancellation
+//!   protocol is the same; its scheduling boundary differs.
+//!
+//!   1. **Capability used**: `TaskHandle::abort` requests cancellation through
+//!      a handle normally held by the parent. `Cx::cancel*` requests it through
+//!      the context capability, either by the running task itself or by another
+//!      component that was explicitly given that `Cx`.
+//!
+//!   2. **Reason kind**:
+//!      - `abort()` → `CancelReason::user("abort")` (=
+//!        CancelKind::User).
+//!      - `abort_with_reason(r)` → user-supplied reason.
+//!      - `cancel_with(kind, msg)` → user-specified kind +
+//!        message.
+//!      - `cancel_fast(kind)` → minimal-attribution kind +
+//!        region.
+//!
+//!   3. **Handle access**: `TaskHandle::abort` operates on
+//!      a `Weak<RwLock<CxInner>>` (parent's handle to the
+//!      child); `Cx::cancel*` operates on the running task's
+//!      own `Arc<RwLock<CxInner>>`.
+//!
+//!   The TaskHandle chain is:
+//!
+//!     1. Acquire the CxInner write lock.
+//!     2. Set cancel_requested = true.
+//!     3. fast_cancel.store(true, Release).
+//!     4. Set/strengthen cancel_reason; do not snapshot Wakers.
+//!     5. Release the Cx and admission-cache locks.
+//!     6. Enqueue `{task_id, effective_reason}` on the runtime gateway.
+//!     7. The runtime-owned consumer reconciles the TaskRecord and returns
+//!        effects. If the task checkpoints first, that checkpoint materializes
+//!        the same authoritative request and a delayed command is idempotent.
+//!     8. Scheduler publishes the cancel lane, then dispatches effects. A
+//!        structurally invalid delegated route remains fail-closed in
+//!        `DelegatedCancel` and requires a fresh command after repair; it does
+//!        not self-requeue and monopolize the mailbox.
+//!     9. The task's next explicit checkpoint or cancellation-aware primitive
+//!        poll observes cancellation and returns its typed cancellation error.
+//!
+//!   "Drop guards" (Rust destructors, finalizer guards,
+//!   panic-recovery TaskExecutionGuard, RegionRunner::Drop)
+//!   ALL fire normally on cancel via either path. There is
+//!   NO "bypass" — that would require unsafe-code thread
+//!   termination which asupersync forbids.
+//!
+//! Verdict on the original hard-kill question: abort and
+//! cancel are graceful-cancellation variants via the same
+//! fast_cancel mechanism, differentiated only by:
+//!   - WHICH capability requests it (task handle vs context capability).
+//!   - WHAT reason kind (User by default for abort; varies
+//!     for cancel).
+//!   - HOW handle access works (Weak vs Arc).
+//!
+//! Drop guards run on BOTH paths. Cancel-handlers run on
+//! BOTH paths. There is no "abort doesn't trigger cancel-
+//! handlers" semantic — the cancel-handlers ARE the
+//! graceful-cancel mechanism, and BOTH APIs trigger them.
+//!
+//! The native behavioral expansion of this audit nevertheless
+//! exposed a serious implementation defect (asupersync-yqlhh7):
+//! a parked cancel-aware operation could return its typed
+//! cancellation value, only for its spawn wrapper to discard
+//! that value by publishing through the now-cancelled child Cx.
+//! The repair makes mailbox and legacy state-threaded spawn adapters apply an
+//! explicit compatibility policy before one non-cancellable terminal-
+//! publication boundary; the older `Scope` adapter retains its unconditional
+//! returned-value policy while using the same safe publisher. The tests below
+//! prove the actual native parked state,
+//! exact nested result, pre-poll and structured task-level cancellation, panic
+//! precedence, sibling-handle publication independence, and resource cleanup
+//! without changing cooperative cancellation or acknowledged-cleanup semantics.
+//!
+//! A regression that:
+//!   - introduced a true hard-kill bypass via unsafe code
+//!     (would violate #![deny(unsafe_code)] AND would be a
+//!     soundness hazard — destructors must run for
+//!     resource safety),
+//!   - added a separate "abort_force" path that bypasses
+//!     the cancel-waker (would skip cross-thread
+//!     observability — parked tasks would miss the abort),
+//!   - made `abort()` and `cancel_with()` differ in
+//!     observable behavior beyond the reason kind (would
+//!     introduce subtle semantic divergence — debugging
+//!     gets harder),
+//!   - dispatched TaskHandle Wakers in the caller/Drop stack,
+//!     or before cancel-lane publication (would permit lock
+//!     reentrancy or miss the parked-task scheduling boundary),
+//!   - introduced std::process::abort or libc::pthread_cancel
+//!     in the abort path (UB pathway; thread terminates
+//!     without destructor unwinding),
+//!     would all be caught by the behavioral and structural pins below.
+
+use asupersync::channel::mpsc::{self, SendError};
+use asupersync::channel::oneshot;
+use asupersync::cx::Cx;
+use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
+use asupersync::net::websocket::{CloseReason, Message, WebSocket, WebSocketConfig, WsError};
+use asupersync::runtime::reactor::create_reactor;
+use asupersync::runtime::{JoinError, RuntimeBuilder, RuntimeState, yield_now};
+use asupersync::sync::{
+    AcquireError, LockError, Mutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore,
+};
+use asupersync::types::{Budget, CancelKind};
+use std::collections::BTreeMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+fn read(rel: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+    std::fs::read_to_string(&path).expect("read source file")
+}
+
+fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).expect("read Rust source directory") {
+        let path = entry.expect("read Rust source entry").path();
+        if path.is_dir() {
+            collect_rust_sources(&path, files);
+        } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn task_handle_constructor_census() -> BTreeMap<String, usize> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect_rust_sources(&root.join("src"), &mut files);
+    files.sort();
+
+    let mut census = BTreeMap::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(&root)
+            .expect("source path must remain beneath manifest root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let source = std::fs::read_to_string(&path).expect("read Rust source for census");
+        // Count compact source instead of individual lines so routine rustfmt
+        // wrapping cannot hide a constructor/factory call from this guard.
+        // Strip line comments first so documentation examples do not become
+        // false producers. The conformance module owns a separate model-only
+        // TaskHandle; remove only its exact smoke-test statement rather than
+        // exempting that file from the census.
+        let active_source = source
+            .lines()
+            .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+            .filter(|line| {
+                !(rel == "src/conformance/mod.rs"
+                    && line
+                        .contains("let handle = TaskHandle::new(tid, async { Outcome::Ok(42) });"))
+            })
+            .collect::<String>();
+        let compact: String = active_source.split_whitespace().collect();
+        for constructor in [
+            "TaskHandle::new(",
+            "TaskHandle::new_pending(",
+            "crate::runtime::task_handle::task_handle_channel::<",
+            "crate::runtime::task_handle::pending_task_handle_channel::<",
+        ] {
+            let count = compact.match_indices(constructor).count();
+            if count != 0 {
+                census.insert(format!("{rel}|{constructor}"), count);
+            }
+        }
+    }
+    census
+}
+
+async fn drive_until_flag(flag: &AtomicBool, budget: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < budget {
+        if flag.load(Ordering::Acquire) {
+            return true;
+        }
+        yield_now().await;
+    }
+    flag.load(Ordering::Acquire)
+}
+
+/// Waits until `mutex` has exactly `waiters` parked waiters. The bound is
+/// wall-clock time, not a yield count: on a multi-worker runtime the waiter
+/// runs on another worker thread, which a loaded host can keep descheduled
+/// for longer than hundreds of yields take.
+async fn drive_until_waiters(mutex: &Mutex<()>, waiters: usize, budget: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < budget {
+        if mutex.waiters() == waiters {
+            return true;
+        }
+        yield_now().await;
+    }
+    mutex.waiters() == waiters
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DownstreamTransportError {
+    Cancelled,
+}
+
+struct PendingWebSocketWrite {
+    write_polls: Arc<AtomicUsize>,
+    dropped: Arc<AtomicBool>,
+}
+
+impl AsyncRead for PendingWebSocketWrite {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+}
+
+impl AsyncWrite for PendingWebSocketWrite {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        _buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        self.write_polls.fetch_add(1, Ordering::AcqRel);
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl Drop for PendingWebSocketWrite {
+    fn drop(&mut self) {
+        self.dropped.store(true, Ordering::Release);
+    }
+}
+
+#[test]
+fn abort_repolls_a_mutex_parked_operation_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..512 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "waiter must be genuinely parked before abort so this test cannot pass via an admission race",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "aborting a mutex-parked operation must repoll it to its graceful inner cancellation result; got {result:?}",
+        );
+
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "graceful cancellation must unlink the parked mutex waiter before the holder unlocks",
+        );
+        drop(holder);
+    }));
+}
+
+#[test]
+fn cross_thread_cx_cancel_wakes_a_timer_parked_native_task() {
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+    let parked = Arc::new(AtomicBool::new(false));
+    let sleep_returned = Arc::new(AtomicBool::new(false));
+    let release_child = Arc::new(AtomicBool::new(false));
+    let child_finished = Arc::new(AtomicBool::new(false));
+    let child_cx_slot = Arc::new(std::sync::Mutex::new(None));
+    let child_parked = Arc::clone(&parked);
+    let child_sleep_returned = Arc::clone(&sleep_returned);
+    let child_release = Arc::clone(&release_child);
+    let child_finished_flag = Arc::clone(&child_finished);
+    let child_slot = Arc::clone(&child_cx_slot);
+
+    runtime
+        .handle()
+        .try_spawn_with_cx(move |child_cx| async move {
+            *child_slot.lock().expect("child Cx slot") = Some(child_cx.clone());
+            let mut sleeper = std::pin::pin!(asupersync::time::sleep(
+                child_cx.now(),
+                Duration::from_secs(10),
+            ));
+            std::future::poll_fn(|poll_cx| {
+                let poll = sleeper.as_mut().poll(poll_cx);
+                if poll.is_pending() {
+                    child_parked.store(true, Ordering::Release);
+                }
+                poll
+            })
+            .await;
+            child_sleep_returned.store(true, Ordering::Release);
+
+            // Keep the completed `Sleep` alive until the parent verifies that
+            // terminal completion, rather than `Drop`, removed its registration.
+            std::future::poll_fn(|poll_cx| {
+                if child_release.load(Ordering::Acquire) {
+                    Poll::Ready(())
+                } else {
+                    poll_cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+            assert!(sleeper.as_ref().was_polled());
+            child_finished_flag.store(true, Ordering::Release);
+        })
+        .expect("spawn timer-parked native task");
+
+    assert!(
+        runtime.block_on(drive_until_flag(&parked, Duration::from_secs(2))),
+        "the reporter-shaped task must poll and arm its 10-second sleep before cancellation",
+    );
+    let child_cx = child_cx_slot
+        .lock()
+        .expect("child Cx slot")
+        .clone()
+        .expect("timer-parked task must publish its Cx");
+    let timer = child_cx
+        .timer_driver()
+        .expect("native task must inherit the runtime timer driver");
+    assert_eq!(
+        timer.pending_count(),
+        1,
+        "the long timer must be registered before the cross-thread cancel fires",
+    );
+
+    std::thread::spawn(move || {
+        child_cx.cancel_with(CancelKind::Shutdown, Some("external shutdown"));
+    })
+    .join()
+    .expect("cross-thread Cx cancellation must not panic");
+
+    assert!(
+        runtime.block_on(drive_until_flag(&sleep_returned, Duration::from_secs(1))),
+        "Cx::cancel_with must wake a task parked in sleep(10s) and complete the wait promptly",
+    );
+    assert!(
+        !child_finished.load(Ordering::Acquire),
+        "the child must retain the completed Sleep during the registration assertion",
+    );
+    assert_eq!(
+        timer.pending_count(),
+        0,
+        "the cancelled sleep must remove its timer registration before the completed future is dropped",
+    );
+
+    release_child.store(true, Ordering::Release);
+    assert!(
+        runtime.block_on(drive_until_flag(&child_finished, Duration::from_secs(1))),
+        "the child must finish after the parent releases its retained Sleep",
+    );
+}
+
+#[test]
+fn abort_and_join_complete_promptly_for_a_timer_parked_native_child() {
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let parked = Arc::new(AtomicBool::new(false));
+        let child_parked = Arc::clone(&parked);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                let mut sleeper = std::pin::pin!(asupersync::time::sleep(
+                    child_cx.now(),
+                    Duration::from_secs(10),
+                ));
+                std::future::poll_fn(|poll_cx| {
+                    let poll = sleeper.as_mut().poll(poll_cx);
+                    if poll.is_pending() {
+                        child_parked.store(true, Ordering::Release);
+                    }
+                    poll
+                })
+                .await;
+            })
+            .expect("spawn timer-parked native child");
+
+        assert!(
+            drive_until_flag(&parked, Duration::from_secs(2)).await,
+            "the child must poll and arm its 10-second sleep before abort",
+        );
+        let timer = cx
+            .timer_driver()
+            .expect("native task must inherit the runtime timer driver");
+        assert_eq!(
+            timer.pending_count(),
+            1,
+            "the child timer must be live before abort",
+        );
+
+        child.abort();
+        let started = Instant::now();
+        let result = child.join(&cx).await;
+        let elapsed = started.elapsed();
+        assert_eq!(
+            result,
+            Ok(()),
+            "Sleep has no error output, so acknowledged cancellation completes the wait and preserves the child's cleanup result",
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "abort+join of a sleep(10s)-parked child must complete promptly, took {elapsed:?}",
+        );
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "joining the cancelled child must leave no registered timer behind",
+        );
+    }));
+}
+
+/// br-asupersync-2u7bpm: a cancelled task whose loop awaits a fresh sleep on
+/// every turn, and never checks for cancellation, must keep returning to the
+/// scheduler. Each such Sleep used to be ready on its first poll, so the loop
+/// ran all its remaining turns inside one poll, and an endless loop froze its
+/// worker (here, the whole current-thread runtime). The loop is bounded so the
+/// old behaviour fails this test instead of hanging it.
+#[test]
+fn a_cancelled_loop_of_sleeps_returns_to_the_scheduler_every_turn() {
+    const TURNS: usize = 200;
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(create_reactor().expect("create native reactor"))
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let turns = Arc::new(AtomicUsize::new(0));
+        let child_turns = Arc::clone(&turns);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                while child_turns.fetch_add(1, Ordering::AcqRel) + 1 < TURNS {
+                    asupersync::time::sleep(child_cx.now(), Duration::from_secs(10)).await;
+                }
+            })
+            .expect("spawn a loop of sleeps");
+
+        let timer = cx
+            .timer_driver()
+            .expect("native task must inherit the runtime timer driver");
+        let parked_by = Instant::now() + Duration::from_secs(2);
+        while !(turns.load(Ordering::Acquire) == 1 && timer.pending_count() == 1) {
+            assert!(
+                Instant::now() < parked_by,
+                "the loop must park in its first 10-second sleep before abort",
+            );
+            yield_now().await;
+        }
+
+        child.abort();
+        let mut seen = Vec::new();
+        let finished_by = Instant::now() + Duration::from_secs(5);
+        loop {
+            let now = turns.load(Ordering::Acquire);
+            seen.push(now);
+            if now >= TURNS {
+                break;
+            }
+            assert!(
+                Instant::now() < finished_by,
+                "the cancelled loop must run out its turns, reached {now}",
+            );
+            yield_now().await;
+        }
+        assert!(
+            seen.iter().any(|&turn| turn > 1 && turn < TURNS),
+            "the parent must run between the cancelled loop's turns, saw {seen:?}",
+        );
+        let _ = child.join(&cx).await;
+        assert_eq!(
+            timer.pending_count(),
+            0,
+            "no sleep of the cancelled loop may stay registered",
+        );
+    }));
+}
+
+#[test]
+fn run_test_preserves_typed_cancellation_from_a_parked_spawn() {
+    asupersync::test_utils::run_test(|| async {
+        let cx = Cx::current().expect("run_test must install a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder_mutex = Arc::clone(&mutex);
+        let (holder_started_tx, mut holder_started_rx) = oneshot::channel();
+        let (release_holder_tx, mut release_holder_rx) = oneshot::channel();
+        let mut holder = cx
+            .spawn(move |holder_cx| async move {
+                let guard = OwnedMutexGuard::lock(holder_mutex, &holder_cx)
+                    .await
+                    .expect("holder must acquire the initially free mutex");
+                holder_started_tx
+                    .send_blocking(())
+                    .expect("holder-start receiver must remain live");
+                release_holder_rx
+                    .recv(&holder_cx)
+                    .await
+                    .expect("holder release signal must remain live");
+                drop(guard);
+            })
+            .expect("run_test must admit a Send holder that owns a guard across await");
+
+        holder_started_rx
+            .recv(&cx)
+            .await
+            .expect("spawned holder must own the mutex before the waiter starts");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                match OwnedMutexGuard::lock(waiter_mutex, &waiter_cx).await {
+                    Ok(guard) => {
+                        drop(guard);
+                        Ok(())
+                    }
+                    Err(LockError::Cancelled) => Err(DownstreamTransportError::Cancelled),
+                    Err(other) => panic!("unexpected downstream lock error: {other:?}"),
+                }
+            })
+            .expect("run_test must provide a native spawn lane");
+
+        for _ in 0..512 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "the downstream-shaped operation must be parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert_eq!(
+            result,
+            Ok(Err(DownstreamTransportError::Cancelled)),
+            "run_test + Cx::spawn must preserve the downstream operation-level cancellation result",
+        );
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "typed cancellation must unlink the parked waiter before the holder unlocks",
+        );
+        release_holder_tx
+            .send_blocking(())
+            .expect("spawned holder must still await its release signal");
+        assert_eq!(
+            holder.join(&cx).await,
+            Ok(()),
+            "the spawned guard holder must complete cleanly after the waiter is cancelled",
+        );
+    });
+}
+
+#[test]
+fn abort_repolls_an_explicit_cx_websocket_close_write_to_typed_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx = Cx::current().expect("runtime task installs a current Cx");
+        let write_polls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let websocket = WebSocket::from_upgraded(
+            PendingWebSocketWrite {
+                write_polls: Arc::clone(&write_polls),
+                dropped: Arc::clone(&dropped),
+            },
+            WebSocketConfig::default(),
+        );
+        let (read, mut write) = websocket.split();
+        let mut close = cx
+            .spawn(move |close_cx| async move {
+                write
+                    .send(&close_cx, Message::Close(Some(CloseReason::normal())))
+                    .await
+            })
+            .expect("runtime-backed Cx must admit the split WebSocket close");
+
+        for _ in 0..512 {
+            if write_polls.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            write_polls.load(Ordering::Acquire),
+            1,
+            "the close frame must be genuinely parked in the transport write before abort",
+        );
+
+        close.abort();
+        let result = close.join(&cx).await;
+        match result {
+            Ok(Err(WsError::Io(error))) => assert_eq!(
+                error.kind(),
+                io::ErrorKind::Interrupted,
+                "the explicit close context must surface typed I/O cancellation",
+            ),
+            other => panic!(
+                "aborting a transport-parked close must preserve its operation-level cancellation result; got {other:?}",
+            ),
+        }
+        assert_eq!(
+            write_polls.load(Ordering::Acquire),
+            1,
+            "the abort repoll must observe the explicit context before polling the transport again",
+        );
+
+        drop(read);
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "joining the cancelled close and dropping the peer half must release the transport",
+        );
+    }));
+}
+
+#[test]
+fn spawn_blocking_discards_a_late_value_after_wrapper_cancellation() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("build runtime with a real blocking pool");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let (started_tx, mut started_rx) = oneshot::channel();
+        let release = Arc::new(AtomicBool::new(false));
+        let closure_release = Arc::clone(&release);
+        let mut handle = cx
+            .spawn_blocking(move |_child| {
+                started_tx
+                    .send_blocking(())
+                    .expect("blocking closure start receiver must remain live");
+                while !closure_release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                42_u32
+            })
+            .expect("runtime-backed Cx must admit blocking work");
+
+        started_rx
+            .recv(&cx)
+            .await
+            .expect("blocking closure must start before wrapper cancellation");
+
+        handle.abort();
+        release.store(true, Ordering::Release);
+        let result = handle.join(&cx).await;
+        assert!(
+            matches!(result, Err(JoinError::Cancelled(_))),
+            "spawn_blocking must discard a value completed after wrapper cancellation; got {result:?}",
+        );
+    }));
+}
+
+#[test]
+fn spawn_blocking_in_discards_a_late_value_after_wrapper_cancellation() {
+    let runtime = RuntimeBuilder::new()
+        .worker_threads(1)
+        .blocking_threads(1, 2)
+        .build()
+        .expect("build runtime with a real blocking pool");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let scope = cx.scope();
+        let (started_tx, mut started_rx) = oneshot::channel();
+        let release = Arc::new(AtomicBool::new(false));
+        let closure_release = Arc::clone(&release);
+        let mut handle = cx
+            .spawn_blocking_in(&scope, move |_child| {
+                started_tx
+                    .send_blocking(())
+                    .expect("blocking closure start receiver must remain live");
+                while !closure_release.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                42_u32
+            })
+            .expect("runtime-backed Cx must admit scoped blocking work");
+
+        started_rx
+            .recv(&cx)
+            .await
+            .expect("scoped blocking closure must start before wrapper cancellation");
+
+        handle.abort();
+        release.store(true, Ordering::Release);
+        let result = handle.join(&cx).await;
+        assert!(
+            matches!(result, Err(JoinError::Cancelled(_))),
+            "spawn_blocking_in must discard a value completed after wrapper cancellation; got {result:?}",
+        );
+    }));
+}
+
+#[test]
+fn legacy_state_task_panic_after_abort_remains_panicked() {
+    struct PendingThenPanic {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl std::future::Future for PendingThenPanic {
+        type Output = ();
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            if self.polls.fetch_add(1, Ordering::AcqRel) == 0 {
+                std::task::Poll::Pending
+            } else {
+                panic!("legacy-state-cancel-panic-sentinel");
+            }
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let join_cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (task_id, mut handle) = state
+            .create_task(
+                region,
+                Budget::INFINITE,
+                PendingThenPanic {
+                    polls: Arc::clone(&polls),
+                },
+            )
+            .expect("legacy state task must be created");
+
+        let waker = std::task::Waker::noop();
+        let mut poll_cx = std::task::Context::from_waker(waker);
+        assert!(
+            state
+                .get_stored_future(task_id)
+                .expect("legacy state task future must be stored")
+                .poll(&mut poll_cx)
+                .is_pending(),
+            "the legacy task must cross one Pending before cancellation",
+        );
+        assert_eq!(polls.load(Ordering::Acquire), 1);
+
+        handle.abort();
+        assert!(
+            state
+                .get_stored_future(task_id)
+                .expect("legacy state task future must remain stored")
+                .poll(&mut poll_cx)
+                .is_ready(),
+            "the cancelled legacy task must be repolled to its panic",
+        );
+
+        let mut join = std::pin::pin!(handle.join(&join_cx));
+        match std::future::Future::poll(join.as_mut(), &mut poll_cx) {
+            std::task::Poll::Ready(Err(JoinError::Panicked(payload))) => assert!(
+                payload
+                    .message()
+                    .contains("legacy-state-cancel-panic-sentinel"),
+                "legacy state task join must preserve the post-cancel panic payload",
+            ),
+            other => panic!(
+                "legacy state task panic must outrank cancellation at terminal publication; got {other:?}"
+            ),
+        }
+    }));
+}
+
+#[test]
+fn legacy_state_ready_future_drop_panic_is_published_as_join_error() {
+    struct ReadyThenDropPanic {
+        drops: Arc<AtomicUsize>,
+        _pinned: std::marker::PhantomPinned,
+    }
+
+    impl std::future::Future for ReadyThenDropPanic {
+        type Output = u8;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Ready(7)
+        }
+    }
+
+    impl Drop for ReadyThenDropPanic {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::AcqRel);
+            panic!("legacy-ready-future-drop-panic-sentinel");
+        }
+    }
+
+    for aborted in [false, true] {
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (task_id, mut handle) = state
+            .create_task(
+                region,
+                Budget::INFINITE,
+                ReadyThenDropPanic {
+                    drops: Arc::clone(&drops),
+                    _pinned: std::marker::PhantomPinned,
+                },
+            )
+            .expect("create legacy task with a pinned user future");
+        if aborted {
+            handle.abort();
+        }
+
+        let mut poll_cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let terminal = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            state
+                .get_stored_future(task_id)
+                .expect("legacy task future is stored")
+                .poll(&mut poll_cx)
+        }));
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+        assert!(
+            terminal.is_ok_and(|poll| poll.is_ready()),
+            "a completed future's destructor must run inside the task panic boundary",
+        );
+        match handle.try_join() {
+            Err(JoinError::Panicked(payload)) => assert!(
+                payload
+                    .message()
+                    .contains("legacy-ready-future-drop-panic-sentinel")
+            ),
+            other => panic!(
+                "destructor panic must outrank both the returned value and cancellation (aborted={aborted}): {other:?}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn legacy_state_task_keeps_cancellation_dominant_result_attribution() {
+    struct PendingThenValue {
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl std::future::Future for PendingThenValue {
+        type Output = u32;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            if self.polls.fetch_add(1, Ordering::AcqRel) == 0 {
+                std::task::Poll::Pending
+            } else {
+                std::task::Poll::Ready(42)
+            }
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let join_cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let polls = Arc::new(AtomicUsize::new(0));
+        let (task_id, mut handle) = state
+            .create_task(
+                region,
+                Budget::INFINITE,
+                PendingThenValue {
+                    polls: Arc::clone(&polls),
+                },
+            )
+            .expect("legacy state task must be created");
+
+        {
+            // `Context` is intentionally scoped away before the async join;
+            // it is a stack-only polling capability and is not `Send`.
+            let waker = std::task::Waker::noop();
+            let mut poll_cx = std::task::Context::from_waker(waker);
+            assert!(
+                state
+                    .get_stored_future(task_id)
+                    .expect("legacy state task future must be stored")
+                    .poll(&mut poll_cx)
+                    .is_pending(),
+                "the legacy state task must cross Pending before cancellation",
+            );
+
+            handle.abort();
+            assert!(
+                state
+                    .get_stored_future(task_id)
+                    .expect("legacy state task future must remain stored")
+                    .poll(&mut poll_cx)
+                    .is_ready(),
+                "the legacy state task must be driven to its late value",
+            );
+        }
+
+        let result = handle.join(&join_cx).await;
+        assert!(
+            matches!(result, Err(JoinError::Cancelled(_))),
+            "RuntimeState::create_task must retain its v0.4.3 cancellation-dominant result contract; got {result:?}",
+        );
+        assert_eq!(polls.load(Ordering::Acquire), 2);
+    }));
+}
+
+#[test]
+fn acknowledged_cancellation_can_finish_async_cleanup_before_join_completes() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let cleanup_completed = Arc::new(AtomicBool::new(false));
+        let waiter_mutex = Arc::clone(&mutex);
+        let waiter_cleanup_completed = Arc::clone(&cleanup_completed);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                let result = OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop);
+                if matches!(result, Err(LockError::Cancelled)) {
+                    // Deliberately cross another Pending after the primitive's
+                    // checkpoint acknowledged cancellation. The spawn/result
+                    // boundary must not mistake protocol cleanup for an
+                    // unresponsive cancellation-blind future.
+                    yield_now().await;
+                    waiter_cleanup_completed.store(true, Ordering::Release);
+                }
+                result
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "cleanup must preserve the operation-level cancellation result; got {result:?}",
+        );
+        assert!(
+            cleanup_completed.load(Ordering::Acquire),
+            "a task that acknowledged cancellation must finish asynchronous protocol cleanup",
+        );
+
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "cleanup must unlink the mutex waiter before the holder unlocks",
+        );
+        drop(holder);
+    }));
+}
+
+#[test]
+fn ordinary_spawn_keeps_cancellation_dominant_for_cancellation_blind_late_values() {
+    struct CancellationBlindLateValue {
+        started: Arc<AtomicBool>,
+        released: Arc<AtomicBool>,
+    }
+
+    impl std::future::Future for CancellationBlindLateValue {
+        type Output = u32;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            self.started.store(true, Ordering::Release);
+            if self.released.load(Ordering::Acquire) {
+                std::task::Poll::Ready(42)
+            } else {
+                std::task::Poll::Pending
+            }
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let started = Arc::new(AtomicBool::new(false));
+        let released = Arc::new(AtomicBool::new(false));
+        let child_started = Arc::clone(&started);
+        let child_released = Arc::clone(&released);
+        let mut child = cx
+            .spawn(move |_child_cx| CancellationBlindLateValue {
+                started: child_started,
+                released: child_released,
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        for _ in 0..512 {
+            if started.load(Ordering::Acquire) {
+                break;
+            }
+            yield_now().await;
+        }
+        assert!(
+            started.load(Ordering::Acquire),
+            "the cancellation-blind future must start before abort",
+        );
+
+        // Publish the value first, then abort without yielding. On the
+        // current-thread runtime the abort wake owns the next child poll, so
+        // the value can only be returned after cancellation was requested.
+        released.store(true, Ordering::Release);
+        child.abort();
+        let result = child.join(&cx).await;
+        assert!(
+            matches!(result, Err(JoinError::Cancelled(_))),
+            "ordinary Cx::spawn must retain v0.4.3 task-level cancellation for a cancellation-blind late value; got {result:?}",
+        );
+    }));
+}
+
+#[test]
+fn read_only_cancellation_observation_does_not_reclassify_a_late_value() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let child_polls = Arc::clone(&polls);
+        let mut child = cx
+            .spawn(move |child_cx| async move {
+                std::future::poll_fn(|_poll_cx| {
+                    if child_polls.fetch_add(1, Ordering::AcqRel) == 0 {
+                        std::task::Poll::Pending
+                    } else {
+                        std::task::Poll::Ready(())
+                    }
+                })
+                .await;
+                assert!(
+                    child_cx.is_cancel_requested(),
+                    "the repoll must observe the abort request",
+                );
+                42_u32
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        for _ in 0..512 {
+            if polls.load(Ordering::Acquire) == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            polls.load(Ordering::Acquire),
+            1,
+            "the child must cross Pending before abort",
+        );
+
+        child.abort();
+        let result = child.join(&cx).await;
+        assert!(
+            matches!(result, Err(JoinError::Cancelled(_))),
+            "is_cancel_requested is read-only; without protocol acknowledgement the late value must retain v0.4.3 task-level cancellation; got {result:?}",
+        );
+    }));
+}
+
+#[test]
+fn local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn_local(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("worker-owned Cx must admit local waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "local waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "local-spawn abort must preserve the mutex operation's typed cancellation; got {result:?}",
+        );
+
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "local-spawn cancellation must unlink the parked mutex waiter before the holder unlocks",
+        );
+        drop(holder);
+    }));
+}
+
+#[test]
+fn cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_waiter_cleanup() {
+    let runtime = RuntimeBuilder::multi_thread()
+        .worker_threads(2)
+        .build()
+        .expect("build two-worker runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedMutexGuard::lock(waiter_mutex, &waiter_cx)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        assert!(
+            drive_until_waiters(&mutex, 1, Duration::from_secs(10)).await,
+            "multi-worker-runtime waiter must be genuinely parked before cross-thread abort",
+        );
+
+        let mut waiter = std::thread::spawn(move || {
+            waiter.abort();
+            waiter
+        })
+        .join()
+        .expect("cross-thread abort caller must not panic");
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(LockError::Cancelled))),
+            "a cross-thread abort on a multi-worker runtime must preserve the mutex operation's typed cancellation; got {result:?}",
+        );
+
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "cross-thread cancellation must unlink the parked mutex waiter before the holder unlocks",
+        );
+        drop(holder);
+    }));
+}
+
+#[test]
+fn abort_before_first_poll_keeps_task_level_cancellation_attribution() {
+    assert_abort_before_first_poll_keeps_task_level_cancellation(false);
+}
+
+#[test]
+fn local_abort_before_first_poll_keeps_task_level_cancellation_attribution() {
+    assert_abort_before_first_poll_keeps_task_level_cancellation(true);
+}
+
+fn assert_abort_before_first_poll_keeps_task_level_cancellation(local: bool) {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let child_polls = Arc::clone(&polls);
+        let child_body = move |child_cx: Cx| async move {
+            child_polls.fetch_add(1, Ordering::AcqRel);
+            assert!(
+                child_cx.checkpoint().is_err(),
+                "an abort requested before first poll must be visible to the child"
+            );
+            "cancelled-before-first-work"
+        };
+        let mut child = if local {
+            cx.spawn_local(child_body)
+        } else {
+            cx.spawn(child_body)
+        }
+        .expect("runtime-backed Cx must admit child task");
+
+        // The current task retains the only worker until it awaits below, so
+        // this abort is deterministically published before the child's first
+        // poll rather than racing a second executor thread.
+        child.abort();
+        let result = child.join(&cx).await;
+        assert!(
+            matches!(
+                result,
+                Err(JoinError::Cancelled(ref reason)) if reason.kind == CancelKind::User
+            ),
+            "pre-poll abort must remain task-level cancellation even though user code receives one cleanup poll; got {result:?}",
+        );
+        assert_eq!(
+            polls.load(Ordering::Acquire),
+            1,
+            "the cancelled child must not be polled again after returning"
+        );
+    }));
+}
+
+#[test]
+fn cancellation_published_at_the_end_of_pending_repolls_user_code() {
+    struct CancelAtEndOfFirstPoll {
+        cx: Cx,
+        polls: Arc<AtomicUsize>,
+    }
+
+    impl std::future::Future for CancelAtEndOfFirstPoll {
+        type Output = &'static str;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _poll_cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            let poll = self.polls.fetch_add(1, Ordering::AcqRel);
+            if poll == 0 {
+                // Force the cancellation publication into the exact race
+                // window after user code has begun this poll but before the
+                // task returns its Pending result to the scheduler.
+                self.cx
+                    .cancel_with(CancelKind::User, Some("cancel at end of first poll"));
+                return std::task::Poll::Pending;
+            }
+
+            assert!(
+                self.cx.checkpoint().is_err(),
+                "the follow-up poll must deliver cancellation to user code",
+            );
+            std::task::Poll::Ready("observed-racing-cancellation")
+        }
+    }
+
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let polls = Arc::new(AtomicUsize::new(0));
+        let child_polls = Arc::clone(&polls);
+        let mut child = cx
+            .spawn(move |child_cx| CancelAtEndOfFirstPoll {
+                cx: child_cx,
+                polls: child_polls,
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        assert_eq!(
+            child.join(&cx).await,
+            Ok("observed-racing-cancellation"),
+            "a cancellation racing with the end of a Pending poll must not skip user delivery",
+        );
+        assert_eq!(
+            polls.load(Ordering::Acquire),
+            2,
+            "cancellation publication must schedule exactly one follow-up poll before return",
+        );
+    }));
+}
+
+#[test]
+fn terminal_publication_boundary_preserves_panics_as_join_errors() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mut child = cx
+            .spawn(|_child_cx| async move {
+                panic!("native-task-boundary-panic-sentinel");
+            })
+            .expect("runtime-backed Cx must admit child task");
+
+        match child.join(&cx).await {
+            Err(JoinError::Panicked(payload)) => assert!(
+                payload
+                    .message()
+                    .contains("native-task-boundary-panic-sentinel"),
+                "join must preserve the original panic payload"
+            ),
+            other => panic!("spawned panic must remain a JoinError::Panicked; got {other:?}"),
+        }
+    }));
+}
+
+#[test]
+fn panic_during_cancel_cleanup_outranks_task_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex
+            .try_lock_owned()
+            .expect("seed mutex must be available");
+        let waiter_mutex = Arc::clone(&mutex);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                let result = OwnedMutexGuard::lock(waiter_mutex, &waiter_cx).await;
+                assert!(
+                    matches!(result, Err(LockError::Cancelled)),
+                    "cleanup panic must follow acknowledged primitive cancellation",
+                );
+                panic!("native-cancel-cleanup-panic-sentinel");
+            })
+            .expect("runtime-backed Cx must admit waiter task");
+
+        for _ in 0..256 {
+            if mutex.waiters() == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            mutex.waiters(),
+            1,
+            "waiter must be genuinely parked before abort",
+        );
+
+        waiter.abort();
+        match waiter.join(&cx).await {
+            Err(JoinError::Panicked(payload)) => assert!(
+                payload
+                    .message()
+                    .contains("native-cancel-cleanup-panic-sentinel"),
+                "join must preserve the cleanup panic payload",
+            ),
+            other => {
+                panic!("panic during cancellation cleanup must outrank cancellation; got {other:?}")
+            }
+        }
+        assert_eq!(
+            mutex.waiters(),
+            0,
+            "cancel cleanup must unlink the mutex waiter before the holder unlocks",
+        );
+        drop(holder);
+    }));
+}
+
+#[test]
+fn abort_repolls_a_capacity_parked_send_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let (sender, _receiver) = mpsc::channel(1);
+        sender.try_send(1_u8).expect("fill bounded channel");
+        let waiter_sender = sender.clone();
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move { waiter_sender.send(&waiter_cx, 2_u8).await })
+            .expect("runtime-backed Cx must admit sender task");
+
+        for _ in 0..256 {
+            if sender.telemetry_snapshot(7).send_waiter_count == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            sender.telemetry_snapshot(7).send_waiter_count,
+            1,
+            "sender must be queued on channel capacity before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(SendError::Cancelled(2)))),
+            "aborting a capacity-parked send must preserve its value-bearing inner cancellation result; got {result:?}",
+        );
+        assert_eq!(
+            sender.telemetry_snapshot(7).send_waiter_count,
+            0,
+            "cancelled sender must unlink its channel waiter",
+        );
+    }));
+}
+
+#[test]
+fn abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build current-thread runtime");
+
+    runtime.block_on(runtime.handle().spawn(async {
+        let cx: Cx = Cx::current().expect("runtime task installs a current Cx");
+        let semaphore = Arc::new(Semaphore::new(0));
+        let waiter_semaphore = Arc::clone(&semaphore);
+        let mut waiter = cx
+            .spawn(move |waiter_cx| async move {
+                OwnedSemaphorePermit::acquire(waiter_semaphore, &waiter_cx, 1)
+                    .await
+                    .map(drop)
+            })
+            .expect("runtime-backed Cx must admit semaphore task");
+
+        for _ in 0..256 {
+            if semaphore.telemetry_snapshot(11).waiter_count == 1 {
+                break;
+            }
+            yield_now().await;
+        }
+        assert_eq!(
+            semaphore.telemetry_snapshot(11).waiter_count,
+            1,
+            "acquirer must be queued on the semaphore before abort",
+        );
+
+        waiter.abort();
+        let result = waiter.join(&cx).await;
+        assert!(
+            matches!(result, Ok(Err(AcquireError::Cancelled))),
+            "aborting a semaphore-parked acquire must preserve its inner cancellation result; got {result:?}",
+        );
+        let telemetry = semaphore.telemetry_snapshot(11);
+        assert_eq!(
+            telemetry.waiter_count, 0,
+            "cancelled acquirer must unlink its semaphore waiter",
+        );
+        assert_eq!(
+            telemetry.cancellation_count, 1,
+            "semaphore cancellation cleanup must remain observable",
+        );
+    }));
+}
+
+#[test]
+fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
+    let task_handle = read("src/runtime/task_handle.rs");
+    assert!(
+        task_handle.contains("pub(crate) fn publish_terminal_result<T>(")
+            && task_handle.contains("pub(crate) struct TaskResultSender<T>")
+            && task_handle.contains("fn task_result_channel<T>()")
+            && task_handle.contains("pub(crate) fn task_handle_channel<T>(")
+            && task_handle.contains("pub(crate) fn pending_task_handle_channel<T>(")
+            && task_handle
+                .matches("sender.sender.send_blocking(result)")
+                .count()
+                == 1,
+        "the authoritative TaskHandle terminal-publication boundary must remain centralized and capability-restricted",
+    );
+
+    for rel in ["src/cx/cx.rs", "src/cx/scope.rs", "src/runtime/state.rs"] {
+        let source = read(rel);
+        assert!(
+            source.contains("publish_terminal_result("),
+            "{rel} must publish TaskHandle results through the authoritative boundary",
+        );
+        let factory = if rel == "src/cx/cx.rs" {
+            "pending_task_handle_channel::<"
+        } else {
+            "task_handle_channel::<"
+        };
+        assert!(
+            source.contains(factory),
+            "{rel} must obtain an inseparable capability-restricted sender and TaskHandle pair",
+        );
+    }
+
+    let cx = read("src/cx/cx.rs");
+    let scope = read("src/cx/scope.rs");
+    let state = read("src/runtime/state.rs");
+    assert!(
+        task_handle.contains("PreserveAcknowledgedCancellationResult")
+            && task_handle.contains("CancellationDominant")
+            && task_handle.contains("pub(crate) fn classify_spawn_completion<T>(")
+            && task_handle.contains("pub(crate) fn observe_spawn_completion<F, T>(")
+            && task_handle.contains("pub(crate) struct SpawnCompletionObserver<F>")
+            && task_handle.contains(
+                "impl<F: std::future::Future> std::future::Future for SpawnCompletionObserver<F>",
+            )
+            && task_handle.contains("cancelled_before_first_poll"),
+        "TaskHandle policy must distinguish acknowledged cancellation results, cancellation-blind late values, structured task cancellation, and pre-poll cancellation",
+    );
+    assert!(
+        cx.contains("SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult"),
+        "public Cx spawn paths must preserve typed results only after cancellation acknowledgement",
+    );
+    assert!(
+        scope.contains("publish_terminal_result(tx, Ok(result))")
+            && !scope.contains("observe_spawn_completion("),
+        "legacy Scope must retain its v0.4.3 unconditional returned-value policy without adding a per-poll cancellation observer",
+    );
+    assert!(
+        state.contains("SpawnCompletionPolicy::CancellationDominant"),
+        "low-level RuntimeState task creation must retain its established cancellation-dominant result policy",
+    );
+    for rel in ["src/cx/cx.rs", "src/runtime/state.rs"] {
+        assert!(
+            read(rel).contains("observe_spawn_completion("),
+            "{rel} must use the shared poll-boundary cancellation observer",
+        );
+    }
+    let join_set = read("src/combinator/join_set.rs");
+    assert!(
+        join_set.contains("spawn_in_cancellation_dominant")
+            && join_set.contains("spawn_local_in_cancellation_dominant"),
+        "JoinSet must opt into task-level cancellation attribution for both send and local members",
+    );
+    assert!(
+        cx.contains("self.spawn_cancellation_dominant(move |child|")
+            && cx.contains("self.spawn_in_cancellation_dominant(scope, move |child|"),
+        "spawn_blocking wrappers must keep their documented late-result discard policy",
+    );
+
+    // Keep the complete source-tree constructor/factory census explicit,
+    // including internal test constructors. Real spawn adapters use only the
+    // capability-restricted pair factories. A new producer in a new file must
+    // fail this lane until its publication behavior is deliberately classified.
+    let expected_census = BTreeMap::from([
+        ("src/combinator/join_set.rs|TaskHandle::new(".to_owned(), 1),
+        // Classified (02469ad83, 1sngsf, bi2462.147): a `#[cfg(test)]` fixture
+        // in the fail-fast JoinSet owner tests (`manual_member`) that builds a
+        // handle over a hand-held oneshot so a test can complete members in
+        // any order. It is not a spawn adapter: production members are
+        // spawned through `Cx` spawn paths, whose pair factories are counted
+        // under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/owner/fail_fast.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
+        // Classified (5f8303a12, b3d54ec0f; ov3xtg): `#[cfg(test)]` fixtures
+        // in the JoinSet collector-wake and nonblocking-collection tests. Each
+        // builds a handle over a hand-held oneshot (`new_pending` adds a test
+        // retirement barrier) so the test completes members at will. They are
+        // not spawn adapters; production members spawn through `Cx` spawn
+        // paths, whose pair factories are counted under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/candidate_tests.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
+        (
+            "src/combinator/join_set/candidate_tests.rs|TaskHandle::new_pending(".to_owned(),
+            1,
+        ),
+        // Classified (cf53c191e, br-asupersync-v8rp1h L4/L5): `#[cfg(test)]`
+        // fixtures in the bounded selection tests (collector.rs
+        // `selection_tests`). Each builds a handle over a hand-held oneshot so
+        // the test decides when a candidate publishes. They are not spawn
+        // adapters; production members spawn through `Cx` spawn paths, whose
+        // pair factories are counted under src/cx/cx.rs.
+        (
+            "src/combinator/join_set/collector.rs|TaskHandle::new(".to_owned(),
+            2,
+        ),
+        (
+            "src/combinator/join_set/waker_tests.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
+        // Classified (27a96729f, bi2462.102): a `#[cfg(test)]` fixture in the
+        // HTTP/2 request-owner tests that builds a handle over a hand-held
+        // oneshot to publish a terminal between two probes. It is not a spawn
+        // adapter: production h2 request tasks are spawned with
+        // `Cx::spawn_in` / `spawn_in_cancellation_dominant`, whose pair
+        // factories are counted under src/cx/cx.rs.
+        (
+            "src/http/h2/listener/ownership.rs|TaskHandle::new(".to_owned(),
+            1,
+        ),
+        (
+            "src/cx/cx.rs|crate::runtime::task_handle::pending_task_handle_channel::<".to_owned(),
+            2,
+        ),
+        (
+            "src/cx/scope.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
+            1,
+        ),
+        // Classified (ecda43b5b, bi2462.156, q1fhxo): a `#[cfg(test)]` fixture
+        // in the drained blocking unit tests that builds a handle over a
+        // directly held publisher, so it can close the task's terminal
+        // publisher before the pool finishes. It is not a spawn adapter:
+        // production drained blocking work is spawned with `Cx::spawn` /
+        // `Cx::spawn_in`, whose pair factories are counted under src/cx/cx.rs.
+        (
+            "src/runtime/spawn_blocking.rs|crate::runtime::task_handle::task_handle_channel::<"
+                .to_owned(),
+            1,
+        ),
+        (
+            "src/runtime/spawn_mailbox.rs|TaskHandle::new_pending(".to_owned(),
+            3,
+        ),
+        (
+            "src/runtime/state.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
+            1,
+        ),
+        ("src/runtime/task_handle.rs|TaskHandle::new(".to_owned(), 27),
+        (
+            "src/runtime/task_handle.rs|TaskHandle::new_pending(".to_owned(),
+            5,
+        ),
+    ]);
+    assert_eq!(
+        task_handle_constructor_census(),
+        expected_census,
+        "TaskHandle constructor census changed; extend the native cancellation matrix before accepting a new spawn adapter",
+    );
+}
+
+#[test]
+fn sibling_terminal_handle_publishers_are_cx_independent() {
+    for rel in [
+        "src/remote.rs",
+        "src/lab/network/harness.rs",
+        "src/actor.rs",
+        "src/gen_server.rs",
+        "src/atp/transfer_actor.rs",
+        "src/conformance/mod.rs",
+    ] {
+        let source = read(rel);
+        let production = source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("source always has a production prefix");
+        let compact: String = production.split_whitespace().collect();
+        assert!(
+            production.contains(".send_blocking("),
+            "{rel} must retain a Cx-independent terminal result publisher",
+        );
+        assert!(
+            !compact.contains("result_tx.send(&")
+                && !compact.contains("response_tx.send(")
+                && !compact.contains("registration_tx.send(&")
+                && (matches!(rel, "src/actor.rs" | "src/gen_server.rs")
+                    || !compact.contains("tx.send(&")),
+            "{rel} must not route terminal handle results through a possibly cancelled Cx",
+        );
+    }
+}
+
+#[test]
+fn task_handle_abort_publishes_via_same_stable_envelope_as_cancel() {
+    // Pin (link 1): TaskHandle::abort_with_reason uses the
+    // same fast_cancel.store(true, Release) + cancel_reason
+    // mechanism as Cx::cancel_with. This is the structural
+    // proof that abort is a graceful-cancel synonym, NOT
+    // a hard-kill.
+    let source = read("src/runtime/task_handle.rs");
+    let task_context = read("src/types/task_context.rs");
+
+    let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
+    let start = source.find(fn_marker).expect("abort_with_reason fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("abort_with_reason close");
+    let body = &source[start..start + body_end];
+
+    assert!(
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("let mut cached = requested.write();")
+            && source.contains(".filter(|task| task.is_published())")
+            && source.contains("strengthen_cancel_reason_locked(&mut lock, &strongest_requested);")
+            && source.contains("lock.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
+        "REGRESSION: abort_with_reason no longer publishes \
+         through the admission gate and cancel_requested + \
+         fast_cancel.store(Release). \
+         Either abort is now a true hard-kill (impossible \
+         in stable Rust, would require unsafe code) OR the \
+         publish mechanism diverged from Cx::cancel_with.",
+    );
+}
+
+#[test]
+fn task_handle_abort_strengthens_existing_cancel_reason() {
+    // Pin (link 1 idempotency): abort_with_reason strengthens
+    // the existing cancel_reason — preserves attribution
+    // when called multiple times. Same coalescing as
+    // request_cancel_with_budget.
+    let source = read("src/runtime/task_handle.rs");
+
+    let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
+    let start = source.find(fn_marker).expect("abort_with_reason fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("abort_with_reason close");
+    let body = &source[start..start + body_end];
+
+    assert!(
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.contains("if let Some(existing) = cached.as_mut() {")
+            && source.contains("if let Some(existing) = &mut lock.cancel_reason {")
+            && source.contains("existing.strengthen(reason)"),
+        "REGRESSION: abort no longer strengthens existing \
+         cancel_reason. Multi-abort attribution lost — \
+         last-abort-wins instead of strongest.",
+    );
+}
+
+#[test]
+fn task_handle_abort_defers_panic_isolated_wakers_to_runtime_publication() {
+    // Pin (link 2): the caller-side helper updates only
+    // checkpoint-visible Cx state and enqueues plain data after
+    // both locks are gone. The runtime snapshots Wakers during the
+    // authoritative TaskRecord transition, publishes every cancel
+    // lane, and only then panic-isolating dispatches the effects.
+    let source = read("src/runtime/task_handle.rs");
+    let mailbox = read("src/runtime/spawn_mailbox.rs");
+    let state = read("src/runtime/state.rs");
+    let scheduler = read("src/runtime/scheduler/three_lane.rs");
+
+    let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
+    let start = source.find(fn_marker).expect("abort_with_reason fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("abort_with_reason close");
+    let body = &source[start..start + body_end];
+    let gate_start = source
+        .find("fn apply_or_defer_cancel_reason(")
+        .expect("admission-aware abort helper");
+    let gate_end = source[gate_start..]
+        .find("\n}\n")
+        .expect("admission-aware abort helper close");
+    let gate_body = &source[gate_start..gate_start + gate_end];
+
+    assert!(
+        body.contains("apply_or_defer_cancel_reason(")
+            && !body.contains(".dispatch()")
+            && source.matches("apply_or_defer_cancel_reason(").count() >= 3
+            && gate_body.contains("let mut cached = requested.write();")
+            && gate_body.contains(".filter(|task| task.is_published())")
+            && !gate_body.contains(".dispatch()")
+            && !gate_body.contains("cancel_waker_snapshot")
+            && gate_body.contains("drop(cached);")
+            && gate_body.contains("changed || lock.runnable_publication.is_delegated_cancel()")
+            && gate_body.contains("gateway.enqueue_handle_cancel(task_id, effective_reason)")
+            && mailbox.contains("pub(crate) fn enqueue_handle_cancel(")
+            && state.contains("pub(crate) fn cancel_task_for_handle(")
+            && state.contains("record.request_cancel_for_handle(reason)")
+            && scheduler.contains("record.publish_delegated_cancel_lane(")
+            && scheduler.contains("publication_wakes.retire_without_dispatch();")
+            && !scheduler.contains("mailbox.enqueue_handle_cancel(task_id, reason);")
+            && scheduler.contains("for wakes in wakes_to_dispatch")
+            && scheduler.contains("wakes.dispatch();"),
+        "REGRESSION: TaskHandle/JoinFuture abort no longer crosses the \
+         callback-free runtime gateway before TaskRecord transition, \
+         cancel-lane publication, and post-publication Waker dispatch. \
+         Caller locks may be reentered or parked tasks may miss cancellation.",
+    );
+}
+
+#[test]
+fn task_handle_abort_default_reason_is_user_kind_not_force_kill() {
+    // Pin (link 1): the default abort() (no-args) uses
+    // CancelReason::user("abort") — CancelKind::User.
+    // There is NO "ForceKill" or "Abort" CancelKind variant.
+    let source = read("src/runtime/task_handle.rs");
+
+    let fn_marker = "pub fn abort(&self) {";
+    let start = source.find(fn_marker).expect("abort fn");
+    let body_end = source[start..].find("\n    }\n").expect("abort close");
+    let body = &source[start..start + body_end];
+
+    assert!(
+        body.contains("self.abort_with_reason(CancelReason::user(\"abort\"));"),
+        "REGRESSION: abort default reason changed. The \
+         User kind is the documented graceful-cancel \
+         attribution; if abort now uses a different kind, \
+         it would silently change cancel-cause chain \
+         attribution.",
+    );
+
+    // Forbid hard-kill kinds.
+    let cancel_kinds = read("src/types/cancel.rs");
+    let suspect_force_kinds = ["ForceKill,", "HardAbort,", "Force,"];
+    for pat in &suspect_force_kinds {
+        assert!(
+            !cancel_kinds.contains(pat),
+            "REGRESSION: CancelKind now has `{pat}` — a \
+             hard-kill variant. asupersync forbids unsafe \
+             thread termination; this variant has no \
+             implementation path that satisfies the \
+             contract.",
+        );
+    }
+}
+
+#[test]
+fn cx_cancel_with_publishes_via_same_stable_envelope_as_abort() {
+    // Pin (link 1+2 symmetry): Cx::cancel_with uses the
+    // SAME fast_cancel.store(true, Release) mechanism as
+    // TaskHandle::abort. The ONLY differences are the
+    // reason kind/message and the handle access pattern.
+    let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
+
+    let fn_marker = "pub fn cancel_with(&self, kind: CancelKind, message: Option<&'static str>) {";
+    let start = source.find(fn_marker).expect("cancel_with fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("cancel_with close");
+    let body = &source[start..start + body_end];
+
+    assert!(
+        body.contains("inner.set_cancel_requested(true);")
+            && task_context.contains("self.publish_cancel_requested(value);")
+            && task_context.contains(".store(value, std::sync::atomic::Ordering::Release);"),
+        "REGRESSION: Cx::cancel_with no longer publishes via \
+         cancel_requested + fast_cancel.store(Release). The \
+         self-cancel API diverges from abort — observable \
+         behavior conflation or split.",
+    );
+
+    assert!(
+        body.contains("inner.cancel_reason = Some(reason);"),
+        "REGRESSION: Cx::cancel_with no longer sets \
+         cancel_reason. Self-cancel cant carry attribution.",
+    );
+}
+
+#[test]
+fn cx_cancel_fast_uses_same_publish_mechanism_minimal_attribution() {
+    // Pin (link 1+2): Cx::cancel_fast is the perf-tuned
+    // self-cancel — minimal attribution but SAME publish
+    // mechanism. NOT a separate hard-kill.
+    let source = read("src/cx/cx.rs");
+
+    let fn_marker = "pub fn cancel_fast(&self, kind: CancelKind) {";
+    let start = source.find(fn_marker).expect("cancel_fast fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("cancel_fast close");
+    let body = &source[start..start + body_end];
+
+    assert!(
+        body.contains("inner.set_cancel_requested(true);"),
+        "REGRESSION: Cx::cancel_fast no longer sets \
+         cancel_requested. The fast-path self-cancel \
+         diverged from the slow-path cancel_with.",
+    );
+}
+
+#[test]
+fn no_unsafe_thread_termination_in_abort_or_cancel_paths() {
+    // Pin (link 5): neither abort nor cancel paths use
+    // unsafe code for thread termination. asupersync
+    // forbids unsafe code; any pthread_cancel /
+    // process::abort / TerminateThread call would be a
+    // soundness hazard.
+    for rel in &["src/runtime/task_handle.rs", "src/cx/cx.rs"] {
+        let source = read(rel);
+        let suspect_force_paths = [
+            "libc::pthread_cancel",
+            "libc::pthread_kill",
+            "TerminateThread",
+            "std::process::abort()",
+            "std::process::exit(",
+            "std::intrinsics::abort",
+        ];
+        for pat in &suspect_force_paths {
+            assert!(
+                !source.contains(pat),
+                "REGRESSION: {rel} now contains `{pat}` — a \
+                 hard-kill path. This violates \
+                 #![deny(unsafe_code)] AND breaks \
+                 destructor unwinding contracts. Resource \
+                 safety hazard.",
+            );
+        }
+    }
+}
+
+#[test]
+fn abort_path_uses_weak_handle_to_avoid_keeping_task_alive() {
+    // Pin (link 3): TaskHandle resolves cancellation through
+    // Weak<RwLock<CxInner>> handles — either the mailbox
+    // admission weak handle or the original construction-time
+    // weak. The parent's reference doesn't keep the child task
+    // alive. Symmetric with the rest of the cancel/abort contract.
+    let source = read("src/runtime/task_handle.rs");
+
+    let helper_start = source
+        .find("fn apply_or_defer_cancel_reason(")
+        .expect("admission-aware abort helper");
+    let helper_end = source[helper_start..]
+        .find("\n}\n")
+        .expect("admission-aware abort helper close");
+    let helper_body = &source[helper_start..helper_start + helper_end];
+
+    assert!(
+        helper_body.contains("admitted.cx_inner.upgrade()")
+            && helper_body.contains("fallback_inner.upgrade()"),
+        "REGRESSION: abort no longer upgrades the canonical admitted weak \
+         handle or the construction-time fallback weak at the gateway \
+         boundary.",
+    );
+
+    assert!(
+        !helper_body.contains("fallback_inner.write()")
+            && !helper_body.contains("fallback_inner.read()"),
+        "REGRESSION: the cancellation helper no longer upgrades only weak \
+         handles. The weak-handle pattern is broken — abort \
+         either keeps the task alive (semantic leak) or panics \
+         on no-upgrade.",
+    );
+}
+
+#[test]
+fn cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path() {
+    // Pin (link 4 - same observation): both abort and
+    // cancel set fast_cancel + cancel_reason. The user's
+    // checkpoint observes via the SAME path — there is no
+    // separate handler routing for "abort vs cancel".
+    let source = read("src/cx/cx.rs");
+    let task_context = read("src/types/task_context.rs");
+
+    let fn_marker = "pub fn checkpoint(&self) -> Result<(), crate::error::Error> {";
+    let start = source.find(fn_marker).expect("checkpoint fn");
+    let window_end = (start + 4000).min(source.len());
+    let safe_end = source
+        .char_indices()
+        .map(|(i, _)| i)
+        .rfind(|&i| i <= window_end)
+        .unwrap_or(window_end);
+    let body = &source[start..safe_end];
+
+    // checkpoint queries the same stable envelope that abort/cancel publish.
+    assert!(
+        body.contains("let cancelled = guard.is_cancel_requested();")
+            && task_context.contains(
+                "self.cancel_requested || self.fast_cancel.load(std::sync::atomic::Ordering::Acquire)",
+            )
+            && task_context.contains("self.publish_cancel_requested(value);"),
+        "REGRESSION: checkpoint no longer reads stable cancellation publication \
+         with Acquire. The single-observation-path contract \
+         is broken — abort and cancel may now route through \
+         different observation mechanisms.",
+    );
+}
+
+#[test]
+fn abort_does_not_have_separate_force_kill_method() {
+    // Pin (link 5 anti-conflation): there must be NO method
+    // like `abort_force` / `abort_now` / `terminate` that
+    // claims to bypass drop guards. Such a method would be
+    // a soundness hazard.
+    let source = read("src/runtime/task_handle.rs");
+
+    let suspect_methods = [
+        "pub fn abort_force(",
+        "pub fn abort_now(",
+        "pub fn terminate(",
+        "pub fn force_kill(",
+        "pub fn hard_abort(",
+    ];
+    for pat in &suspect_methods {
+        assert!(
+            !source.contains(pat),
+            "REGRESSION: TaskHandle now has `{pat}` — \
+             claiming hard-kill semantics. asupersync \
+             cannot soundly implement this; the method must \
+             either be a synonym for graceful abort \
+             (confusing API) or a soundness hazard.",
+        );
+    }
+}
+
+#[test]
+fn abort_with_reason_does_not_call_drop_guard_bypass_machinery() {
+    // Pin (link 5): abort_with_reason does NOT call any
+    // mem::forget or ManuallyDrop pattern that would skip
+    // destructor execution. The graceful-cancel contract
+    // requires destructors to run.
+    let source = read("src/runtime/task_handle.rs");
+
+    let fn_marker = "pub fn abort_with_reason(&self, reason: CancelReason) {";
+    let start = source.find(fn_marker).expect("abort_with_reason fn");
+    let body_end = source[start..]
+        .find("\n    }\n")
+        .expect("abort_with_reason close");
+    let body = &source[start..start + body_end];
+
+    let suspect_drop_bypass = [
+        "std::mem::forget(",
+        "mem::forget(",
+        "ManuallyDrop::new(",
+        "std::ptr::drop_in_place(",
+    ];
+    for pat in &suspect_drop_bypass {
+        assert!(
+            !body.contains(pat),
+            "REGRESSION: abort_with_reason now contains \
+             drop-bypass machinery (`{pat}`). Resources \
+             held by the task may leak; structured-\
+             concurrency cleanup is silently skipped.",
+        );
+    }
+}
+
+#[test]
+fn cross_reference_to_prior_audits() {
+    let prior_audits = [
+        "tests/runtime_cancel_signal_coalescing_audit.rs",
+        "tests/runtime_cancel_cause_kinds_distinct_audit.rs",
+        "tests/cx_checkpoint_cancel_fail_fast_audit.rs",
+    ];
+
+    for audit in &prior_audits {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(audit);
+        assert!(
+            path.exists(),
+            "REGRESSION: prior audit `{audit}` is missing.",
+        );
+    }
+}
+
+// asupersync-bi2462.29: real native checked-admission coverage. These tests use
+// public builder limits, spawned task contexts and live runtime inspectors.
+// Wall time only bounds a failed native wake/drain; it is not a timing oracle.
+// The ShardedState cases do not stand in for an independent external TaskTable.
+fn checked_native_runtime(sharded: bool, limit: usize) -> asupersync::runtime::Runtime {
+    let mut limits = asupersync::record::RegionLimits::UNLIMITED;
+    limits.max_obligations = Some(limit);
+    let builder = if sharded {
+        RuntimeBuilder::multi_thread()
+            .worker_threads(2)
+            .with_sharded_state(true)
+    } else {
+        RuntimeBuilder::current_thread()
+    };
+    let runtime = builder
+        .root_region_limits(limits)
+        .build()
+        .expect("build native runtime with an authoritative obligation quota");
+    assert_eq!(
+        runtime.config().runtime_state_shape,
+        if sharded {
+            asupersync::runtime::config::RuntimeStateShape::Sharded
+        } else {
+            asupersync::runtime::config::RuntimeStateShape::Unified
+        }
+    );
+    assert_eq!(runtime.config().worker_threads, if sharded { 2 } else { 1 });
+    runtime
+}
+
+fn assert_checked_native_cleanup(runtime: &asupersync::runtime::Runtime) {
+    // GH#58: this wait used to run inside `block_on` with `yield_now`. On a
+    // current-thread runtime the root of `block_on` is now itself a live
+    // task, so `is_quiescent()` is false by design for as long as the root
+    // runs and the wait can never succeed from inside it. It therefore runs
+    // on this thread, outside any root. That is sufficient because
+    // `block_on` drains every runnable task before it returns, and the
+    // runtime's background worker thread resumes the worker afterwards, so
+    // the checked-admission cleanup keeps progressing while this thread
+    // sleeps. Same oracle, same 5 s bound, same diagnostics.
+    let started = Instant::now();
+    while !runtime.is_quiescent() {
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "native checked-admission tasks and unapplied obligations must drain; active={:?}, leaks={:?}",
+            runtime
+                .task_inspector(Default::default())
+                .list_active_tasks(),
+            runtime.diagnostics().find_leaked_obligations(),
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        runtime
+            .task_inspector(Default::default())
+            .list_tasks()
+            .is_empty()
+    );
+    assert!(runtime.diagnostics().find_leaked_obligations().is_empty());
+    assert!(
+        runtime.is_quiescent(),
+        "actual task tables and obligation barriers are empty"
+    );
+}
+
+fn checked_native_zero_quota(sharded: bool) {
+    use asupersync::channel::mpsc::{CheckedSendError, RecvError};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+
+    let runtime = checked_native_runtime(sharded, 0);
+    let (sender, mut receiver) = mpsc::channel(2);
+    let observed_sender = sender.clone();
+    runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("actual spawned native holder context");
+        assert!(matches!(
+            sender.reserve_checked(&cx).await,
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: (),
+            })
+        ));
+        assert_eq!(
+            sender.try_send_checked(&cx, 17_u32),
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: 17,
+            })
+        );
+        assert_eq!(
+            sender.send_checked(&cx, 23_u32).await,
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 0, live: 0 },
+                value: 23,
+            })
+        );
+        assert_eq!(receiver.try_recv(), Err(RecvError::Empty));
+        let denied = sender.telemetry_snapshot(2900);
+        assert_eq!(denied.reserved_uncommitted_obligations, 0);
+        assert_eq!(denied.queued_messages, 0);
+        assert_eq!(denied.send_waiter_count, 0);
+        // An independent physical-capacity control: admission refusal must
+        // return every slot, without changing the legacy send contract.
+        sender
+            .try_send(31)
+            .expect("first physical slot was rolled back");
+        sender
+            .try_send(37)
+            .expect("second physical slot was rolled back");
+        assert_eq!(receiver.try_recv(), Ok(31));
+        assert_eq!(receiver.try_recv(), Ok(37));
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_zero_quota",
+                "sharded": sharded, "limit": 0, "holder": format!("{:?}", cx.task_id()),
+                "typed_refusals": 3, "published_checked_values": 0, "physical_slots_reused": 2
+            })
+        );
+    }));
+    assert_checked_native_cleanup(&runtime);
+    assert!(
+        runtime.trace_snapshot().iter().all(|event| !matches!(
+            event.data,
+            asupersync::trace::TraceData::Obligation {
+                kind: asupersync::record::ObligationKind::SendPermit,
+                ..
+            }
+        )),
+        "denied checked operations must not create arena obligations"
+    );
+    let physical = observed_sender.telemetry_snapshot(2900);
+    assert_eq!(physical.reserved_uncommitted_obligations, 0);
+    assert_eq!(physical.queued_messages, 0);
+    assert_eq!(physical.send_waiter_count, 0);
+    assert_eq!(physical.recv_waiter_count, 0);
+    drop(observed_sender);
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must finish teardown"
+    );
+}
+
+fn checked_native_one_quota(sharded: bool) {
+    use asupersync::channel::mpsc::CheckedSendError;
+    use asupersync::record::{ObligationKind, ObligationState};
+    use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+    use asupersync::trace::TraceData;
+
+    let runtime = checked_native_runtime(sharded, 1);
+    let observer = runtime.handle();
+    let (sender, mut receiver) = mpsc::channel(2);
+    let observed_sender = sender.clone();
+    // Keep the test's parent state machine behind a checked Send boundary too:
+    // TLS adds enough runtime state to exceed the compiler's trait recursion
+    // budget when both complete task types reach the storage wrapper together.
+    let parent: std::pin::Pin<
+        Box<dyn Future<Output = (asupersync::types::TaskId, asupersync::types::TaskId)> + Send>,
+    > = Box::pin(async move {
+        let cx = Cx::current().expect("actual spawned native parent context");
+        let mutex = Arc::new(Mutex::new(()));
+        let holder = mutex.try_lock_owned().expect("hold real native mutex");
+        let child_mutex = Arc::clone(&mutex);
+        let child_sender = sender.clone();
+        let child_context = Arc::new(std::sync::Mutex::new(None));
+        let context_slot = Arc::clone(&child_context);
+        let child = cx
+            .spawn(move |child_cx| {
+                // Erase only this fixture's nested future type before embedding
+                // it in the parent spawn. The strict TLS lane still checks Send
+                // at this boundary, without recursively expanding both tasks'
+                // complete async types through each runtime wrapper.
+                let future: std::pin::Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> =
+                    Box::pin(async move {
+                        let permit = child_sender
+                            .reserve_checked(&child_cx)
+                            .await
+                            .expect("the only obligation credit is initially available");
+                        *context_slot.lock().expect("publish actual child context") =
+                            Some(child_cx.clone());
+                        let result = OwnedMutexGuard::lock(child_mutex, &child_cx)
+                            .await
+                            .map(drop);
+                        // The permit remains owned throughout the native Pending and the
+                        // cancellation checkpoint, then returns its physical slot and credit.
+                        drop(permit);
+                        result
+                    });
+                future
+            })
+            .expect("spawn actual checked-permit holder");
+
+        let started = Instant::now();
+        let retained_cx = loop {
+            let retained = child_context
+                .lock()
+                .expect("read actual child context")
+                .clone();
+            if let Some(retained) = retained {
+                let details = observer
+                    .task_inspector(Default::default())
+                    .expect("live runtime inspector")
+                    .inspect_task(retained.task_id());
+                if mutex.waiters() == 1
+                    && details.as_ref().is_some_and(|task| {
+                        task.obligations.len() == 1
+                            && observer.trace_snapshot().expect("live native trace").iter().any(|event| {
+                                matches!(&event.data, TraceData::Obligation {
+                                    obligation, task: traced_holder, kind: ObligationKind::SendPermit,
+                                    state: ObligationState::Reserved, ..
+                                } if *traced_holder == retained.task_id() && task.obligations.contains(obligation))
+                            })
+                    })
+                {
+                    break retained;
+                }
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "child must own a materialized checked credit while genuinely mutex-parked"
+            );
+            yield_now().await;
+        };
+        let live = sender.telemetry_snapshot(2901);
+        assert_eq!(live.reserved_uncommitted_obligations, 1);
+        assert_eq!(live.queued_messages, 0);
+        assert_eq!(live.send_waiter_count, 0);
+        assert_eq!(live.capacity, 2, "one physical slot remains available");
+        assert_eq!(
+            sender.try_send_checked(&cx, 41_u32),
+            Err(CheckedSendError::Admission {
+                error: ObligationAdmissionError::LimitReached { limit: 1, live: 1 },
+                value: 41
+            }),
+            "a different live task must compete for the same authoritative region quota"
+        );
+        assert_eq!(
+            sender
+                .telemetry_snapshot(2901)
+                .reserved_uncommitted_obligations,
+            1
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_one_quota",
+                "phase": "owned_and_parked", "sharded": sharded, "limit": 1,
+                "holder": format!("{:?}", retained_cx.task_id()), "mutex_waiters": 1,
+                "physical_reservations": 1, "observed_arena_obligations": 1, "typed_refusals": 1
+            })
+        );
+
+        let mut child = std::thread::spawn(move || {
+            child.abort();
+            child
+        })
+        .join()
+        .expect("cross-thread abort caller");
+        let mut join = std::pin::pin!(child.join(&cx));
+        let join_started = Instant::now();
+        let result = std::future::poll_fn(|poll_cx| {
+            let result = join.as_mut().poll(poll_cx);
+            if result.is_pending() {
+                assert!(
+                    join_started.elapsed() < Duration::from_secs(5),
+                    "checked holder cancellation must wake and finish"
+                );
+                // Bound the observer wait without injecting a wake into the child.
+                poll_cx.waker().wake_by_ref();
+            }
+            result
+        })
+        .await;
+        assert_eq!(result, Ok(Err(LockError::Cancelled)));
+        assert_eq!(mutex.waiters(), 0);
+        assert_eq!(
+            sender
+                .telemetry_snapshot(2901)
+                .reserved_uncommitted_obligations,
+            0
+        );
+        let retirement_started = Instant::now();
+        while observer
+            .task_inspector(Default::default())
+            .expect("live runtime inspector")
+            .inspect_task(retained_cx.task_id())
+            .is_some()
+        {
+            assert!(
+                retirement_started.elapsed() < Duration::from_secs(5),
+                "terminal result publication must be followed by actual holder retirement"
+            );
+            yield_now().await;
+        }
+        assert!(
+            matches!(
+                retained_cx.try_register_obligation_checked(
+                    ObligationKind::SendPermit,
+                    retained_cx.task_id()
+                ),
+                Err(ObligationAdmissionError::HolderNotLive)
+            ),
+            "a retained completed generation cannot acquire another credit"
+        );
+        drop(holder);
+
+        // This closure has no await and is polled exactly once: every send
+        // settles the quota before the next reservation within this same poll.
+        let mut polls = 0;
+        std::future::poll_fn(|_| {
+            polls += 1;
+            for value in 0..65_u32 {
+                sender
+                    .try_reserve_checked(&cx)
+                    .expect("same-poll quota must be reusable")
+                    .try_send(value)
+                    .expect("live receiver accepts each checked payload");
+                assert_eq!(receiver.try_recv(), Ok(value));
+            }
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(polls, 1);
+        let clean = sender.telemetry_snapshot(2901);
+        assert_eq!(clean.reserved_uncommitted_obligations, 0);
+        assert_eq!(clean.queued_messages, 0);
+        assert_eq!(clean.send_waiter_count, 0);
+        assert_eq!(clean.recv_waiter_count, 0);
+        (cx.task_id(), retained_cx.task_id())
+    });
+    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(parent));
+    assert_checked_native_cleanup(&runtime);
+    let trace = runtime.trace_snapshot();
+    let mut observed = BTreeMap::new();
+    for event in &trace {
+        if let TraceData::Obligation {
+            obligation,
+            task,
+            kind: ObligationKind::SendPermit,
+            state,
+            ..
+        } = &event.data
+        {
+            let entry = observed.entry(*obligation).or_insert((*task, Vec::new()));
+            assert_eq!(
+                entry.0, *task,
+                "holder attribution cannot change during projection"
+            );
+            entry.1.push(*state);
+        }
+    }
+    assert_eq!(
+        observed.len(),
+        66,
+        "65 successful sends and one aborted owned permit; refusals add none"
+    );
+    let mut committed = 0;
+    let mut aborted = 0;
+    for (task, states) in observed.values() {
+        if *task == parent_id {
+            assert_eq!(
+                states,
+                &[ObligationState::Reserved, ObligationState::Committed]
+            );
+            committed += 1;
+        } else {
+            assert_eq!(
+                *task, child_id,
+                "only the actual checked holders may own these records"
+            );
+            assert_eq!(
+                states,
+                &[ObligationState::Reserved, ObligationState::Aborted]
+            );
+            aborted += 1;
+        }
+    }
+    assert_eq!((committed, aborted), (65, 1));
+    let clean = observed_sender.telemetry_snapshot(2901);
+    assert_eq!(clean.reserved_uncommitted_obligations, 0);
+    assert_eq!(clean.queued_messages, 0);
+    assert_eq!(clean.send_waiter_count, 0);
+    assert_eq!(clean.recv_waiter_count, 0);
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_one_quota",
+            "phase": "settled", "sharded": sharded, "committed": committed, "aborted": aborted,
+            "same_poll_roundtrips": 65, "live_tasks": 0, "physical_reservations": 0,
+            "runtime_quiescent": runtime.is_quiescent(), "result": "pass"
+        })
+    );
+    drop(observed_sender);
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must finish teardown"
+    );
+}
+
+#[test]
+fn checked_zero_quota_refuses_before_publication_on_native_current_thread() {
+    checked_native_zero_quota(false);
+}
+
+#[test]
+fn checked_zero_quota_refuses_before_publication_on_native_sharded_workers() {
+    checked_native_zero_quota(true);
+}
+
+#[test]
+fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread() {
+    checked_native_one_quota(false);
+}
+
+#[test]
+fn checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers() {
+    checked_native_one_quota(true);
+}
+
+#[derive(Clone, Copy, Debug)]
+enum CheckedNativePrimitive {
+    Oneshot,
+    Broadcast,
+    Semaphore,
+}
+
+impl CheckedNativePrimitive {
+    fn obligation_kind(self) -> asupersync::record::ObligationKind {
+        match self {
+            Self::Oneshot | Self::Broadcast => asupersync::record::ObligationKind::SendPermit,
+            Self::Semaphore => asupersync::record::ObligationKind::SemaphorePermit,
+        }
+    }
+
+    async fn assert_refusal(self, cx: &Cx, limit: usize, live: usize) {
+        use asupersync::channel::broadcast;
+        use asupersync::runtime::obligation_mailbox::ObligationAdmissionError;
+        use asupersync::sync::semaphore::CheckedAcquireError;
+
+        let expected = ObligationAdmissionError::LimitReached { limit, live };
+        match self {
+            Self::Oneshot => {
+                let (sender, mut receiver) = oneshot::channel::<u32>();
+                assert!(matches!(
+                    sender.reserve_checked(cx),
+                    Err(oneshot::CheckedSendError::Admission { error, value: () })
+                        if error == expected
+                ));
+                // This consuming API drops its sender on refusal. The receiver
+                // must close without receiving a value or retaining a permit.
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Closed));
+                let (sender, mut receiver) = oneshot::channel();
+                assert_eq!(
+                    sender.send_checked(cx, 101_u32),
+                    Err(oneshot::CheckedSendError::Admission {
+                        error: expected,
+                        value: 101,
+                    })
+                );
+                assert_eq!(receiver.try_recv(), Err(oneshot::TryRecvError::Closed));
+            }
+            Self::Broadcast => {
+                let (sender, mut receiver) = broadcast::channel::<u32>(2);
+                assert!(matches!(
+                    sender.reserve_checked(cx),
+                    Err(broadcast::CheckedSendError::Admission { error, value: () })
+                        if error == expected
+                ));
+                assert_eq!(
+                    sender.send_checked(cx, 103),
+                    Err(broadcast::CheckedSendError::Admission {
+                        error: expected,
+                        value: 103,
+                    })
+                );
+                assert!(sender.is_empty());
+                assert_eq!(receiver.try_recv(), Err(broadcast::TryRecvError::Empty));
+            }
+            Self::Semaphore => {
+                let semaphore = Arc::new(Semaphore::new(2));
+                assert!(matches!(
+                    OwnedSemaphorePermit::try_acquire_checked(Arc::clone(&semaphore), cx, 1),
+                    Err(CheckedAcquireError::Admission(error)) if error == expected
+                ));
+                assert!(matches!(
+                    OwnedSemaphorePermit::acquire_checked(Arc::clone(&semaphore), cx, 1).await,
+                    Err(CheckedAcquireError::Admission(error)) if error == expected
+                ));
+                assert_eq!(semaphore.available_permits(), 2);
+            }
+        }
+    }
+}
+
+async fn park_checked_native_resource<P: Send>(
+    permit: P,
+    cx: Cx,
+    mutex: Arc<Mutex<()>>,
+    context_slot: Arc<std::sync::Mutex<Option<Cx>>>,
+) -> Result<(), LockError> {
+    *context_slot
+        .lock()
+        .expect("publish the real resource holder") = Some(cx.clone());
+    let result = OwnedMutexGuard::lock(mutex, &cx).await.map(drop);
+    drop(permit);
+    result
+}
+
+fn checked_native_other_primitive(sharded: bool, limit: usize, primitive: CheckedNativePrimitive) {
+    use asupersync::channel::broadcast;
+    use asupersync::record::ObligationState;
+    use asupersync::trace::TraceData;
+    use asupersync::types::TaskId;
+
+    let runtime = checked_native_runtime(sharded, limit);
+    let observer = runtime.handle();
+    let parent: Pin<Box<dyn Future<Output = (TaskId, Option<TaskId>)> + Send>> =
+        Box::pin(async move {
+            let cx = Cx::current().expect("actual native checked-admission context");
+            if limit == 0 {
+                primitive.assert_refusal(&cx, 0, 0).await;
+                return (cx.task_id(), None);
+            }
+            assert_eq!(limit, 1);
+            let mutex = Arc::new(Mutex::new(()));
+            let held_lock = mutex.try_lock_owned().expect("hold native parking mutex");
+            let child_mutex = Arc::clone(&mutex);
+            let context_slot = Arc::new(std::sync::Mutex::new(None));
+            let child_slot = Arc::clone(&context_slot);
+            let (oneshot_sender, mut oneshot_receiver) = oneshot::channel::<u32>();
+            let (broadcast_sender, mut broadcast_receiver) = broadcast::channel::<u32>(2);
+            let child_broadcast = broadcast_sender.clone();
+            let semaphore = Arc::new(Semaphore::new(2));
+            let child_semaphore = Arc::clone(&semaphore);
+            let child = cx
+                .spawn(move |child_cx| {
+                    let future: Pin<Box<dyn Future<Output = Result<(), LockError>> + Send>> =
+                        Box::pin(async move {
+                            match primitive {
+                                CheckedNativePrimitive::Oneshot => {
+                                    let permit = oneshot_sender
+                                        .reserve_checked(&child_cx)
+                                        .expect("admit owned oneshot permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                                CheckedNativePrimitive::Broadcast => {
+                                    let permit = child_broadcast
+                                        .reserve_checked(&child_cx)
+                                        .expect("admit broadcast permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                                CheckedNativePrimitive::Semaphore => {
+                                    let permit = OwnedSemaphorePermit::acquire_checked(
+                                        child_semaphore,
+                                        &child_cx,
+                                        1,
+                                    )
+                                    .await
+                                    .expect("admit owned semaphore permit");
+                                    park_checked_native_resource(
+                                        permit,
+                                        child_cx,
+                                        child_mutex,
+                                        child_slot,
+                                    )
+                                    .await
+                                }
+                            }
+                        });
+                    future
+                })
+                .expect("spawn real native resource holder");
+            let started = Instant::now();
+            let retained_cx = loop {
+                let retained = context_slot.lock().expect("read holder context").clone();
+                if let Some(retained) = retained {
+                    let details = observer
+                        .task_inspector(Default::default())
+                        .expect("live inspector")
+                        .inspect_task(retained.task_id());
+                    if mutex.waiters() == 1
+                        && details.as_ref().is_some_and(|task| {
+                            task.obligations.len() == 1
+                                && observer.trace_snapshot().expect("live trace").iter().any(
+                                    |event| {
+                                        matches!(&event.data, TraceData::Obligation {
+                                        obligation, task: holder, kind,
+                                        state: ObligationState::Reserved, ..
+                                    } if *holder == retained.task_id()
+                                        && *kind == primitive.obligation_kind()
+                                        && task.obligations.contains(obligation))
+                                    },
+                                )
+                        })
+                    {
+                        break retained;
+                    }
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "{primitive:?}: actual permit must materialize while the holder is parked"
+                );
+                yield_now().await;
+            };
+            match primitive {
+                CheckedNativePrimitive::Oneshot => {
+                    assert_eq!(
+                        oneshot_receiver.try_recv(),
+                        Err(oneshot::TryRecvError::Empty)
+                    );
+                }
+                CheckedNativePrimitive::Broadcast => {
+                    assert!(broadcast_sender.is_empty());
+                    assert_eq!(
+                        broadcast_receiver.try_recv(),
+                        Err(broadcast::TryRecvError::Empty)
+                    );
+                }
+                CheckedNativePrimitive::Semaphore => assert_eq!(semaphore.available_permits(), 1),
+            }
+            // Fresh physical capacity rules out capacity exhaustion as the cause
+            // of refusal. Both live holders compete for the same region credit.
+            primitive.assert_refusal(&cx, 1, 1).await;
+            let mut child = std::thread::spawn(move || {
+                child.abort();
+                child
+            })
+            .join()
+            .expect("cross-thread cancellation caller");
+            let mut join = std::pin::pin!(child.join(&cx));
+            let started = Instant::now();
+            let result = std::future::poll_fn(|poll_cx| {
+                let result = join.as_mut().poll(poll_cx);
+                if result.is_pending() {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(5),
+                        "{primitive:?}: cancelled parked holder must wake and finish"
+                    );
+                    poll_cx.waker().wake_by_ref();
+                }
+                result
+            })
+            .await;
+            assert_eq!(result, Ok(Err(LockError::Cancelled)));
+            assert_eq!(mutex.waiters(), 0);
+            drop(held_lock);
+            match primitive {
+                CheckedNativePrimitive::Oneshot => {
+                    assert_eq!(
+                        oneshot_receiver.try_recv(),
+                        Err(oneshot::TryRecvError::Closed)
+                    );
+                    // The old one-shot stays closed. Reuse refers to region
+                    // admission credit, exercised by a genuinely new channel.
+                    let (sender, mut receiver) = oneshot::channel();
+                    sender
+                        .reserve_checked(&cx)
+                        .expect("reuse oneshot credit")
+                        .send(107_u32)
+                        .expect("publish checked oneshot payload");
+                    assert_eq!(receiver.try_recv(), Ok(107));
+                }
+                CheckedNativePrimitive::Broadcast => {
+                    assert_eq!(
+                        broadcast_receiver.try_recv(),
+                        Err(broadcast::TryRecvError::Empty)
+                    );
+                    assert_eq!(
+                        broadcast_sender
+                            .reserve_checked(&cx)
+                            .expect("reuse broadcast credit")
+                            .send(109),
+                        1
+                    );
+                    assert_eq!(broadcast_receiver.try_recv(), Ok(109));
+                }
+                CheckedNativePrimitive::Semaphore => {
+                    assert_eq!(semaphore.available_permits(), 2);
+                    let permit =
+                        OwnedSemaphorePermit::try_acquire_checked(Arc::clone(&semaphore), &cx, 1)
+                            .expect("reuse semaphore capacity and admission credit");
+                    assert_eq!(semaphore.available_permits(), 1);
+                    permit.commit();
+                    assert_eq!(semaphore.available_permits(), 2);
+                }
+            }
+            (cx.task_id(), Some(retained_cx.task_id()))
+        });
+    let (parent_id, child_id) = runtime.block_on(runtime.handle().spawn(parent));
+    assert_checked_native_cleanup(&runtime);
+    let mut observed = BTreeMap::new();
+    for event in runtime.trace_snapshot() {
+        if let TraceData::Obligation {
+            obligation,
+            task,
+            kind,
+            state,
+            ..
+        } = event.data
+        {
+            assert_eq!(kind, primitive.obligation_kind());
+            let entry = observed.entry(obligation).or_insert((task, Vec::new()));
+            assert_eq!(entry.0, task);
+            entry.1.push(state);
+        }
+    }
+    assert_eq!(observed.len(), if limit == 0 { 0 } else { 2 });
+    if let Some(child_id) = child_id {
+        let mut holders = BTreeMap::new();
+        for (holder, states) in observed.values() {
+            assert!(
+                holders.insert(*holder, states).is_none(),
+                "one ID per real holder"
+            );
+        }
+        assert_eq!(
+            holders.get(&parent_id).copied(),
+            Some(&vec![ObligationState::Reserved, ObligationState::Committed])
+        );
+        assert_eq!(
+            holders.get(&child_id).copied(),
+            Some(&vec![
+                ObligationState::Reserved,
+                match primitive {
+                    // Returning semaphore capacity fulfils its liability even
+                    // when cancellation caused the guard to be dropped.
+                    CheckedNativePrimitive::Semaphore => ObligationState::Committed,
+                    CheckedNativePrimitive::Oneshot | CheckedNativePrimitive::Broadcast =>
+                        ObligationState::Aborted,
+                },
+            ])
+        );
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "bead_id": "asupersync-bi2462.29", "scenario": "native_checked_primitive",
+            "primitive": format!("{primitive:?}"), "sharded": sharded, "limit": limit,
+            "actual_obligation_ids": observed.len(), "runtime_quiescent": runtime.is_quiescent(),
+            "result": "pass"
+        })
+    );
+    assert!(
+        runtime.shutdown_timeout(Duration::from_secs(5)),
+        "native workers must join"
+    );
+}
+
+#[test]
+fn checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread() {
+    for primitive in [
+        CheckedNativePrimitive::Oneshot,
+        CheckedNativePrimitive::Broadcast,
+        CheckedNativePrimitive::Semaphore,
+    ] {
+        for limit in [0, 1] {
+            checked_native_other_primitive(false, limit, primitive);
+        }
+    }
+}
+
+#[test]
+fn checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers() {
+    for primitive in [
+        CheckedNativePrimitive::Oneshot,
+        CheckedNativePrimitive::Broadcast,
+        CheckedNativePrimitive::Semaphore,
+    ] {
+        for limit in [0, 1] {
+            checked_native_other_primitive(true, limit, primitive);
+        }
+    }
+}

@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-bare-cargo` at `badc0ffee`. Validation: cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1007,
+        "subject": "Closed asupersync-bare-cargo",
+        "thread_id": "asupersync-bare-cargo"
+      }
+    ],
+    "reservations": [
+      {
+        "agent": "GentleCitadel",
+        "id": 47,
+        "path": "scripts/closeout_verifier.py",
+        "released_ts": "2026-05-10T08:00:00Z"
+      }
+    ]
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-bare-cargo",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-bare-cargo",
+    "commit": "badc0ffee",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-bare-cargo",
+    "thread_id": "asupersync-bare-cargo"
+  },
+  "git": {
+    "main_head": "badc0ffee",
+    "origin_main": "badc0ffee",
+    "origin_master": "badc0ffee"
+  }
+}

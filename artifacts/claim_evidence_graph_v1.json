@@ -1,0 +1,173 @@
+{
+  "contract_version": "claim-evidence-graph-v1",
+  "bead_id": "asupersync-1508v.10.4",
+  "description": "AA-10.1 claim/evidence/policy/trace graph schema and artifact bundle contract for runtime ascension closure.",
+  "runner_script": "scripts/run_claim_evidence_graph_smoke.sh",
+  "runner_bundle_schema_version": "claim-evidence-graph-smoke-bundle-v1",
+  "runner_report_schema_version": "claim-evidence-graph-smoke-run-report-v1",
+  "graph_schema": {
+    "description": "Minimal graph linking runtime claims to their supporting evidence, governing policies, and replay traces.",
+    "node_types": [
+      {
+        "type_id": "CLAIM",
+        "description": "A verifiable assertion about runtime behavior (e.g., 'p99 scheduling latency <= 500us').",
+        "required_fields": ["claim_id", "description", "category", "status"],
+        "status_values": ["asserted", "evidenced", "verified", "revoked"],
+        "category_values": ["safety", "performance", "correctness", "fairness"]
+      },
+      {
+        "type_id": "EVIDENCE",
+        "description": "An artifact or measurement that supports or refutes a claim.",
+        "required_fields": ["evidence_id", "kind", "source_artifact", "timestamp"],
+        "kind_values": ["test_result", "benchmark", "proof_artifact", "calibration_score", "replay_trace", "audit_finding"]
+      },
+      {
+        "type_id": "POLICY",
+        "description": "A rule governing claim evaluation, promotion, or rejection.",
+        "required_fields": ["policy_id", "description", "enforcement"],
+        "enforcement_values": ["mandatory", "advisory", "informational"]
+      },
+      {
+        "type_id": "TRACE",
+        "description": "A replayable execution trace linked to a workload.",
+        "required_fields": ["trace_id", "workload_id", "snapshot_range", "duration_us"]
+      },
+      {
+        "type_id": "WORKLOAD",
+        "description": "A reproducible workload from the replay corpus.",
+        "required_fields": ["workload_id", "description", "profile"]
+      },
+      {
+        "type_id": "TEST",
+        "description": "A deterministic test that produces evidence.",
+        "required_fields": ["test_id", "test_file", "test_name", "kind"],
+        "kind_values": ["unit", "integration", "e2e", "smoke", "compile_fail"]
+      },
+      {
+        "type_id": "ROLLBACK",
+        "description": "A rollback trigger linked to a claim violation.",
+        "required_fields": ["rollback_id", "claim_id", "reason", "command"]
+      }
+    ],
+    "edge_types": [
+      {
+        "edge_id": "SUPPORTS",
+        "from": "EVIDENCE",
+        "to": "CLAIM",
+        "description": "Evidence supports a claim."
+      },
+      {
+        "edge_id": "REFUTES",
+        "from": "EVIDENCE",
+        "to": "CLAIM",
+        "description": "Evidence refutes a claim."
+      },
+      {
+        "edge_id": "GOVERNS",
+        "from": "POLICY",
+        "to": "CLAIM",
+        "description": "Policy governs claim evaluation."
+      },
+      {
+        "edge_id": "PRODUCES",
+        "from": "TEST",
+        "to": "EVIDENCE",
+        "description": "Test produces evidence."
+      },
+      {
+        "edge_id": "REPLAYS",
+        "from": "TRACE",
+        "to": "WORKLOAD",
+        "description": "Trace replays a workload."
+      },
+      {
+        "edge_id": "OBSERVES",
+        "from": "TRACE",
+        "to": "EVIDENCE",
+        "description": "Trace produces observational evidence."
+      },
+      {
+        "edge_id": "TRIGGERS",
+        "from": "CLAIM",
+        "to": "ROLLBACK",
+        "description": "Claim violation triggers rollback."
+      }
+    ]
+  },
+  "bundle_contract": {
+    "description": "An artifact bundle packages claims, evidence, policies, and traces for validation.",
+    "bundle_schema_version": "claim-evidence-bundle-v1",
+    "required_sections": ["claims", "evidence", "policies", "edges"],
+    "optional_sections": ["traces", "workloads", "tests", "rollbacks"],
+    "validation_rules": [
+      {
+        "rule_id": "V-CLAIM-EVIDENCE",
+        "description": "Every evidenced or verified claim must have at least one SUPPORTS edge.",
+        "severity": "error"
+      },
+      {
+        "rule_id": "V-EDGE-REFS",
+        "description": "All edge endpoints must reference existing nodes.",
+        "severity": "error"
+      },
+      {
+        "rule_id": "V-POLICY-COVERAGE",
+        "description": "Every safety claim must be governed by at least one mandatory policy.",
+        "severity": "error"
+      },
+      {
+        "rule_id": "V-ROLLBACK-COMMAND",
+        "description": "Every rollback must have a non-empty command.",
+        "severity": "error"
+      },
+      {
+        "rule_id": "V-TEST-EVIDENCE",
+        "description": "Evidence of kind test_result should have a PRODUCES edge from a TEST.",
+        "severity": "warning"
+      },
+      {
+        "rule_id": "V-TRACE-WORKLOAD",
+        "description": "Every trace must REPLAYS exactly one workload.",
+        "severity": "warning"
+      }
+    ]
+  },
+  "structured_log_fields_required": [
+    "bundle_id",
+    "bundle_version",
+    "validation_rule_id",
+    "validation_severity",
+    "validation_pass",
+    "validation_message",
+    "claim_id",
+    "claim_status",
+    "evidence_count",
+    "policy_count",
+    "edge_count",
+    "node_type",
+    "graph_connected"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CEG-SMOKE-SCHEMA",
+      "description": "Validate graph schema node and edge type definitions",
+      "test_filter": "schema",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals schema -- --nocapture"
+    },
+    {
+      "scenario_id": "CEG-SMOKE-BUNDLE",
+      "description": "Validate bundle contract and validation rules",
+      "test_filter": "bundle",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals bundle -- --nocapture"
+    },
+    {
+      "scenario_id": "CEG-SMOKE-VALIDATION",
+      "description": "Validate graph validation logic and rejection reporting",
+      "test_filter": "validation",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_claim_evidence_graph cargo test -p asupersync --test claim_evidence_graph_contract --features test-internals validation -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.5"
+  ]
+}

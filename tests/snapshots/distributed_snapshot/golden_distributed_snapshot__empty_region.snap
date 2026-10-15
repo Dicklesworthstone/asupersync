@@ -1,0 +1,60 @@
+---
+source: tests/golden_distributed_snapshot.rs
+expression: capture
+---
+SnapshotFormatCapture {
+    scenario: "empty_region",
+    original: RegionSnapshot {
+        region_id: RegionId(1:0),
+        state: Open,
+        timestamp: Time(0ns),
+        sequence: 0,
+        vector_clock: VC{},
+        origin_id: 0,
+        epoch: 0,
+        tasks: [],
+        children: [],
+        finalizer_count: 0,
+        budget: BudgetSnapshot {
+            deadline_nanos: None,
+            polls_remaining: None,
+            cost_remaining: None,
+        },
+        cancel_reason: None,
+        parent: None,
+        metadata: [],
+        auth_tag: Tag(<redacted>),
+    },
+    serialized_hex: "534e41500201000000000000000000000000000000000000000000000000080000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    size_bytes: 111,
+    deserialized: Ok(
+        RegionSnapshot {
+            region_id: RegionId(1:0),
+            state: Open,
+            timestamp: Time(0ns),
+            sequence: 0,
+            vector_clock: VC{},
+            origin_id: 0,
+            epoch: 0,
+            tasks: [],
+            children: [],
+            finalizer_count: 0,
+            budget: BudgetSnapshot {
+                deadline_nanos: None,
+                polls_remaining: None,
+                cost_remaining: None,
+            },
+            cancel_reason: None,
+            parent: None,
+            metadata: [],
+            auth_tag: Tag(<redacted>),
+        },
+    ),
+    content_hash: "670f805f7006d7d7343583397a4cea30eb307ae8e8db4d6314e1e400f163b8ba",
+    metadata: SnapshotCaptureMetadata {
+        test_name: "empty_region",
+        description: "Minimal empty region snapshot with no tasks, children, or metadata",
+        version: 2,
+        magic: "SNAP",
+    },
+}

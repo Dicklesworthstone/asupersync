@@ -1,0 +1,3 @@
+schema_version: atp-release-gates-v1
+required_status: passed
+require_all_expected_lanes: true

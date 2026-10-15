@@ -1,0 +1,267 @@
+---
+source: tests/conformance/raptorq_proof_correctness.rs
+assertion_line: 406
+expression: scrubbed
+---
+{
+  "config": {
+    "h": 10,
+    "k": 12,
+    "l": 29,
+    "object_id": "[deterministic]",
+    "s": 7,
+    "sbn": 0,
+    "seed": "[deterministic]",
+    "symbol_size": 40
+  },
+  "content_hash": "0x12c2fff7c36e1a3dd51ef45f908a2feb658ca2b916f964867a46e8c24a8679e9",
+  "elimination": {
+    "inactivated": 29,
+    "inactive_cols_preview": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28
+    ],
+    "inactive_cols_truncated": false,
+    "pivot_events_preview": [
+      {
+        "col": 26,
+        "row": 22
+      },
+      {
+        "col": 28,
+        "row": 21
+      },
+      {
+        "col": 19,
+        "row": 19
+      },
+      {
+        "col": 20,
+        "row": 17
+      },
+      {
+        "col": 27,
+        "row": 29
+      },
+      {
+        "col": 21,
+        "row": 24
+      },
+      {
+        "col": 22,
+        "row": 18
+      },
+      {
+        "col": 25,
+        "row": 27
+      },
+      {
+        "col": 23,
+        "row": 5
+      },
+      {
+        "col": 24,
+        "row": 0
+      },
+      {
+        "col": 18,
+        "row": 6
+      },
+      {
+        "col": 15,
+        "row": 3
+      },
+      {
+        "col": 16,
+        "row": 4
+      },
+      {
+        "col": 4,
+        "row": 23
+      },
+      {
+        "col": 12,
+        "row": 25
+      },
+      {
+        "col": 13,
+        "row": 1
+      },
+      {
+        "col": 3,
+        "row": 28
+      },
+      {
+        "col": 14,
+        "row": 26
+      },
+      {
+        "col": 1,
+        "row": 7
+      },
+      {
+        "col": 6,
+        "row": 20
+      },
+      {
+        "col": 9,
+        "row": 2
+      },
+      {
+        "col": 10,
+        "row": 8
+      },
+      {
+        "col": 11,
+        "row": 9
+      },
+      {
+        "col": 2,
+        "row": 10
+      },
+      {
+        "col": 7,
+        "row": 11
+      },
+      {
+        "col": 17,
+        "row": 12
+      },
+      {
+        "col": 0,
+        "row": 13
+      },
+      {
+        "col": 8,
+        "row": 14
+      },
+      {
+        "col": 5,
+        "row": 15
+      }
+    ],
+    "pivot_events_truncated": false,
+    "pivots": 29,
+    "row_ops": 511,
+    "strategy": "HighSupportFirst",
+    "strategy_transitions": [
+      {
+        "from": "AllAtOnce",
+        "reason": "fallback_after_baseline_failure",
+        "to": "HighSupportFirst"
+      }
+    ],
+    "strategy_transitions_truncated": false
+  },
+  "outcome": {
+    "kind": "Failure",
+    "reason": {
+      "attempted_cols": [
+        26,
+        28,
+        19,
+        20,
+        27,
+        21,
+        22,
+        25,
+        23,
+        24,
+        18,
+        15,
+        16,
+        4,
+        12,
+        13,
+        3,
+        14,
+        1,
+        6,
+        9,
+        10,
+        11,
+        2,
+        7,
+        17,
+        0,
+        8,
+        5
+      ],
+      "row": 16,
+      "type": "SingularMatrix"
+    }
+  },
+  "peeling": {
+    "solved": 0,
+    "solved_indices_preview": [],
+    "truncated": false
+  },
+  "received": {
+    "esi_multiset_hash": "0xaf7226df5f9f0b5b",
+    "esis_preview": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      8,
+      9,
+      9,
+      10,
+      10,
+      11,
+      11,
+      12,
+      12,
+      13,
+      14,
+      15,
+      16
+    ],
+    "repair_count": 18,
+    "source_count": 12,
+    "total": 30,
+    "truncated": false
+  },
+  "test_vector": "corrupted_k12_middle",
+  "version": 2
+}

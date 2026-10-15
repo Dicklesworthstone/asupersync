@@ -1,0 +1,88 @@
+{
+  "schema_version": "doctor-performance-gate-report-v1",
+  "run_id": "golden-perf-run-001",
+  "scenario_id": "golden-perf-scenario",
+  "budgets": [
+    {
+      "budget_id": "scan-small",
+      "workflow_category": "scan",
+      "dataset_profile": "small",
+      "latency_p50_ms": 50,
+      "latency_p95_ms": 100,
+      "latency_p99_ms": 200,
+      "memory_ceiling_mb": 32,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    }
+  ],
+  "metrics": [
+    {
+      "metric_id": "scan-small-latency-p50",
+      "metric_class": "latency",
+      "workflow_category": "scan",
+      "dataset_profile": "small",
+      "value": 35,
+      "unit": "ms",
+      "percentile": "p50",
+      "correlation_id": "golden-perf-run-001"
+    },
+    {
+      "metric_id": "scan-small-latency-p95",
+      "metric_class": "latency",
+      "workflow_category": "scan",
+      "dataset_profile": "small",
+      "value": 85,
+      "unit": "ms",
+      "percentile": "p95",
+      "correlation_id": "golden-perf-run-001"
+    },
+    {
+      "metric_id": "scan-small-memory-peak",
+      "metric_class": "memory",
+      "workflow_category": "scan",
+      "dataset_profile": "small",
+      "value": 24,
+      "unit": "mb",
+      "percentile": "peak",
+      "correlation_id": "golden-perf-run-001"
+    }
+  ],
+  "evaluations": [
+    {
+      "gate_id": "gate-scan-small-latency-p50",
+      "budget_id": "scan-small",
+      "metric_id": "scan-small-latency-p50",
+      "threshold": 50,
+      "measured": 35,
+      "outcome": "pass",
+      "headroom_pct": 30,
+      "confidence": 100,
+      "correlation_id": "golden-perf-run-001"
+    },
+    {
+      "gate_id": "gate-scan-small-latency-p95",
+      "budget_id": "scan-small",
+      "metric_id": "scan-small-latency-p95",
+      "threshold": 100,
+      "measured": 85,
+      "outcome": "warn",
+      "headroom_pct": 15,
+      "confidence": 100,
+      "correlation_id": "golden-perf-run-001"
+    },
+    {
+      "gate_id": "gate-scan-small-memory-peak",
+      "budget_id": "scan-small",
+      "metric_id": "scan-small-memory-peak",
+      "threshold": 32,
+      "measured": 24,
+      "outcome": "pass",
+      "headroom_pct": 25,
+      "confidence": 100,
+      "correlation_id": "golden-perf-run-001"
+    }
+  ],
+  "overall_outcome": "warn",
+  "reproduction_command": "cargo test --test doctor_performance_budget_gates --features cli -- golden_gate_report",
+  "correlation_id": "golden-perf-run-001"
+}

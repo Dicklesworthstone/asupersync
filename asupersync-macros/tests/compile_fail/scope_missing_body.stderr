@@ -1,0 +1,7 @@
+error: expected comma after scope name: scope!(cx, "name", { body })
+ --> tests/compile_fail/scope_missing_body.rs:5:5
+  |
+5 |     scope!(cx, "name");
+  |     ^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the macro `scope` (in Nightly builds, run with -Z macro-backtrace for more info)

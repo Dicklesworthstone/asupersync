@@ -1,0 +1,31 @@
+---
+source: src/record/task.rs
+assertion_line: 1927
+expression: "scrub_task_record_state(serde_json::to_value(&record_running).expect(\"should serialize running task record\"))"
+---
+{
+  "cancel_epoch": 0,
+  "created_at": 0,
+  "deadline": null,
+  "heap_index": null,
+  "id": {
+    "generation": 0,
+    "index": 1,
+    "kind": "TaskId"
+  },
+  "is_local": false,
+  "last_polled_step": 0,
+  "next_in_queue": null,
+  "owner": {
+    "generation": 0,
+    "index": 2,
+    "kind": "RegionId"
+  },
+  "pinned_worker": null,
+  "polls_remaining": 100000,
+  "prev_in_queue": null,
+  "queue_tag": 0,
+  "sched_generation": 0,
+  "sched_priority": 0,
+  "total_polls": 0
+}

@@ -1,0 +1,74 @@
+---
+source: tests/raptorq_encoder_stability.rs
+assertion_line: 128
+expression: output
+---
+EncoderOutput {
+    config: EncoderTestCase {
+        k: 100,
+        symbol_size: 128,
+        seed: 3735928559,
+        repair_count: 10,
+    },
+    source_symbols_hash: "c10010470e805c6d",
+    repair_symbols: [
+        RepairSymbolData {
+            esi: 100,
+            symbol_data_hex: "5a8378e7d59153ec1abe33d0b986aaa84d0bf6ed232d789c36d407ba2a42a6e9e39f3c59e7f6fa5484d97ac96b1821f7691a41b8c16b955d9f3d2888ec3495e52c9f41337050c3d1cb7bcfb55535fc3f09af0d057a3192595b33fe1affd638fec07b80685e7489a9da8ba1d91ef4e52225e9f0dbe780d981664dab9518b53d27",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 101,
+            symbol_data_hex: "44f8b140e03785685e0ab4a340900cd9bbda6219da38978de75bf944890fb23dc4aa73c9ca8db971634e2b4b328ba4602c68cb8823bbf7f843b34832ffead489fe17ba0da6756c491ed54603a4279fa129c8e14bc32bb25f3155f8f50dac9467cf52f2f65a90a11a99d7d13e0ed3d8e80f8dcf013b6a9a4b52ffd004892fe778",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 102,
+            symbol_data_hex: "9cf2e35e02e21d16a91c61934711dc9dfb539f3a19170b224950421a3509a0c264644dd2af9b491fc3d8d2f9ef4b05fafbb76818083b3aa10e3990b26b6512f001de2f30a1630930a3453a164a3187914bd1f3863e13d7c01d6de5d9ada96e7f906d5a3a3129e6a80f70d99637af5a0ecfd25962a78aadda9c519eeafc11beec",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 103,
+            symbol_data_hex: "a55afe128406e90435771b4c9c5cd0494514395e5c6d35f9bd5aeeaa2169c8fea0b1c6f9e35dc4e94a4dd266dccc6ee749c123733a0d1ffac7881a4c3530d5d9b8a4b0069b11496bea859af2abc3da2e84c73790a78b3165b1df60d98d4b1f1eb7c0dbd03709c153fa1b212250ae43297501ec294f04864867e562e5efca0a30",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 104,
+            symbol_data_hex: "0b7aaa03e3021d96d75433463584601d4364eee3d16eb44c59466dd446333eb9130831370b5a2776bd8b2006c445723fc86bf2e3fe9c1e32775987ded9b815463b17707c50ad0bfeeca9c07ff2af3b7ea0790b6e6f5a046f5f8c962be1887d526824913761e79d816b60fa2791568a33ba8889eaaffed491ae9b17e70f262a72",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 105,
+            symbol_data_hex: "5c081bec54bf92041bc9b879d6e66fab6041e3fa586f573c2d69a0aeb2eab284e9c95ac91bdb9dd3b786085676b699c6dd210adab3c720e83ff7dd9893b90b74ededb446f898dc81c1a2d995cf73804890e568c2e89c153cab647f662f865050e981671ee277d9a005c9b72a9ea1c5c574bff6f11a29b4f8cc69902c5e5dfd1d",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 106,
+            symbol_data_hex: "d9529c2328b44142ef75489eb06844a2d37756485e1ecf8907d92171c69b0d35fd650dbf34a2c7aa0e150d52ab4c47b88d68e3ceb0e9ac677d36c4410a03501cd4503654d0327f38be001669a21917b481933e98b29ea01f3643110e94a08929e3d92abb1b8b41df1834beecec2c00bb4a6be3906eed4808f522c5282b8de37b",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 107,
+            symbol_data_hex: "920f282e32768d00d96f8cf05ea2e64867915195247f8a263d4049d9783a14fbff788d371cb48cc132d43bf4e636de11b7d0f56fdf0ce232c2bd2a91c039d94f75cbe8991b22f69b9d408bdd43c1412697825f0a3fbd950f1cee49ff298743ce76facda08148899344205660bc7cbf4cce007c8816e5e8a2d20f26abb053ea4e",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 108,
+            symbol_data_hex: "143d26cabda2c0a2b78deaeb50d82f03b56c4aa60e8a30d62cb77ea08099ecc830d902b277f649bda75544fa2d5b3fdd72f2686f2a286611f3f9daee8cc58f7d3477af517a274c26a63a12b43350608a41d3dfe04f8f45c3c6f7ae633938d8e8377d4e9296a6d74539323573f5747a83832b7e492e140f49a90dd60162146401",
+            symbol_length: 128,
+        },
+        RepairSymbolData {
+            esi: 109,
+            symbol_data_hex: "f4b7e941eb70d8b61bc4ad36bdb27c677570f163d9131e84e1a9f30a9c479d3418b269ef3fb14933ba73b3741950de6e44529a08e220758a689aba859e72076bf79104456566b4dfa75d54659868c0a5a22d9248ae1d7d11b236c904579caed536d7579d92fd79aad3712d7175d39cd84f43194a66821df297d4f1c2b17dc22a",
+            symbol_length: 128,
+        },
+    ],
+    params_summary: {
+        "h": 10,
+        "k": 100,
+        "k_prime": 101,
+        "l": 128,
+        "s": 17,
+        "w": 113,
+    },
+}

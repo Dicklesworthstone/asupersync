@@ -1,0 +1,29 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "TopazGoose",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:08:00Z",
+        "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "reason": "asupersync-aj7lx3"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "scripts/dirty_tree_ownership_receipt.py",
+        "status": "??"
+      }
+    ],
+    "status": "ok"
+  }
+}

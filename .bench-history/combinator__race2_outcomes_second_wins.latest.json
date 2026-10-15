@@ -1,0 +1,12 @@
+{
+  "cv_pct": 4.0350210503641755,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 22.400537562757513,
+  "median_ns": 22.305334212626654,
+  "name": "combinator/race2_outcomes_second_wins",
+  "p95_ns": 24.208310010388963,
+  "p99_ns": 24.889716877264352,
+  "profile": "release-perf",
+  "std_dev_ns": 0.903866406052
+}

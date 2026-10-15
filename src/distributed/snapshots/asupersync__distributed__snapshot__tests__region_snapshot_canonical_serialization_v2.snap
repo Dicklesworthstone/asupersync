@@ -1,0 +1,60 @@
+---
+source: src/distributed/snapshot.rs
+assertion_line: 1344
+expression: canonical_snapshot_serialization_snapshot_test_output()
+---
+{
+  "budget": {
+    "cost_remaining": 1000,
+    "deadline_nanos": 5000000000,
+    "polls_remaining": 50
+  },
+  "byte_len": 147,
+  "cancel_reason": "timeout",
+  "children": [
+    {
+      "generation": 0,
+      "index": 10
+    },
+    {
+      "generation": 0,
+      "index": 11
+    }
+  ],
+  "content_hash_hex": "70b614c1f13a79ff",
+  "epoch": 9,
+  "finalizer_count": 7,
+  "format_version": 2,
+  "metadata_hex": "01 02 03 04 05",
+  "origin_id": 77,
+  "parent": {
+    "generation": 0,
+    "index": 0
+  },
+  "region_id": {
+    "generation": 2,
+    "index": 5
+  },
+  "sequence": 42,
+  "serialized_hex": "53 4e 41 50 02 05 00 00 00 02 00 00 00 01 00 46 0a 99 e8 00 00 00 2a 00 00 00 00 00 00 00 4d 00 00 00 00 00 00 00 09 00 00 00 00 00 00 00 02 00 00 00 01 00 00 00 00 00 00 00 01 05 02 00 00 00 01 00 00 00 02 03 02 00 00 00 0a 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00 07 00 00 00 01 00 f2 05 2a 01 00 00 00 01 32 00 00 00 01 e8 03 00 00 00 00 00 00 01 07 00 00 00 74 69 6d 65 6f 75 74 01 00 00 00 00 00 00 00 00 05 00 00 00 01 02 03 04 05",
+  "state": "Closing",
+  "tasks": [
+    {
+      "priority": 5,
+      "state": "Running",
+      "task_id": {
+        "generation": 0,
+        "index": 1
+      }
+    },
+    {
+      "priority": 3,
+      "state": "Completed",
+      "task_id": {
+        "generation": 1,
+        "index": 2
+      }
+    }
+  ],
+  "timestamp_nanos": 999000000000
+}

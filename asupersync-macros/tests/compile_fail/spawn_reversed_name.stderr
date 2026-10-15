@@ -1,0 +1,5 @@
+error: spawn! three-argument form is spawn!(scope, "name", future); put the task name before the future
+ --> tests/compile_fail/spawn_reversed_name.rs:4:27
+  |
+4 |     let _ = spawn!(scope, async { 42 }, "worker");
+  |                           ^^^^^^^^^^^^

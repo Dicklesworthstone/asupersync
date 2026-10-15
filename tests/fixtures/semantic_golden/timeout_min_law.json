@@ -1,0 +1,49 @@
+{
+  "schema_version": "semantic-golden-fixture-v1",
+  "fixture_id": "golden-timeout-min-law",
+  "rule_ids": ["comb.timeout"],
+  "description": "Expected effective_deadline for canonical test cases",
+  "cases": [
+    {
+      "id": "outer-greater",
+      "outer_ns": 5000000000,
+      "inner_ns": 3000000000,
+      "expected_ns": 3000000000,
+      "description": "Inner deadline is tighter"
+    },
+    {
+      "id": "inner-greater",
+      "outer_ns": 3000000000,
+      "inner_ns": 5000000000,
+      "expected_ns": 3000000000,
+      "description": "Outer deadline is tighter"
+    },
+    {
+      "id": "equal",
+      "outer_ns": 1000000000,
+      "inner_ns": 1000000000,
+      "expected_ns": 1000000000,
+      "description": "Equal deadlines yield same value"
+    },
+    {
+      "id": "zero-outer",
+      "outer_ns": 0,
+      "inner_ns": 5000000000,
+      "expected_ns": 0,
+      "description": "Zero outer is tightest possible"
+    },
+    {
+      "id": "max-outer",
+      "outer_ns": 18446744073709551615,
+      "inner_ns": 1000000000,
+      "expected_ns": 1000000000,
+      "description": "u64::MAX outer defers to inner"
+    }
+  ],
+  "invariants": [
+    "effective_deadline(outer, Some(inner)) == min(outer, inner)",
+    "effective_deadline is commutative: min(a,b) == min(b,a)",
+    "effective_deadline is associative: min(min(a,b),c) == min(a,min(b,c))",
+    "effective_deadline(x, None) == x (identity when no existing deadline)"
+  ]
+}

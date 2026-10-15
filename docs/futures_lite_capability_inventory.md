@@ -1,0 +1,704 @@
+# futures-lite capability inventory
+
+<!-- BEGIN FUTURES LITE CAPABILITY INVENTORY -->
+
+This is the operator-facing view of
+`artifacts/futures_lite_capability_inventory_v1.json`, the FUT A1 baseline for
+`CAP-FUTURES-STREAMS`. The inventory is source-pinned to
+`ed1c0c3ae4ba68947cd2c0212f1aab2242f60724` and follows the accepted
+`DEP-ADR-008` decision: **KEEP_UNTIL_PARITY**. It inventories the current
+dependency; it does not authorize a cutover.
+
+## Result
+
+The root crate has an unconditional normal `futures-lite = "2.6"` dependency,
+resolved to 2.6.1 with its `std` and `race` default features. It remains present
+under default features, `--no-default-features`, every optional root feature,
+native targets, and the excluded wasm and fuzz workspaces that depend on the
+root by path. The Tokio compatibility member separately has a direct
+`futures-lite = "2"` dev dependency. Its normal library build does not have that
+edge; its unit tests do.
+
+The baseline Rust-source census is exact:
+
+| Scope | Files | `futures_lite` tokens | Cargo-built classification |
+|---|---:|---:|---|
+| `src` | 150 | 817 | 6 production, 2 public doctest, 809 test |
+| `tests` | 151 | 534 | integration test |
+| `benches` | 3 | 3 | benchmark |
+| `examples` | 1 | 1 | example |
+| `asupersync-tokio-compat` | 3 | 5 | 3 dev-dependency API tokens, 2 local helper-name tokens |
+| `fuzz` | 2 | 2 | comments only |
+| Total | 310 | 1362 | fully classified; zero unknown |
+
+The contract excludes its own post-baseline source file from those numbers and
+records its single import separately as temporary dev-oracle evidence. It also
+pins a digest of every baseline `path<TAB>count` row, so a new reference, a
+removed reference, or a moved reference fails the focused contract.
+
+The ADR's approximate `796 / 148` `src` count has already drifted to `817 / 150`.
+Migration owners must use the executable census rather than copying the ADR
+headline.
+
+## Production and public surfaces
+
+At the historical A1 baseline, six production source tokens in five files
+preserved seven behaviors. The two panic adapters below were subsequently
+migrated to the owned helper by A5; their retained rows describe the baseline.
+
+| ID | Source | Contract |
+|---|---|---|
+| `FUT-PROD-ATP-STREAM` | `src/net/atp/sdk/stream.rs` | One trait import supports public `Stream<Item = TransferProgress>` impls for both `AtpWriter` and `AtpReader`. Empty progress queues register the latest task waker and return `Pending` without self-waking; disconnected or creation-context-cancelled queues terminate. Drop best-effort signals cancellation and aborts an outstanding obligation. |
+| `FUT-PROD-MIDDLEWARE-CATCH` | `src/web/middleware.rs` | `CatchPanicMiddleware` separately catches construction panic with `std`, then catches poll panic with `FutureExt`. It emits stable `ASUP-E502` behavior and never intentionally repolls after panic. |
+| `FUT-PROD-NEGOTIATE-CATCH` | `src/web/negotiate.rs` | `ErrorHandlerMiddleware` catches poll panic and converts it through content negotiation. Construction happens before the adapter and is not contained by this site. |
+| `FUT-PROD-ROUTER-BLOCK` | `src/web/router.rs` | Public synchronous `Router::handle` drives `handle_with_cx` on the caller thread without an ambient runtime. |
+| `FUT-PROD-RELOAD-BLOCK` | `src/signal/shutdown.rs` | The SIGHUP receive loop blocks on its dedicated `asupersync-reload-sighup` standard thread. |
+| `FUT-PROD-SHUTDOWN-BLOCK` | `src/signal/shutdown.rs` | Each watched shutdown signal blocks on its own named standard thread. |
+
+The current production census contains ten incumbent tokens: the four
+unmigrated A1 tokens, four new `future::race` calls and two native ATP helpers. Their source
+review records ownership; it supplies no new behavioral execution receipt.
+
+| Current site | Source function | Cancellation ownership |
+|---|---|---|
+| `FUT-PROD-REMOTE-SESSION-RACE` | `src/remote.rs`: `remote_session_race_io` (`tls`) | Races session I/O against a Cx-aware oneshot wait. Caller cancellation drops the session's owned framed connection. |
+| `FUT-PROD-REMOTE-CLIENT-RACE` | `src/remote.rs`: `remote_client_race_cancellation` (`tls`, native) | Wakes an active connection attempt or bounded retry delay on cancellation. Retries remain limited to failures proven to precede delivery. |
+| `FUT-PROD-REMOTE-DRIVER-RACE` | `src/remote.rs`: `drive_native_remote_session` (`tls`, native) | A control win releases the borrowed event read before cancel or renewal on the same framed transport. The driver guard owns terminal publication. |
+| `FUT-PROD-MULTIPART-READ-RACE` | `src/web/multipart.rs`: `read_more` (native) | Races a deadline-bounded borrowed body poll against caller cancellation, returning a typed multipart error on cancellation. |
+
+All four use the incumbent's drop-loser behavior. None spawns a separate loser
+task, proves structured loser drain, or rolls back effects already performed
+by a polled future. The remote driver's separate protocol cleanup remains its
+owner's responsibility.
+
+The native ATP inventory now includes an earlier omitted `future::or` in
+`keep_peer_alive_while` and the `future::poll_once` added in `efa5798d1`.
+The keep-alive race borrows pinned work while racing it against the cadence
+sleep; it then completes each keep-alive emission outside that race. The zero-wait
+receive polls once instead of allowing an expired timeout to skip the socket
+poll. These ownership descriptions establish neither safe external cancellation
+of the whole operation nor rollback of effects from a polled receive.
+
+Two additional references are compiled public doctests on `Notify`. They are
+not production runtime calls, but removing the test executor without migrating
+them would break the documented public workflow.
+
+The public exposure is a foreign trait implementation, not a root re-export or
+a foreign type in a function signature. That is still downstream-observable:
+generic code bounded on `futures_lite::Stream` accepts the two ATP SDK types
+today. `artifacts/api_surface_map_v1.json` maps root exports and therefore does
+not enumerate this nested trait-implementation property.
+
+At the original inventory baseline, the standalone downstream fixture proved
+only `asupersync::stream::{Stream, StreamExt}` and did not mention the ATP SDK
+types. The follow-on A2 source contract below adds owned-side ATP assertions,
+but deliberately adds no futures-lite dependency and therefore cannot catch a
+break to the retained foreign impls.
+
+### FUT A2 executed contract progress
+
+At base revision `9f3684b48af00f93a6717af8575bbb4c984d5873`, bead
+`asupersync-d24mms.6.2` adds alongside-incumbent owned Stream implementations
+for `AtpWriter` and `AtpReader`. The public compile and documentation contracts
+now have terminal RCH receipts. Two inline ATP behavior tests also have a
+terminal receipt, while the constructed ATP runtime E2E and user trial remain
+open.
+
+The incumbent and owned trait implementations all delegate to one private
+`poll_progress` kernel. One queued `TransferProgress` becomes `Ready(Some(_))`;
+an empty queue registers the latest task waker and returns `Pending` without
+self-waking; and a disconnected or creation-context-cancelled queue becomes
+`Ready(None)`. The types' existing Drop implementations still best-effort
+signal cancellation and abort an outstanding graded obligation. The incumbent
+public trait remains implemented; no downstream break or dependency cutover is
+authorized.
+
+Public-contract assertions for both ATP types under
+`asupersync::stream::Stream<Item = TransferProgress>` compiled in the standalone
+downstream fixture. The focused inline ATP wake and cancellation lane passed two
+tests on remote worker `ovh-a`: latest-waker replacement and sender wake
+delivery complete without synthetic self-wake, and creation-context
+cancellation terminates the owned reader stream while clearing a stale wake.
+That unit receipt does not construct a live ATP transfer and therefore is not
+the separately required runtime E2E.
+
+At follow-on base revision `aa23f536a5c22d3c16ecd592f9c3b743d3e78fc2`,
+the standalone downstream fixture also names both ATP types, asserts the owned
+Stream item contract, and instantiates their `StreamExt::next` function shape.
+This compile contract executed successfully, but it does not construct an ATP
+stream. It therefore does not prove ATP Pending/wake/item/EOF behavior, Drop
+cleanup, region quiescence, or the separately retained foreign Stream journey.
+
+At documentation-contract base revision
+`862c58a609c1c7b6087e992903b287d08208d7ad`, the owned trait and `Next`
+documentation now freeze the semantic boundary that A2 requires:
+
+- `poll_next` receives a pinned mutable reference, and `StreamExt::next`
+  requires `Unpin`; a pinned pointer can expose a `!Unpin` target;
+- `Pending` must account for the current waker, while `Ready(None)` is not a
+  fused-stream promise;
+- `size_hint` is an untrusted bound for optimization, never correctness;
+- neither `Stream` nor `StreamExt` globally adds `Send`, `Sync`, `Unpin`, or
+  `'static`, and fallible streams carry `Result<T, E>` as their item;
+- dropping `Next` releases its borrow but cannot roll back poll-side state, and
+  dropping a stream may discard buffers or invoke implementation-specific
+  cleanup; and
+- the `Pin<P>`, `Box<S>`, and `&mut S` adapters forward the underlying polling
+  and size-hint semantics under their stated bounds.
+
+This corrects the former blanket claim that every stream poll is losslessly
+cancel-safe. The focused rustdoc lane passed two positive examples and the
+direct-`next` `!Unpin` compile-fail example. That scoped receipt does not prove
+that every existing implementation satisfies the documented wake, pinning,
+size-hint, cancellation, or drop obligations.
+
+At pinned-downstream base revision
+`64a80ef684d277238a5b2e19ccef684ebcf7984b`, the standalone consumer adds
+`DownstreamPinnedLocalStream<'_>`. It borrows its item cell, carries `Rc` local
+state, and includes `PhantomPinned`, so the same custom stream simultaneously
+exercises a non-`'static`, non-`Send`/`Sync`, and `!Unpin` shape. The fixture
+holds it behind `Pin<Box<_>>`, names `StreamExt::next` on that forwarding
+adapter, drops the unpolled `Next`, and then source-authors size-hint, item, and
+EOF observations. The `StreamExt::next` rustdoc also adds the inverse
+compile-fail case for calling `next` directly on an address-sensitive value.
+
+The downstream fixture executed 15 tests, including the pinned local stream and
+owned ATP compile shapes; the rustdoc lane also executed the inverse compile-fail
+case. These receipts do not claim a stable compiler diagnostic, ATP progress
+runtime behavior, ecosystem trait parity, or permission to remove the incumbent
+dependency.
+
+The same downstream fixture now also maps its custom stream into
+`Result<u32, &'static str>` items and names
+`StreamExt::try_collect::<u32, &'static str, Vec<u32>>`. The downstream fixture
+executed its error short-circuiting and completion observations.
+
+#### A2 acceptance status
+
+| Requirement | Source status | Terminal evidence or gap |
+|---|---|---|
+| Owned API | Implemented alongside incumbent | Downstream fixture passed |
+| Downstream ergonomics | Implemented | 15 fixture tests passed |
+| Compile-fail rustdoc | Implemented | Focused rustdoc passed |
+| Pin/drop/bounds | Implemented | Downstream fixture passed |
+| Error adapter | Implemented | Downstream fixture passed |
+| ATP runtime E2E | Two focused inline behavior tests executed | Constructed runtime E2E missing |
+| User trial | Missing | SAME-or-BETTER receipt |
+| Cutover | Blocked | Every receipt above |
+
+The terminal receipts are scoped: the standalone fixture passed 15 tests, the
+Stream rustdoc lane passed two positive examples plus one compile-fail example,
+and clean-overlay build `29967068015099952` passed both focused inline ATP
+behavior tests on `ovh-a` in 896,042 ms. An earlier focused attempt reached the
+final workspace crate but emitted no test output before bounded stuck-link
+cancellation; build `29967068015099936` exited 130 with cleanup complete and
+remains recorded as non-evidence. Neither receipt proves a constructed ATP
+runtime E2E, Drop cleanup under a real transfer, region quiescence, or the
+SAME-or-BETTER user trial.
+This matrix remains fail-closed, does not authorize closing A2, and does not
+convert focused unit behavior into runtime E2E evidence.
+
+### Post-baseline current snapshot
+
+The historical A1 census remains frozen at 310 files and 1,362 textual tokens.
+A separate post-baseline current snapshot, refreshed on 2026-09-09, records 331
+files and 1,531 tokens after the A5 production poll-adapter migration, A3
+incumbent-comparison receipt, remote and multipart races, native ATP poll-once,
+and additional tests. The driverless socket fixture contributes three test-only tokens.
+It does not rewrite the historical baseline:
+
+| Scope | Current files | Current tokens |
+|---|---:|---:|
+| `src` | 160 | 957 |
+| `tests` | 161 | 562 |
+| `benches` | 4 | 4 |
+| `examples` | 1 | 1 |
+| `asupersync-tokio-compat` | 3 | 5 |
+| `fuzz` | 2 | 2 |
+
+The current ownership projection is 45 files / 278 tokens for `FUT-A6-CORE`,
+35 / 183 for `FUT-A7-IO`, 34 / 218 for `FUT-A8-SERVICES`, and 217 / 852 for
+`FUT-A9-ATP-DEV`. Owners must use these current projections for reservation
+drift checks while retaining the A1 rows as historical evidence.
+
+Eight previously stale source pins are reconciled to current bytes:
+`Cargo.toml`, `Cargo.lock`, `src/sync/notify.rs`, the capability registry, the
+marginal ledger, the API surface map, the compatibility manifest, and the router.
+The new remote, multipart, and extracted Notify test files are also pinned.
+The follow-up pins the native ATP source and retains the multipart parser bytes
+with the browser-only unused-context binding; that binding changes no native parse path.
+Each reconciliation records the old
+and current whole-file hash plus its capability-specific classification. The
+manifest requirement, resolved package block, combined Notify token lines,
+canonical capability row, 52-cell marginal distribution, and zero-token public
+API result are unchanged. Four baseline and counterfactual graph totals changed
+together without changing their marginal difference. The compatibility manifest
+changed only release versions; the router retains its production blocking call
+and adds three test-only references. Notify's two public doctests remain in the
+original file while its unit-test reference moved to `notify_tests.rs`.
+This is static source reconciliation only: it is
+`NOT_RUN_STATIC_ONLY`, not focused-contract or broad-health evidence.
+
+## `block_on` context
+
+The incumbent pins the future on the calling stack, polls it, and parks the
+current thread after `Pending`. Its Waker unparks that Parker. A thread-local
+Parker/Waker pair is reused for ordinary calls; a recursive call on the same
+thread gets a fresh pair because the cache is already borrowed.
+
+`block_on` adds no `Send`, `Unpin`, or `'static` bound. That matters:
+
+- `Router::handle` can borrow `self` and its local `Cx`.
+- unit tests can drive borrowed and non-`Send` futures;
+- recursive calls are supported;
+- signal listeners satisfy thread ownership because their closures move the
+  listener state, not because `block_on` requires it;
+- no ambient executor or orphan task is created.
+
+The production call contexts are the public router caller thread and dedicated
+signal-listener threads. Test call contexts also include ordinary test threads,
+runtime and lab helpers, blocking-pool tests, benchmarks, examples, and the
+Tokio compatibility member. A replacement must explicitly test all of those
+contexts. “Works in a normal unit test” is not parity.
+
+### FUT A3 focused unit kernel progress
+
+At base revision `02b380ee063e7e643105b1a7997360a7021bf32e`, bead
+`asupersync-d24mms.6.3` added an alongside-incumbent owned kernel at the
+crate-private `crate::util::future` module. The current continuation is
+`ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT`; its executable state is
+`ACCEPTANCE_FOCUSED_TESTS_PASSED`.
+
+The implementation landed in revision
+`050fd0f08e4cf127e348bbf545c1e46cc392f6b5`. The current source receipt pins
+`src/future.rs` and `src/util/mod.rs`; the exact blocking-kernel projection from
+`pub(crate) enum BlockOnError` through the line before the inline test module is
+hashed independently. Later FUT A4 helper work in the same source file is
+therefore outside the A3 kernel projection.
+
+The 2026-08-08 continuation makes the context boundary explicit without
+pretending the kernel can identify every executor. Both a thread driving an
+Asupersync runtime and an Asupersync scheduler worker are conservatively
+refused before polling. A foreign executor thread is admitted only for a
+self-contained future whose progress does not depend on that paused outer
+executor; each crate-private migration site must establish that precondition.
+
+The kernel pins its future on the calling stack and uses one `Arc`-owned
+thread-notification state per invocation. The waker records a release-ordered
+notification before unparking the caller. The waiter consumes notifications
+with acquire-release ordering on both sides of each poll, so a wake between the
+pending result and the actual park remains represented by either the atomic bit
+or the thread's park token. A boolean notification coalesces repeated wakes.
+Spurious park returns do not cause an unnotified repoll: the waiter checks the
+notification bit and parks again. Separate state per invocation preserves
+ordinary recursion without a thread-local borrow or a shared poisoned mutex.
+
+The kernel policy is deliberately conservative:
+
+- `crate::util::future::block_on` preserves the parity-shaped direct-output
+  shape for admitted internal contexts, while
+  `crate::util::future::try_block_on` exposes a typed refusal;
+- borrowed, non-`Send`, non-`Unpin`, and non-`'static` futures remain admissible;
+- ordinary host threads and Asupersync blocking-pool threads are admitted;
+- any installed `Runtime::current_handle()` is rejected before the future is
+  polled, covering both scheduler workers and a nested call from the thread
+  driving `Runtime::block_on`;
+- `wasm32` is rejected because host-thread parking is unavailable;
+- the kernel creates no executor, task, region, obligation, or ambient `Cx`;
+- cancellation remains explicit future behavior: progress requires the
+  cancellation source to wake the future after changing its state.
+
+Fourteen inline behavior cases cover ready-without-park, borrowed
+non-`Send` recursion, wake coalescing, deterministic spurious returns, a bounded
+notification-state matrix, stable waker identity, wake-after-pending, explicit
+cancellation wake, panic propagation, separate driver and scheduler-worker
+refusals, safe self-contained nesting under a foreign executor, LabRuntime
+quiescence, and execution on the real blocking-pool implementation.
+
+A fifteenth ignored measurement case compares the owned kernel with the
+incumbent on Linux. It is excluded from ordinary unit runs because it contains
+two 750 millisecond idle waits and seven alternating 50,000-call ready batches
+per implementation; it is executed explicitly when producing a performance
+receipt.
+
+A current-source clean-overlay library check did terminate successfully. RCH
+build `29967986903220229` ran `cargo check --locked -p asupersync --lib` on
+`hz2` with warnings denied and returned exit code 0 in 107,797 milliseconds.
+That is implementation compilation evidence only: a library check does not
+compile or execute the `cfg(test)` inline cases.
+
+The terminal focused lane is RCH build `29967986903220231` on `hz2`. It ran
+`cargo test -p asupersync --lib util::future::tests -- --nocapture
+--test-threads=1` with warnings denied. Compilation took 11 minutes 10 seconds;
+the full remote receipt completed in 696,612 milliseconds with exit code 0.
+All 26 `util::future` tests passed, including the fourteen A3-authored cases;
+there were zero failures and 21,826 unrelated tests were filtered out.
+
+The explicit comparison passed in clean-overlay RCH build
+`29967986903220250` on `hz2`. Both implementations consumed zero observed
+process CPU ticks during their separate 750 millisecond idle waits. Across
+seven alternating 50,000-call ready batches, the owned median was 6,755,423
+nanoseconds (about 135 nanoseconds per call) and the incumbent median was
+1,941,878 nanoseconds (about 39 nanoseconds per call). The owned implementation
+is therefore slower on this ready-future micro-workload, while the idle result
+shows no observed spin. This one Linux run is not a cross-platform performance,
+throughput, or exhaustive-interleaving claim.
+
+Two clean-overlay focused attempts against preceding source states reached
+final workspace compilation but were lost across RCH daemon restarts before any
+terminal compiler or test result. Both clients were cancelled with exit code
+130 after `rch status` showed no active build. A third attempt covered the
+current source on RCH build `29967986903220226`; its heartbeat remained fresh,
+but it emitted no progress for 479 seconds and no test output before a graceful
+cancel at the bounded 620-second ceiling returned exit code 143. The artifact
+pins all three attempted source states, records zero executed tests, and carries
+an explicit no-claim for each. None is terminal compile or behavior evidence,
+and no unbounded or automatic retry was started.
+
+The artifact names all fifteen functions rather than summarizing them as a
+green test result. The three explicit A3 rows now record their exact
+dispositions:
+
+- `FUT-A3-GAP-13`: the bounded state model, real cross-thread wake and
+  cancellation cases, and LabRuntime quiescence satisfy the acceptance choice
+  of loom or a deterministic state machine where applicable; no exhaustive
+  CPU-interleaving claim is made;
+- `FUT-A3-GAP-14`: the driver, worker, and foreign-executor policies are now
+  explicit and their focused cases pass;
+- `FUT-A3-GAP-15`: idle CPU ticks and ready-completion latency are measured in
+  build `29967986903220250`, with the slower owned ready path reported above.
+
+This is not parity and is not a migration authorization. In particular, the
+kernel deliberately refuses both kinds of Asupersync runtime context and cannot
+automatically identify arbitrary foreign executors. The three production
+blocking sites and every test call remain on the incumbent; their migration is
+owned by FUT A6 through A9, not this kernel bead.
+The dependency, manifests, capability registry, source-pinned A1 artifact, and
+cutover state remain unchanged at `KEEP_UNTIL_PARITY` /
+`BLOCKED_PENDING_EVIDENCE`.
+
+### FUT A4 static helper progress
+
+At base revision `050fd0f08e4cf127e348bbf545c1e46cc392f6b5`, bead
+`asupersync-d24mms.6.4` adds the allocation-free helper subset beside the
+incumbent in `crate::util::future`. Revisions
+`da8d632b5ef51ea4074589aed0664cb8f5e33d41` and
+`9f3684b48af00f93a6717af8575bbb4c984d5873` contain the two source increments.
+This is `PARTIAL_STATIC_SOURCE_PROGRESS`; its executable state is
+`NOT_RUN_STATIC_ONLY`, and the bead remains open. The current receipt pins the
+whole source and independently hashes the helper-only projection before the A3
+blocking kernel.
+
+The subset deliberately uses the standard library where it already provides
+the required semantics:
+
+- `poll_fn` is a direct adoption of `std::future::poll_fn`, preserving the
+  caller's Context, one closure call per wrapper poll, closure drop, panic
+  propagation, and the absence of extra `Send` or `'static` bounds;
+- `pending` is a direct adoption of `std::future::pending`, so it remains
+  pending without scheduling a wake;
+- the owned `poll_once` pins its input inside the returned future, polls it
+  exactly once, maps `Ready(value)` to `Some(value)`, maps `Pending` to `None`
+  without waiting, and drops the input when that observation completes;
+- the owned `YieldNow` self-wakes and returns `Pending` on its first poll, then
+  returns `Ready(())` on every later poll without another wake. This repeated
+  ready behavior is intentionally distinct from `runtime::yield_now`, whose
+  separate runtime-facing contract rejects a post-completion repoll.
+
+At follow-on base revision `da8d632b5ef51ea4074589aed0664cb8f5e33d41`, a
+second static-only increment adds the deterministic two-future combinators:
+
+- the owned `Zip` polls left before right on every wrapper poll, stores each
+  completed output, drops that completed child in place, and never polls it
+  again while the other child remains pending;
+- the owned `Or` polls left first and returns immediately when left is ready,
+  otherwise polling right. Completion leaves the other future to be dropped
+  with the wrapper; it does not claim to drain a losing structured task.
+
+Both combinators use the root crate's existing pin-projection dependency and
+store their state inline; they add no heap allocation or executor.
+
+Inline cases have been authored for Context identity and closure-call count,
+ready and pending one-poll observations, pending-input drop, the exact
+first/second/later yield sequence, a pending future that never wakes, zip poll
+order and completed-child suppression, retained-output and unfinished-child
+drop, and left-biased `or` selection, fallthrough, and loser drop. None of those
+cases has been executed in these static-only increments.
+
+Two additional source cases now exhaustively cover the 4-by-4 readiness matrix
+for deterministic `zip`/left-biased `or` traces and run all six owned helpers
+inside two LabRuntime tasks under bounded DPOR exploration, checking runtime
+quiescence and zero pending obligations. The machine receipt therefore names
+the exact nine authored functions. They remain
+source cases, not unit-test evidence. There is no standalone property or
+differential corpus, LabRuntime/DPOR scheduling receipt, deterministic trace
+receipt, or expiry-independent replacement for the incumbent oracle.
+
+`race` remains an explicit policy boundary. The incumbent chooses its first
+child with an ambient random generator on every wrapper poll and drops the
+other generic future after a winner is returned. A raw `Future` exposes only
+poll and drop: it has no generic cancellation acknowledgement, obligation
+ledger, or drain-to-quiescence protocol. Implementing the same drop-only shape
+would preserve the incumbent's local behavior but would not satisfy the
+project's stronger structured loser-drain contract. Ambient per-poll randomness
+would also violate deterministic trace replay. The recorded decision is
+`KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY`; a drop-only owned race is not
+authorized.
+
+The stale empty/large-collection requirement came from treating `join_all` as
+live. It is not a reason to invent that API: A1 proved the only occurrence is a
+comment and the pinned dependency exports no such helper. The actual `zip`,
+`or`, and `race` surfaces are two-future, O(1)-state combinators.
+
+Three `BLOCKED_GAP` rows preserve what remains:
+
+- `FUT-A4-GAP-16`: no terminal focused execution or independent differential
+  evidence for the nine source-authored cases, including the bounded readiness
+  matrix and LabRuntime/DPOR scenario;
+- `FUT-A4-GAP-17`: generic-future drop cannot establish structured race-loser
+  cancellation, obligation resolution, drain, and quiescence;
+- `FUT-A4-GAP-18`: no deterministic race fairness/trace policy or
+  expiry-independent race corpus.
+
+These increments do not implement randomized `race` and do not invent a
+comment-only `join_all` target. They also do not migrate an incumbent call site,
+change a manifest, authorize cutover, establish differential parity, or provide
+unit, property, lab, DPOR, performance, or loser-drain evidence. The remaining
+race surface and its explicit cancellation/quiescence policy keep FUT A4 open.
+
+### FUT A5 focused panic-boundary acceptance
+
+At claimed base revision `fc687fbbe677f25e6c00d7a6adc9403be88a0f2b`, bead
+`asupersync-d24mms.6.5` completes the owned crate-private poll-panic wrapper and
+the two production web panic boundaries. Its scoped status is
+`ACCEPTANCE_IMPLEMENTED` / `FOCUSED_REMOTE_EXECUTION_PASSED`.
+
+`crate::util::future::catch_unwind` forwards the caller Context and contains
+each inner poll with `std::panic::catch_unwind`. Before returning a terminal
+result it takes and drops the pinned inner future inside a second unwind
+boundary. A poll panic remains the primary payload even when cleanup also
+panics; a cleanup-only panic after `Ready` becomes `Err`. Taking the inner
+`Option` exactly once prevents every later inner poll. Abandoning an unpolled
+or pending wrapper still uses ordinary Rust drop outside a poll.
+
+Both production boundaries now catch synchronous `Handler::call` panics and
+later poll panics, retain the best-effort payload only in correlated server
+diagnostics, and return sanitized 500 responses containing `[ASUP-E502]`.
+`CatchPanicMiddleware` and `ErrorHandlerMiddleware` include method, path, trace
+identifier, and panic message in the server event; the panic message is never
+returned to the client. When panic catching is disabled, propagation remains
+unchanged.
+
+These are web `Response` boundaries. Recovery completes the handler future
+normally with a 500 response, so there is no `Outcome` value at this API layer
+and the implementation does not invent one.
+
+Focused remote execution under explicit `-C panic=unwind` admission covers
+pending/wake/ready forwarding, original-payload preservation, terminal
+no-repoll, unpolled drop, nested poll/drop panic precedence, cleanup-only
+panic conversion, LabRuntime obligation resolution and quiescence,
+construction-panic policy, and a direct `ErrorHandlerMiddleware`
+request/response boundary. The handler-boundary test proves exact-once future
+drop, a redacted response, and correlated structured diagnostics. It does not
+exercise a listener, router, or transport.
+
+The four A5 gaps now carry terminal scoped dispositions:
+
+- `FUT-A5-GAP-19`: `FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED`;
+- `FUT-A5-GAP-20`: `NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED`;
+- `FUT-A5-GAP-21`: `STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED`;
+- `FUT-A5-GAP-22`: `HANDLER_BOUNDARY_TEST_PASSED`.
+
+This closes A5 but does not authorize dependency cutover. It does not claim
+panic containment under an abort strategy, broad web/workspace health, or
+behavior outside the two named web boundaries and the owned helper. In
+particular, it does not claim listener/router/transport end-to-end coverage.
+
+## Consumed helper semantics
+
+The live API set is:
+
+- `block_on`
+- `poll_fn`
+- `poll_once`
+- `yield_now`
+- `zip`
+- `race`
+- `or`
+- `pending`
+- `FutureExt::catch_unwind`
+- `Stream`
+
+`poll_fn` invokes its `FnMut` once per poll and forwards the caller's Context.
+`poll_once` performs exactly one inner poll, turning `Ready(v)` into `Some(v)`
+and `Pending` into `None`; completion drops the inner future. `yield_now`
+self-wakes and returns `Pending` once, then returns `Ready(())`.
+
+`zip` polls left then right, stores completed outputs, and returns an ordered
+pair after both complete. Dropping it drops the remaining child and any stored
+output.
+
+`race` randomizes the first child on each wrapper poll. `or` always polls left
+first. Both return the first ready output and drop the losing future when the
+wrapper is dropped. They do **not** drain the loser or prove region quiescence.
+Any owned replacement must either preserve this incumbent behavior for
+differential compatibility or explicitly upgrade it to the project's stronger
+race contract with obligation-aware drain evidence. Merely dropping the loser
+cannot be reported as “losers are drained.”
+
+`pending` never completes and never schedules a wake. The incumbent
+`catch_unwind` wraps each inner poll in `std::panic::catch_unwind`, producing
+`Err(Box<dyn Any + Send>)`. The owned A5 poll wrapper now supplies that
+production behavior, while each web middleware separately owns its
+construction-stage policy. The `Stream` trait is the futures-core trait
+re-export and adds no `Send`, `Sync`, `Unpin`, or `'static` supertrait.
+
+### ADR correction: no `join_all`
+
+`future::join_all` is not consumed. The only repository occurrence is a stale
+comment in `src/sync/notify_metamorphic.rs`, and futures-lite 2.6.1 exports no
+such function. Conversely, `future::or` is used by
+`tests/channel_conformance.rs` and was absent from the ADR list.
+
+FUT A4 must implement the executable inventory, not the stale prose list:
+include `or`; do not invent a futures-lite `join_all` parity target. The
+project's own join-all behavior remains a separate asupersync combinator
+surface.
+
+## Exact migration ownership
+
+Every baseline occurrence is assigned by a deterministic path selector. Each
+group carries the SHA-256 digest of its sorted `path<TAB>count` projection:
+
+| Group | Bead | Files | Tokens | Scope |
+|---|---|---:|---:|---|
+| `FUT-A6-CORE` | `.6.6` | 42 | 258 | actor, cancellation, channels, combinators, Cx, epoch, gen-server, lab, obligations, runtime, service, session, owned stream, sync, test utilities, tracing |
+| `FUT-A7-IO` | `.6.7` | 31 | 145 | filesystem, IO, non-ATP network, process, signal, time, TLS |
+| `FUT-A8-SERVICES` | `.6.8` | 33 | 196 | web, HTTP, gRPC, database, messaging, distributed |
+| `FUT-A9-ATP-DEV` | `.6.9` | 204 | 763 | ATP, transports, root real/conformance test modules, integration tests, benchmarks, examples, compatibility tests, fuzz comments |
+
+Before editing, an owner must materialize the group's digest projection, reserve
+every exact path it intends to change, and fail closed if the projection drifts.
+The groups are ownership partitions, not permission for a bulk rewrite.
+
+Design and kernel ownership remains:
+
+- `.6.2`: owned Stream/public extension contract and ATP downstream ergonomics;
+- `.6.3`: safe blocking kernel, Parker/Waker state, recursion, runtime and
+  blocking-pool policy;
+- `.6.4`: `poll_fn`, `poll_once`, `yield_now`, `zip`, `race`, `or`, and
+  `pending`;
+- `.6.5`: construction- and poll-phase panic containment;
+- `.6.10`: aggregate parity, graph proof, downstream E2E, rollback, and only
+  then a conditional cutover decision.
+
+## Marginal ledger
+
+The existing marginal ledger has 52 root-edge cells: 13 feature profiles over
+four target triples.
+
+| Unique marginal package versions | Cells |
+|---:|---:|
+| 0 | 4 |
+| 3 | 21 |
+| 4 | 13 |
+| 5 | 14 |
+
+The possible unique set is futures-lite 2.6.1, futures-io 0.3.33, parking
+2.2.1, futures-core 0.3.33, and pin-project-lite 0.2.17. No marginal build
+script, proc macro, or native-code package is recorded.
+
+All four zero-marginal cells are `workspace-dev-build-audit` targets. Removing
+the root normal edge would not remove a package there because workspace
+dev/test edges—including the Tokio compatibility member's direct dev
+dependency—retain the incumbent. Therefore:
+
+1. production normal-edge exit is one gate;
+2. temporary differential/dev-oracle retention is a separate, explicit gate;
+3. dev-oracle retirement happens only after standalone owned tests replace the
+   oracle;
+4. a zero workspace marginal is not evidence that production already stopped
+   using futures-lite.
+
+## Required downstream and real E2E evidence
+
+`public_stream_consumer` must compile and run an external crate whose generic
+functions are bounded on the ecosystem Stream trait and consume both ATP SDK
+types. It must cover Pending, wake, progress item, EOF, channel cancellation,
+drop, obligation cleanup, and region-close quiescence.
+
+`stream_cancel_backpressure` must exercise the real bounded progress path and
+prove cancellation signaling, obligation resolution, no task leak, no
+obligation leak, loser cleanup, and quiescence.
+
+`test_block_on` must cover a borrowed non-`Send` future, recursive invocation,
+wake-after-Pending, panic propagation, ordinary test threads, runtime contexts,
+and blocking-pool contexts with no spin, deadlock, or orphan task.
+
+Canonical aggregate execution remains:
+
+```bash
+scripts/run_all_e2e.sh --suite dependency-sovereignty --scenario futures_streams
+```
+
+The scenario must retain the standard provenance, normalized outcomes,
+resource state, timings, redaction scan, and deterministic replay command.
+`BLOCKED` or `UNSUPPORTED` is explicit; silent skip is not green.
+
+## Fail-closed findings
+
+- The capability registry names the wrong source owners.
+- Its feature list implies a gate that does not exist.
+- Registry and baseline evidence states disagree.
+- The manifest comment describes only the two web adapter sites.
+- Public ATP ecosystem Stream runtime behavior remains untested; owned
+  downstream compile usability is executed.
+- ATP's Empty path no longer self-wakes and focused wake/cancellation tests are
+  authored, but those inline tests still lack a terminal execution receipt.
+- The ADR count drifted, listed comment-only `join_all`, omitted live `or`, and
+  omitted the compatibility-member direct dev edge.
+- Two fuzz comments imply direct use that does not exist.
+
+All are routed in the machine artifact. None is permission to expand A1 into a
+source migration.
+
+## Focused contract
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay \
+  --overlay-path artifacts/futures_lite_capability_inventory_v1.json \
+  --overlay-path docs/futures_lite_capability_inventory.md \
+  --overlay-path tests/futures_lite_capability_inventory_contract.rs \
+  -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 \
+  RUSTFLAGS='-D warnings -C debuginfo=0' \
+  CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_futures_lite_capability_inventory" \
+  cargo test -p asupersync --test futures_lite_capability_inventory_contract -- --nocapture
+```
+
+## No-claim boundary
+
+This inventory proves a source-pinned, zero-unknown classification and focused
+incumbent semantic probes. It does not prove arbitrary downstream Stream
+compatibility, replacement parity, broad workspace health, release readiness,
+performance, no regression, live RCH fleet availability, local Cargo fallback
+approval, or permission to remove futures-lite. Package-count marginals are not
+behavioral evidence. Dropping a race loser is not the project's required loser
+drain. The owned Stream documentation and downstream contracts described above
+have scoped execution receipts; the ATP progress runtime path remains
+unexecuted and does not establish replacement parity.
+The FUT A3 receipts prove the named behavior cases, deterministic bounded state
+model, LabRuntime quiescence case, explicit context-policy cases, and one Linux
+idle/ready comparison. They do not prove exhaustive wake/park interleavings,
+safe dependency on a paused foreign executor, cross-platform performance,
+throughput, incumbent latency parity, broad workspace health, or cutover
+readiness.
+The FUT A4 receipt likewise does not turn nine source-authored cases into
+executed proof, implement `race`, treat comment-only `join_all` as live, prove
+deterministic fairness, or equate dropping a generic future with structured
+loser drain and quiescence.
+The FUT A5 receipt proves the named owned-wrapper and direct handler-boundary
+lanes under `panic=unwind`; it does not prove listener/router/transport
+end-to-end behavior, abort-strategy containment, broad web or workspace health,
+performance, or dependency cutover readiness.
+
+<!-- END FUTURES LITE CAPABILITY INVENTORY -->

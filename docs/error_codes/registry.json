@@ -1,0 +1,1046 @@
+{
+  "schema_version": "asupersync-error-code-registry-v1",
+  "namespace": "ASUP-Exxx",
+  "updated": "2026-09-01",
+  "ranges": [
+    {
+      "range": "ASUP-E0xx",
+      "area": "core-runtime",
+      "summary": "Spawn, region admission, runtime availability, and budget setup failures."
+    },
+    {
+      "range": "ASUP-E1xx",
+      "area": "obligations",
+      "summary": "Permit, ack, lease, guard, leak, and obligation-lifecycle failures."
+    },
+    {
+      "range": "ASUP-E2xx",
+      "area": "channels-sync",
+      "summary": "Channel, mailbox, lock, semaphore, and cancel-aware synchronization failures."
+    },
+    {
+      "range": "ASUP-E3xx",
+      "area": "cancellation-drain",
+      "summary": "Cancellation protocol, loser drain, and finalizer completion failures."
+    },
+    {
+      "range": "ASUP-E4xx",
+      "area": "lab-replay",
+      "summary": "Deterministic lab runtime, replay, oracle, and futurelock diagnostics."
+    },
+    {
+      "range": "ASUP-E5xx",
+      "area": "net-http",
+      "summary": "Network, HTTP, protocol, and deadline propagation failures."
+    },
+    {
+      "range": "ASUP-E6xx",
+      "area": "database",
+      "summary": "Database client, pool, transaction, and statement-timeout failures."
+    },
+    {
+      "range": "ASUP-E7xx",
+      "area": "distributed-remote",
+      "summary": "Remote spawn, transport routing, ATP, and distributed runtime failures."
+    },
+    {
+      "range": "ASUP-E8xx",
+      "area": "raptorq",
+      "summary": "RaptorQ encode/decode, repair, and symbol-validation failures."
+    },
+    {
+      "range": "ASUP-E9xx",
+      "area": "config-build",
+      "summary": "Configuration, feature graph, build, and release-gate failures."
+    }
+  ],
+  "codes": [
+    {
+      "code": "ASUP-E001",
+      "name": "runtime-unavailable",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The runtime behind a spawn handle is no longer available.",
+      "probable_causes": [
+        "The runtime was dropped before the spawn call.",
+        "Shutdown began before the caller enqueued the task."
+      ],
+      "remediation": [
+        "Hold a strong runtime handle for the spawner lifetime.",
+        "Stop spawning after shutdown starts and treat the error as terminal."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E001.md",
+      "since": "0.3.2",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E002",
+      "name": "region-not-found",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A spawn target referenced a region id that is no longer present.",
+      "probable_causes": [
+        "The region id was cached past region close.",
+        "A test fixture reused a stale RegionId."
+      ],
+      "remediation": [
+        "Spawn into a live ancestor region.",
+        "Refresh the handle that produced the region id before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E002.md",
+      "since": "0.3.2",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E003",
+      "name": "region-closed",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The target region is closing or closed and admits no new tasks.",
+      "probable_causes": [
+        "Spawn raced with region close.",
+        "The caller kept using a scope after the owning region began draining."
+      ],
+      "remediation": [
+        "Treat spawn-vs-shutdown as a normal cancellation race.",
+        "Move the spawn earlier or route work through a still-live parent region."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E003.md",
+      "since": "0.3.2",
+      "source_refs": ["src/error.rs", "src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E004",
+      "name": "local-scheduler-unavailable",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A local spawn was attempted without an active worker scheduler.",
+      "probable_causes": [
+        "spawn_local was called outside a worker thread.",
+        "A fixture constructed runtime state without the local scheduler context."
+      ],
+      "remediation": [
+        "Use spawn for Send tasks.",
+        "Call spawn_local only from inside runtime worker context."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E004.md",
+      "since": "0.3.2",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E005",
+      "name": "name-registration-failed",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "Service name registration failed while spawning a named task.",
+      "probable_causes": [
+        "The service name is already leased.",
+        "The requested name is invalid for the registry."
+      ],
+      "remediation": [
+        "Pick a unique service name.",
+        "Release or await the existing name lease before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E005.md",
+      "since": "0.3.2",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E006",
+      "name": "region-at-capacity",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "Region admission rejected a spawn because the live-task limit was reached.",
+      "probable_causes": [
+        "The region has too many live child tasks.",
+        "Admission limits are lower than the workload envelope requires."
+      ],
+      "remediation": [
+        "Await existing task completions before spawning more.",
+        "Raise the region admission limit only after proving the capacity envelope."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E006.md",
+      "since": "0.3.2",
+      "source_refs": ["src/error.rs", "src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E007",
+      "name": "authorization-denied",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "The capability context lacks permission to create tasks in the target region.",
+      "probable_causes": [
+        "The Cx was narrowed without spawn rights.",
+        "Code attempted to spawn through a region it does not own."
+      ],
+      "remediation": [
+        "Pass a Cx with spawn capability for the target region.",
+        "Spawn through the owning scope instead of bypassing capability flow."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E007.md",
+      "since": "0.3.2",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E008",
+      "name": "admission-slot-already-reserved",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "A spawn request attempted to reuse a one-shot canonical identity slot.",
+      "probable_causes": [
+        "Two spawn requests were constructed with the same AdmittedTaskSlot.",
+        "Caller code retained and reused a slot after its original request was admitted or denied."
+      ],
+      "remediation": [
+        "Create a fresh AdmittedTaskSlot alongside each TaskHandle.",
+        "Treat the slot and its spawn request as one indivisible, one-shot admission handshake."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E008.md",
+      "since": "0.3.5",
+      "source_refs": ["src/runtime/state.rs"]
+    },
+    {
+      "code": "ASUP-E009",
+      "name": "ambient-io-capability-denied",
+      "area": "core-runtime",
+      "status": "live",
+      "summary": "An ambient I/O entry point refused because the calling task's Cx lacks the IO capability.",
+      "probable_causes": [
+        "The task runs under a Cx narrowed with Cx::push_restriction or Cx::set_current_restricted to a capability set without IO.",
+        "The task belongs to an AppSpec work unit whose required Cx capabilities include neither io nor net."
+      ],
+      "remediation": [
+        "Perform the I/O from a task whose Cx carries the IO capability, or require the io or net capability on the work unit.",
+        "If the narrowing is intended, keep the I/O out of the restricted code and pass results in instead."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E009.md",
+      "since": "0.6.0",
+      "source_refs": ["src/cx/io_gate.rs"]
+    },
+    {
+      "code": "ASUP-E101",
+      "name": "obligation-leaked",
+      "area": "obligations",
+      "status": "live",
+      "summary": "An obligation reached leak handling without commit or abort.",
+      "probable_causes": [
+        "A guard, permit, ack, or lease was dropped without resolving.",
+        "A cancellation path skipped drain-phase cleanup."
+      ],
+      "remediation": [
+        "Find the holder task and obligation kind in the audit snapshot.",
+        "Ensure every acquire/reserve path has matching commit or abort cleanup."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E101.md",
+      "since": "0.3.4",
+      "source_refs": ["src/error.rs", "src/obligation/graded.rs"]
+    },
+    {
+      "code": "ASUP-E102",
+      "name": "obligation-double-resolve",
+      "area": "obligations",
+      "status": "live",
+      "summary": "An obligation was committed, aborted, or leaked more than once.",
+      "probable_causes": [
+        "Both normal completion and cancellation cleanup resolved the same token.",
+        "A retry path reused an obligation id after resolution."
+      ],
+      "remediation": [
+        "Make resolution idempotence explicit at the owner boundary.",
+        "Split token ownership so only one path can consume the obligation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E102.md",
+      "since": "0.3.4",
+      "source_refs": ["src/error.rs"]
+    },
+    {
+      "code": "ASUP-E103",
+      "name": "root-region-obligation",
+      "area": "obligations",
+      "status": "live",
+      "summary": "An obligation was created in the root region.",
+      "probable_causes": [
+        "A test fixture used the root RegionId for obligation-bearing code.",
+        "Runtime setup skipped child-region allocation before creating a permit.",
+        "A GenServer call was issued from a root-region task (block_on, RuntimeHandle::spawn, or a LabRuntime task created directly under the root region); GenServerHandle::call and GenServerRef::call return CallError::Cancelled carrying this token instead of panicking."
+      ],
+      "remediation": [
+        "Move the fixture or runtime path into a non-root region.",
+        "Issue GenServer calls from a child region (a Scope region or a task spawned inside one).",
+        "Preserve the guard: root-region obligations hide leaks and break quiescence."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E103.md",
+      "since": "0.3.4",
+      "source_refs": ["src/obligation/graded.rs", "src/gen_server.rs"]
+    },
+    {
+      "code": "ASUP-E104",
+      "name": "obligation-abort-missing",
+      "area": "obligations",
+      "status": "live",
+      "summary": "An obligation was dropped without being completed, cancelled, or aborted (e.g. an in-flight I/O obligation dropped without complete/cancel/abort/into_raw handoff).",
+      "probable_causes": [
+        "A two-phase reserve/send path lost the reserved permit.",
+        "A cancellation branch returned before abort cleanup.",
+        "An IoOp was dropped while still pending without complete(), cancel(), abort(), or into_raw()."
+      ],
+      "remediation": [
+        "Add abort cleanup to every early return after reservation.",
+        "Test cancellation between reserve and commit.",
+        "Resolve every IoOp via complete/cancel/abort, or hand the obligation off with into_raw() before dropping it."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E104.md",
+      "since": "0.3.4",
+      "source_refs": ["src/runtime/io_op.rs"]
+    },
+    {
+      "code": "ASUP-E105",
+      "name": "obligation-drain-timeout",
+      "area": "obligations",
+      "status": "live",
+      "summary": "Drain or recovery waited too long for obligation resolution and aborted a stale reserved obligation.",
+      "probable_causes": [
+        "A holder task did not observe cancellation.",
+        "A blocking section prevented finalizer progress.",
+        "A remote replica retained a Reserved obligation past the recovery stale-timeout budget."
+      ],
+      "remediation": [
+        "Inspect holder task, obligation kind, and age in the audit snapshot.",
+        "Move blocking cleanup into a bounded drain path.",
+        "For CRDT recovery, compare the stale-abort age against RecoveryConfig::stale_timeout_ns and verify the holder node either committed or aborted before partition heal."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E105.md",
+      "since": "0.3.4",
+      "source_refs": ["src/obligation/recovery.rs"]
+    },
+    {
+      "code": "ASUP-E201",
+      "name": "channel-closed",
+      "area": "channels-sync",
+      "status": "live",
+      "summary": "A send or receive operation observed a closed channel.",
+      "probable_causes": [
+        "All senders or receivers were dropped.",
+        "A region closed before channel users finished."
+      ],
+      "remediation": [
+        "Treat closure as normal shutdown if it follows region cancellation.",
+        "If unexpected, inspect owner region lifetime and channel endpoint drops."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E201.md",
+      "since": "0.3.4",
+      "source_refs": ["src/error.rs"]
+    },
+    {
+      "code": "ASUP-E202",
+      "name": "send-permit-leaked",
+      "area": "channels-sync",
+      "status": "live",
+      "summary": "A two-phase send permit was reserved but never committed or aborted.",
+      "probable_causes": [
+        "Cancellation happened between reserve and send.",
+        "The permit owner was dropped without abort cleanup."
+      ],
+      "remediation": [
+        "Use the channel reserve/send guard pattern instead of manual state flags.",
+        "Add a test that cancels immediately after reserve."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E202.md",
+      "since": "0.3.4",
+      "source_refs": ["src/obligation/marking.rs"]
+    },
+    {
+      "code": "ASUP-E203",
+      "name": "receive-cancelled",
+      "area": "channels-sync",
+      "status": "live",
+      "summary": "A receive operation was cancelled before it could commit delivery.",
+      "probable_causes": [
+        "The caller's Cx was cancelled while waiting.",
+        "A race loser was not drained before observing channel state."
+      ],
+      "remediation": [
+        "Drain the losing receive future before reusing the channel.",
+        "Confirm the receive path preserves queued data on cancellation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E203.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/channel/mpsc.rs",
+        "src/channel/broadcast.rs",
+        "src/channel/oneshot.rs",
+        "src/channel/watch.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E204",
+      "name": "semaphore-permit-exhausted",
+      "area": "channels-sync",
+      "status": "live",
+      "summary": "A semaphore acquire could not obtain the requested permits.",
+      "probable_causes": [
+        "All permits are held or queued ahead under FIFO policy.",
+        "The request asked for more permits than the semaphore can issue."
+      ],
+      "remediation": [
+        "Respect FIFO no-queue-jump behavior when diagnosing availability.",
+        "Reduce permit count or split the work into smaller admitted units."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E204.md",
+      "since": "0.3.4",
+      "source_refs": ["src/sync/semaphore.rs"]
+    },
+    {
+      "code": "ASUP-E205",
+      "name": "lock-order-violation",
+      "area": "channels-sync",
+      "status": "live",
+      "summary": "A code path violated runtime lock-order or lock-name policy.",
+      "probable_causes": [
+        "Nested runtime/obligation locks were introduced in the wrong order.",
+        "A diagnostic query held one shard lock while entering another domain.",
+        "The lock-metrics policy rejected an undocumented unranked lock name."
+      ],
+      "remediation": [
+        "Reorder acquisition to E(Config), D(Instrumentation), B(Regions), A(Tasks), C(Obligations).",
+        "Snapshot data under one lock and release it before querying another domain.",
+        "Rename the lock with a ranked prefix or document a stable LOCK_ORDER_REASON allowance."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E205.md",
+      "since": "0.3.4",
+      "source_refs": ["src/sync/lock_ordering.rs"]
+    },
+    {
+      "code": "ASUP-E301",
+      "name": "cancel-drain-timeout",
+      "area": "cancellation-drain",
+      "status": "live",
+      "summary": "Cancellation was requested but drain did not complete within budget.",
+      "probable_causes": [
+        "A child task ignored cancellation.",
+        "A finalizer or obligation holder blocked drain progress."
+      ],
+      "remediation": [
+        "Inspect pending children, finalizers, and obligations for the region.",
+        "Make cancellation checkpoints visible in long-running loops."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E301.md",
+      "since": "0.3.4",
+      "source_refs": ["src/error.rs", "src/observability/diagnostics.rs"]
+    },
+    {
+      "code": "ASUP-E302",
+      "name": "race-loser-not-drained",
+      "area": "cancellation-drain",
+      "status": "live",
+      "summary": "A race combinator returned before fully draining losing branches.",
+      "probable_causes": [
+        "The winner path forgot to await loser cancellation.",
+        "A loser future held obligations after the race completed."
+      ],
+      "remediation": [
+        "Cancel every losing branch and drive it to completion before returning.",
+        "Assert zero obligation leaks after race completion in lab tests."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E302.md",
+      "since": "0.3.4",
+      "source_refs": ["src/combinator/race.rs"]
+    },
+    {
+      "code": "ASUP-E303",
+      "name": "finalizer-timeout",
+      "area": "cancellation-drain",
+      "status": "live",
+      "summary": "A region finalizer exceeded its configured completion budget.",
+      "probable_causes": [
+        "Cleanup performed unbounded I/O or blocking work.",
+        "A finalizer waited on a task in the same closing region."
+      ],
+      "remediation": [
+        "Move blocking cleanup behind an explicit bounded capability.",
+        "Avoid waiting on same-region tasks from finalizer code."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E303.md",
+      "since": "0.3.5",
+      "source_refs": ["src/record/finalizer.rs"]
+    },
+    {
+      "code": "ASUP-E401",
+      "name": "replay-divergence",
+      "area": "lab-replay",
+      "status": "live",
+      "summary": "A replay run diverged from its recorded deterministic trace.",
+      "probable_causes": [
+        "The code introduced nondeterministic ordering or ambient time.",
+        "A trace schema changed without migration or golden update."
+      ],
+      "remediation": [
+        "Compare the first-divergence event, not the final failure only.",
+        "Normalize ordering, timestamps, and ids before accepting new goldens."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E401.md",
+      "since": "0.3.4",
+      "source_refs": ["src/lab/scenario_runner.rs", "src/trace/replayer.rs"]
+    },
+    {
+      "code": "ASUP-E402",
+      "name": "futurelock-detected",
+      "area": "lab-replay",
+      "status": "live",
+      "summary": "The lab runtime detected a task that stopped being polled while it still held obligations.",
+      "probable_causes": [
+        "Tasks are mutually waiting on each other.",
+        "A wake registration was lost or cancelled incorrectly."
+      ],
+      "remediation": [
+        "Inspect wait-for edges and the last wake event for each parked task.",
+        "Add a deterministic regression that reproduces the minimal parked set."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E402.md",
+      "since": "0.3.3",
+      "source_refs": ["src/lab/runtime.rs"]
+    },
+    {
+      "code": "ASUP-E403",
+      "name": "lab-seed-nondeterminism",
+      "area": "lab-replay",
+      "status": "live",
+      "summary": "Two runs with the same lab seed produced different outcomes.",
+      "probable_causes": [
+        "A data structure iteration order is nondeterministic.",
+        "The test used wall-clock time, random entropy, or global process state."
+      ],
+      "remediation": [
+        "Replace unordered iteration with stable ordering in trace-visible paths.",
+        "Route time and entropy through Cx capabilities."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E403.md",
+      "since": "0.3.4",
+      "source_refs": ["src/lab/oracle/determinism.rs"]
+    },
+    {
+      "code": "ASUP-E404",
+      "name": "snapshot-artifact-invalid",
+      "area": "lab-replay",
+      "status": "live",
+      "summary": "An owned runtime snapshot artifact failed version, integrity, resource, structural, or incremental-base validation.",
+      "probable_causes": [
+        "The artifact is partial, corrupt, oversized, or from an unsupported future version.",
+        "An incremental artifact was applied without the exact validated base snapshot.",
+        "Decoded runtime state violates referential, quiescence, timestamp, count, or depth invariants."
+      ],
+      "remediation": [
+        "Preserve the rejected bytes and use the specific diagnostic suffix to identify the failed admission check.",
+        "Validate legacy schema-1 JSON before explicit reversible migration and retain the source as the rollback anchor.",
+        "Install migrated bytes through the cancel-safe atomic write boundary only after successful decode and validation."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E404.md",
+      "since": "0.3.9",
+      "source_refs": ["src/lab/snapshot_restore.rs"]
+    },
+    {
+      "code": "ASUP-E501",
+      "name": "http-deadline-exhausted",
+      "area": "net-http",
+      "status": "live",
+      "summary": "An HTTP request or response path exhausted its effective deadline.",
+      "probable_causes": [
+        "The request budget was smaller than the operation latency.",
+        "A child call failed to compose its timeout with the ambient budget."
+      ],
+      "remediation": [
+        "Use min-plus deadline composition: effective deadline is the meet of ambient and override.",
+        "Log inbound, consumed, and forwarded budget at every server/client hop."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E501.md",
+      "since": "0.3.4",
+      "source_refs": [
+        "src/web/request_region.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E502",
+      "name": "web-handler-panic-recovered",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A web handler panicked; a configured web panic boundary recovered it into a 500 response.",
+      "probable_causes": [
+        "A handler or extractor hit an unwrap/expect or index out of bounds on request data.",
+        "Application logic panicked on an unexpected state instead of returning an error response."
+      ],
+      "remediation": [
+        "Find the panic message and backtrace in the server log line tagged [ASUP-E502]; the client response intentionally omits details.",
+        "Fix the handler to return an error Response (4xx/5xx) for the failing input instead of panicking.",
+        "Keep CatchPanicMiddleware (or Router::layer(CatchPanicLayer::new())) outermost so panics cannot tear down the connection or worker."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E502.md",
+      "since": "0.3.4",
+      "source_refs": ["src/web/middleware.rs", "src/web/negotiate.rs"]
+    },
+    {
+      "code": "ASUP-E503",
+      "name": "web-header-rejected",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A typed web header extractor rejected a missing or malformed request header.",
+      "probable_causes": [
+        "A required typed request header was absent.",
+        "A header value was empty, carried forbidden control characters, or did not match the typed header grammar."
+      ],
+      "remediation": [
+        "Send the required header with a syntactically valid value.",
+        "Use Header<T> or TypedHeader<T> in handlers instead of indexing request headers directly."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E503.md",
+      "since": "0.3.4",
+      "source_refs": ["src/web/extract.rs"]
+    },
+    {
+      "code": "ASUP-E504",
+      "name": "streaming-multipart-rejected",
+      "area": "net-http",
+      "status": "live",
+      "summary": "The live multipart field API rejected framing, limits, media type, deadline, cancellation, transport, or field-lease lifecycle state.",
+      "probable_causes": [
+        "Multipart framing, part headers, or a declared Content-Length was malformed.",
+        "A request or part exceeded its configured size or time budget.",
+        "A live field lease was dropped or forgotten before field EOF, or the request-body source disconnected."
+      ],
+      "remediation": [
+        "Branch on StreamingMultipartError::kind and status instead of parsing the diagnostic message.",
+        "Consume each StreamingMultipartField to EOF before requesting the next field.",
+        "Send multipart/form-data with a valid boundary and keep declared lengths within the configured limits."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E504.md",
+      "since": "0.4.9",
+      "source_refs": ["src/web/multipart.rs"]
+    },
+    {
+      "code": "ASUP-E505",
+      "name": "web-total-body-limit-exceeded",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A declared or observed request body exceeded the effective aggregate byte limit.",
+      "probable_causes": [
+        "Content-Length exceeds the monotonic server, router, route, or legacy extractor limit.",
+        "A streaming or chunked body crossed the effective limit while frames were being consumed."
+      ],
+      "remediation": [
+        "Reduce the request body or explicitly raise the narrowest owning RequestBodyPolicy limit.",
+        "Keep server, router, and route policies monotonic; a descendant policy cannot loosen an ancestor limit."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E505.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E506",
+      "name": "multipart-field-limit-exceeded",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A multipart field, part header block, part count, or bounded parser-work allowance exceeded its effective limit.",
+      "probable_causes": [
+        "A single field body or header block exceeded MultipartLimits.",
+        "The request contained too many parts or exhausted bounded parser work."
+      ],
+      "remediation": [
+        "Reduce the offending field, header block, or part count.",
+        "Raise only the required MultipartLimits value while retaining a finite aggregate request limit."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E506.md",
+      "since": "0.4.10",
+      "source_refs": ["src/web/mod.rs", "src/web/multipart.rs"]
+    },
+    {
+      "code": "ASUP-E507",
+      "name": "multipart-malformed",
+      "area": "net-http",
+      "status": "live",
+      "summary": "Multipart media type, boundary framing, headers, or declared part lengths were malformed or unsupported.",
+      "probable_causes": [
+        "The request is not multipart/form-data or its boundary is absent or invalid.",
+        "A part terminator, header, nested multipart declaration, or Content-Length is malformed."
+      ],
+      "remediation": [
+        "Generate multipart/form-data with a valid bounded boundary and matching declared lengths.",
+        "Flatten nested multipart input because the current extractor deliberately rejects nested parts."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E507.md",
+      "since": "0.4.10",
+      "source_refs": ["src/web/mod.rs", "src/web/multipart.rs"]
+    },
+    {
+      "code": "ASUP-E508",
+      "name": "web-body-timeout",
+      "area": "net-http",
+      "status": "live",
+      "summary": "Request-body reading, multipart parsing, or bounded unread-body draining exhausted its time budget.",
+      "probable_causes": [
+        "The client stopped making body progress before the idle or absolute deadline.",
+        "Unread request frames could not be drained within the configured reuse deadline."
+      ],
+      "remediation": [
+        "Make body progress within the advertised timeout or reduce request size.",
+        "Tune finite body and drain deadlines only after confirming the handler consumes or deliberately drops the body."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E508.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E509",
+      "name": "web-client-abort",
+      "area": "net-http",
+      "status": "live",
+      "summary": "The peer transport closed or reset before the request or response body reached a synchronized terminal boundary.",
+      "probable_causes": [
+        "The client disconnected, reset an HTTP/2 stream, or abandoned a request in flight.",
+        "An intermediary closed the transport before body EOF."
+      ],
+      "remediation": [
+        "Correlate the operator diagnostic with peer and request identifiers; do not retry unsafe methods automatically.",
+        "Treat the connection or stream as non-reusable; no synthetic success or fallback response is safe after an abort."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E509.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/extract.rs",
+        "src/web/multipart.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E510",
+      "name": "web-response-producer-failed",
+      "area": "net-http",
+      "status": "live",
+      "summary": "A produced response body failed, panicked, or violated its one-shot terminal contract after response production began.",
+      "probable_causes": [
+        "The application producer returned an error or panicked.",
+        "The producer closed without finish, emitted an invalid terminal sequence, or disagreed with the emitted byte count."
+      ],
+      "remediation": [
+        "Inspect the producer-side error and ensure it calls finish or trailers exactly once after all committed frames.",
+        "Keep the resulting HTTP/1 connection closed or HTTP/2 stream reset; never append a fallback body after the response head was committed."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E510.md",
+      "since": "0.4.10",
+      "source_refs": [
+        "src/web/mod.rs",
+        "src/web/router.rs",
+        "src/http/h1/server.rs",
+        "src/http/h2/listener.rs"
+      ]
+    },
+    {
+      "code": "ASUP-E601",
+      "name": "database-pool-acquire-timeout",
+      "area": "database",
+      "status": "live",
+      "summary": "A database connection-pool acquire waited the full FIFO acquire budget without being granted a connection.",
+      "probable_causes": [
+        "The pool is saturated: all max_size connections are checked out and none were released before the acquire deadline.",
+        "Connections are held too long (slow queries or leaked PooledConnection guards), so FIFO waiters never reach the head within budget.",
+        "DbPoolConfig::max_size or connection_timeout is too low for the offered concurrency."
+      ],
+      "remediation": [
+        "Raise DbPoolConfig::max_size or shorten connection hold time so the FIFO waiter queue drains within the budget.",
+        "Increase DbPoolConfig::connection_timeout if the workload legitimately needs a longer acquire budget.",
+        "Treat AcquireTimeout as backpressure: shed or retry the request at a higher layer rather than retrying the acquire immediately."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E601.md",
+      "since": "0.3.4",
+      "source_refs": ["src/database/pool.rs"]
+    },
+    {
+      "code": "ASUP-E701",
+      "name": "atp-not-implemented",
+      "area": "distributed-remote",
+      "status": "live",
+      "summary": "An ATP CLI command without a real wired implementation was invoked and failed closed.",
+      "probable_causes": [
+        "The invoked ATP subcommand has no transport or daemon backing yet.",
+        "The operation needs durable transfer state from a running atpd that the CLI cannot query yet."
+      ],
+      "remediation": [
+        "Use atp send / atp serve (or the standalone atp binary) for real verified transfers.",
+        "Use --dry-run where supported to preview plans without claiming execution."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E701.md",
+      "since": "0.3.4",
+      "source_refs": ["src/bin/asupersync.rs"]
+    },
+    {
+      "code": "ASUP-E702",
+      "name": "atp-transfer-listener-bind-failed",
+      "area": "distributed-remote",
+      "status": "live",
+      "summary": "atpd could not bind its configured transfer port and refused to start.",
+      "probable_causes": [
+        "Another process already holds the configured transfer port.",
+        "The bind address is not local to this host or needs privileges."
+      ],
+      "remediation": [
+        "Stop the conflicting listener or pick another port with atpd start --bind.",
+        "Verify the address belongs to a local interface and is unprivileged."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E702.md",
+      "since": "0.3.4",
+      "source_refs": ["src/bin/atpd.rs"]
+    },
+    {
+      "code": "ASUP-E801",
+      "name": "atp-rq-no-convergence",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP RaptorQ/QUIC fountain transfer exhausted its feedback-round budget with undecoded entries remaining.",
+      "probable_causes": [
+        "The sender and receiver could not exchange enough repair symbols before max feedback rounds were exhausted.",
+        "Loss, auth filtering, or an undersized repair budget kept one or more entries undecodable."
+      ],
+      "remediation": [
+        "Inspect the pending entry count, feedback round count, and observed loss before retrying.",
+        "Increase repair overhead or feedback-round budget only after ruling out auth, manifest, or block-size mismatch."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E801.md",
+      "since": "0.3.5",
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
+    },
+    {
+      "code": "ASUP-E802",
+      "name": "atp-capability-mismatch",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP peer lacks a required wire-version or transport capability for the requested data-plane mode.",
+      "probable_causes": [
+        "Sender and receiver binaries were built from incompatible protocol versions.",
+        "The selected path requires a feature or capability the peer did not advertise."
+      ],
+      "remediation": [
+        "Upgrade both endpoints to binaries that advertise the same ATP capability set.",
+        "Force a lower transport mode only when the runbook says it preserves the required integrity guarantees."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E802.md",
+      "since": "0.3.5",
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
+    },
+    {
+      "code": "ASUP-E803",
+      "name": "atp-block-size-mismatch",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP RaptorQ/QUIC transfer detected incompatible sender and receiver block-size planning.",
+      "probable_causes": [
+        "The sender and receiver computed different effective maximum block sizes for the same manifest.",
+        "One endpoint is running an older build that does not apply the current block-size negotiation rule."
+      ],
+      "remediation": [
+        "Compare both endpoints' configured and effective block-size values.",
+        "Upgrade the older endpoint or force a full compatible transfer mode before retrying."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E803.md",
+      "since": "0.3.5",
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
+    },
+    {
+      "code": "ASUP-E804",
+      "name": "atp-pacer-stall",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP receiver observed no delivery samples within the idle window while waiting for paced symbols.",
+      "probable_causes": [
+        "The sender stopped emitting symbols or keepalives while the receiver still expected progress.",
+        "A path, firewall, or pacer configuration dropped all data-plane packets after setup."
+      ],
+      "remediation": [
+        "Check the last delivery sample timestamp, idle window, and selected path before retrying.",
+        "Reduce pacer aggressiveness or switch paths if the stall follows a bandwidth estimate change."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E804.md",
+      "since": "0.3.5",
+      "source_refs": ["src/net/atp/transport_quic/mod.rs"]
+    },
+    {
+      "code": "ASUP-E805",
+      "name": "atp-decode-rank-stall",
+      "area": "raptorq",
+      "status": "live",
+      "summary": "An ATP receiver accepted symbols but decoder rank stopped advancing for a pending entry.",
+      "probable_causes": [
+        "Symbols are authenticated but redundant for the pending source block.",
+        "Manifest, object id, or repair-symbol metadata drift means received symbols cannot increase rank."
+      ],
+      "remediation": [
+        "Compare accepted-symbol count, rank deficit, manifest hash, and auth domain for the stalled entry.",
+        "Treat repeated rank stalls as a fail-closed signal and fall back to a full compatible transfer."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E805.md",
+      "since": "0.3.5",
+      "source_refs": ["src/net/atp/transport_rq/mod.rs", "src/net/atp/transport_quic/mod.rs"]
+    },
+    {
+      "code": "ASUP-E901",
+      "name": "config-invalid",
+      "area": "config-build",
+      "status": "live",
+      "summary": "Runtime or build configuration failed deterministic validation.",
+      "probable_causes": [
+        "A numeric bound is internally inconsistent.",
+        "A feature combination violates the supported proof-lane envelope."
+      ],
+      "remediation": [
+        "Normalize dependent values before constructing runtime state.",
+        "Map the failed claim to the proof-lane manifest before changing docs."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E901.md",
+      "since": "0.3.4",
+      "source_refs": ["src/error.rs"]
+    },
+    {
+      "code": "ASUP-E902",
+      "name": "semantic-lint-ambient-determinism",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found ambient time or entropy in lab-sensitive code.",
+      "probable_causes": [
+        "Code used host wall-clock, monotonic time, or process entropy inside a replay-sensitive surface.",
+        "A test fixture bypassed virtual time or deterministic seed capabilities."
+      ],
+      "remediation": [
+        "Route time and entropy through Cx or lab-runtime capabilities.",
+        "Use an allow marker only for deliberate diagnostics with an owner bead."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E902.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E903",
+      "name": "semantic-lint-await-holding-resource",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found an await while a lock, permit, lease, or capability token remained live.",
+      "probable_causes": [
+        "A guard or permit binding stayed in scope across an await point.",
+        "Cancellation cleanup can now wait while still holding the resource it must release."
+      ],
+      "remediation": [
+        "Drop, commit, abort, release, or close the resource before awaiting.",
+        "Split the critical section so awaited work happens after resource resolution."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E903.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E904",
+      "name": "semantic-lint-loop-checkpoint",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found an async infinite loop without an explicit cancellation checkpoint.",
+      "probable_causes": [
+        "A loop awaits work repeatedly but never polls cancellation.",
+        "A long-running task can starve region close and drain quiescence."
+      ],
+      "remediation": [
+        "Add a Cx checkpoint, cancellation poll, or bounded progress proof in the loop body.",
+        "Use an allow marker only when another local invariant proves bounded progress."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E904.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E905",
+      "name": "semantic-lint-outcome-severity",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found ignored or collapsed Outcome severity.",
+      "probable_causes": [
+        "Outcome::Cancelled or Outcome::Panicked was mapped to a successful value.",
+        "A task or combinator discarded an Outcome value without preserving severity."
+      ],
+      "remediation": [
+        "Propagate, match, or record the full Outcome lattice explicitly.",
+        "Document any fixture-only discard with an owner bead allow marker."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E905.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E906",
+      "name": "semantic-lint-race-loser-drain",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found a race loser that appears dropped or defused without loser-drain proof.",
+      "probable_causes": [
+        "A loser-named handle was dropped without abort, join, drain, or cancel evidence.",
+        "A defuse_drop_abort path lacks nearby proof that the loser is drained elsewhere."
+      ],
+      "remediation": [
+        "Cancel and join losing branches before returning the race winner.",
+        "Add local loser-drain proof comments only when another path actually drains the loser."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E906.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E907",
+      "name": "semantic-lint-cleanup-budget",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found cleanup, drain, or finalizer code without an explicit bounded budget.",
+      "probable_causes": [
+        "Cleanup used Budget::INFINITE or ad hoc wall-duration constants.",
+        "A drain or finalizer call has no obvious Budget argument or owner boundary."
+      ],
+      "remediation": [
+        "Derive cleanup duration from an explicit Budget or deadline capability.",
+        "Keep finalizers bounded so region close can reach quiescence."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E907.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    },
+    {
+      "code": "ASUP-E908",
+      "name": "semantic-lint-core-tokio-boundary",
+      "area": "config-build",
+      "status": "live",
+      "summary": "The semantic lint runner found malformed or leaking Tokio feature-boundary evidence.",
+      "probable_causes": [
+        "A production dependency graph is not classified tokio-free.",
+        "A scoped Tokio carve-out lacks quarantine rationale or a valid RCH proof command."
+      ],
+      "remediation": [
+        "Fix the feature graph or move the Tokio edge behind a documented non-production carve-out.",
+        "Update proof-lane commands so production and scoped-audit claims are distinct."
+      ],
+      "doc_path": "docs/error_codes/ASUP-E908.md",
+      "since": "0.3.4",
+      "source_refs": ["scripts/semantic_lint.py"]
+    }
+  ]
+}

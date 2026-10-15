@@ -1,0 +1,289 @@
+{
+  "contract_version": "proof-reuse-cache-contract-v1",
+  "bead_id": "asupersync-5pziae.1",
+  "created_date": "2026-06-04",
+  "description": "Fail-closed schema for deciding whether an existing RCH proof artifact can be reused for a later proof request.",
+  "source_of_truth": {
+    "contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "contract_test": "tests/proof_reuse_cache_contract.rs",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_freshness_helper": "scripts/proof_artifact_freshness_receipt.py",
+    "agent_instructions": "AGENTS.md"
+  },
+  "decision_policy": {
+    "decisions": [
+      "reusable",
+      "miss",
+      "refused"
+    ],
+    "default_decision": "refused",
+    "unknown_or_missing_fields_decision": "refused",
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "remote_route_required": true,
+    "required_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "cargo_requires_target_dir": true,
+    "tracker_mutation_allowed": false,
+    "network_access_required_for_contract_tests": false
+  },
+  "fingerprint_sections": [
+    {
+      "section": "command",
+      "required_fields": [
+        "argv",
+        "cargo_manifest_path",
+        "cargo_package",
+        "cargo_target_selector",
+        "command_fingerprint",
+        "env_allowlist",
+        "feature_flags",
+        "normalization_version"
+      ]
+    },
+    {
+      "section": "source",
+      "required_fields": [
+        "branch",
+        "dirty_frontier_paths",
+        "dirty_frontier_status",
+        "head_commit",
+        "manifest_source_paths",
+        "source_tree_fingerprint",
+        "touched_file_hashes",
+        "touched_files"
+      ]
+    },
+    {
+      "section": "toolchain",
+      "required_fields": [
+        "cargo_lock_hash",
+        "cargo_version",
+        "profile",
+        "rust_toolchain_toml_hash",
+        "rustc_version",
+        "target_dir_identity",
+        "target_triple"
+      ]
+    },
+    {
+      "section": "outcome",
+      "required_fields": [
+        "exit_code",
+        "first_blocker_line",
+        "generated_artifacts",
+        "local_fallback_markers",
+        "proof_output_digest",
+        "rch_remote_route_segments",
+        "rch_remote_worker",
+        "status"
+      ]
+    },
+    {
+      "section": "reuse_policy",
+      "required_fields": [
+        "allowed_cache_hit_claims",
+        "claim_scope",
+        "explicit_not_covered",
+        "lane_kind",
+        "manifest_guarantee_ids",
+        "manifest_lane_id",
+        "remediation_command",
+        "rerun_only_claims"
+      ]
+    }
+  ],
+  "outcome_policy": {
+    "reusable_statuses": [
+      "pass"
+    ],
+    "non_reusable_statuses": [
+      "blocked",
+      "degraded",
+      "error",
+      "fail",
+      "failed",
+      "malformed",
+      "no_win",
+      "nonzero_exit",
+      "stale",
+      "unsupported"
+    ],
+    "required_clean_source_status": "clean",
+    "required_branch": "main"
+  },
+  "refusal_reason_codes": [
+    "branch-mismatch",
+    "broad-claim-unsupported",
+    "command-mismatch",
+    "dirty-frontier-overlap",
+    "failed-proof-status",
+    "lane-mismatch",
+    "local-fallback-marker",
+    "missing-command-fingerprint",
+    "missing-dirty-frontier-status",
+    "missing-touched-files",
+    "source-hash-mismatch",
+    "stale-head",
+    "toolchain-mismatch",
+    "unknown-cache-policy"
+  ],
+  "manifest_lane_policy_examples": [
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "lane_kind": "artifact_contract",
+      "cache_reuse_allowed": true,
+      "allowed_claim_scopes": [
+        "proof-lane-manifest-verifier"
+      ],
+      "requires_fresh_rerun_when_dirty_overlap": true,
+      "prohibited_claim_scopes": [
+        "fresh-rch-pass",
+        "release-readiness",
+        "workspace-health"
+      ]
+    },
+    {
+      "lane_id": "all-targets-check",
+      "lane_kind": "compile_frontier",
+      "cache_reuse_allowed": true,
+      "allowed_claim_scopes": [
+        "all-target-compile-frontier"
+      ],
+      "requires_fresh_rerun_when_dirty_overlap": true,
+      "prohibited_claim_scopes": [
+        "fresh-rch-pass",
+        "release-readiness",
+        "workspace-health"
+      ]
+    },
+    {
+      "lane_id": "clippy-all-targets",
+      "lane_kind": "lint_frontier",
+      "cache_reuse_allowed": true,
+      "allowed_claim_scopes": [
+        "clippy-frontier"
+      ],
+      "requires_fresh_rerun_when_dirty_overlap": true,
+      "prohibited_claim_scopes": [
+        "fresh-rch-pass",
+        "release-readiness",
+        "workspace-health"
+      ]
+    }
+  ],
+  "decision_examples": [
+    {
+      "example_id": "focused-contract-cache-hit",
+      "expected_decision": "reusable",
+      "reason_codes": [],
+      "cache_hit_is_fresh_rch_pass": false,
+      "request": {
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "head_commit": "5417ddb5d",
+        "dirty_frontier_status": "clean"
+      },
+      "candidate": {
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_tree_fingerprint": "git-tree:5417ddb5d",
+        "toolchain_fingerprint": "sha256:rust-toolchain-cargo-lock-profile",
+        "status": "pass",
+        "rch_remote_worker": "rch-worker-proof-01",
+        "local_fallback_markers": [],
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ]
+      }
+    },
+    {
+      "example_id": "missing-dirty-frontier-status",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "missing-dirty-frontier-status"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "missing-touched-files",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "missing-touched-files"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "local-fallback-marker",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "local-fallback-marker"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "failed-status",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "failed-proof-status"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "stale-head",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "stale-head"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "unsupported-broad-claim",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "broad-claim-unsupported"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "toolchain-mismatch",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "toolchain-mismatch"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "command-mismatch",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "command-mismatch"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "source-hash-mismatch",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "source-hash-mismatch"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "dirty-overlap-frontier",
+      "expected_decision": "refused",
+      "reason_codes": [
+        "dirty-frontier-overlap"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    },
+    {
+      "example_id": "unrelated-lane-miss",
+      "expected_decision": "miss",
+      "reason_codes": [
+        "lane-mismatch"
+      ],
+      "cache_hit_is_fresh_rch_pass": false
+    }
+  ]
+}

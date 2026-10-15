@@ -1,0 +1,51 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-peer-dirt` at `13579bdf`. Validation: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_peer_dirt cargo test passed. Released reservations.",
+        "from": "GentleCitadel",
+        "id": 1009,
+        "subject": "Closed asupersync-peer-dirt",
+        "thread_id": "asupersync-peer-dirt"
+      }
+    ],
+    "reservations": []
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-peer-dirt",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-peer-dirt",
+    "commit": "13579bdf",
+    "mode": "bead-backed",
+    "owned_paths": [
+      "scripts/closeout_verifier.py"
+    ],
+    "slice_id": "asupersync-peer-dirt",
+    "thread_id": "asupersync-peer-dirt"
+  },
+  "git": {
+    "branch": "main",
+    "dirty_files": [
+      {
+        "owner": "GentleCitadel",
+        "path": "scripts/closeout_verifier.py",
+        "status": "M"
+      },
+      {
+        "owner": "SapphireHill",
+        "path": "src/runtime/spawn_mailbox.rs",
+        "status": "M"
+      }
+    ],
+    "main_head": "13579bdf",
+    "origin_main": "13579bdf",
+    "origin_master": "13579bdf"
+  }
+}

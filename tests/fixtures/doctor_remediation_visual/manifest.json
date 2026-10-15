@@ -1,0 +1,70 @@
+{
+  "schema_version": "doctor-remediation-visual-fixture-pack-v1",
+  "description": "Golden fixtures for remediation and trust visual regression (bead 6.1)",
+  "fixtures": [
+    {
+      "fixture_id": "visual-fix-applied-baseline",
+      "outcome_class": "fix_applied",
+      "expected_visual_profile": "frankentui-stable",
+      "expected_focused_panel": "remediation_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-fix-preview-baseline",
+      "outcome_class": "fix_preview",
+      "expected_visual_profile": "frankentui-preview",
+      "expected_focused_panel": "remediation_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-fix-rejected-baseline",
+      "outcome_class": "fix_rejected",
+      "expected_visual_profile": "frankentui-cancel",
+      "expected_focused_panel": "remediation_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-rollback-baseline",
+      "outcome_class": "rollback_initiated",
+      "expected_visual_profile": "frankentui-alert",
+      "expected_focused_panel": "remediation_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-trust-degraded-baseline",
+      "outcome_class": "trust_degraded",
+      "expected_visual_profile": "frankentui-alert",
+      "expected_focused_panel": "trust_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-trust-improved-baseline",
+      "outcome_class": "trust_improved",
+      "expected_visual_profile": "frankentui-stable",
+      "expected_focused_panel": "trust_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-verify-fail-baseline",
+      "outcome_class": "verification_fail",
+      "expected_visual_profile": "frankentui-alert",
+      "expected_focused_panel": "trust_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-verify-pass-baseline",
+      "outcome_class": "verification_pass",
+      "expected_visual_profile": "frankentui-stable",
+      "expected_focused_panel": "trust_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    }
+  ]
+}

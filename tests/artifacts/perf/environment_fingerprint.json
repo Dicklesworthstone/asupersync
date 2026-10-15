@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-04-23T08:36:00Z",
+  "session_id": "gf256-simd-dispatch-analysis",
+  "cpu": {
+    "model": "AMD EPYC 7282 16-Core Processor",
+    "architecture": "x86_64",
+    "cores": 32,
+    "threads": 64,
+    "sockets": 2,
+    "frequency_mhz": 2794.710,
+    "features": ["avx2", "fma", "sse4_1", "sse4_2", "ssse3"],
+    "governor": "unknown_virtualized",
+    "turbo": "unknown"
+  },
+  "memory": {
+    "note": "Will be measured during baseline"
+  },
+  "toolchain": {
+    "note": "Will be captured during build"
+  },
+  "build_profile": {
+    "target": "release-perf",
+    "opt_level": 3,
+    "debug": "line-tables-only",
+    "lto": "thin",
+    "frame_pointers": "enabled"
+  },
+  "feature_flags": ["simd-intrinsics"],
+  "isolation": "shared_environment",
+  "test_scenario": "gf256_simd_dispatch_overhead"
+}

@@ -1,0 +1,1 @@
+{"date":"2026-06-13T01:35:37Z","sender":"root@87.99.133.171","receiver":"root@178.18.254.243","rtt":"rtt min/avg/max/mdev = 92.997/93.322/94.399/0.430 ms","sender_cores":8,"receiver_cores":8,"tools":"atp-tcp,rsync-ssh,rsyncd","payloads":"512k,1m,10m,100m,1g,tree","runs":3}

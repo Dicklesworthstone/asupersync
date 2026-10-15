@@ -1,0 +1,106 @@
+{
+  "contract_version": "swarm-cockpit-proof-runner-v1",
+  "manifest_schema_version": "asupersync.swarm-cockpit-proof-runner.manifest.v1",
+  "run_report_schema_version": "asupersync.swarm-cockpit-proof-runner.run-report.v1",
+  "cockpit_report_schema_version": "asupersync.swarm-operator-cockpit-report.v1",
+  "bead_id": "asupersync-vssefs.9.7",
+  "description": "RCH-only no-mock cockpit proof runner. Executes at least one bounded real swarm scenario through live Asupersync lab-runtime surfaces (run_swarm_replay_scenario), derives the pressure trace summary and contention ledger from the real replay, plans the RCH proof lane with observed provenance, builds the operator cockpit report through build_swarm_operator_cockpit_report, and emits the cockpit bundle (report JSON plus compact text) as operator evidence. Dry-run mode prints the manifest without invoking cargo. Execute mode requires RCH_REQUIRE_REMOTE=1 and fails closed on local fallback or missing provenance.",
+  "runner_script": "scripts/run_swarm_cockpit_proof_runner.sh",
+  "contract_test": "tests/swarm_cockpit_proof_runner_contract.rs",
+  "scenario_corpus": "artifacts/swarm_workload_scenario_corpus_v1.json",
+  "cockpit_report_contract": "artifacts/swarm_operator_cockpit_report_contract_v1.json",
+  "scenario_source": {
+    "runtime_scenario_type": "asupersync::lab::SwarmReplayScenario",
+    "runtime_runner": "asupersync::lab::run_swarm_replay_scenario",
+    "runtime_summary_type": "asupersync::lab::SwarmReplaySummary",
+    "trace_summarizer": "asupersync::lab::summarize_swarm_replay_trace",
+    "contention_builder": "asupersync::lab::build_swarm_contention_heatmap",
+    "proof_lane_planner": "asupersync::lab::plan_swarm_proof_lane",
+    "cockpit_report_builder": "asupersync::lab::build_swarm_operator_cockpit_report",
+    "cockpit_text_renderer": "asupersync::lab::render_swarm_operator_cockpit_text",
+    "runtime_source": "src/lab/swarm_replay.rs"
+  },
+  "execution_policy": {
+    "default_profile": "small",
+    "dry_run_mode": "writes a manifest and exits without invoking cargo or rch",
+    "execute_mode": "requires RCH_REQUIRE_REMOTE=1 and invokes cargo test through rch exec",
+    "local_fallback_allowed": false,
+    "missing_provenance_outcome": "blocked",
+    "contention_instrumentation_mode": "lab-trace-derived",
+    "larger_profiles": "medium and large profiles are runnable with the same script but stay optional and expensive; closeout requires exactly one passing small RCH-backed run"
+  },
+  "required_log_fields": [
+    "scenario_id",
+    "profile",
+    "command",
+    "git_commit",
+    "rch_worker",
+    "feature_set",
+    "worker_count",
+    "region_count",
+    "task_count",
+    "quiescence_result",
+    "obligation_verdict",
+    "cockpit_outcome",
+    "first_failure",
+    "artifact_path",
+    "proof_status"
+  ],
+  "forbidden_success_markers": [
+    "placeholder_success",
+    "fake_success",
+    "mock_success",
+    "todo_success"
+  ],
+  "required_outcomes": [
+    "pass",
+    "degraded",
+    "no_win",
+    "blocked",
+    "stale_evidence",
+    "malformed",
+    "unsupported"
+  ],
+  "required_obligation_verdicts": [
+    "clean",
+    "leak_suspect",
+    "missing",
+    "incomplete"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "swarm-minimal-healthy-run",
+      "source_scenario_id": "swarm-minimal-healthy-run",
+      "profile": "small",
+      "scale_class": "small",
+      "execution_mode": "run_in_contract",
+      "closeout_required": true
+    },
+    {
+      "scenario_id": "swarm-fanout-healthy-baseline",
+      "source_scenario_id": "swarm-fanout-healthy-baseline",
+      "profile": "medium",
+      "scale_class": "medium",
+      "execution_mode": "run_in_contract",
+      "closeout_required": false
+    },
+    {
+      "scenario_id": "swarm-saturated-contract-boundary",
+      "source_scenario_id": "swarm-saturated-contract-boundary",
+      "profile": "large",
+      "scale_class": "large",
+      "execution_mode": "manifest_only",
+      "closeout_required": false
+    }
+  ],
+  "proof_command": "timeout 1800 env RCH_REQUIRE_REMOTE=1 scripts/run_swarm_cockpit_proof_runner.sh --execute --profile small --run-id asupersync-vssefs.9.7-closeout",
+  "dry_run_command": "scripts/run_swarm_cockpit_proof_runner.sh --dry-run --profile small",
+  "operator_evidence": {
+    "manifest_path": "target/swarm-cockpit-proof-runner/run_<run_id>/manifest.json",
+    "run_log_path": "target/swarm-cockpit-proof-runner/run_<run_id>/run.log",
+    "run_report_path": "target/swarm-cockpit-proof-runner/run_<run_id>/run_report.json",
+    "cockpit_report_json_path": "target/swarm-cockpit-proof-runner/run_<run_id>/cockpit_report.json",
+    "cockpit_report_text_path": "target/swarm-cockpit-proof-runner/run_<run_id>/cockpit_report.txt",
+    "stdout_event_prefix": "SWARM_COCKPIT_PROOF_EVENT "
+  }
+}

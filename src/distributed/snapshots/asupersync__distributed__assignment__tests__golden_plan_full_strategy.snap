@@ -1,0 +1,48 @@
+---
+source: src/distributed/assignment.rs
+expression: plan
+---
+[
+    ReplicaAssignment {
+        replica_id: "r0",
+        symbol_indices: [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+        ],
+        can_decode: true,
+    },
+    ReplicaAssignment {
+        replica_id: "r1",
+        symbol_indices: [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+        ],
+        can_decode: true,
+    },
+    ReplicaAssignment {
+        replica_id: "r2",
+        symbol_indices: [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+        ],
+        can_decode: true,
+    },
+]

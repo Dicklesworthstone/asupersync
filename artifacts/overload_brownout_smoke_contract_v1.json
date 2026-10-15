@@ -1,0 +1,257 @@
+{
+  "contract_version": "overload-brownout-smoke-contract-v1",
+  "runner_bundle_schema_version": "overload-brownout-smoke-bundle-v1",
+  "runner_report_schema_version": "overload-brownout-smoke-run-report-v1",
+  "runner_path": "scripts/run_overload_brownout_smoke.sh",
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-OVERLOAD-BROWNOUT-OPTIONAL-FIRST",
+      "description": "Staged overload replay proving optional runtime surfaces brown out before core throughput and cancellation latency collapse.",
+      "workload_class": "optional-first",
+      "output_root": "target/overload-brownout-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 808080,
+      "safe_fallback_profile": "full_surfaces",
+      "expected_winner_profile": "brownout",
+      "brownout_profile": {
+        "enabled": true,
+        "observe_memory_pressure_bps": 7800,
+        "degrade_memory_pressure_bps": 8600,
+        "shed_optional_memory_pressure_bps": 9300,
+        "observe_wake_to_run_p99_ns": 145000,
+        "degrade_wake_to_run_p99_ns": 210000,
+        "shed_optional_wake_to_run_p99_ns": 285000,
+        "recovery_window_threshold": 2,
+        "allowed_optional_surfaces": [
+          "detailed_tracing",
+          "rich_diagnostics",
+          "debug_http",
+          "rich_export_formatting"
+        ],
+        "denied_optional_surfaces": []
+      },
+      "fixture": {
+        "initial_phase": "normal",
+        "replay_count": 2,
+        "windows": [
+          {
+            "window_id": "observe_export_formatting",
+            "wake_to_run_p99_ns": 162000,
+            "queue_residency_p99_ns": 188000,
+            "ready_backlog_p99": 144,
+            "cancel_debt_p99": 24,
+            "memory_pressure_bps": 7940,
+            "degradation_level": "Light",
+            "outer_tail_risk_decision": "admit",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 158000
+          },
+          {
+            "window_id": "degrade_diagnostics",
+            "wake_to_run_p99_ns": 228000,
+            "queue_residency_p99_ns": 246000,
+            "ready_backlog_p99": 208,
+            "cancel_debt_p99": 56,
+            "memory_pressure_bps": 8820,
+            "degradation_level": "Moderate",
+            "outer_tail_risk_decision": "defer",
+            "already_shed_surfaces": [
+              "rich_diagnostics"
+            ],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 176000
+          },
+          {
+            "window_id": "shed_optional",
+            "wake_to_run_p99_ns": 308000,
+            "queue_residency_p99_ns": 322000,
+            "ready_backlog_p99": 264,
+            "cancel_debt_p99": 72,
+            "memory_pressure_bps": 9420,
+            "degradation_level": "Heavy",
+            "outer_tail_risk_decision": "shed",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 214000
+          },
+          {
+            "window_id": "recovery_restore",
+            "wake_to_run_p99_ns": 118000,
+            "queue_residency_p99_ns": 126000,
+            "ready_backlog_p99": 108,
+            "cancel_debt_p99": 18,
+            "memory_pressure_bps": 7120,
+            "degradation_level": "None",
+            "outer_tail_risk_decision": "admit",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 132000
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "schema_version": "overload-brownout-projection-v1",
+        "scenario_id": "AA-OVERLOAD-BROWNOUT-OPTIONAL-FIRST",
+        "workload_class": "optional-first",
+        "workload_seed": 808080,
+        "replay_count": 2,
+        "window_count": 4,
+        "phase_sequence": [
+          "observe",
+          "degrade",
+          "shed_optional",
+          "recovery"
+        ],
+        "fallback_windows": [],
+        "restored_windows": [
+          "recovery_restore"
+        ],
+        "already_shedding_windows": [
+          "degrade_diagnostics"
+        ],
+        "brownout": {
+          "observe_count": 2,
+          "degrade_count": 2,
+          "shed_optional_count": 2,
+          "recovery_count": 2,
+          "fallback_used_count": 0,
+          "core_units_preserved": 512,
+          "cancel_p95_ns": 456465,
+          "cancel_p99_ns": 459752,
+          "throughput_ratio": 0.6667,
+          "optional_surface_reduction_events": 16
+        },
+        "full_surfaces": {
+          "core_units_preserved": 468,
+          "cancel_p95_ns": 533119,
+          "cancel_p99_ns": 536752,
+          "throughput_ratio": 0.6094
+        },
+        "comparison": {
+          "cancel_p95_improvement_ns": 76654,
+          "cancel_p99_improvement_ns": 77000,
+          "core_units_delta": 44,
+          "winner_profile": "brownout",
+          "no_win_trigger": false
+        }
+      }
+    },
+    {
+      "scenario_id": "AA-OVERLOAD-BROWNOUT-KEEP-FULL-SURFACES",
+      "description": "Low-pressure recovery replay where the operator should keep full optional surfaces pinned because brownout does not win decisively.",
+      "workload_class": "keep-full",
+      "output_root": "target/overload-brownout-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 919191,
+      "safe_fallback_profile": "full_surfaces",
+      "expected_winner_profile": "full_surfaces",
+      "brownout_profile": {
+        "enabled": true,
+        "observe_memory_pressure_bps": 7800,
+        "degrade_memory_pressure_bps": 8600,
+        "shed_optional_memory_pressure_bps": 9300,
+        "observe_wake_to_run_p99_ns": 145000,
+        "degrade_wake_to_run_p99_ns": 210000,
+        "shed_optional_wake_to_run_p99_ns": 285000,
+        "recovery_window_threshold": 2,
+        "allowed_optional_surfaces": [
+          "detailed_tracing",
+          "rich_diagnostics",
+          "debug_http",
+          "rich_export_formatting"
+        ],
+        "denied_optional_surfaces": []
+      },
+      "fixture": {
+        "initial_phase": "degrade",
+        "replay_count": 1,
+        "windows": [
+          {
+            "window_id": "recovery_hysteresis",
+            "wake_to_run_p99_ns": 119000,
+            "queue_residency_p99_ns": 122000,
+            "ready_backlog_p99": 112,
+            "cancel_debt_p99": 18,
+            "memory_pressure_bps": 7180,
+            "degradation_level": "None",
+            "outer_tail_risk_decision": "admit",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 128000
+          },
+          {
+            "window_id": "restored_normal",
+            "wake_to_run_p99_ns": 114000,
+            "queue_residency_p99_ns": 118000,
+            "ready_backlog_p99": 104,
+            "cancel_debt_p99": 16,
+            "memory_pressure_bps": 7040,
+            "degradation_level": "None",
+            "outer_tail_risk_decision": "admit",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 126000
+          },
+          {
+            "window_id": "steady_state",
+            "wake_to_run_p99_ns": 112000,
+            "queue_residency_p99_ns": 116000,
+            "ready_backlog_p99": 98,
+            "cancel_debt_p99": 16,
+            "memory_pressure_bps": 7020,
+            "degradation_level": "None",
+            "outer_tail_risk_decision": "admit",
+            "already_shed_surfaces": [],
+            "offered_core_units": 96,
+            "base_cancel_p99_ns": 124000
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "schema_version": "overload-brownout-projection-v1",
+        "scenario_id": "AA-OVERLOAD-BROWNOUT-KEEP-FULL-SURFACES",
+        "workload_class": "keep-full",
+        "workload_seed": 919191,
+        "replay_count": 1,
+        "window_count": 3,
+        "phase_sequence": [
+          "recovery",
+          "normal",
+          "normal"
+        ],
+        "fallback_windows": [],
+        "restored_windows": [
+          "recovery_hysteresis",
+          "restored_normal"
+        ],
+        "already_shedding_windows": [],
+        "brownout": {
+          "observe_count": 0,
+          "degrade_count": 0,
+          "shed_optional_count": 0,
+          "recovery_count": 1,
+          "fallback_used_count": 0,
+          "core_units_preserved": 220,
+          "cancel_p95_ns": 282199,
+          "cancel_p99_ns": 283410,
+          "throughput_ratio": 0.7639,
+          "optional_surface_reduction_events": 1
+        },
+        "full_surfaces": {
+          "core_units_preserved": 217,
+          "cancel_p95_ns": 289665,
+          "cancel_p99_ns": 290876,
+          "throughput_ratio": 0.7535
+        },
+        "comparison": {
+          "cancel_p95_improvement_ns": 7466,
+          "cancel_p99_improvement_ns": 7466,
+          "core_units_delta": 3,
+          "winner_profile": "full_surfaces",
+          "no_win_trigger": true
+        }
+      }
+    }
+  ]
+}

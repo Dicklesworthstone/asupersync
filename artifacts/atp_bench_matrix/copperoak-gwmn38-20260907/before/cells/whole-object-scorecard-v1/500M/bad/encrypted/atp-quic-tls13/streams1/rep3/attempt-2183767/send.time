@@ -1,0 +1,25 @@
+atp failed: [ASUP-E804] transport timeout during source stream send admission after 360s
+Command exited with non-zero status 1
+	Command being timed: "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX /data/tmp/copperoak-gwmn38-20260907/bin/before send /data/tmp/copperoak-gwmn38-20260907/workloads/500M.bin 10.99.0.1:44042 --transport quic --symbol-size 1141 --peer-id atpsend-369202 --max-bytes 6442450944 --no-delta --rq-round0-loss-pct 2.0 --ca /data/tmp/copperoak-gwmn38-20260907/matrix-before/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2183767/cert.pem --server-name 10.99.0.1"
+	User time (seconds): 2.68
+	System time (seconds): 0.58
+	Percent of CPU this job got: 0%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 6:02.53
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 58780
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 15990
+	Voluntary context switches: 44116
+	Involuntary context switches: 312
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 8
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 1

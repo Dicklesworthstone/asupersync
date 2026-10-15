@@ -1,0 +1,16 @@
+{
+  "reservations": [
+    {
+      "agent_name": "TopazGoose",
+      "exclusive": true,
+      "expires_ts": "2999-01-01T00:00:00Z",
+      "path_pattern": "scripts/claim_reservation_receipt.py"
+    },
+    {
+      "agent_name": "TopazGoose",
+      "exclusive": true,
+      "expires_ts": "2999-01-01T00:00:00Z",
+      "path_pattern": "tests/claim_reservation_receipt_contract.rs"
+    }
+  ]
+}

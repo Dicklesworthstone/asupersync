@@ -1,0 +1,95 @@
+{
+  "schema_version": "semantic-golden-manifest-v1",
+  "description": "Golden fixture corpus for semantic verification (SEM-12.8)",
+  "owner": "SapphireHill",
+  "created": "2026-03-02",
+  "update_policy": {
+    "review_required": true,
+    "drift_justification_required": true,
+    "reviewers": ["semantic-harmonization"],
+    "checklist": [
+      "Confirm the change reflects a genuine semantic improvement, not a regression",
+      "Verify the affected rule IDs still pass all oracle checks",
+      "Update the change_log entry with drift justification",
+      "Run `cargo test --test semantic_golden_fixture_validation` locally"
+    ]
+  },
+  "fixtures": [
+    {
+      "id": "golden-severity-lattice",
+      "rule_ids": ["def.outcome.severity_lattice", "def.outcome.four_valued"],
+      "rule_numbers": [30, 29],
+      "description": "Expected severity values for all 4 outcome variants",
+      "file": "severity_lattice.json",
+      "seed": null,
+      "last_updated": "2026-03-02",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-cancel-severity-map",
+      "rule_ids": ["def.cancel.reason_kinds", "def.cancel.severity_ordering"],
+      "rule_numbers": [7, 8],
+      "description": "Expected severity for all 11 CancelKind variants",
+      "file": "cancel_severity_map.json",
+      "seed": null,
+      "last_updated": "2026-03-02",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-join-associativity",
+      "rule_ids": ["law.join.assoc", "def.outcome.join_semantics"],
+      "rule_numbers": [42, 31],
+      "description": "Expected join severity for all 64 (4x4x4) outcome triples",
+      "file": "join_associativity.json",
+      "seed": null,
+      "last_updated": "2026-03-02",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-timeout-min-law",
+      "rule_ids": ["comb.timeout"],
+      "rule_numbers": [39],
+      "description": "Expected effective_deadline for canonical test cases",
+      "file": "timeout_min_law.json",
+      "seed": null,
+      "last_updated": "2026-03-02",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-fuzz-baseline",
+      "rule_ids": ["inv.determinism.replayable"],
+      "rule_numbers": [46],
+      "description": "Expected fuzz campaign results for stable seed 0xADC00003",
+      "file": "fuzz_baseline.json",
+      "seed": 2915041283,
+      "last_updated": "2026-03-02",
+      "update_reason": "Initial creation"
+    },
+    {
+      "id": "golden-dual-run-harness-contract",
+      "rule_ids": ["differential.shared_harness.contract", "differential.seed_lineage.roundtrip"],
+      "rule_numbers": [201, 202],
+      "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
+      "file": "dual_run_harness_contract.json",
+      "seed": 42,
+      "last_updated": "2026-03-19",
+      "update_reason": "Lock shared harness identity, live override, and seed-lineage golden output"
+    }
+  ],
+  "change_log": [
+    {
+      "date": "2026-03-19",
+      "author": "PinkHeron",
+      "action": "add",
+      "fixtures_affected": ["golden-dual-run-harness-contract"],
+      "justification": "Add deterministic golden coverage for shared dual-run harness identity and seed-lineage provenance"
+    },
+    {
+      "date": "2026-03-02",
+      "author": "SapphireHill",
+      "action": "create",
+      "fixtures_affected": ["all"],
+      "justification": "Initial golden corpus creation for SEM-12.8"
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+---
+source: src/observability/diagnostics.rs
+expression: rendered
+---
+scenario: happy_path
+generated_at: <scrubbed>
+
+[region]
+none
+
+[task]
+Task TaskId(0:0) blocked: completed
+  - outcome: Ok(())
+
+[leaks]
+none

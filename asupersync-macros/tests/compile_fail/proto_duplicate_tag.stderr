@@ -1,0 +1,6 @@
+error: protobuf tag 1 is declared more than once
+ --> tests/compile_fail/proto_duplicate_tag.rs:7:5
+  |
+7 | /     #[proto(uint64, tag = 1)]
+8 | |     second: u64,
+  | |_______________^

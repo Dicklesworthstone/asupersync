@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "snapshot-remediation-trust-degraded",
+  "viewport_width": 132,
+  "viewport_height": 44,
+  "focused_panel": "trust_panel",
+  "selected_node_id": "finding-01",
+  "stage_digest": "len:2|verify_fail|trust:-8",
+  "visual_profile": "frankentui-alert",
+  "capture_index": 3
+}

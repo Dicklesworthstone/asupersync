@@ -1,0 +1,328 @@
+{
+  "contract_version": "proof-reuse-handoff-receipt-contract-v1",
+  "bead_id": "asupersync-5pziae.5",
+  "created_date": "2026-06-05",
+  "description": "Deterministic Agent Mail handoff receipt shape for proof reuse decisions. The contract is fixture-only, redacted, no-network, and never treats a cache hit as a fresh RCH rerun.",
+  "source_of_truth": {
+    "contract": "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+    "contract_test": "tests/proof_reuse_handoff_receipt_contract.rs",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_freshness_helper": "scripts/proof_artifact_freshness_receipt.py",
+    "agent_instructions": "AGENTS.md"
+  },
+  "policy": {
+    "network_access_required": false,
+    "tracker_mutation_allowed": false,
+    "raw_agent_mail_bodies_allowed": false,
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "required_rerun_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "allowed_decisions": [
+      "approved-cache-hit",
+      "refused",
+      "rerun-required"
+    ],
+    "allowed_redaction_classes": [
+      "metadata_only",
+      "redacted",
+      "refused"
+    ]
+  },
+  "required_handoff_fields": [
+    "example_id",
+    "decision",
+    "proof_evidence_status",
+    "requested_lane_id",
+    "claim_scope",
+    "chosen_proof_id",
+    "refusal_reason_codes",
+    "command_fingerprint",
+    "source_fingerprint_summary",
+    "toolchain_fingerprint_summary",
+    "rch_remote_provenance",
+    "dirty_frontier",
+    "touched_surface_coverage",
+    "rerun_command",
+    "redaction_class",
+    "log_excerpt_policy",
+    "cache_hit_is_fresh_rch_pass",
+    "operator_statement",
+    "stage_log"
+  ],
+  "disallowed_fields": [
+    "raw_agent_mail_body",
+    "raw_mail_body",
+    "raw_log_excerpt",
+    "secret",
+    "token",
+    "password",
+    "api_key"
+  ],
+  "secret_like_markers": [
+    "api_key=",
+    "authorization: bearer ",
+    "password=",
+    "secret=",
+    "token="
+  ],
+  "handoff_examples": [
+    {
+      "example_id": "approved-cache-hit-handoff",
+      "decision": "approved-cache-hit",
+      "proof_evidence_status": "approved-cache-hit",
+      "requested_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "chosen_proof_id": "proof-reuse-index-fixture-001",
+      "refusal_reason_codes": [],
+      "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+      "source_fingerprint_summary": {
+        "branch": "main",
+        "head_commit": "6e6084cf3",
+        "source_tree_fingerprint": "git-tree:6e6084cf3",
+        "touched_surface_count": 2
+      },
+      "toolchain_fingerprint_summary": {
+        "cargo_lock_hash": "sha256:cargo-lock-fixture",
+        "rust_toolchain_toml_hash": "sha256:rust-toolchain-fixture",
+        "target_triple": "x86_64-unknown-linux-gnu"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "selected-worker:vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "redaction_class": "metadata_only",
+      "log_excerpt_policy": "none",
+      "cache_hit_is_fresh_rch_pass": false,
+      "operator_statement": "Approved cache hit for proof-lane-manifest-verifier. This is not a fresh RCH rerun and must not be cited as workspace health.",
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded approved receipt fixture"
+        },
+        {
+          "stage": "classifier",
+          "status": "approved-cache-hit",
+          "detail": "lane, command, source, toolchain, outcome, and provenance matched"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "ok",
+          "detail": "rendered metadata-only Agent Mail receipt"
+        }
+      ]
+    },
+    {
+      "example_id": "refused-unsupported-claim-handoff",
+      "decision": "refused",
+      "proof_evidence_status": "unsupported",
+      "requested_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "workspace-health",
+      "chosen_proof_id": null,
+      "refusal_reason_codes": [
+        "broad-claim-unsupported"
+      ],
+      "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+      "source_fingerprint_summary": {
+        "branch": "main",
+        "head_commit": "6e6084cf3",
+        "source_tree_fingerprint": "git-tree:6e6084cf3",
+        "touched_surface_count": 2
+      },
+      "toolchain_fingerprint_summary": {
+        "cargo_lock_hash": "sha256:cargo-lock-fixture",
+        "rust_toolchain_toml_hash": "sha256:rust-toolchain-fixture",
+        "target_triple": "x86_64-unknown-linux-gnu"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "selected-worker:vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "redaction_class": "metadata_only",
+      "log_excerpt_policy": "none",
+      "cache_hit_is_fresh_rch_pass": false,
+      "operator_statement": "Refused cache reuse because workspace-health is not citeable from this lane. Rerun the manifest command for fresh evidence if that broader claim is needed.",
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded unsupported claim fixture"
+        },
+        {
+          "stage": "classifier",
+          "status": "refused",
+          "detail": "broad-claim-unsupported"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "ok",
+          "detail": "included rerun command"
+        }
+      ]
+    },
+    {
+      "example_id": "dirty-overlap-rerun-handoff",
+      "decision": "rerun-required",
+      "proof_evidence_status": "rerun-required",
+      "requested_lane_id": "all-targets-check",
+      "claim_scope": "all-target-compile-frontier",
+      "chosen_proof_id": null,
+      "refusal_reason_codes": [
+        "dirty-frontier-overlap"
+      ],
+      "command_fingerprint": "sha256:all-targets-check-command",
+      "source_fingerprint_summary": {
+        "branch": "main",
+        "head_commit": "6e6084cf3",
+        "source_tree_fingerprint": "git-tree:dirty-frontier-fixture",
+        "touched_surface_count": 1
+      },
+      "toolchain_fingerprint_summary": {
+        "cargo_lock_hash": "sha256:cargo-lock-fixture",
+        "rust_toolchain_toml_hash": "sha256:rust-toolchain-fixture",
+        "target_triple": "x86_64-unknown-linux-gnu"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "selected-worker:vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "dirty-overlap",
+        "overlap_paths": [
+          "src/lib.rs"
+        ]
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "Cargo.toml",
+          "src/lib.rs",
+          "tests"
+        ],
+        "uncovered_paths": [
+          "src/lib.rs"
+        ]
+      },
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "redaction_class": "metadata_only",
+      "log_excerpt_policy": "none",
+      "cache_hit_is_fresh_rch_pass": false,
+      "operator_statement": "Rerun required because the dirty frontier overlaps all-targets-check. The prior cache candidate is not citeable.",
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded dirty-overlap fixture"
+        },
+        {
+          "stage": "dirty-frontier",
+          "status": "rerun-required",
+          "detail": "src/lib.rs overlaps manifest source paths"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "ok",
+          "detail": "included dirty-frontier verdict and rerun command"
+        }
+      ]
+    },
+    {
+      "example_id": "local-fallback-refusal-handoff",
+      "decision": "refused",
+      "proof_evidence_status": "rerun-required",
+      "requested_lane_id": "proof-lane-manifest-contract",
+      "claim_scope": "proof-lane-manifest-verifier",
+      "chosen_proof_id": null,
+      "refusal_reason_codes": [
+        "local-fallback-marker"
+      ],
+      "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+      "source_fingerprint_summary": {
+        "branch": "main",
+        "head_commit": "6e6084cf3",
+        "source_tree_fingerprint": "git-tree:6e6084cf3",
+        "touched_surface_count": 2
+      },
+      "toolchain_fingerprint_summary": {
+        "cargo_lock_hash": "sha256:cargo-lock-fixture",
+        "rust_toolchain_toml_hash": "sha256:rust-toolchain-fixture",
+        "target_triple": "x86_64-unknown-linux-gnu"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": null,
+        "route_segments": [],
+        "local_fallback_absent": false
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "redaction_class": "refused",
+      "log_excerpt_policy": "local-fallback-marker-only",
+      "cache_hit_is_fresh_rch_pass": false,
+      "operator_statement": "Refused cache reuse because the candidate recorded local fallback. Rerun remotely before citing proof.",
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded local-fallback fixture"
+        },
+        {
+          "stage": "provenance",
+          "status": "refused",
+          "detail": "local-fallback-marker"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "ok",
+          "detail": "redacted to marker-only refusal"
+        }
+      ]
+    }
+  ]
+}

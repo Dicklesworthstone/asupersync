@@ -1,0 +1,15 @@
+{
+  "name": "asupersync-rust-browser-consumer-fixture",
+  "type": "module",
+  "version": "0.0.0",
+  "files": [
+    "asupersync_rust_browser_consumer_fixture_bg.wasm",
+    "asupersync_rust_browser_consumer_fixture.js",
+    "asupersync_rust_browser_consumer_fixture.d.ts"
+  ],
+  "main": "asupersync_rust_browser_consumer_fixture.js",
+  "types": "asupersync_rust_browser_consumer_fixture.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

@@ -1,0 +1,122 @@
+---
+source: tests/golden_grpc_health_responses.rs
+expression: snapshot
+---
+{
+  "edge_case_queries": [
+    {
+      "description": "Empty string (server query)",
+      "is_healthy": true,
+      "query_service": "",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Normal dotted service",
+      "is_healthy": true,
+      "query_service": "normal.service",
+      "result": "success",
+      "status_code": 1,
+      "status_text": "SERVING"
+    },
+    {
+      "description": "Single character service",
+      "is_healthy": false,
+      "query_service": "a",
+      "result": "success",
+      "status_code": 2,
+      "status_text": "NOT_SERVING"
+    },
+    {
+      "description": "Service with dashes",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service-with-dashes",
+      "result": "error"
+    },
+    {
+      "description": "Service with underscores",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service_with_underscores",
+      "result": "error"
+    },
+    {
+      "description": "Uppercase service name",
+      "is_healthy": false,
+      "query_service": "SERVICE.UPPER.CASE",
+      "result": "success",
+      "status_code": 0,
+      "status_text": "UNKNOWN"
+    },
+    {
+      "description": "Service starting with numbers",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "123.numeric.service",
+      "result": "error"
+    },
+    {
+      "description": "Service with many dots",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "service.with.many.dots.here",
+      "result": "error"
+    }
+  ],
+  "service_clearing": {
+    "bulk_clear": {
+      "server_after_clear": {
+        "description": "Server after bulk clear",
+        "is_healthy": false,
+        "query_service": "",
+        "result": "success",
+        "status_code": 3,
+        "status_text": "SERVICE_UNKNOWN"
+      },
+      "service_after_clear": {
+        "description": "Service 'a' after bulk clear",
+        "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+        "query_service": "a",
+        "result": "error"
+      },
+      "version_after": 6,
+      "version_before": 5
+    },
+    "single_clear": {
+      "description": "Normal service after clear",
+      "error_message": "gRPC status PERMISSION_DENIED: health check access denied",
+      "query_service": "normal.service",
+      "result": "error"
+    }
+  },
+  "status_enum_metadata": {
+    "from_i32_tests": [
+      {
+        "code": 0,
+        "valid": true
+      },
+      {
+        "code": 1,
+        "valid": true
+      },
+      {
+        "code": 2,
+        "valid": true
+      },
+      {
+        "code": 3,
+        "valid": true
+      },
+      {
+        "code": 4,
+        "valid": false
+      },
+      {
+        "code": -1,
+        "valid": false
+      }
+    ],
+    "not_serving_code": 2,
+    "service_unknown_code": 3,
+    "serving_code": 1,
+    "unknown_code": 0
+  }
+}

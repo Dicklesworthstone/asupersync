@@ -1,0 +1,20 @@
+{
+  "buffer_capacity": "Small",
+  "transport_behavior": {
+    "Partial": {
+      "data": [65, 66, 67, 10, 68, 69, 70, 10],
+      "chunk_size": 2
+    }
+  },
+  "codec_type": "Lines",
+  "operations": [
+    "PollNext",
+    "PollNext",
+    { "Send": { "data": [71, 72, 73, 10] } },
+    "PollFlush",
+    "PollFlush",
+    "PollNext",
+    "InspectReadBuffer",
+    "InspectWriteBuffer"
+  ]
+}

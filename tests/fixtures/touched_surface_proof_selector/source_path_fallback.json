@@ -1,0 +1,17 @@
+{
+  "schema_version": "touched-surface-proof-selector-input-v1",
+  "touched_files": ["artifacts/proof_lane_manifest_v1.json"],
+  "lanes": [
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "kind": "test_frontier",
+      "command": "rch exec -- cargo test -p asupersync --test proof_lane_manifest_contract",
+      "guarantee_ids": ["proof-lane-manifest-verifier"],
+      "source_paths": ["artifacts/proof_lane_manifest_v1.json", "tests/proof_lane_manifest_contract.rs"],
+      "covers": "proof lane manifest contract",
+      "explicit_not_covered": "actual proof command execution",
+      "broad_frontier": false
+    }
+  ],
+  "selection_rules": []
+}

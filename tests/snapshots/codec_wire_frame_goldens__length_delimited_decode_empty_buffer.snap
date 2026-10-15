@@ -1,0 +1,10 @@
+---
+source: tests/codec_wire_frame_goldens.rs
+expression: "(\n            \"result\",\n            decode_label(&result),\n            \"remaining_bytes\",\n            buf.len()\n        )"
+---
+(
+    "result",
+    "None",
+    "remaining_bytes",
+    0,
+)

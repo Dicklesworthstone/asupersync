@@ -1,0 +1,46 @@
+---
+source: src/observability/diagnostics.rs
+assertion_line: 7812
+expression: value
+---
+diagnostics:
+  health:
+    bottleneck_count: 0
+    classification:
+      kind: healthy
+      margin: 0
+    fiedler_value: 0
+  leaked_obligations:
+    count: 1
+  task_blocked:
+    has_explanation: true
+    task_id: T1
+meta:
+  snapshot_version: v1
+  test_scenario: 3_tasks_1_obligation_1_cancel
+runtime_state:
+  obligations:
+    obligation1:
+      holder: T0
+      id: O0
+      kind: SendPermit
+      region: R0
+  regions:
+    root:
+      explanation:
+        can_close: false
+        reasons_count: 3
+      id: R0
+  tasks:
+    task1:
+      id: T0
+      region: R0
+      state: Running
+    task2:
+      id: T1
+      region: R0
+      state: Running
+    task3:
+      id: T2
+      region: R0
+      state: Cancelled

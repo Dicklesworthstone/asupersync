@@ -1,0 +1,6565 @@
+//! Connection routing and management for native QUIC endpoint.
+//!
+//! This module provides connection-ID routing, timer scheduling integration,
+//! and connection lifecycle management for the ATP native QUIC endpoint.
+//! It bridges the gap between the UDP endpoint packet I/O and individual
+//! QUIC connection state machines.
+
+#![allow(dead_code)]
+
+use crate::cx::Cx;
+use crate::net::atp::protocol::quic_frames::QuicFrame;
+use crate::net::atp::quic::AtpPacketProtection;
+use crate::net::quic_core::{
+    ConnectionId, LongPacketType, PacketHeader, ProtectedHeaderPrefix, QuicCoreError, ShortHeader,
+    apply_header_protection, decode_packet_number_reconstruct, header_protection_sample,
+    remove_header_protection,
+};
+use crate::net::quic_native::{
+    NativeQuicConnection, NativeQuicConnectionConfig, OutgoingPacket, QuicConnectionState,
+    ReceivedPacket,
+};
+use crate::net::quic_native::{
+    NativeQuicConnectionError, PacketNumberSpace, PacketProtectionRequest, PacketProtectionSpace,
+    ProtectedPacket, ProtectionProof, TranscriptHash,
+};
+use crate::time::{Sleep, TimerDriverHandle};
+use crate::types::outcome::Outcome;
+use std::collections::{HashMap, HashSet};
+use std::future::{Future, poll_fn};
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll, Waker};
+use std::time::{Duration, Instant};
+
+const DEFAULT_MAX_CONNECTIONS: usize = 4096;
+const TIMER_CONNECTIONS_PER_TURN: usize = 32;
+
+/// Connection routing table that maps connection IDs to active QUIC connections.
+#[derive(Debug)]
+pub struct ConnectionRouter {
+    /// Map from destination connection ID to connection handle.
+    connections: HashMap<ConnectionId, ConnectionHandle>,
+    /// Maximum active connections accepted by this router.
+    max_connections: usize,
+    /// Next connection ID counter for generating new connections.
+    next_connection_id: u64,
+    /// Connection configuration template.
+    config_template: NativeQuicConnectionConfig,
+    /// Monotonic clock origin for connection timer APIs that use microseconds.
+    clock_origin: Instant,
+    /// Timer output remains owned across cancellation or another connection's error.
+    pending_timer_packets: Vec<RoutedOutgoingPacket>,
+    /// Committed deferred output survives cancellation before handoff.
+    pending_deferred_packets: Vec<RoutedOutgoingPacket>,
+    /// Last serviced CID, used to rotate deterministic deferred-output order.
+    deferred_cursor: Option<ConnectionId>,
+    /// Local idle policy, which peer negotiation may shorten but never extend.
+    idle_timeout_micros: Option<u64>,
+}
+
+/// Private ownership envelope; the public UDP packet layout stays unchanged.
+#[derive(Debug)]
+pub(crate) struct RoutedOutgoingPacket {
+    pub(crate) connection_id: ConnectionId,
+    pub(crate) packet: OutgoingPacket,
+    pub(crate) final_handshake_flight: bool,
+    pub(crate) ack_eliciting: bool,
+}
+
+/// A requested close remains route-owned across asynchronous protection and
+/// socket backpressure. Its sole queued packet is never ordinary stream work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalCloseOutput {
+    Requested,
+    Queued,
+    Sent,
+}
+
+/// Handle to a managed QUIC connection with timing and lifecycle state.
+#[derive(Debug)]
+pub struct ConnectionHandle {
+    /// The underlying QUIC connection state machine.
+    connection: RoutedConnection,
+    /// Packet-protection provider for 1-RTT UDP handoff.
+    packet_protection: Option<ConnectionPacketProtection>,
+    /// Remote peer address.
+    peer_addr: SocketAddr,
+    /// Last activity timestamp for connection timeout tracking.
+    last_activity: Instant,
+    /// Only the first ack-eliciting send after accepted input restarts idle.
+    sent_since_receive: bool,
+    /// Connection establishment timestamp.
+    established_at: Option<Instant>,
+    /// Pending timer deadline for this connection.
+    next_timer_deadline: Option<Instant>,
+    /// Input may make output ready while the endpoint's send queue is full.
+    deferred_spaces: [bool; 3],
+    next_deferred_space: usize,
+    local_close_output: Option<LocalCloseOutput>,
+    /// Imported connections keep their negotiated peer CID and recovery epoch.
+    peer_connection_id: Option<ConnectionId>,
+    clock_origin: Option<Instant>,
+    #[cfg(feature = "tls")]
+    authenticated: Option<AuthenticatedRouting>,
+}
+
+/// Keep the application-facing owner intact when an authenticated socket moves
+/// into the router. Legacy routes retain their original native state machine.
+#[derive(Debug)]
+enum RoutedConnection {
+    Native(NativeQuicConnection),
+    #[cfg(feature = "tls")]
+    Authenticated(super::QuicConnection),
+}
+
+impl std::ops::Deref for RoutedConnection {
+    type Target = NativeQuicConnection;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Native(connection) => connection,
+            #[cfg(feature = "tls")]
+            Self::Authenticated(connection) => connection.inner(),
+        }
+    }
+}
+
+impl std::ops::DerefMut for RoutedConnection {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Native(connection) => connection,
+            #[cfg(feature = "tls")]
+            Self::Authenticated(connection) => connection.inner_mut(),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+#[derive(Debug)]
+struct AuthenticatedRouting {
+    negotiated_alpn: Vec<u8>,
+    final_handshake_flight: Vec<OutgoingPacket>,
+    last_final_flight_retransmit: Option<Instant>,
+    pending_final_flight_packets: usize,
+}
+
+#[cfg(feature = "tls")]
+struct MarkApplicationOutput<'a>(&'a mut bool);
+
+#[cfg(feature = "tls")]
+impl Drop for MarkApplicationOutput<'_> {
+    fn drop(&mut self) {
+        *self.0 = true;
+    }
+}
+
+/// Native QUIC connection removed from the router for application-level handoff.
+#[derive(Debug)]
+pub struct AcceptedNativeQuicConnection {
+    /// Connection ID that owned the routed connection.
+    pub connection_id: ConnectionId,
+    /// The native QUIC connection state machine.
+    pub connection: NativeQuicConnection,
+    /// Remote peer address associated with the accepted connection.
+    pub peer_addr: SocketAddr,
+}
+
+struct ConnectionPacketProtection {
+    protection: AtpPacketProtection,
+}
+
+impl std::fmt::Debug for ConnectionPacketProtection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectionPacketProtection")
+            .field("provider_kind", &self.protection.provider_kind())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Timer event for a specific connection.
+#[derive(Debug, Clone)]
+pub struct ConnectionTimerEvent {
+    /// Connection ID this timer event belongs to.
+    pub connection_id: ConnectionId,
+    /// Type of timer that fired.
+    pub timer_type: TimerType,
+    /// Deadline when this timer was scheduled to fire.
+    pub deadline: Instant,
+}
+
+/// Types of timers used by QUIC connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerType {
+    /// Probe timeout (PTO) for loss recovery.
+    ProbeTimeout,
+    /// ACK delay timer.
+    AckDelay,
+    /// Connection idle timeout.
+    IdleTimeout,
+    /// Connection draining timeout.
+    DrainTimeout,
+    /// Keep-alive probe.
+    KeepAlive,
+}
+
+/// Result of routing a received packet to a connection.
+#[derive(Debug)]
+pub enum RoutingResult {
+    /// Packet was successfully routed to an existing connection.
+    Routed {
+        /// Connection ID packet was routed to.
+        connection_id: ConnectionId,
+        /// Outgoing packets generated by processing this packet.
+        outgoing_packets: Vec<OutgoingPacket>,
+    },
+    /// Packet is a new connection attempt (e.g., Initial packet).
+    NewConnection {
+        /// Suggested connection ID for the new connection.
+        connection_id: ConnectionId,
+        /// Remote address that originated the first datagram.
+        peer_addr: SocketAddr,
+        /// Original Initial packet that triggered connection creation.
+        triggering_packet: ReceivedPacket,
+        /// Initial outgoing packets for handshake response.
+        outgoing_packets: Vec<OutgoingPacket>,
+    },
+    /// Packet should be dropped (invalid CID, stateless reset, etc.).
+    Drop {
+        /// Reason for dropping the packet.
+        reason: String,
+    },
+}
+
+/// Errors from connection routing operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionRouterError {
+    /// Operation was cancelled via Cx.
+    Cancelled,
+    /// Connection ID not found in routing table.
+    ConnectionNotFound(ConnectionId),
+    /// Connection is in invalid state for the operation.
+    InvalidConnectionState {
+        /// Connection ID.
+        connection_id: ConnectionId,
+        /// Description of invalid state.
+        reason: String,
+    },
+    /// Unable to create new connection.
+    ConnectionCreationFailed(String),
+    /// Timer scheduling failed.
+    TimerSchedulingFailed(String),
+    /// Packet reached a connection but failed state-machine processing.
+    PacketProcessingFailed {
+        /// Connection ID.
+        connection_id: ConnectionId,
+        /// Processing error.
+        reason: String,
+    },
+    /// Application-data frames were ready, but no 1-RTT packet protection was installed.
+    PacketProtectionUnavailable {
+        /// Connection ID.
+        connection_id: ConnectionId,
+    },
+}
+
+impl std::fmt::Display for ConnectionRouterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => write!(f, "operation cancelled"),
+            Self::ConnectionNotFound(cid) => write!(f, "connection not found: {cid:?}"),
+            Self::InvalidConnectionState {
+                connection_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "invalid connection state for {connection_id:?}: {reason}"
+                )
+            }
+            Self::ConnectionCreationFailed(msg) => write!(f, "connection creation failed: {msg}"),
+            Self::TimerSchedulingFailed(msg) => write!(f, "timer scheduling failed: {msg}"),
+            Self::PacketProcessingFailed {
+                connection_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "packet processing failed for {connection_id:?}: {reason}"
+                )
+            }
+            Self::PacketProtectionUnavailable { connection_id } => {
+                write!(
+                    f,
+                    "packet protection unavailable for application-data packet on {connection_id:?}"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectionRouterError {}
+
+impl ConnectionRouter {
+    #[cfg(feature = "tls")]
+    pub(crate) fn validate_authenticated_cids(
+        &self,
+        initial_cid: ConnectionId,
+        local_cid: ConnectionId,
+    ) -> Result<(), ConnectionRouterError> {
+        if self.connections.len() >= self.max_connections {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(
+                "authenticated connection capacity exhausted".to_string(),
+            ));
+        }
+        if initial_cid.is_empty()
+            || local_cid.is_empty()
+            || self.connections.contains_key(&initial_cid)
+            || self.connections.keys().any(|existing| {
+                existing.as_bytes().starts_with(local_cid.as_bytes())
+                    || local_cid.as_bytes().starts_with(existing.as_bytes())
+            })
+        {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(
+                "empty, occupied, or ambiguous authenticated connection ID".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn insert_authenticated_connection(
+        &mut self,
+        cx: &Cx,
+        initial_cid: ConnectionId,
+        local_cid: ConnectionId,
+        peer_addr: SocketAddr,
+        mut parts: super::udp_connection::AuthenticatedQuicParts,
+        now: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        self.validate_authenticated_cids(initial_cid, local_cid)?;
+        let deadline = parts
+            .connection
+            .inner_mut()
+            .pto_deadline_micros(cx, 0)
+            .map_err(|error| match error {
+                super::NativeQuicConnectionError::Cancelled => ConnectionRouterError::Cancelled,
+                other => ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: local_cid,
+                    reason: other.to_string(),
+                },
+            })?
+            .map(|micros| {
+                now.checked_add(Duration::from_micros(micros))
+                    .ok_or_else(|| {
+                        ConnectionRouterError::TimerSchedulingFailed(
+                            "authenticated deadline exceeds the managed clock range".to_string(),
+                        )
+                    })
+            })
+            .transpose()?;
+        self.connections.insert(
+            local_cid,
+            ConnectionHandle {
+                connection: RoutedConnection::Authenticated(parts.connection),
+                packet_protection: Some(ConnectionPacketProtection {
+                    protection: parts.protection,
+                }),
+                peer_addr,
+                last_activity: now,
+                sent_since_receive: false,
+                established_at: Some(now),
+                next_timer_deadline: deadline,
+                deferred_spaces: [false, false, true],
+                next_deferred_space: 0,
+                local_close_output: None,
+                peer_connection_id: Some(parts.peer_cid),
+                clock_origin: Some(now),
+                authenticated: Some(AuthenticatedRouting {
+                    negotiated_alpn: parts.negotiated_alpn,
+                    final_handshake_flight: parts.final_handshake_flight,
+                    last_final_flight_retransmit: None,
+                    pending_final_flight_packets: 0,
+                }),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn retained_packet_connection_id(
+        &self,
+        packet: &ReceivedPacket,
+    ) -> Option<ConnectionId> {
+        self.decode_routing_info(packet)
+            .ok()
+            .map(|info| info.destination_cid)
+    }
+
+    /// All fallible validation precedes this owned move. No negotiated state
+    /// is recreated from the template or from handshake transition flags.
+    #[cfg(feature = "tls")]
+    pub(crate) fn from_authenticated_parts(
+        parts: super::udp_connection::NativeQuicUdpHandoffParts,
+        config_template: NativeQuicConnectionConfig,
+        max_connections: usize,
+        next_timer_deadline: Option<Instant>,
+        now: Instant,
+    ) -> (
+        Self,
+        super::QuicUdpEndpoint,
+        std::collections::VecDeque<ReceivedPacket>,
+    ) {
+        let super::udp_connection::NativeQuicUdpHandoffParts {
+            connection,
+            endpoint,
+            protection,
+            local_cid,
+            peer_cid,
+            peer_addr,
+            negotiated_alpn,
+            final_handshake_flight,
+            early_one_rtt_packets,
+            last_final_flight_retransmit,
+            clock_origin,
+            last_activity,
+            sent_since_receive,
+            pending_outgoing,
+        } = parts;
+        let mut router = Self::with_max_connections(config_template, max_connections);
+        router.pending_deferred_packets = pending_outgoing;
+        router.connections.insert(
+            local_cid,
+            ConnectionHandle {
+                connection: RoutedConnection::Authenticated(connection),
+                packet_protection: Some(ConnectionPacketProtection { protection }),
+                peer_addr,
+                last_activity,
+                sent_since_receive,
+                established_at: Some(now),
+                next_timer_deadline,
+                deferred_spaces: [false, false, true],
+                next_deferred_space: 0,
+                local_close_output: None,
+                peer_connection_id: Some(peer_cid),
+                clock_origin: Some(clock_origin),
+                authenticated: Some(AuthenticatedRouting {
+                    negotiated_alpn,
+                    final_handshake_flight,
+                    last_final_flight_retransmit,
+                    pending_final_flight_packets: 0,
+                }),
+            },
+        );
+        (router, endpoint, early_one_rtt_packets.into())
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn with_authenticated_connection<R>(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        operation: impl FnOnce(&mut super::QuicConnection) -> R,
+    ) -> Result<R, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        let RoutedConnection::Authenticated(connection) = &mut handle.connection else {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated application owner".to_string(),
+            });
+        };
+        // An application callback may queue output and then unwind. Its caller
+        // can resume the same owned endpoint without stranding that output.
+        let _mark = MarkApplicationOutput(&mut handle.deferred_spaces[2]);
+        Ok(operation(connection))
+    }
+
+    /// Start one authenticated route's local drain in its original clock
+    /// domain. The event loop owns protection and delivery of the final close.
+    /// A non-forced request preserves buffered and unacknowledged output.
+    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+    pub(crate) fn request_authenticated_close(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        now: Instant,
+        app_error_code: u64,
+        force: bool,
+    ) -> Result<bool, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        if !matches!(
+            crate::net::atp::protocol::varint::VarInt::new(app_error_code),
+            Outcome::Ok(_)
+        ) {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "close code exceeds QUIC varint range".to_string(),
+            });
+        }
+        let queued_output = self.pending_datagram_count_for(connection_id) != 0;
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        if !matches!(handle.connection, RoutedConnection::Authenticated(_))
+            || handle.authenticated.is_none()
+            || handle.packet_protection.is_none()
+        {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated application owner".to_string(),
+            });
+        }
+        if matches!(
+            handle.connection.state(),
+            QuicConnectionState::Draining | QuicConnectionState::Closed
+        ) {
+            return Ok(true);
+        }
+        if !force
+            && (queued_output
+                || handle.connection.has_pending_stream_frames()
+                || handle.connection.has_pending_control_frames()
+                || handle.connection.pending_outbound_datagram_count() != 0
+                || handle.connection.transport().bytes_in_flight() != 0)
+        {
+            return Ok(false);
+        }
+        let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+        handle
+            .connection
+            .begin_close(cx, instant_micros_from(origin, now), app_error_code)
+            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: error.to_string(),
+            })?;
+        handle.local_close_output = Some(LocalCloseOutput::Requested);
+        handle.deferred_spaces = [false; 3];
+        handle.next_timer_deadline = None;
+        // A forced deadline retires only this route's ordinary output. Once
+        // locally draining, no further application or recovery packet is made.
+        self.pending_timer_packets
+            .retain(|packet| packet.connection_id != connection_id);
+        self.pending_deferred_packets
+            .retain(|packet| packet.connection_id != connection_id);
+        Ok(true)
+    }
+
+    #[cfg(all(feature = "tls", any(test, feature = "http3")))]
+    pub(crate) fn pending_datagram_count_for(&self, connection_id: ConnectionId) -> usize {
+        self.pending_timer_packets
+            .iter()
+            .chain(self.pending_deferred_packets.iter())
+            .filter(|packet| packet.connection_id == connection_id)
+            .count()
+    }
+
+    #[cfg(feature = "tls")]
+    pub(crate) fn negotiated_alpn(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<&[u8], ConnectionRouterError> {
+        let handle = self
+            .connections
+            .get(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        handle
+            .authenticated
+            .as_ref()
+            .map(|state| state.negotiated_alpn.as_slice())
+            .ok_or_else(|| ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "connection has no authenticated ALPN".to_string(),
+            })
+    }
+
+    /// A final-flight copy remains outstanding until its actual UDP sent prefix
+    /// is acknowledged. Other application/PTO packets cannot retire that copy.
+    pub(crate) fn packet_sent(&mut self, packet: &RoutedOutgoingPacket, now: Option<Instant>) {
+        if let Some(handle) = self.connections.get_mut(&packet.connection_id) {
+            if handle.local_close_output == Some(LocalCloseOutput::Queued) {
+                // The close request removed all ordinary packets for this CID
+                // before its sole terminal packet was assembled.
+                handle.local_close_output = Some(LocalCloseOutput::Sent);
+            }
+            if let Some(now) = now.filter(|_| packet.ack_eliciting && !handle.sent_since_receive) {
+                handle.last_activity = handle.last_activity.max(now);
+                handle.sent_since_receive = true;
+            }
+        }
+        #[cfg(feature = "tls")]
+        if packet.final_handshake_flight {
+            if let Some(state) = self
+                .connections
+                .get_mut(&packet.connection_id)
+                .and_then(|handle| handle.authenticated.as_mut())
+            {
+                state.pending_final_flight_packets = state
+                    .pending_final_flight_packets
+                    .checked_sub(1)
+                    .expect("each final-flight packet is acknowledged once");
+            }
+        }
+        #[cfg(not(feature = "tls"))]
+        let _ = packet;
+    }
+
+    /// Create a new connection router with the given configuration template.
+    pub fn new(config_template: NativeQuicConnectionConfig) -> Self {
+        Self::with_max_connections(config_template, DEFAULT_MAX_CONNECTIONS)
+    }
+
+    /// Create a connection router with an explicit active-connection cap.
+    ///
+    /// A zero cap is normalized to one connection so the router never accepts an
+    /// unbounded configuration by accident.
+    pub fn with_max_connections(
+        config_template: NativeQuicConnectionConfig,
+        max_connections: usize,
+    ) -> Self {
+        Self {
+            connections: HashMap::new(),
+            max_connections: max_connections.max(1),
+            next_connection_id: 1,
+            config_template,
+            clock_origin: Instant::now(),
+            pending_timer_packets: Vec::new(),
+            pending_deferred_packets: Vec::new(),
+            deferred_cursor: None,
+            idle_timeout_micros: None,
+        }
+    }
+
+    pub(crate) fn set_idle_timeout_micros(&mut self, timeout: u64) {
+        self.idle_timeout_micros = (timeout != 0).then_some(timeout);
+    }
+
+    /// Route a received packet to the appropriate connection.
+    pub async fn route_packet(
+        &mut self,
+        cx: &Cx,
+        packet: ReceivedPacket,
+    ) -> Result<RoutingResult, ConnectionRouterError> {
+        self.route_packet_with_output(cx, packet, true).await
+    }
+
+    /// Process input even under send backpressure, deferring destructive frame
+    /// generation until the managed owner has room for the resulting packet.
+    pub(crate) async fn route_packet_with_output(
+        &mut self,
+        cx: &Cx,
+        #[allow(unused_mut)] mut packet: ReceivedPacket,
+        emit_output: bool,
+    ) -> Result<RoutingResult, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        #[allow(unused_mut)]
+        let mut routing_info = match self.decode_routing_info(&packet) {
+            Ok(info) => info,
+            Err(err) => {
+                return Ok(RoutingResult::Drop {
+                    reason: format!("invalid QUIC header: {err}"),
+                });
+            }
+        };
+        let connection_id = routing_info.destination_cid;
+        let now_micros = self.instant_micros(packet.receive_time);
+
+        if let Some(handle) = self.connections.get_mut(&connection_id) {
+            if matches!(
+                handle.connection.state(),
+                QuicConnectionState::Closed | QuicConnectionState::Draining
+            ) {
+                return Ok(RoutingResult::Drop {
+                    reason: "connection is draining or closed".to_string(),
+                });
+            }
+            let now_micros = handle.clock_origin.map_or(now_micros, |origin| {
+                instant_micros_from(origin, packet.receive_time)
+            });
+            #[cfg(feature = "tls")]
+            if let Some(authenticated) = &mut handle.authenticated {
+                if packet.src_addr != handle.peer_addr {
+                    return Ok(RoutingResult::Drop {
+                        reason: "packet source does not match the authenticated peer".to_string(),
+                    });
+                }
+                if routing_info.kind != PacketRoutingKind::OneRtt {
+                    // RFC 9000 section 12.2: a datagram may coalesce several
+                    // long-header packets and then one 1-RTT short-header
+                    // packet. Each long-header packet is bounded by its Length
+                    // field and classified alone, so a peer that still holds
+                    // Handshake keys and sends [Handshake(ACK)][1-RTT] neither
+                    // requests the final flight nor loses its 1-RTT packet.
+                    let mut offset = 0;
+                    let mut only_handshake_acks = true;
+                    let mut coalesced_1rtt = None;
+                    while offset < packet.data.len() {
+                        let rest = &packet.data[offset..];
+                        match ProtectedHeaderPrefix::decode(rest, connection_id.len()) {
+                            Ok(ProtectedHeaderPrefix::Long(long_header))
+                                if long_header.dst_cid == connection_id =>
+                            {
+                                let Ok(long_len) = long_header.packet_len(rest.len()) else {
+                                    only_handshake_acks = false;
+                                    break;
+                                };
+                                only_handshake_acks = only_handshake_acks
+                                    && handle.packet_protection.as_mut().is_some_and(
+                                        |protection| {
+                                            authenticated_handshake_ack_only(
+                                                cx,
+                                                connection_id,
+                                                &mut protection.protection,
+                                                &rest[..long_len],
+                                            )
+                                        },
+                                    );
+                                offset += long_len;
+                            }
+                            Ok(ProtectedHeaderPrefix::Short { dst_cid, .. })
+                                if offset > 0 && dst_cid == connection_id =>
+                            {
+                                coalesced_1rtt = Some(rest.to_vec());
+                                break;
+                            }
+                            // Padding, a malformed trailer or a packet for
+                            // another connection ends the datagram; a leading
+                            // packet of any other kind still requests recovery.
+                            _ => {
+                                only_handshake_acks &= offset > 0;
+                                break;
+                            }
+                        }
+                    }
+                    // These encrypted handshake bytes belong to the retained
+                    // TLS flight, never the legacy plaintext-frame path.
+                    if !only_handshake_acks
+                        && authenticated.pending_final_flight_packets == 0
+                        && !authenticated.final_handshake_flight.is_empty()
+                        && authenticated
+                            .last_final_flight_retransmit
+                            .is_none_or(|last| {
+                                packet.receive_time.saturating_duration_since(last)
+                                    >= super::udp_connection::FINAL_HANDSHAKE_FLIGHT_RESEND_INTERVAL
+                            })
+                    {
+                        let retained = authenticated
+                            .final_handshake_flight
+                            .iter()
+                            .cloned()
+                            .map(|packet| RoutedOutgoingPacket {
+                                connection_id,
+                                packet,
+                                final_handshake_flight: true,
+                                ack_eliciting: false,
+                            })
+                            .collect::<Vec<_>>();
+                        authenticated.pending_final_flight_packets = retained.len();
+                        self.pending_deferred_packets.extend(retained);
+                        authenticated.last_final_flight_retransmit = Some(packet.receive_time);
+                    }
+
+                    if let Some(short_data) = coalesced_1rtt {
+                        packet.data = short_data;
+                        // A 1-RTT tail is ApplicationData, not the long header's space.
+                        routing_info = PacketRoutingInfo {
+                            destination_cid: connection_id,
+                            kind: PacketRoutingKind::OneRtt,
+                            space: PacketNumberSpace::ApplicationData,
+                        };
+                    } else {
+                        return Ok(RoutingResult::Routed {
+                            connection_id,
+                            outgoing_packets: Vec::new(),
+                        });
+                    }
+                }
+            }
+            let authenticated = handle.clock_origin.is_some();
+            if authenticated {
+                // Replay admission and payload commitment are one bounded,
+                // synchronous cancellation transaction. In particular a stream
+                // waker may request cancellation while processing the first
+                // frame: the remaining frames must still commit exactly once.
+                // No socket, timer, or other asynchronous wait is masked.
+                let admitted = cx.masked(|| -> Result<bool, ConnectionRouterError> {
+                    let protection = handle.packet_protection.as_mut().ok_or(
+                        ConnectionRouterError::PacketProtectionUnavailable { connection_id },
+                    )?;
+                    let unprotected = unprotect_1rtt_packet_now(
+                        cx,
+                        connection_id,
+                        &mut protection.protection,
+                        Some(&handle.connection),
+                        &packet.data,
+                    )?;
+                    if unprotected.peer_key_update {
+                        handle
+                            .connection
+                            .on_peer_key_phase_pn(
+                                cx,
+                                unprotected.header.key_phase,
+                                unprotected.header.packet_number,
+                            )
+                            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: error.to_string(),
+                            })?;
+                        protection
+                            .protection
+                            .note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase
+                        {
+                            handle
+                                .connection
+                                .request_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            handle
+                                .connection
+                                .commit_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            protection
+                                .protection
+                                .note_local_key_update(PacketProtectionSpace::OneRtt);
+                        }
+                    }
+                    handle
+                        .connection
+                        .on_datagram_received(cx, packet.data.len() as u64)
+                        .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                            connection_id,
+                            reason: error.to_string(),
+                        })?;
+                    let processing = handle.connection.process_packet_payload(
+                        cx,
+                        routing_info.space,
+                        unprotected.header.packet_number,
+                        &unprotected.plaintext,
+                        now_micros,
+                    );
+                    if let Err(error) = processing {
+                        if error.is_stream_reassembly_backpressure() {
+                            return Ok(false);
+                        }
+                        Self::request_peer_violation_close(handle);
+                        return Err(ConnectionRouterError::PacketProcessingFailed {
+                            connection_id,
+                            reason: error.to_string(),
+                        });
+                    }
+                    handle.last_activity = handle.last_activity.max(packet.receive_time);
+                    handle.sent_since_receive = false;
+                    handle.deferred_spaces[packet_space_index(routing_info.space)] = true;
+                    Self::refresh_connection_timer(
+                        cx,
+                        connection_id,
+                        handle,
+                        self.clock_origin,
+                        now_micros,
+                        packet.receive_time,
+                    )?;
+                    Ok(true)
+                })?;
+                if !admitted {
+                    return Ok(RoutingResult::Drop {
+                        reason: "stream reassembly backpressure".to_string(),
+                    });
+                }
+                // Always acknowledge committed input before a later checkpoint
+                // or await. The driver owns deferred output, so cancellation
+                // cannot turn this accepted ciphertext into a replay retry.
+                return Ok(RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets: Vec::new(),
+                });
+            }
+            handle
+                .connection
+                .on_datagram_received(cx, packet.data.len() as u64)
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: err.to_string(),
+                })?;
+            let (packet_number, plaintext_payload) =
+                if routing_info.kind == PacketRoutingKind::OneRtt {
+                    let packet_protection = handle.packet_protection.as_mut().ok_or(
+                        ConnectionRouterError::PacketProtectionUnavailable { connection_id },
+                    )?;
+                    let unprotected = unprotect_1rtt_packet_with_connection(
+                        cx,
+                        connection_id,
+                        &mut packet_protection.protection,
+                        Some(&handle.connection),
+                        &packet.data,
+                    )
+                    .await?;
+                    if unprotected.peer_key_update {
+                        handle
+                            .connection
+                            .on_peer_key_phase_pn(
+                                cx,
+                                unprotected.header.key_phase,
+                                unprotected.header.packet_number,
+                            )
+                            .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: error.to_string(),
+                            })?;
+                        packet_protection
+                            .protection
+                            .note_peer_key_update(PacketProtectionSpace::OneRtt);
+                        if handle.connection.tls().local_key_phase() != unprotected.header.key_phase
+                        {
+                            handle
+                                .connection
+                                .request_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            handle
+                                .connection
+                                .commit_local_key_update(cx)
+                                .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                                    connection_id,
+                                    reason: error.to_string(),
+                                })?;
+                            packet_protection
+                                .protection
+                                .note_local_key_update(PacketProtectionSpace::OneRtt);
+                        }
+                    }
+                    (unprotected.header.packet_number, unprotected.plaintext)
+                } else {
+                    plaintext_packet_payload(connection_id, &packet.data)?
+                };
+            let processing = handle.connection.process_packet_payload(
+                cx,
+                routing_info.space,
+                packet_number,
+                &plaintext_payload,
+                now_micros,
+            );
+            if let Err(error) = processing {
+                if error.is_stream_reassembly_backpressure() {
+                    return Ok(RoutingResult::Drop {
+                        reason: "stream reassembly backpressure".to_string(),
+                    });
+                }
+                Self::request_peer_violation_close(handle);
+                return Err(ConnectionRouterError::PacketProcessingFailed {
+                    connection_id,
+                    reason: error.to_string(),
+                });
+            }
+            handle.last_activity = handle.last_activity.max(packet.receive_time);
+            handle.sent_since_receive = false;
+            let space_index = packet_space_index(routing_info.space);
+            handle.deferred_spaces[space_index] = true;
+            let retained_start = self.pending_deferred_packets.len();
+            if emit_output {
+                let packets = drain_connection_frames(
+                    cx,
+                    connection_id,
+                    handle,
+                    routing_info.space,
+                    packet.src_addr,
+                    packet.receive_time,
+                    now_micros,
+                )
+                .await?;
+                handle.deferred_spaces[space_index] = !packets.is_empty();
+                self.pending_deferred_packets.extend(packets);
+            }
+            Self::refresh_connection_timer(
+                cx,
+                connection_id,
+                handle,
+                self.clock_origin,
+                now_micros,
+                packet.receive_time,
+            )?;
+            cx.trace(&format!(
+                "Routed packet from {} to connection {connection_id:?}",
+                packet.src_addr
+            ));
+
+            Ok(RoutingResult::Routed {
+                connection_id,
+                outgoing_packets: self
+                    .pending_deferred_packets
+                    .split_off(retained_start)
+                    .into_iter()
+                    .map(|routed| routed.packet)
+                    .collect(),
+            })
+        } else if routing_info.kind == PacketRoutingKind::Initial
+            && self.connections.len() >= self.max_connections
+        {
+            Ok(RoutingResult::Drop {
+                reason: format!(
+                    "connection limit reached: active={}, max={}",
+                    self.connections.len(),
+                    self.max_connections
+                ),
+            })
+        } else if routing_info.kind == PacketRoutingKind::Initial {
+            let new_connection_id = connection_id;
+
+            cx.trace(&format!(
+                "New connection attempt from {} assigned ID {new_connection_id:?}",
+                packet.src_addr
+            ));
+
+            Ok(RoutingResult::NewConnection {
+                connection_id: new_connection_id,
+                peer_addr: packet.src_addr,
+                triggering_packet: packet,
+                outgoing_packets: Vec::new(),
+            })
+        } else {
+            Ok(RoutingResult::Drop {
+                reason: format!(
+                    "unknown connection ID {connection_id:?} for {:?} packet",
+                    routing_info.kind
+                ),
+            })
+        }
+    }
+
+    /// Create a new connection and add it to the routing table.
+    pub async fn create_connection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        peer_addr: SocketAddr,
+        is_server: bool,
+    ) -> Result<(), ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        if self.connections.contains_key(&connection_id) {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(format!(
+                "connection ID collision: {connection_id:?}"
+            )));
+        }
+        if self.connections.len() >= self.max_connections {
+            return Err(ConnectionRouterError::ConnectionCreationFailed(format!(
+                "connection limit reached: active={}, max={}",
+                self.connections.len(),
+                self.max_connections
+            )));
+        }
+
+        let mut config = self.config_template;
+        config.role = if is_server {
+            crate::net::quic_native::StreamRole::Server
+        } else {
+            crate::net::quic_native::StreamRole::Client
+        };
+
+        // Create the QUIC connection state machine
+        let connection = NativeQuicConnection::new(config);
+
+        let handle = ConnectionHandle {
+            connection: RoutedConnection::Native(connection),
+            packet_protection: None,
+            peer_addr,
+            last_activity: Instant::now(),
+            sent_since_receive: false,
+            established_at: None,
+            next_timer_deadline: None,
+            deferred_spaces: [false; 3],
+            next_deferred_space: 0,
+            local_close_output: None,
+            peer_connection_id: None,
+            clock_origin: None,
+            #[cfg(feature = "tls")]
+            authenticated: None,
+        };
+
+        self.connections.insert(connection_id, handle);
+
+        cx.trace(&format!(
+            "Created new connection {connection_id:?} for peer {peer_addr}"
+        ));
+
+        Ok(())
+    }
+
+    /// Install packet protection for a managed connection's 1-RTT
+    /// UDP handoff path.
+    ///
+    /// Once installed, application-data frames drained by this router are
+    /// assembled as short-header packets and protected before being passed to
+    /// the UDP endpoint.
+    pub fn install_packet_protection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        protection: AtpPacketProtection,
+    ) -> Result<(), ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        handle.packet_protection = Some(ConnectionPacketProtection { protection });
+        handle.deferred_spaces[packet_space_index(PacketNumberSpace::ApplicationData)] = true;
+        Ok(())
+    }
+
+    /// Borrow a managed connection for focused integration tests.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn connection_mut_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+    ) -> Result<&mut NativeQuicConnection, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        self.connections
+            .get_mut(&connection_id)
+            .map(|handle| &mut *handle.connection)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))
+    }
+
+    /// Arm a unit fixture's real recovery deadline in this router's clock
+    /// domain. No packet, timer deadline, or recovery state is manufactured.
+    #[cfg(test)]
+    pub(crate) fn refresh_connection_timer_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        now_micros: u64,
+    ) -> Result<Instant, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let now = self
+            .clock_origin
+            .checked_add(Duration::from_micros(now_micros))
+            .ok_or_else(|| {
+                ConnectionRouterError::TimerSchedulingFailed(
+                    "test fixture time exceeds router Instant range".to_string(),
+                )
+            })?;
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        Self::refresh_connection_timer(
+            cx,
+            connection_id,
+            handle,
+            self.clock_origin,
+            now_micros,
+            now,
+        )?;
+        Ok(now)
+    }
+
+    /// Drain one batch of protected application-data packets for focused
+    /// integration tests that need to cross the real UDP endpoint boundary.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub async fn drain_application_data_for_testing(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+        dst_addr: SocketAddr,
+        now: Instant,
+    ) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let now_micros = self.instant_micros(now);
+        let handle = self
+            .connections
+            .get_mut(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+        let now_micros = handle
+            .clock_origin
+            .map_or(now_micros, |origin| instant_micros_from(origin, now));
+        Ok(drain_connection_frames(
+            cx,
+            connection_id,
+            handle,
+            PacketNumberSpace::ApplicationData,
+            dst_addr,
+            now,
+            now_micros,
+        )
+        .await?
+        .into_iter()
+        .map(|routed| routed.packet)
+        .collect())
+    }
+
+    /// Remove a connection from the routing table.
+    pub fn remove_connection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+    ) -> Result<(), ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        if self.connections.remove(&connection_id).is_some() {
+            self.purge_retained_output(connection_id);
+            cx.trace(&format!("Removed connection {connection_id:?}"));
+            Ok(())
+        } else {
+            Err(ConnectionRouterError::ConnectionNotFound(connection_id))
+        }
+    }
+
+    /// Remove a connection from the router and hand ownership to the caller.
+    pub fn take_connection(
+        &mut self,
+        cx: &Cx,
+        connection_id: ConnectionId,
+    ) -> Result<AcceptedNativeQuicConnection, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        #[cfg(feature = "tls")]
+        if self
+            .connections
+            .get(&connection_id)
+            .is_some_and(|handle| handle.authenticated.is_some())
+        {
+            return Err(ConnectionRouterError::InvalidConnectionState {
+                connection_id,
+                reason: "authenticated connection ownership must remain with its managed socket and packet protection".to_string(),
+            });
+        }
+
+        let handle = self
+            .connections
+            .remove(&connection_id)
+            .ok_or(ConnectionRouterError::ConnectionNotFound(connection_id))?;
+
+        self.purge_retained_output(connection_id);
+
+        cx.trace(&format!(
+            "Accepted native QUIC connection {connection_id:?}"
+        ));
+        Ok(AcceptedNativeQuicConnection {
+            connection_id,
+            connection: match handle.connection {
+                RoutedConnection::Native(connection) => connection,
+                #[cfg(feature = "tls")]
+                RoutedConnection::Authenticated(_) => unreachable!("refused before removal"),
+            },
+            peer_addr: handle.peer_addr,
+        })
+    }
+
+    /// Remove the next routed connection using deterministic connection-ID order.
+    pub fn take_next_connection(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<AcceptedNativeQuicConnection>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let Some(connection_id) = self
+            .connections
+            .keys()
+            .min_by(|left, right| left.as_bytes().cmp(right.as_bytes()))
+            .copied()
+        else {
+            return Ok(None);
+        };
+
+        self.take_connection(cx, connection_id).map(Some)
+    }
+
+    /// Close and remove every active connection.
+    pub(crate) fn discard_peer_connections(&mut self, peer: SocketAddr) -> usize {
+        let previous = self.connections.len();
+        self.connections
+            .retain(|_, handle| handle.peer_addr != peer);
+        self.pending_timer_packets
+            .retain(|routed| self.connections.contains_key(&routed.connection_id));
+        self.pending_deferred_packets
+            .retain(|routed| self.connections.contains_key(&routed.connection_id));
+        previous - self.connections.len()
+    }
+
+    /// Terminal local ownership cleanup, including after the context is cancelled.
+    pub(crate) fn discard_all(&mut self) {
+        self.connections.clear();
+        self.pending_timer_packets.clear();
+        self.pending_deferred_packets.clear();
+        self.deferred_cursor = None;
+    }
+
+    fn purge_retained_output(&mut self, connection_id: ConnectionId) {
+        self.pending_timer_packets
+            .retain(|routed| routed.connection_id != connection_id);
+        self.pending_deferred_packets
+            .retain(|routed| routed.connection_id != connection_id);
+    }
+
+    /// Close and remove every active connection.
+    pub fn close_all(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+        app_error_code: u64,
+    ) -> Result<usize, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        let now_micros = self.instant_micros(now);
+        for (connection_id, handle) in &mut self.connections {
+            let now_micros = handle
+                .clock_origin
+                .map_or(now_micros, |origin| instant_micros_from(origin, now));
+            handle
+                .connection
+                .begin_close(cx, now_micros, app_error_code)
+                .or_else(|_| handle.connection.close_immediately(cx, app_error_code))
+                .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                    connection_id: *connection_id,
+                    reason: err.to_string(),
+                })?;
+        }
+        let closed = self.connections.len();
+        self.discard_all();
+        Ok(closed)
+    }
+
+    /// Prepare terminal 1-RTT output without discarding its encryption keys.
+    /// Shutdown owns these packets separately from ordinary application output.
+    pub(crate) async fn prepare_shutdown_close_packets(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+    ) -> Result<Vec<(OutgoingPacket, Instant)>, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let retained_deadlines: HashMap<_, _> = self
+            .connections
+            .keys()
+            .filter_map(|cid| {
+                self.queued_local_close_deadline(*cid)
+                    .filter(|deadline| *deadline > now)
+                    .map(|deadline| (*cid, deadline))
+            })
+            .collect();
+        let mut packets: Vec<_> = self
+            .pending_timer_packets
+            .drain(..)
+            .chain(self.pending_deferred_packets.drain(..))
+            .filter_map(|packet| {
+                retained_deadlines
+                    .get(&packet.connection_id)
+                    .map(|deadline| (packet.packet, *deadline))
+            })
+            .collect();
+        for (connection_id, handle) in &mut self.connections {
+            if matches!(
+                handle.local_close_output,
+                Some(LocalCloseOutput::Queued | LocalCloseOutput::Sent)
+            ) {
+                // Already committed ciphertext is owned either by this vector
+                // or by the endpoint's retained shutdown packet vector.
+                continue;
+            }
+            let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+            let now_micros = instant_micros_from(origin, now);
+            if !matches!(
+                handle.connection.state(),
+                QuicConnectionState::Draining | QuicConnectionState::Closed
+            ) {
+                handle
+                    .connection
+                    .begin_close(cx, now_micros, 0)
+                    .or_else(|_| handle.connection.close_immediately(cx, 0))
+                    .map_err(|error| ConnectionRouterError::PacketProcessingFailed {
+                        connection_id: *connection_id,
+                        reason: error.to_string(),
+                    })?;
+            }
+            if let Some(packet) =
+                prepare_local_close_packet(cx, *connection_id, handle, origin, now).await?
+            {
+                packets.push(packet);
+                handle.local_close_output = Some(LocalCloseOutput::Queued);
+            }
+        }
+        Ok(packets)
+    }
+
+    /// A peer frame that broke a transport rule has closed this connection
+    /// (`process_packet_frames`). Its transport CONNECTION_CLOSE leaves on the
+    /// next deferred-output turn, as a requested close does, in every build
+    /// (an ATP binary has `tls` without `http3`). A route without packet
+    /// protection has no close to send.
+    fn request_peer_violation_close(handle: &mut ConnectionHandle) {
+        if handle.local_close_output.is_none()
+            && handle.connection.local_close_frame_type().is_some()
+        {
+            handle.local_close_output = Some(LocalCloseOutput::Requested);
+            handle.deferred_spaces = [false; 3];
+            handle.next_timer_deadline = None;
+        }
+    }
+
+    /// Refresh a connection's PTO deadline from its transport state.
+    fn refresh_connection_timer(
+        cx: &Cx,
+        connection_id: ConnectionId,
+        handle: &mut ConnectionHandle,
+        origin: Instant,
+        now_micros: u64,
+        now_instant: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        let now_micros = handle.clock_origin.map_or(now_micros, |origin| {
+            instant_micros_from(origin, now_instant)
+        });
+        let origin = handle.clock_origin.unwrap_or(origin);
+        handle.next_timer_deadline = handle
+            .connection
+            .pto_deadline_micros(cx, now_micros)
+            .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: err.to_string(),
+            })?
+            .and_then(|deadline| {
+                let delta = deadline.saturating_sub(now_micros);
+                origin
+                    .checked_add(Duration::from_micros(deadline))
+                    .or_else(|| now_instant.checked_add(Duration::from_micros(delta)))
+            });
+        Ok(())
+    }
+
+    /// Get the next timer deadline across all connections.
+    pub fn next_timer_deadline(&self) -> Option<Instant> {
+        self.connections
+            .values()
+            .flat_map(|handle| {
+                let recovery = (!matches!(
+                    handle.connection.state(),
+                    QuicConnectionState::Closed | QuicConnectionState::Draining
+                ))
+                .then_some(handle.next_timer_deadline)
+                .flatten();
+                [recovery, self.lifecycle_deadline(handle)]
+                    .into_iter()
+                    .flatten()
+            })
+            .min()
+    }
+
+    fn lifecycle_deadline(&self, handle: &ConnectionHandle) -> Option<Instant> {
+        let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+        match handle.connection.state() {
+            QuicConnectionState::Closed => Some(origin),
+            QuicConnectionState::Draining => handle
+                .connection
+                .transport()
+                .drain_deadline_micros()
+                .and_then(|micros| origin.checked_add(Duration::from_micros(micros))),
+            _ => {
+                let timeout = [
+                    handle.connection.negotiated_idle_timeout_micros(),
+                    self.idle_timeout_micros,
+                ]
+                .into_iter()
+                .flatten()
+                .min()?
+                .max(handle.connection.transport().idle_timeout_floor_micros());
+                handle
+                    .last_activity
+                    .checked_add(Duration::from_micros(timeout))
+            }
+        }
+    }
+
+    pub(crate) fn expired_connections(&self, now: Instant) -> Vec<ConnectionId> {
+        let mut expired: Vec<_> = self
+            .connections
+            .iter()
+            .filter_map(|(cid, handle)| {
+                self.lifecycle_deadline(handle)
+                    .filter(|deadline| *deadline <= now)
+                    .map(|_| *cid)
+            })
+            .collect();
+        expired.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        expired
+    }
+
+    pub(crate) fn connection_is_terminal(&self, cid: ConnectionId) -> bool {
+        self.connections.get(&cid).is_some_and(|handle| {
+            matches!(
+                handle.connection.state(),
+                QuicConnectionState::Closed | QuicConnectionState::Draining
+            )
+        })
+    }
+
+    /// Ordinary terminal output is discarded. A requested local close is the
+    /// only terminal packet retained until UDP reports that packet was sent.
+    pub(crate) fn connection_can_send_queued(&self, cid: ConnectionId) -> bool {
+        !self.connection_is_terminal(cid)
+            || self
+                .connections
+                .get(&cid)
+                .is_some_and(|handle| handle.local_close_output == Some(LocalCloseOutput::Queued))
+    }
+
+    /// Deadline for the sole committed local-close packet, wherever its current
+    /// owner retained it. Shutdown transfers that ciphertext without reassembly.
+    pub(crate) fn queued_local_close_deadline(&self, cid: ConnectionId) -> Option<Instant> {
+        let handle = self.connections.get(&cid)?;
+        (handle.local_close_output == Some(LocalCloseOutput::Queued))
+            .then(|| self.lifecycle_deadline(handle))
+            .flatten()
+    }
+
+    fn discard_terminal_output(&mut self) {
+        let terminal: HashSet<_> = self
+            .connections
+            .keys()
+            .copied()
+            .filter(|cid| !self.connection_can_send_queued(*cid))
+            .collect();
+        self.pending_timer_packets
+            .retain(|packet| !terminal.contains(&packet.connection_id));
+        self.pending_deferred_packets
+            .retain(|packet| !terminal.contains(&packet.connection_id));
+    }
+
+    /// Hand off already committed timer output before a restarted managed loop
+    /// parks on a future deadline. The caller checks cancellation and supplies
+    /// its available queue capacity; no packet is generated or recommitted.
+    pub(crate) fn take_pending_timer_output(
+        &mut self,
+        max_packets: usize,
+    ) -> Vec<RoutedOutgoingPacket> {
+        self.discard_terminal_output();
+        let count = max_packets.min(self.pending_timer_packets.len());
+        self.pending_timer_packets.drain(..count).collect()
+    }
+
+    /// Process timer events for connections.
+    pub async fn process_timer_events(
+        &mut self,
+        cx: &Cx,
+        current_time: Instant,
+    ) -> Result<Vec<OutgoingPacket>, ConnectionRouterError> {
+        Ok(self
+            .process_managed_timer_events(cx, current_time, &HashSet::new())
+            .await?
+            .into_iter()
+            .map(|routed| routed.packet)
+            .collect())
+    }
+
+    /// Rearm due timers, retaining CID ownership until the managed endpoint
+    /// takes each packet. An already committed packet waiting anywhere in the
+    /// managed send path suppresses another probe for that same connection.
+    pub(crate) async fn process_managed_timer_events(
+        &mut self,
+        cx: &Cx,
+        current_time: Instant,
+        pending_connections: &HashSet<ConnectionId>,
+    ) -> Result<Vec<RoutedOutgoingPacket>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        for cid in self.expired_connections(current_time) {
+            self.remove_connection(cx, cid)?;
+        }
+        self.discard_terminal_output();
+
+        let origin = self.clock_origin;
+
+        let mut connection_ids: Vec<_> = self.connections.keys().copied().collect();
+        connection_ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        for (index, connection_id) in connection_ids.into_iter().enumerate() {
+            if index > 0 && index % TIMER_CONNECTIONS_PER_TURN == 0 {
+                // Completed packets are already router-owned. Dropping this
+                // future at the yield cannot lose them or recommit those probes.
+                crate::runtime::yield_now().await;
+                cx.checkpoint()
+                    .map_err(|_| ConnectionRouterError::Cancelled)?;
+            }
+            let handle = self
+                .connections
+                .get_mut(&connection_id)
+                .expect("snapshot CID");
+            if matches!(
+                handle.connection.state(),
+                QuicConnectionState::Closed | QuicConnectionState::Draining
+            ) {
+                continue;
+            }
+            let origin = handle.clock_origin.unwrap_or(origin);
+            if let Some(deadline) = handle.next_timer_deadline {
+                if current_time >= deadline {
+                    cx.trace(&format!(
+                        "Timer fired for connection {connection_id:?} at {current_time:?}"
+                    ));
+
+                    handle.next_timer_deadline = None;
+                    let now_micros = instant_micros_from(origin, current_time);
+                    match handle.connection.on_managed_probe_timeout(cx, now_micros) {
+                        Ok(Some(next)) => {
+                            handle.next_timer_deadline =
+                                origin.checked_add(Duration::from_micros(next));
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            if cx.checkpoint().is_err() {
+                                return Err(ConnectionRouterError::Cancelled);
+                            }
+                            cx.trace(&format!("QUIC timer failed for {connection_id:?}: {error}"));
+                            continue;
+                        }
+                    }
+                    if pending_connections.contains(&connection_id)
+                        || self
+                            .pending_timer_packets
+                            .iter()
+                            .any(|routed| routed.connection_id == connection_id)
+                        || self
+                            .pending_deferred_packets
+                            .iter()
+                            .any(|routed| routed.connection_id == connection_id)
+                    {
+                        cx.trace(&format!(
+                            "QUIC PTO rearmed without another queued probe for {connection_id:?}"
+                        ));
+                        continue;
+                    }
+                    let peer_addr = handle.peer_addr;
+                    match drain_connection_frames_inner(
+                        cx,
+                        connection_id,
+                        handle,
+                        PacketNumberSpace::ApplicationData,
+                        peer_addr,
+                        current_time,
+                        instant_micros_from(origin, current_time),
+                        true,
+                    )
+                    .await
+                    {
+                        Ok(packets) => self.pending_timer_packets.extend(packets),
+                        Err(ConnectionRouterError::Cancelled) => {
+                            return Err(ConnectionRouterError::Cancelled);
+                        }
+                        Err(error) => {
+                            cx.trace(&format!(
+                                "QUIC timer output failed for {connection_id:?}: {error}"
+                            ));
+                            continue;
+                        }
+                    }
+                    if let Err(error) = Self::refresh_connection_timer(
+                        cx,
+                        connection_id,
+                        handle,
+                        origin,
+                        instant_micros_from(origin, current_time),
+                        current_time,
+                    ) {
+                        if cx.checkpoint().is_err() {
+                            return Err(ConnectionRouterError::Cancelled);
+                        }
+                        cx.trace(&format!(
+                            "QUIC timer rearm failed for {connection_id:?}: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(std::mem::take(&mut self.pending_timer_packets))
+    }
+
+    /// Drain deferred packet spaces up to the managed owner's available packet
+    /// capacity. The retained prefix belongs to the router until a successful
+    /// return, including cancellation after an earlier connection committed.
+    /// A sorted, rotating CID order and rotating packet spaces avoid starving a
+    /// peer when the caller repeatedly has room for only one packet.
+    pub(crate) async fn drain_deferred_output(
+        &mut self,
+        cx: &Cx,
+        now: Instant,
+        max_packets: usize,
+    ) -> Result<Vec<RoutedOutgoingPacket>, ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        self.discard_terminal_output();
+        if max_packets == 0 {
+            return Ok(Vec::new());
+        }
+        let mut connection_ids: Vec<_> = self.connections.keys().copied().collect();
+        connection_ids.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        if let Some(cursor) = self.deferred_cursor {
+            let next = connection_ids.partition_point(|id| id.as_bytes() <= cursor.as_bytes());
+            connection_ids.rotate_left(next);
+        }
+        let now_micros = self.instant_micros(now);
+        for (index, connection_id) in connection_ids.into_iter().enumerate() {
+            if self.pending_deferred_packets.len() >= max_packets {
+                break;
+            }
+            if index > 0 && index % TIMER_CONNECTIONS_PER_TURN == 0 {
+                crate::runtime::yield_now().await;
+            }
+            cx.checkpoint()
+                .map_err(|_| ConnectionRouterError::Cancelled)?;
+            let handle = self
+                .connections
+                .get_mut(&connection_id)
+                .expect("snapshot CID");
+            let now_micros = handle
+                .clock_origin
+                .map_or(now_micros, |origin| instant_micros_from(origin, now));
+            if handle.local_close_output == Some(LocalCloseOutput::Requested) {
+                let origin = handle.clock_origin.unwrap_or(self.clock_origin);
+                match prepare_local_close_packet(cx, connection_id, handle, origin, now).await {
+                    Ok(Some((packet, _))) => {
+                        // Packet-number/amplification accounting commits inside
+                        // protection. Store the packet before any yield.
+                        self.pending_deferred_packets.push(RoutedOutgoingPacket {
+                            connection_id,
+                            packet,
+                            final_handshake_flight: false,
+                            ack_eliciting: false,
+                        });
+                        handle.local_close_output = Some(LocalCloseOutput::Queued);
+                    }
+                    Ok(None) => handle.local_close_output = None,
+                    Err(error) => {
+                        if cx.checkpoint().is_err() || error == ConnectionRouterError::Cancelled {
+                            return Err(ConnectionRouterError::Cancelled);
+                        }
+                        // A failed close for one peer must not stop healthy
+                        // routes. Its existing drain deadline still retires it.
+                        handle.local_close_output = None;
+                        cx.trace(&format!(
+                            "QUIC local close failed for {connection_id:?}: {error}"
+                        ));
+                    }
+                }
+                self.deferred_cursor = Some(connection_id);
+                continue;
+            }
+            let first_space = handle.next_deferred_space;
+            for offset in 0..3 {
+                if self.pending_deferred_packets.len() >= max_packets {
+                    break;
+                }
+                let index = (first_space + offset) % 3;
+                if !handle.deferred_spaces[index] {
+                    continue;
+                }
+                self.deferred_cursor = Some(connection_id);
+                handle.next_deferred_space = (index + 1) % 3;
+                let space = [
+                    PacketNumberSpace::Initial,
+                    PacketNumberSpace::Handshake,
+                    PacketNumberSpace::ApplicationData,
+                ][index];
+                let peer_addr = handle.peer_addr;
+                match drain_connection_frames(
+                    cx,
+                    connection_id,
+                    handle,
+                    space,
+                    peer_addr,
+                    now,
+                    now_micros,
+                )
+                .await
+                {
+                    Ok(packets) => {
+                        // Empty (including cwnd blocked) is not readiness. New
+                        // input/ACK marks the space again; nonempty output gets
+                        // one later opportunity to drain the remaining frames.
+                        handle.deferred_spaces[index] = !packets.is_empty();
+                        self.pending_deferred_packets.extend(packets);
+                    }
+                    Err(error) => {
+                        if cx.checkpoint().is_err() || error == ConnectionRouterError::Cancelled {
+                            return Err(ConnectionRouterError::Cancelled);
+                        }
+                        cx.trace(&format!(
+                            "QUIC deferred output failed for {connection_id:?}: {error}"
+                        ));
+                    }
+                }
+                if let Err(error) = Self::refresh_connection_timer(
+                    cx,
+                    connection_id,
+                    handle,
+                    self.clock_origin,
+                    now_micros,
+                    now,
+                ) {
+                    if cx.checkpoint().is_err() {
+                        return Err(ConnectionRouterError::Cancelled);
+                    }
+                    cx.trace(&format!(
+                        "QUIC deferred timer refresh failed for {connection_id:?}: {error}"
+                    ));
+                }
+            }
+        }
+        let count = max_packets.min(self.pending_deferred_packets.len());
+        Ok(self.pending_deferred_packets.drain(..count).collect())
+    }
+
+    /// Get connection statistics for observability.
+    pub fn connection_stats(&self) -> ConnectionRouterStats {
+        let active_connections = self.connections.len();
+        let established_connections = self
+            .connections
+            .values()
+            .filter(|h| h.established_at.is_some())
+            .count();
+
+        ConnectionRouterStats {
+            active_connections,
+            established_connections,
+            pending_connections: active_connections - established_connections,
+        }
+    }
+
+    /// Routing needs only the header-protection-invariant prefix.
+    ///
+    /// RFC 9001 §5.4: form/type bits and the destination CID are readable on
+    /// the wire; the packet number and key phase are masked and only become
+    /// readable inside the connection's own unprotect step.
+    fn decode_routing_info(
+        &self,
+        packet: &ReceivedPacket,
+    ) -> Result<PacketRoutingInfo, QuicCoreError> {
+        if packet.data.first().is_some_and(|first| first & 0x80 != 0) {
+            let prefix = ProtectedHeaderPrefix::decode(&packet.data, 0)?;
+            return Ok(PacketRoutingInfo::from_prefix(&prefix));
+        }
+
+        for cid_len in self.known_connection_id_lengths() {
+            if let Ok(prefix) = ProtectedHeaderPrefix::decode(&packet.data, cid_len) {
+                let info = PacketRoutingInfo::from_prefix(&prefix);
+                if self.connections.contains_key(&info.destination_cid) {
+                    return Ok(info);
+                }
+            }
+        }
+
+        let prefix = ProtectedHeaderPrefix::decode(&packet.data, 0)?;
+        Ok(PacketRoutingInfo::from_prefix(&prefix))
+    }
+
+    fn known_connection_id_lengths(&self) -> Vec<usize> {
+        let mut lengths = self
+            .connections
+            .keys()
+            .map(ConnectionId::len)
+            .collect::<Vec<_>>();
+        lengths.sort_unstable_by(|a, b| b.cmp(a));
+        lengths.dedup();
+        if !lengths.contains(&0) {
+            lengths.push(0);
+        }
+        lengths
+    }
+
+    fn instant_micros(&self, instant: Instant) -> u64 {
+        instant_micros_from(self.clock_origin, instant)
+    }
+
+    /// Allocate a new connection ID.
+    pub(crate) fn allocate_connection_id(&mut self) -> ConnectionId {
+        let id = self.next_connection_id;
+        self.next_connection_id += 1;
+
+        // Create connection ID from counter
+        let id_bytes = id.to_be_bytes();
+        ConnectionId::new(&id_bytes).expect("Connection ID from counter should always be valid")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketRoutingKind {
+    Initial,
+    Handshake,
+    ZeroRtt,
+    OneRtt,
+    Retry,
+}
+
+#[derive(Debug, Clone)]
+struct PacketRoutingInfo {
+    destination_cid: ConnectionId,
+    kind: PacketRoutingKind,
+    space: PacketNumberSpace,
+}
+
+impl PacketRoutingInfo {
+    fn from_prefix(prefix: &ProtectedHeaderPrefix) -> Self {
+        match prefix {
+            ProtectedHeaderPrefix::Long(header) => {
+                let (kind, space) = match header.packet_type {
+                    LongPacketType::Initial => {
+                        (PacketRoutingKind::Initial, PacketNumberSpace::Initial)
+                    }
+                    LongPacketType::ZeroRtt => (
+                        PacketRoutingKind::ZeroRtt,
+                        PacketNumberSpace::ApplicationData,
+                    ),
+                    LongPacketType::Handshake => {
+                        (PacketRoutingKind::Handshake, PacketNumberSpace::Handshake)
+                    }
+                    LongPacketType::Retry => (PacketRoutingKind::Retry, PacketNumberSpace::Initial),
+                };
+                Self {
+                    destination_cid: header.dst_cid,
+                    kind,
+                    space,
+                }
+            }
+            ProtectedHeaderPrefix::Retry(header) => Self {
+                destination_cid: header.dst_cid,
+                kind: PacketRoutingKind::Retry,
+                space: PacketNumberSpace::Initial,
+            },
+            ProtectedHeaderPrefix::Short { dst_cid, .. } => Self {
+                destination_cid: *dst_cid,
+                kind: PacketRoutingKind::OneRtt,
+                space: PacketNumberSpace::ApplicationData,
+            },
+        }
+    }
+}
+
+/// Packet number and payload of a legacy plaintext long-header packet.
+///
+/// The lab/loopback transitions never derive keys, so their headers carry no
+/// protection and are fully decodable on the wire.
+fn plaintext_packet_payload(
+    connection_id: ConnectionId,
+    data: &[u8],
+) -> Result<(u64, Vec<u8>), ConnectionRouterError> {
+    let (header, header_len) = PacketHeader::decode(data, connection_id.len()).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("invalid QUIC header: {err}"),
+        }
+    })?;
+    let packet_number = match header {
+        PacketHeader::Long(header) => header.packet_number,
+        PacketHeader::Retry(_) => 0,
+        PacketHeader::Short(header) => header.packet_number,
+    };
+    let payload =
+        data.get(header_len..)
+            .ok_or_else(|| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: "header length exceeded datagram length".to_string(),
+            })?;
+    Ok((packet_number, payload.to_vec()))
+}
+
+fn instant_micros_from(origin: Instant, instant: Instant) -> u64 {
+    instant
+        .checked_duration_since(origin)
+        .unwrap_or(Duration::ZERO)
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn packet_space_index(space: PacketNumberSpace) -> usize {
+    match space {
+        PacketNumberSpace::Initial => 0,
+        PacketNumberSpace::Handshake => 1,
+        PacketNumberSpace::ApplicationData => 2,
+    }
+}
+
+/// Protect the already-recorded local close without admitting any application
+/// output. Both endpoint shutdown and per-route retirement use this path.
+async fn prepare_local_close_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    origin: Instant,
+    now: Instant,
+) -> Result<Option<(OutgoingPacket, Instant)>, ConnectionRouterError> {
+    let Some(protection) = handle.packet_protection.as_mut() else {
+        return Ok(None);
+    };
+    let Some(code) = handle.connection.transport().close_code() else {
+        return Ok(None);
+    };
+    let Outcome::Ok(error_code) = crate::net::atp::protocol::varint::VarInt::new(code) else {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: "close code exceeds QUIC varint range".to_string(),
+        });
+    };
+    let frames = [QuicFrame::ConnectionClose {
+        error_code,
+        frame_type: handle.connection.local_close_frame_type(),
+        reason_phrase: crate::bytes::Bytes::new(),
+    }];
+    if !handle.connection.is_local_close_frame(&frames) {
+        return Ok(None);
+    }
+    let Some(deadline) = handle
+        .connection
+        .transport()
+        .drain_deadline_micros()
+        .and_then(|micros| origin.checked_add(Duration::from_micros(micros)))
+        .filter(|deadline| *deadline > now)
+    else {
+        return Ok(None);
+    };
+    let mut payload = crate::bytes::BytesMut::new();
+    NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(|error| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: error.to_string(),
+        }
+    })?;
+    let data = assemble_protected_1rtt_packet_inner(
+        cx,
+        handle.peer_connection_id.unwrap_or(connection_id),
+        &mut handle.connection,
+        &mut protection.protection,
+        &frames,
+        payload.as_ref(),
+        instant_micros_from(origin, now),
+        false,
+        false,
+    )
+    .await?;
+    Ok(Some((
+        OutgoingPacket {
+            dst_addr: handle.peer_addr,
+            data,
+            send_time: Some(now),
+        },
+        deadline,
+    )))
+}
+
+async fn drain_connection_frames(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    space: PacketNumberSpace,
+    dst_addr: SocketAddr,
+    now: Instant,
+    now_micros: u64,
+) -> Result<Vec<RoutedOutgoingPacket>, ConnectionRouterError> {
+    drain_connection_frames_inner(
+        cx,
+        connection_id,
+        handle,
+        space,
+        dst_addr,
+        now,
+        now_micros,
+        false,
+    )
+    .await
+}
+
+async fn drain_connection_frames_inner(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    handle: &mut ConnectionHandle,
+    space: PacketNumberSpace,
+    dst_addr: SocketAddr,
+    now: Instant,
+    now_micros: u64,
+    pto_probe: bool,
+) -> Result<Vec<RoutedOutgoingPacket>, ConnectionRouterError> {
+    if matches!(
+        handle.connection.state(),
+        QuicConnectionState::Closed | QuicConnectionState::Draining
+    ) {
+        return Ok(Vec::new());
+    }
+    let destination_cid = handle.peer_connection_id.unwrap_or(connection_id);
+    let max_frame_bytes = if space == PacketNumberSpace::ApplicationData {
+        if handle.packet_protection.is_none() {
+            return Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id });
+        }
+        PROTECTED_1RTT_MAX_PACKET_BYTES
+            .saturating_sub(protected_1rtt_packet_len(destination_cid, 0))
+    } else {
+        PROTECTED_1RTT_MAX_PACKET_BYTES
+    };
+    if space == PacketNumberSpace::ApplicationData {
+        // Keep DATAGRAM admission in step with the exact packet budget this
+        // assembler enforces (GH#66).
+        handle.connection.set_one_rtt_frame_budget(max_frame_bytes);
+    }
+    let frames = if pto_probe {
+        handle
+            .connection
+            .generate_pto_probe_frames(cx, max_frame_bytes)
+    } else if space == PacketNumberSpace::ApplicationData {
+        generate_congestion_admitted_1rtt_frames(cx, &mut handle.connection, max_frame_bytes)
+    } else {
+        handle
+            .connection
+            .generate_frames(cx, space, max_frame_bytes)
+    }
+    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+        connection_id,
+        reason: err.to_string(),
+    })?;
+    if frames.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut payload = crate::bytes::BytesMut::new();
+    NativeQuicConnection::encode_frames(&frames, &mut payload).map_err(
+        |err: NativeQuicConnectionError| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        },
+    )?;
+    let data = if space == PacketNumberSpace::ApplicationData {
+        match handle.packet_protection.as_mut() {
+            Some(packet_protection) => {
+                assemble_protected_1rtt_packet_inner(
+                    cx,
+                    destination_cid,
+                    &mut handle.connection,
+                    &mut packet_protection.protection,
+                    &frames,
+                    payload.as_ref(),
+                    now_micros,
+                    frames.iter().any(is_ack_eliciting),
+                    pto_probe,
+                )
+                .await
+            }
+            None => Err(ConnectionRouterError::PacketProtectionUnavailable { connection_id }),
+        }
+    } else {
+        Ok(payload.to_vec())
+    };
+    let data = match data {
+        Ok(data) => data,
+        Err(error) => {
+            if !pto_probe {
+                handle
+                    .connection
+                    .on_generated_frames_dropped(&frames)
+                    .map_err(|recovery_error| ConnectionRouterError::PacketProcessingFailed {
+                        connection_id,
+                        reason: format!(
+                            "packet assembly failed ({error}); reliable-frame requeue failed: {recovery_error}"
+                        ),
+                    })?;
+            }
+            return Err(error);
+        }
+    };
+
+    Ok(vec![RoutedOutgoingPacket {
+        connection_id,
+        packet: OutgoingPacket {
+            dst_addr,
+            data,
+            send_time: Some(now),
+        },
+        final_handshake_flight: false,
+        ack_eliciting: frames.iter().any(is_ack_eliciting),
+    }])
+}
+
+#[cfg(test)]
+pub(crate) async fn assemble_protected_1rtt_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    connection: &mut NativeQuicConnection,
+    packet_protection: &mut AtpPacketProtection,
+    frames: &[QuicFrame],
+    payload: &[u8],
+    now_micros: u64,
+    ack_eliciting: bool,
+) -> Result<Vec<u8>, ConnectionRouterError> {
+    assemble_protected_1rtt_packet_inner(
+        cx,
+        connection_id,
+        connection,
+        packet_protection,
+        frames,
+        payload,
+        now_micros,
+        ack_eliciting,
+        false,
+    )
+    .await
+}
+
+/// Every native 1-RTT assembler uses the same rotation and exhaustion policy.
+/// Checking per packet also covers a batch that crosses the soft threshold,
+/// PTO probes, and a final close packet. Already protected retained packets
+/// never pass through this function again and keep their original key/nonce.
+fn prepare_one_rtt_send_key(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    connection: &mut NativeQuicConnection,
+    packet_protection: &mut AtpPacketProtection,
+) -> Result<(), ConnectionRouterError> {
+    cx.checkpoint()
+        .map_err(|_| ConnectionRouterError::Cancelled)?;
+    let space = PacketProtectionSpace::OneRtt;
+    let mut rotation_failure = None;
+    if packet_protection.confidentiality_key_update_due(space)
+        && connection.can_initiate_local_key_update()
+    {
+        let next_phase = !connection.tls().local_key_phase();
+        // Eligibility is checked before advancing the bidirectional rustls
+        // ratchet. Receiving the peer's phase bit is not a substitute for an
+        // ACK of our current generation (RFC 9001 section 6.1).
+        match packet_protection.ensure_next_gen_keys(cx, space, next_phase) {
+            Outcome::Ok(()) => {
+                connection
+                    .request_local_key_update(cx)
+                    .and_then(|_| connection.commit_local_key_update(cx))
+                    .map_err(|error| {
+                        if matches!(error, NativeQuicConnectionError::Cancelled) {
+                            ConnectionRouterError::Cancelled
+                        } else {
+                            ConnectionRouterError::PacketProcessingFailed {
+                                connection_id,
+                                reason: format!("1-RTT key update failed: {error}"),
+                            }
+                        }
+                    })?;
+                packet_protection.note_local_key_update(space);
+            }
+            Outcome::Err(error) => {
+                rotation_failure = Some(format!("1-RTT key update failed: {error:?}"));
+            }
+            Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+            Outcome::Panicked(payload) => {
+                rotation_failure = Some(format!("1-RTT key update panicked: {payload:?}"));
+            }
+        }
+    }
+    if packet_protection.confidentiality_limit_reached(space) {
+        // No CONNECTION_CLOSE can be encrypted with an exhausted key. Stop
+        // locally with AEAD_LIMIT_REACHED; the router reaps the closed owner.
+        connection
+            .close_immediately(cx, 0x0f)
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: "AEAD_LIMIT_REACHED: 1-RTT confidentiality limit exhausted".to_owned(),
+        });
+    }
+    if let Some(reason) = rotation_failure {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) async fn assemble_protected_1rtt_packet_inner(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    connection: &mut NativeQuicConnection,
+    packet_protection: &mut AtpPacketProtection,
+    frames: &[QuicFrame],
+    payload: &[u8],
+    now_micros: u64,
+    ack_eliciting: bool,
+    pto_probe: bool,
+) -> Result<Vec<u8>, ConnectionRouterError> {
+    let packet_len = protected_1rtt_packet_len(connection_id, payload.len());
+    if packet_len > PROTECTED_1RTT_MAX_PACKET_BYTES {
+        return Err(ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!(
+                "protected 1-RTT packet length {packet_len} exceeds max {PROTECTED_1RTT_MAX_PACKET_BYTES}"
+            ),
+        });
+    }
+    let local_close = !pto_probe && !ack_eliciting && connection.is_local_close_frame(frames);
+    if local_close {
+        connection
+            .validate_local_close_packet(cx, packet_len as u64, frames)
+            .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: err.to_string(),
+            })?;
+    }
+    let packet_number = connection
+        .next_packet_number_for_protection(PacketNumberSpace::ApplicationData)
+        .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        })?;
+    prepare_one_rtt_send_key(cx, connection_id, connection, packet_protection)?;
+    let key_phase = connection.tls().local_key_phase();
+    let header = PacketHeader::Short(ShortHeader {
+        spin: false,
+        key_phase,
+        dst_cid: connection_id,
+        packet_number,
+        packet_number_len: PROTECTED_1RTT_PACKET_NUMBER_LEN,
+    });
+    let mut header_bytes = Vec::new();
+    header.encode(&mut header_bytes).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: err.to_string(),
+        }
+    })?;
+    let protected = match packet_protection
+        .protect_packet(
+            cx,
+            PacketProtectionRequest {
+                space: PacketProtectionSpace::OneRtt,
+                key_phase,
+                packet_number,
+                associated_data: &header_bytes,
+                payload,
+            },
+        )
+        .await
+    {
+        Outcome::Ok(packet) => packet,
+        Outcome::Err(err) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT packet protection failed: {err:?}"),
+            });
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT packet protection panicked: {payload:?}"),
+            });
+        }
+    };
+
+    // Finish the wire bytes, including header protection (RFC 9001 §5.4,
+    // GH#69), before the packet is committed as sent: a failure here must
+    // not leave the connection believing a packet left that never did.
+    let mut packet =
+        Vec::with_capacity(header_bytes.len() + protected.ciphertext.len() + protected.tag.len());
+    packet.extend_from_slice(&header_bytes);
+    packet.extend_from_slice(&protected.ciphertext);
+    packet.extend_from_slice(&protected.tag);
+    let packet_number_offset = 1 + connection_id.len();
+    let sample = header_protection_sample(&packet, packet_number_offset).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT header protection sample: {err}"),
+        }
+    })?;
+    let mask = match packet_protection.header_protection_mask_now(
+        cx,
+        PacketProtectionSpace::OneRtt,
+        &sample,
+    ) {
+        Outcome::Ok(mask) => mask,
+        Outcome::Err(err) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT header protection failed: {err:?}"),
+            });
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(ConnectionRouterError::PacketProcessingFailed {
+                connection_id,
+                reason: format!("1-RTT header protection panicked: {payload:?}"),
+            });
+        }
+    };
+    apply_header_protection(&mut packet, packet_number_offset, mask.bytes).map_err(|err| {
+        ConnectionRouterError::PacketProcessingFailed {
+            connection_id,
+            reason: format!("1-RTT header protection apply: {err}"),
+        }
+    })?;
+
+    let committed_packet_number = if local_close {
+        connection.on_local_close_packet_sent(cx, packet_len as u64, frames)
+    } else if pto_probe {
+        connection.on_pto_probe_packet_sent(cx, packet_len as u64, now_micros, frames)
+    } else {
+        connection.on_packet_sent_with_frames(
+            cx,
+            PacketNumberSpace::ApplicationData,
+            packet_len as u64,
+            ack_eliciting,
+            ack_eliciting,
+            now_micros,
+            frames,
+        )
+    }
+    .map_err(|err| ConnectionRouterError::PacketProcessingFailed {
+        connection_id,
+        reason: err.to_string(),
+    })?;
+    debug_assert_eq!(committed_packet_number, packet_number);
+    Ok(packet)
+}
+
+/// One authenticated 1-RTT packet: the unmasked short header (with the full,
+/// reconstructed packet number), the plaintext payload, and whether this
+/// packet was accepted as a genuine peer key update under next-generation keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Unprotected1RttPacket {
+    pub(crate) header: ShortHeader,
+    pub(crate) plaintext: Vec<u8>,
+    pub(crate) peer_key_update: bool,
+}
+
+/// Remove header protection from a received 1-RTT datagram addressed to
+/// `connection_id` and authenticate it. See [`unprotect_1rtt_packet_now`].
+pub(crate) async fn unprotect_1rtt_packet(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    packet_protection: &mut AtpPacketProtection,
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, None, packet)
+}
+
+/// Remove header protection and authenticate a 1-RTT datagram with connection
+/// context to accurately disambiguate peer key updates (RFC 9001 §6.3).
+pub(crate) async fn unprotect_1rtt_packet_with_connection(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    packet_protection: &mut AtpPacketProtection,
+    connection: Option<&NativeQuicConnection>,
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    unprotect_1rtt_packet_now(cx, connection_id, packet_protection, connection, packet)
+}
+
+/// Recognize an authenticated Handshake ACK without mistaking it for a
+/// retransmitted TLS flight.
+///
+/// `packet` is one long-header packet bounded by its Length field: the router
+/// classifies each packet of a coalesced datagram on its own. Unknown or
+/// invalid packets keep the existing recovery behavior; only verified
+/// ACK/PADDING is suppressed.
+pub(crate) fn authenticated_handshake_ack_only(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    protection: &mut AtpPacketProtection,
+    packet: &[u8],
+) -> bool {
+    let Ok(ProtectedHeaderPrefix::Long(prefix)) = ProtectedHeaderPrefix::decode(packet, 0) else {
+        return false;
+    };
+    if prefix.packet_type != LongPacketType::Handshake || prefix.dst_cid != connection_id {
+        return false;
+    }
+    let space = PacketProtectionSpace::Handshake;
+    let offset = prefix.packet_number_offset;
+    let Ok(sample) = header_protection_sample(packet, offset) else {
+        return false;
+    };
+    let Outcome::Ok(mask) = protection.header_protection_mask_remote_now(cx, space, &sample) else {
+        return false;
+    };
+    let mut bytes = packet.to_vec();
+    let Ok(width) = remove_header_protection(&mut bytes, offset, mask.bytes) else {
+        return false;
+    };
+    let header_len = offset + usize::from(width);
+    if bytes.len() < header_len + PROTECTED_1RTT_TAG_LEN {
+        return false;
+    }
+    let truncated = bytes[offset..header_len]
+        .iter()
+        .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+    let Ok(number) = decode_packet_number_reconstruct(
+        truncated,
+        width,
+        protection
+            .highest_accepted_packet_number(space)
+            .unwrap_or(0),
+    ) else {
+        return false;
+    };
+    let tag_start = bytes.len() - PROTECTED_1RTT_TAG_LEN;
+    let protected = ProtectedPacket {
+        space,
+        key_phase: false,
+        packet_number: number,
+        ciphertext: bytes[header_len..tag_start].to_vec(),
+        tag: bytes[tag_start..].try_into().expect("tag length checked"),
+        proof: ProtectionProof {
+            provider_kind: protection.provider_kind(),
+            space,
+            key_phase: false,
+            generation: 0,
+            transcript_hash: TranscriptHash::from_bytes([0; 32]),
+            failure_code: None,
+        },
+    };
+    let Outcome::Ok(plaintext) =
+        protection.inspect_handshake_packet_now(cx, &protected, &bytes[..header_len])
+    else {
+        return false;
+    };
+    let Ok((PacketHeader::Long(header), consumed)) = PacketHeader::decode(&bytes, 0) else {
+        return false;
+    };
+    if consumed != header_len || header.payload_length != (bytes.len() - offset) as u64 {
+        return false;
+    }
+    let Ok(frames) = NativeQuicConnection::decode_frames(&plaintext.plaintext) else {
+        return false;
+    };
+    frames
+        .iter()
+        .any(|frame| matches!(frame, QuicFrame::Ack { .. }))
+        && frames
+            .iter()
+            .all(|frame| matches!(frame, QuicFrame::Ack { .. } | QuicFrame::Padding { .. }))
+}
+
+/// Unmask and authenticate one short-header packet on the current task.
+///
+/// RFC 9001 §5.4.1 receiver order (GH#69): read the invariant prefix, sample
+/// the ciphertext, unmask the first byte and the packet number with the
+/// peer's header-protection key, reconstruct the full packet number against
+/// the largest one accepted so far, AEAD-open with the unmasked header as
+/// associated data, and only then validate the reserved bits (RFC 9000
+/// §17.3.1 checks them after packet protection is removed).
+fn unprotect_1rtt_packet_now(
+    cx: &Cx,
+    connection_id: ConnectionId,
+    packet_protection: &mut AtpPacketProtection,
+    connection: Option<&NativeQuicConnection>,
+    packet: &[u8],
+) -> Result<Unprotected1RttPacket, ConnectionRouterError> {
+    let failed = |reason: String| ConnectionRouterError::PacketProcessingFailed {
+        connection_id,
+        reason,
+    };
+    let prefix = ProtectedHeaderPrefix::decode(packet, connection_id.len())
+        .map_err(|err| failed(format!("invalid 1-RTT header: {err}")))?;
+    let ProtectedHeaderPrefix::Short {
+        dst_cid,
+        packet_number_offset,
+    } = prefix
+    else {
+        return Err(failed("expected a 1-RTT short header".to_string()));
+    };
+    if dst_cid != connection_id {
+        return Err(failed(format!(
+            "1-RTT packet addressed to {dst_cid:?}, not {connection_id:?}"
+        )));
+    }
+    let sample = header_protection_sample(packet, packet_number_offset).map_err(|_| {
+        failed(format!(
+            "protected 1-RTT packet too short: len={}, header_len={packet_number_offset}, tag_len={PROTECTED_1RTT_TAG_LEN}",
+            packet.len()
+        ))
+    })?;
+    let mask = match packet_protection.header_protection_mask_remote_now(
+        cx,
+        PacketProtectionSpace::OneRtt,
+        &sample,
+    ) {
+        Outcome::Ok(mask) => mask,
+        Outcome::Err(err) => {
+            return Err(failed(format!(
+                "1-RTT header protection removal failed: {err:?}"
+            )));
+        }
+        Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+        Outcome::Panicked(payload) => {
+            return Err(failed(format!(
+                "1-RTT header protection removal panicked: {payload:?}"
+            )));
+        }
+    };
+    let mut unmasked = packet.to_vec();
+    let packet_number_len =
+        remove_header_protection(&mut unmasked, packet_number_offset, mask.bytes)
+            .map_err(|err| failed(format!("1-RTT header protection removal: {err}")))?;
+    let header_len = packet_number_offset + usize::from(packet_number_len);
+    if unmasked.len() < header_len + PROTECTED_1RTT_TAG_LEN {
+        return Err(failed(format!(
+            "protected 1-RTT packet too short: len={}, header_len={header_len}, tag_len={PROTECTED_1RTT_TAG_LEN}",
+            unmasked.len()
+        )));
+    }
+    let truncated = unmasked[packet_number_offset..header_len]
+        .iter()
+        .fold(0u32, |acc, byte| (acc << 8) | u32::from(*byte));
+    let largest = packet_protection
+        .highest_accepted_packet_number(PacketProtectionSpace::OneRtt)
+        .unwrap_or(0);
+    let packet_number = decode_packet_number_reconstruct(truncated, packet_number_len, largest)
+        .map_err(|err| failed(format!("1-RTT packet number: {err}")))?;
+    let key_phase = unmasked[0] & 0b0000_0100 != 0;
+
+    let peer_key_update = match connection {
+        Some(conn) => {
+            key_phase != conn.tls().remote_key_phase()
+                && conn.can_send_1rtt()
+                && conn
+                    .tls()
+                    .peer_key_phase_is_new_update(key_phase, packet_number)
+        }
+        None => {
+            !packet_protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, key_phase)
+        }
+    };
+
+    if peer_key_update {
+        if let Outcome::Err(err) =
+            packet_protection.ensure_next_gen_keys(cx, PacketProtectionSpace::OneRtt, key_phase)
+        {
+            return Err(failed(format!(
+                "1-RTT key update derivation failed: {err:?}"
+            )));
+        }
+    }
+
+    let tag_offset = unmasked.len() - PROTECTED_1RTT_TAG_LEN;
+    let tag: [u8; PROTECTED_1RTT_TAG_LEN] = unmasked[tag_offset..]
+        .try_into()
+        .expect("tag length checked above");
+    let protected = ProtectedPacket {
+        space: PacketProtectionSpace::OneRtt,
+        key_phase,
+        packet_number,
+        ciphertext: unmasked[header_len..tag_offset].to_vec(),
+        tag,
+        proof: ProtectionProof {
+            provider_kind: packet_protection.provider_kind(),
+            space: PacketProtectionSpace::OneRtt,
+            key_phase,
+            generation: 0,
+            transcript_hash: TranscriptHash::from_bytes([0; 32]),
+            failure_code: None,
+        },
+    };
+
+    let plaintext =
+        match packet_protection.unprotect_packet_now(cx, &protected, &unmasked[..header_len]) {
+            Outcome::Ok(packet) => packet.plaintext,
+            Outcome::Err(err) => {
+                return Err(failed(format!("1-RTT packet unprotection failed: {err:?}")));
+            }
+            Outcome::Cancelled(_) => return Err(ConnectionRouterError::Cancelled),
+            Outcome::Panicked(payload) => {
+                return Err(failed(format!(
+                    "1-RTT packet unprotection panicked: {payload:?}"
+                )));
+            }
+        };
+
+    // Authenticated: the reserved bits are now trustworthy and must be zero.
+    let (PacketHeader::Short(mut header), consumed) =
+        PacketHeader::decode(&unmasked[..header_len], connection_id.len())
+            .map_err(|err| failed(format!("invalid 1-RTT header: {err}")))?
+    else {
+        return Err(failed("expected a 1-RTT short header".to_string()));
+    };
+    if consumed != header_len {
+        return Err(failed("1-RTT header length mismatch".to_string()));
+    }
+    header.packet_number = packet_number;
+    Ok(Unprotected1RttPacket {
+        header,
+        plaintext,
+        peer_key_update,
+    })
+}
+
+pub(crate) const PROTECTED_1RTT_MAX_PACKET_BYTES: usize = 1_200;
+pub(crate) const PROTECTED_1RTT_PACKET_NUMBER_LEN: u8 = 4;
+pub(crate) const PROTECTED_1RTT_TAG_LEN: usize = 16;
+
+pub(crate) fn protected_1rtt_packet_len(connection_id: ConnectionId, payload_len: usize) -> usize {
+    1 + connection_id.len()
+        + usize::from(PROTECTED_1RTT_PACKET_NUMBER_LEN)
+        + payload_len
+        + PROTECTED_1RTT_TAG_LEN
+}
+
+/// Generate a protected 1-RTT packet only after conservatively reserving one
+/// full packet against the congestion window.
+///
+/// The fixed ceiling makes admission stable across destructive generation and
+/// asynchronous packet protection while the caller holds exclusive connection
+/// ownership. When the window is full, only congestion-exempt ACK frames may
+/// drain; all other control, STREAM, and DATAGRAM state remains queued exactly
+/// as it was.
+pub(crate) fn generate_congestion_admitted_1rtt_frames(
+    cx: &Cx,
+    connection: &mut NativeQuicConnection,
+    max_frame_bytes: usize,
+) -> Result<Vec<QuicFrame>, NativeQuicConnectionError> {
+    if connection
+        .transport()
+        .can_send(PROTECTED_1RTT_MAX_PACKET_BYTES as u64)
+    {
+        connection.generate_frames(cx, PacketNumberSpace::ApplicationData, max_frame_bytes)
+    } else {
+        connection.generate_pending_ack_frames(cx, max_frame_bytes)
+    }
+}
+
+pub(crate) fn is_ack_eliciting(frame: &crate::net::atp::protocol::quic_frames::QuicFrame) -> bool {
+    !matches!(
+        frame,
+        crate::net::atp::protocol::quic_frames::QuicFrame::Padding { .. }
+            | crate::net::atp::protocol::quic_frames::QuicFrame::Ack { .. }
+            | crate::net::atp::protocol::quic_frames::QuicFrame::ConnectionClose { .. }
+    )
+}
+
+/// Statistics about the connection router state.
+#[derive(Debug, Clone)]
+pub struct ConnectionRouterStats {
+    /// Number of active connections in the routing table.
+    pub active_connections: usize,
+    /// Number of established connections.
+    pub established_connections: usize,
+    /// Number of connections still in handshake.
+    pub pending_connections: usize,
+}
+
+/// Timer scheduler for QUIC connections that integrates with Asupersync runtime.
+#[derive(Debug)]
+pub struct QuicTimerScheduler {
+    /// Currently scheduled timer sleep.
+    current_sleep: Option<Sleep>,
+    /// Next deadline we're sleeping until.
+    current_deadline: Option<Instant>,
+    /// Mapping for the currently owned driver; managed cancellation preserves it.
+    clock: Option<QuicClock>,
+}
+
+#[derive(Debug, Clone)]
+struct QuicClock {
+    instant_origin: Instant,
+    runtime_origin: crate::Time,
+    driver: TimerDriverHandle,
+}
+
+/// Owns exactly one cancellation registration, including when a wait is dropped.
+pub(crate) struct QuicCancelWake<'a> {
+    cx: &'a Cx,
+    token: Option<crate::cx::CancelWakerToken>,
+}
+
+impl<'a> QuicCancelWake<'a> {
+    pub(crate) fn new(cx: &'a Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    pub(crate) fn checkpoint(&mut self, waker: &Waker) -> Result<(), ConnectionRouterError> {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+        self.cx
+            .checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)
+    }
+}
+
+impl Drop for QuicCancelWake<'_> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+impl QuicTimerScheduler {
+    /// Create a new timer scheduler.
+    pub fn new() -> Self {
+        Self {
+            current_sleep: None,
+            current_deadline: None,
+            clock: None,
+        }
+    }
+
+    fn bind_clock(&mut self, cx: &Cx) -> Result<&QuicClock, ConnectionRouterError> {
+        let driver = cx.timer_driver().ok_or_else(|| {
+            ConnectionRouterError::TimerSchedulingFailed(
+                "QUIC timers require the supplied Cx's timer driver".to_string(),
+            )
+        })?;
+        if let Some(clock) = &self.clock {
+            if !clock.driver.ptr_eq(&driver) {
+                return Err(ConnectionRouterError::TimerSchedulingFailed(
+                    "QUIC timer scheduler cannot change runtime clocks".to_string(),
+                ));
+            }
+        }
+        Ok(self.clock.get_or_insert_with(|| QuicClock {
+            instant_origin: Instant::now(),
+            runtime_origin: driver.now(),
+            driver,
+        }))
+    }
+
+    /// Current time in the same Instant domain as scheduled connection deadlines.
+    pub(crate) fn now(&mut self, cx: &Cx) -> Result<Instant, ConnectionRouterError> {
+        let clock = self.bind_clock(cx)?;
+        clock
+            .instant_origin
+            .checked_add(Duration::from_nanos(
+                clock
+                    .driver
+                    .now()
+                    .as_nanos()
+                    .saturating_sub(clock.runtime_origin.as_nanos()),
+            ))
+            .ok_or_else(|| {
+                ConnectionRouterError::TimerSchedulingFailed(
+                    "runtime time exceeds the Instant clock range".to_string(),
+                )
+            })
+    }
+
+    /// Schedule a timer to fire at the given deadline.
+    ///
+    /// If a timer is already scheduled for an earlier time, this is a no-op.
+    /// If the new deadline is earlier, the current timer is cancelled and
+    /// a new one is scheduled.
+    ///
+    /// A new timer uses the supplied context's driver when present, otherwise
+    /// the established shared wall-clock `Sleep` fallback. A later-deadline
+    /// no-op leaves the original driver and registration intact. Cancellation
+    /// still observes the supplied context. [`Self::cancel`] permits reuse
+    /// with another driver.
+    pub async fn schedule_timer(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+
+        if self
+            .current_deadline
+            .is_some_and(|current| current <= deadline)
+        {
+            return Ok(());
+        }
+        let clock = cx.timer_driver().map(|driver| {
+            self.clock
+                .as_ref()
+                .filter(|clock| clock.driver.ptr_eq(&driver))
+                .cloned()
+                .unwrap_or_else(|| QuicClock {
+                    instant_origin: Instant::now(),
+                    runtime_origin: driver.now(),
+                    driver,
+                })
+        });
+        self.arm_timer(cx, deadline, clock)
+    }
+
+    /// Managed endpoints keep one explicit clock across timer replacement and
+    /// losing event-loop branches. Even a no-op must validate that owner.
+    pub(crate) async fn schedule_timer_bound(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+    ) -> Result<(), ConnectionRouterError> {
+        cx.checkpoint()
+            .map_err(|_| ConnectionRouterError::Cancelled)?;
+        let clock = self.bind_clock(cx)?.clone();
+        if self
+            .current_deadline
+            .is_some_and(|current| current <= deadline)
+        {
+            return Ok(());
+        }
+        self.arm_timer(cx, deadline, Some(clock))
+    }
+
+    fn arm_timer(
+        &mut self,
+        cx: &Cx,
+        deadline: Instant,
+        clock: Option<QuicClock>,
+    ) -> Result<(), ConnectionRouterError> {
+        let sleep = if let Some(clock) = &clock {
+            let time_deadline = if deadline >= clock.instant_origin {
+                let delta = deadline.duration_since(clock.instant_origin).as_nanos();
+                u64::try_from(delta)
+                    .ok()
+                    .and_then(|delta| clock.runtime_origin.as_nanos().checked_add(delta))
+                    .ok_or_else(|| {
+                        ConnectionRouterError::TimerSchedulingFailed(
+                            "QUIC deadline exceeds the runtime clock range".to_string(),
+                        )
+                    })?
+            } else {
+                // Past deadlines remain armed and are observed exactly once.
+                clock.runtime_origin.as_nanos().saturating_sub(
+                    u64::try_from(clock.instant_origin.duration_since(deadline).as_nanos())
+                        .unwrap_or(u64::MAX),
+                )
+            };
+            Sleep::with_timer_driver(crate::Time::from_nanos(time_deadline), clock.driver.clone())
+        } else {
+            // Sleep's shared fallback and WallClock use this exact process
+            // epoch. A duration from now is not an absolute Time deadline.
+            let nanos = u64::try_from(
+                deadline
+                    .saturating_duration_since(crate::time::process_epoch())
+                    .as_nanos(),
+            )
+            .map_err(|_| {
+                ConnectionRouterError::TimerSchedulingFailed(
+                    "QUIC deadline exceeds the wall-clock range".to_string(),
+                )
+            })?;
+            Sleep::new(crate::Time::from_nanos(nanos))
+        };
+        // Construct and range-check before dropping the previous registration.
+        self.current_sleep = Some(sleep);
+        self.current_deadline = Some(deadline);
+        self.clock = clock;
+        cx.trace(&format!("Scheduled QUIC timer for {deadline:?}"));
+        Ok(())
+    }
+
+    /// Wait for the next timer to fire.
+    ///
+    /// Returns the deadline that was reached, or None if no timer was scheduled.
+    /// An already bound timer keeps its driver while cancellation observes the
+    /// caller. A wall-clock fallback timer adopts a newly supplied driver by
+    /// translating its Instant deadline into that driver's epoch before polling.
+    pub async fn wait_for_timer(
+        &mut self,
+        cx: &Cx,
+    ) -> Result<Option<Instant>, ConnectionRouterError> {
+        if cx.checkpoint().is_err() {
+            return Err(ConnectionRouterError::Cancelled);
+        }
+        if self.clock.is_none() {
+            if let (Some(deadline), Some(driver)) = (self.current_deadline, cx.timer_driver()) {
+                self.arm_timer(
+                    cx,
+                    deadline,
+                    Some(QuicClock {
+                        instant_origin: Instant::now(),
+                        runtime_origin: driver.now(),
+                        driver,
+                    }),
+                )?;
+            }
+        }
+        let mut cancel = QuicCancelWake::new(cx);
+        poll_fn(|task_cx| {
+            // Sleep's cancellation checks must observe the same explicit owner
+            // as its bound timer driver. This guard never crosses an await.
+            let _current = Cx::set_current(Some(cx.clone()));
+            if let Err(err) = cancel.checkpoint(task_cx.waker()) {
+                return Poll::Ready(Err(err));
+            }
+            let result = self.poll_timer(task_cx);
+            if cx.checkpoint().is_err() {
+                return Poll::Ready(Err(ConnectionRouterError::Cancelled));
+            }
+            result.map(Ok)
+        })
+        .await
+    }
+
+    /// Retain the sleep across losing branches; only a completed timer is removed.
+    pub(crate) fn poll_timer(&mut self, task_cx: &mut Context<'_>) -> Poll<Option<Instant>> {
+        let Some(sleep) = self.current_sleep.as_mut() else {
+            return Poll::Ready(None);
+        };
+        if Pin::new(sleep).poll(task_cx).is_pending() {
+            return Poll::Pending;
+        }
+        self.current_sleep = None;
+        Poll::Ready(self.current_deadline.take())
+    }
+
+    /// Check if a timer is currently scheduled.
+    pub fn has_pending_timer(&self) -> bool {
+        self.current_sleep.is_some()
+    }
+
+    /// Get the current timer deadline if any.
+    pub fn current_deadline(&self) -> Option<Instant> {
+        self.current_deadline
+    }
+
+    /// Cancel the pending timer, if one is armed, and release its clock binding.
+    pub fn cancel(&mut self) {
+        self.cancel_pending();
+        self.clock = None;
+    }
+
+    /// Drop pending work while retaining the managed owner's fixed epoch.
+    pub(crate) fn cancel_pending(&mut self) {
+        self.current_sleep = None;
+        self.current_deadline = None;
+    }
+}
+
+impl Default for QuicTimerScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bytes::{Bytes, BytesMut};
+    use crate::net::VarInt;
+    use crate::net::atp::protocol::quic_frames::QuicFrame;
+    use crate::net::atp::quic::AtpPacketProtection;
+    use crate::net::quic_core::{LongHeader, LongPacketType, PacketHeader};
+    use crate::net::quic_native::QuicHandshakeTranscript;
+    use crate::test_utils::run_test_with_cx;
+
+    #[test]
+    fn protected_packet_ack_elicitation_matches_rfc_9000() {
+        let zero = crate::net::VarInt(0);
+        assert!(!is_ack_eliciting(&QuicFrame::Padding { length: 1 }));
+        assert!(!is_ack_eliciting(&QuicFrame::Ack {
+            largest_acknowledged: zero,
+            ack_delay: zero,
+            ack_range_count: zero,
+            first_ack_range: zero,
+            ack_ranges: Vec::new(),
+            ecn_counts: None,
+        }));
+        assert!(!is_ack_eliciting(&QuicFrame::ConnectionClose {
+            error_code: zero,
+            frame_type: None,
+            reason_phrase: Bytes::new(),
+        }));
+        assert!(is_ack_eliciting(&QuicFrame::Ping));
+        assert!(is_ack_eliciting(&QuicFrame::MaxData { maximum_data: zero }));
+    }
+
+    #[test]
+    fn test_connection_router_creation() {
+        let config = NativeQuicConnectionConfig::default();
+        let router = ConnectionRouter::new(config);
+
+        assert_eq!(router.connections.len(), 0);
+        assert_eq!(router.next_connection_id, 1);
+    }
+
+    #[test]
+    fn test_connection_id_allocation() {
+        run_test_with_cx(|_cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+
+            let id1 = router.allocate_connection_id();
+            let id2 = router.allocate_connection_id();
+
+            assert_ne!(id1, id2);
+            assert!(router.next_connection_id > 2);
+        });
+    }
+
+    #[test]
+    fn test_connection_creation() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+
+            let connection_id = router.allocate_connection_id();
+            let peer_addr = "127.0.0.1:12345".parse().unwrap();
+
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+
+            assert_eq!(router.connections.len(), 1);
+            assert!(router.connections.contains_key(&connection_id));
+        });
+    }
+
+    #[test]
+    fn create_connection_rejects_duplicate_connection_id_without_overwrite() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0x31, 0x71, 0x00, 0x01]).expect("cid");
+            let original_peer: SocketAddr = "127.0.0.1:4401".parse().unwrap();
+            let colliding_peer: SocketAddr = "127.0.0.1:4402".parse().unwrap();
+
+            router
+                .create_connection(&cx, connection_id, original_peer, true)
+                .await
+                .expect("first connection creation should succeed");
+
+            let err = router
+                .create_connection(&cx, connection_id, colliding_peer, false)
+                .await
+                .expect_err("duplicate destination CID must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionCreationFailed(ref msg)
+                    if msg.contains("connection ID collision")
+            ));
+            assert_eq!(router.connections.len(), 1);
+            assert_eq!(
+                router
+                    .connections
+                    .get(&connection_id)
+                    .expect("original connection remains")
+                    .peer_addr,
+                original_peer
+            );
+        });
+    }
+
+    #[test]
+    fn connection_limit_rejects_create_and_drops_unknown_initials() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::with_max_connections(config, 0);
+            assert_eq!(router.max_connections, 1);
+
+            let peer_addr: SocketAddr = "127.0.0.1:4403".parse().unwrap();
+            let first = ConnectionId::new(&[0x31, 0x71, 0x00, 0x02]).expect("first cid");
+            router
+                .create_connection(&cx, first, peer_addr, true)
+                .await
+                .expect("first connection within normalized limit should succeed");
+
+            let second = ConnectionId::new(&[0x31, 0x71, 0x00, 0x03]).expect("second cid");
+            let err = router
+                .create_connection(&cx, second, peer_addr, true)
+                .await
+                .expect_err("second connection must hit the cap");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionCreationFailed(ref msg)
+                    if msg.contains("connection limit reached")
+            ));
+
+            let packet = ReceivedPacket {
+                src_addr: peer_addr,
+                data: encode_long_packet(second, LongPacketType::Initial, 0, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::Drop { reason } => {
+                    assert!(reason.contains("connection limit reached"));
+                }
+                other => panic!("full router must not advertise a new connection: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_take_connection_removes_handle_and_preserves_peer() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0x10, 0x00, 0x00, 0x01]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5544".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, true)
+                .await
+                .expect("connection creation should succeed");
+
+            let accepted = router
+                .take_connection(&cx, connection_id)
+                .expect("connection should be handed off");
+            assert_eq!(accepted.connection_id, connection_id);
+            assert_eq!(accepted.peer_addr, peer_addr);
+            assert_eq!(accepted.connection.pending_outbound_datagram_count(), 0);
+            assert!(!router.connections.contains_key(&connection_id));
+            assert_eq!(router.connection_stats().active_connections, 0);
+
+            let err = router
+                .take_connection(&cx, connection_id)
+                .expect_err("missing connection must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::ConnectionNotFound(id) if id == connection_id
+            ));
+        });
+    }
+
+    #[test]
+    fn test_take_next_connection_uses_deterministic_connection_id_order() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let low = ConnectionId::new(&[0x01, 0x00, 0x00, 0x00]).expect("low cid");
+            let mid = ConnectionId::new(&[0x10, 0x00, 0x00, 0x00]).expect("mid cid");
+            let high = ConnectionId::new(&[0xff, 0x00, 0x00, 0x00]).expect("high cid");
+            let peer_addr: SocketAddr = "127.0.0.1:5545".parse().unwrap();
+
+            for connection_id in [high, low, mid] {
+                router
+                    .create_connection(&cx, connection_id, peer_addr, true)
+                    .await
+                    .expect("connection creation should succeed");
+            }
+
+            let first = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(first.connection_id, low);
+
+            let second = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(second.connection_id, mid);
+
+            let third = router
+                .take_next_connection(&cx)
+                .expect("take should succeed")
+                .expect("connection should exist");
+            assert_eq!(third.connection_id, high);
+
+            assert!(
+                router
+                    .take_next_connection(&cx)
+                    .expect("empty take should succeed")
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn test_long_header_initial_routes_as_new_connection() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let dst_cid = ConnectionId::new(&[0xaa, 0xbb, 0xcc]).expect("cid");
+            let src_addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+            let packet = ReceivedPacket {
+                src_addr,
+                data: encode_long_packet(dst_cid, LongPacketType::Initial, 0, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::NewConnection { peer_addr, .. } => assert_eq!(peer_addr, src_addr),
+                other => panic!("expected new connection, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_new_initial_reroutes_after_connection_creation() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let dst_cid = ConnectionId::new(&[0xda, 0x7a, 0x00, 0x01]).expect("cid");
+            let src_addr: SocketAddr = "127.0.0.1:4436".parse().unwrap();
+            let packet = ReceivedPacket {
+                src_addr,
+                data: encode_long_packet(dst_cid, LongPacketType::Initial, 7, QuicFrame::Ping),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            let triggering_packet = match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::NewConnection {
+                    connection_id,
+                    peer_addr,
+                    triggering_packet,
+                    outgoing_packets,
+                } => {
+                    assert_eq!(connection_id, dst_cid);
+                    assert_eq!(peer_addr, src_addr);
+                    assert!(outgoing_packets.is_empty());
+                    triggering_packet
+                }
+                other => panic!("expected new connection, got {other:?}"),
+            };
+
+            router
+                .create_connection(&cx, dst_cid, src_addr, true)
+                .await
+                .expect("connection creation should succeed");
+
+            match router
+                .route_packet(&cx, triggering_packet)
+                .await
+                .expect("reroute")
+            {
+                RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets,
+                } => {
+                    assert_eq!(connection_id, dst_cid);
+                    assert_eq!(outgoing_packets.len(), 1);
+                    assert_eq!(outgoing_packets[0].dst_addr, src_addr);
+                    assert!(!outgoing_packets[0].data.is_empty());
+                }
+                other => panic!("expected triggering Initial to reroute, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_existing_connection_processes_ping_and_emits_ack_frame() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = router.allocate_connection_id();
+            let peer_addr: SocketAddr = "127.0.0.1:4434".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+
+            let packet = ReceivedPacket {
+                src_addr: peer_addr,
+                data: encode_long_packet(
+                    connection_id,
+                    LongPacketType::Initial,
+                    42,
+                    QuicFrame::Ping,
+                ),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+
+            match router.route_packet(&cx, packet).await.expect("route") {
+                RoutingResult::Routed {
+                    outgoing_packets, ..
+                } => {
+                    assert_eq!(outgoing_packets.len(), 1);
+                    assert_eq!(outgoing_packets[0].dst_addr, peer_addr);
+                    assert!(!outgoing_packets[0].data.is_empty());
+                }
+                other => panic!("expected routed packet, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn test_application_datagram_handoff_uses_protected_short_header_packet() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0xa1, 0x01, 0x00, 0x01]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:4435".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+            router
+                .install_packet_protection(
+                    &cx,
+                    connection_id,
+                    deterministic_one_rtt_protection(&cx).await,
+                )
+                .expect("install packet protection");
+            let mut receiver = ConnectionRouter::new(config);
+            receiver
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("receiver connection creation should succeed");
+            receiver
+                .install_packet_protection(
+                    &cx,
+                    connection_id,
+                    deterministic_one_rtt_protection(&cx).await,
+                )
+                .expect("install receiver packet protection");
+
+            let datagram = Bytes::from_static(b"a1 protected udp symbol");
+            {
+                let handle = router
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("connection handle");
+                establish_for_application_data(&cx, &mut handle.connection);
+                handle
+                    .connection
+                    .send_datagram(&cx, datagram.clone())
+                    .expect("queue datagram");
+            }
+
+            let now = Instant::now();
+            let packets = {
+                let handle = router
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("connection handle");
+                drain_connection_frames(
+                    &cx,
+                    connection_id,
+                    handle,
+                    PacketNumberSpace::ApplicationData,
+                    peer_addr,
+                    now,
+                    42_000,
+                )
+                .await
+                .expect("drain protected packet")
+            };
+            assert_eq!(packets.len(), 1);
+            assert_eq!(packets[0].packet.dst_addr, peer_addr);
+            assert_eq!(packets[0].packet.send_time, Some(now));
+            assert!(packets[0].packet.data.len() <= PROTECTED_1RTT_MAX_PACKET_BYTES);
+
+            let mut raw_frame_payload = BytesMut::new();
+            QuicFrame::Datagram { data: datagram }
+                .encode(&mut raw_frame_payload)
+                .expect("encode raw DATAGRAM frame");
+            let packet = &packets[0].packet.data;
+            assert_ne!(packet.as_slice(), raw_frame_payload.as_ref());
+
+            // On the wire only the invariant prefix is readable (RFC 9001
+            // §5.4): the packet number and key phase are masked until the
+            // receiver removes header protection with the sender's key.
+            let ProtectedHeaderPrefix::Short {
+                dst_cid,
+                packet_number_offset,
+            } = ProtectedHeaderPrefix::decode(packet, connection_id.len())
+                .expect("decode protected short prefix")
+            else {
+                panic!("expected a protected 1-RTT short header packet");
+            };
+            assert_eq!(dst_cid, connection_id);
+            assert_eq!(packet_number_offset, 1 + connection_id.len());
+            let header_len = packet_number_offset + usize::from(PROTECTED_1RTT_PACKET_NUMBER_LEN);
+            assert_eq!(
+                packet.len(),
+                header_len + raw_frame_payload.len() + PROTECTED_1RTT_TAG_LEN
+            );
+            assert_ne!(
+                &packet[header_len..header_len + raw_frame_payload.len()],
+                raw_frame_payload.as_ref()
+            );
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            let unprotected = unprotect_1rtt_packet(&cx, connection_id, &mut verifier, packet)
+                .await
+                .expect("unmask and authenticate");
+            assert!(!unprotected.header.spin);
+            assert!(!unprotected.header.key_phase);
+            assert_eq!(unprotected.header.dst_cid, connection_id);
+            assert_eq!(unprotected.header.packet_number, 0);
+            assert_eq!(
+                unprotected.header.packet_number_len,
+                PROTECTED_1RTT_PACKET_NUMBER_LEN
+            );
+            assert_eq!(unprotected.plaintext, raw_frame_payload.as_ref());
+            // Planted negative: a flipped masked bit (packet-number length)
+            // changes the AEAD associated data, so authentication fails.
+            let mut flipped = packet.clone();
+            flipped[0] ^= 0x01;
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            assert!(
+                unprotect_1rtt_packet(&cx, connection_id, &mut verifier, &flipped)
+                    .await
+                    .is_err(),
+                "flipping a header-protected bit must fail authentication"
+            );
+            let mut flipped_pn = packet.clone();
+            flipped_pn[packet_number_offset] ^= 0x80;
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            assert!(
+                unprotect_1rtt_packet(&cx, connection_id, &mut verifier, &flipped_pn)
+                    .await
+                    .is_err(),
+                "flipping a protected packet-number byte must fail authentication"
+            );
+
+            {
+                let handle = receiver
+                    .connections
+                    .get_mut(&connection_id)
+                    .expect("receiver connection handle");
+                establish_for_application_data(&cx, &mut handle.connection);
+            }
+            let received = ReceivedPacket {
+                src_addr: peer_addr,
+                data: packet.clone(),
+                receive_time: Instant::now(),
+                transmit_time: None,
+            };
+            match receiver
+                .route_packet(&cx, received)
+                .await
+                .expect("route protected packet")
+            {
+                RoutingResult::Routed {
+                    connection_id: routed_id,
+                    ..
+                } => assert_eq!(routed_id, connection_id),
+                other => panic!("expected routed protected packet, got {other:?}"),
+            }
+            let received_datagram = receiver
+                .connections
+                .get_mut(&connection_id)
+                .expect("receiver connection handle")
+                .connection
+                .recv_datagram()
+                .expect("datagram delivered after unprotect");
+            assert_eq!(received_datagram.as_ref(), b"a1 protected udp symbol");
+        });
+    }
+
+    #[test]
+    fn test_application_datagram_handoff_without_protection_fails_closed() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let connection_id = ConnectionId::new(&[0xa1, 0x01, 0x00, 0x02]).expect("cid");
+            let peer_addr: SocketAddr = "127.0.0.1:4436".parse().unwrap();
+            router
+                .create_connection(&cx, connection_id, peer_addr, false)
+                .await
+                .expect("connection creation should succeed");
+
+            let handle = router
+                .connections
+                .get_mut(&connection_id)
+                .expect("connection handle");
+            establish_for_application_data(&cx, &mut handle.connection);
+            handle
+                .connection
+                .send_datagram(&cx, Bytes::from_static(b"must not leak raw"))
+                .expect("queue datagram");
+
+            let err = drain_connection_frames(
+                &cx,
+                connection_id,
+                handle,
+                PacketNumberSpace::ApplicationData,
+                peer_addr,
+                Instant::now(),
+                42_000,
+            )
+            .await
+            .expect_err("missing 1-RTT packet protection must fail closed");
+            assert!(matches!(
+                err,
+                ConnectionRouterError::PacketProtectionUnavailable { connection_id: id }
+                    if id == connection_id
+            ));
+            assert_eq!(handle.connection.pending_outbound_datagram_count(), 1);
+        });
+    }
+
+    #[test]
+    fn overdue_managed_pto_emits_bounded_protected_probes_and_isolates_a_bad_connection() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let peer: SocketAddr = "127.0.0.1:4401".parse().unwrap();
+            let ids = [1u8, 2, 3].map(|id| ConnectionId::new(&[id, 0, 0, 1]).unwrap());
+            for (index, id) in ids.into_iter().enumerate() {
+                router
+                    .create_connection(&cx, id, peer, false)
+                    .await
+                    .unwrap();
+                if index != 1 {
+                    router
+                        .install_packet_protection(
+                            &cx,
+                            id,
+                            deterministic_one_rtt_protection(&cx).await,
+                        )
+                        .unwrap();
+                }
+                let handle = router.connections.get_mut(&id).unwrap();
+                establish_for_application_data(&cx, &mut handle.connection);
+                let cwnd = handle.connection.transport().congestion_window_bytes();
+                for sent in 0..cwnd / 1_200 {
+                    handle
+                        .connection
+                        .on_packet_sent(
+                            &cx,
+                            PacketNumberSpace::ApplicationData,
+                            1_200,
+                            true,
+                            true,
+                            1_000 + sent,
+                        )
+                        .unwrap();
+                }
+                handle
+                    .connection
+                    .send_datagram(&cx, Bytes::from_static(b"ordinary data must stay queued"))
+                    .unwrap();
+                let origin = router.clock_origin;
+                ConnectionRouter::refresh_connection_timer(
+                    &cx,
+                    id,
+                    handle,
+                    origin,
+                    1_000,
+                    origin + Duration::from_micros(1_000),
+                )
+                .unwrap();
+            }
+            // One hour exceeds the old capped PTO horizon. Both healthy peers
+            // must emit one authenticated probe despite a full congestion window.
+            let now = router.clock_origin + Duration::from_secs(3_600);
+            let packets = router.process_timer_events(&cx, now).await.unwrap();
+            assert_eq!(
+                packets.len(),
+                2,
+                "one broken protection provider must not erase healthy output"
+            );
+            for packet in packets {
+                let ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                    ProtectedHeaderPrefix::decode(&packet.data, 4).unwrap()
+                else {
+                    panic!("protected short packet required")
+                };
+                assert!(dst_cid == ids[0] || dst_cid == ids[2]);
+                let mut protection = deterministic_one_rtt_protection(&cx).await;
+                let unprotected =
+                    unprotect_1rtt_packet(&cx, dst_cid, &mut protection, &packet.data)
+                        .await
+                        .unwrap();
+                let mut expected = BytesMut::new();
+                QuicFrame::Ping.encode(&mut expected).unwrap();
+                assert_eq!(unprotected.plaintext, expected.as_ref());
+            }
+            assert!(router.next_timer_deadline().unwrap() > now);
+            assert!(
+                router
+                    .process_timer_events(&cx, now)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "the same elapsed deadline must not fire twice"
+            );
+            for id in ids {
+                let handle = &router.connections[&id];
+                assert_eq!(handle.connection.pending_outbound_datagram_count(), 1);
+                assert!(handle.next_timer_deadline.unwrap() > now);
+            }
+        });
+    }
+
+    #[test]
+    fn test_timer_scheduler_basic() {
+        let (cx, _, _) = timer_test_context(crate::Time::from_secs(123));
+        futures_lite::future::block_on(async move {
+            let mut scheduler = QuicTimerScheduler::new();
+
+            assert!(!scheduler.has_pending_timer());
+            assert_eq!(scheduler.current_deadline(), None);
+
+            let deadline = Instant::now() + std::time::Duration::from_millis(10);
+            scheduler
+                .schedule_timer(&cx, deadline)
+                .await
+                .expect("timer scheduling should succeed");
+
+            assert!(scheduler.has_pending_timer());
+            assert_eq!(scheduler.current_deadline(), Some(deadline));
+        });
+    }
+
+    // br-asupersync-bi2462.75: real router/frame/protection transitions with
+    // explicit clock inputs; these unit cases do not claim native UDP delivery.
+    #[test]
+    fn managed_router_unsent_probe_keeps_queue_and_in_flight_bytes_bounded() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(&[7, 0, 0, 1]).unwrap();
+            let peer = "127.0.0.1:4450".parse().unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let handle = router.connections.get_mut(&cid).unwrap();
+            handle
+                .connection
+                .on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1_200,
+                    true,
+                    true,
+                    1_000,
+                )
+                .unwrap();
+            let origin = router.clock_origin;
+            ConnectionRouter::refresh_connection_timer(
+                &cx,
+                cid,
+                handle,
+                origin,
+                1_000,
+                origin + Duration::from_micros(1_000),
+            )
+            .unwrap();
+            let first = router.next_timer_deadline().unwrap();
+            let mut queued = router
+                .process_managed_timer_events(&cx, first, &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].connection_id, cid);
+            let committed_bytes = router.connections[&cid]
+                .connection
+                .transport()
+                .bytes_in_flight();
+            assert_eq!(committed_bytes, 1_200 + queued[0].packet.data.len() as u64);
+            let first_packet = queued[0].packet.data.clone();
+            let endpoint_pending = HashSet::from([cid]);
+            for _ in 0..14 {
+                let now = router.next_timer_deadline().unwrap() + Duration::from_secs(1);
+                queued.extend(
+                    router
+                        .process_managed_timer_events(&cx, now, &endpoint_pending)
+                        .await
+                        .unwrap(),
+                );
+                assert_eq!(queued.len(), 1);
+                assert_eq!(queued[0].packet.data, first_packet);
+                assert_eq!(
+                    router.connections[&cid]
+                        .connection
+                        .transport()
+                        .bytes_in_flight(),
+                    committed_bytes
+                );
+                assert!(router.next_timer_deadline().unwrap() > now);
+            }
+            // Exercise the same bound while the committed packet remains in
+            // the router (for example after a cancelled multi-connection pass).
+            router.pending_timer_packets.extend(queued);
+            let now = router.next_timer_deadline().unwrap();
+            let retained = router
+                .process_managed_timer_events(&cx, now, &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(retained.len(), 1);
+            assert_eq!(retained[0].packet.data, first_packet);
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .bytes_in_flight(),
+                committed_bytes
+            );
+            assert!(router.next_timer_deadline().unwrap() > now);
+            // Once the owner reports the packet drained, a later PTO really
+            // commits another bounded protected probe rather than refusing all output.
+            let now = router.next_timer_deadline().unwrap();
+            let resumed = router
+                .process_managed_timer_events(&cx, now, &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(resumed.len(), 1);
+            assert_ne!(resumed[0].packet.data, first_packet);
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .bytes_in_flight(),
+                committed_bytes + resumed[0].packet.data.len() as u64
+            );
+        });
+    }
+
+    #[test]
+    fn managed_router_handoff_purges_only_its_cid_at_a_shared_peer() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let ids = [1u8, 2].map(|id| ConnectionId::new(&[8, 0, 0, id]).unwrap());
+            let peer = "127.0.0.1:4451".parse().unwrap();
+            for cid in ids {
+                add_protected_test_connection(&cx, &mut router, cid, peer).await;
+                let handle = router.connections.get_mut(&cid).unwrap();
+                handle
+                    .connection
+                    .on_packet_sent(
+                        &cx,
+                        PacketNumberSpace::ApplicationData,
+                        1_200,
+                        true,
+                        true,
+                        1_000,
+                    )
+                    .unwrap();
+                let origin = router.clock_origin;
+                ConnectionRouter::refresh_connection_timer(
+                    &cx,
+                    cid,
+                    handle,
+                    origin,
+                    1_000,
+                    origin + Duration::from_micros(1_000),
+                )
+                .unwrap();
+            }
+            let now = router.next_timer_deadline().unwrap();
+            let packets = router
+                .process_managed_timer_events(&cx, now, &HashSet::new())
+                .await
+                .unwrap();
+            assert_eq!(
+                packets
+                    .iter()
+                    .map(|routed| routed.connection_id)
+                    .collect::<Vec<_>>(),
+                ids
+            );
+            let survivor = packets[1].packet.data.clone();
+            router.pending_timer_packets.extend(packets);
+            for cid in ids {
+                router
+                    .connections
+                    .get_mut(&cid)
+                    .unwrap()
+                    .connection
+                    .queue_ping(&cx)
+                    .unwrap();
+            }
+            let deferred = router.drain_deferred_output(&cx, now, 2).await.unwrap();
+            assert_eq!(deferred.len(), 2);
+            let deferred_survivor = deferred
+                .iter()
+                .find(|routed| routed.connection_id == ids[1])
+                .unwrap()
+                .packet
+                .data
+                .clone();
+            router.pending_deferred_packets.extend(deferred);
+            let accepted = router.take_connection(&cx, ids[0]).unwrap();
+            assert_eq!(accepted.peer_addr, peer);
+            assert_eq!(router.pending_timer_packets.len(), 1);
+            assert_eq!(router.pending_timer_packets[0].connection_id, ids[1]);
+            assert_eq!(router.pending_timer_packets[0].packet.data, survivor);
+            assert_eq!(router.pending_deferred_packets.len(), 1);
+            assert_eq!(
+                router.pending_deferred_packets[0].packet.data,
+                deferred_survivor
+            );
+            router.remove_connection(&cx, ids[1]).unwrap();
+            assert!(router.pending_timer_packets.is_empty());
+            assert!(router.pending_deferred_packets.is_empty());
+        });
+    }
+
+    #[test]
+    fn managed_router_backpressure_processes_ack_then_drains_encrypted_data() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(&[9, 0, 0, 1]).unwrap();
+            let peer = "127.0.0.1:4452".parse().unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let handle = router.connections.get_mut(&cid).unwrap();
+            for _ in 0..10 {
+                handle
+                    .connection
+                    .on_packet_sent(
+                        &cx,
+                        PacketNumberSpace::ApplicationData,
+                        1_200,
+                        true,
+                        true,
+                        1_000,
+                    )
+                    .unwrap();
+            }
+            handle
+                .connection
+                .send_datagram(&cx, Bytes::from_static(b"deferred actual data"))
+                .unwrap();
+            let now = router.clock_origin + Duration::from_micros(2_000);
+            assert!(
+                router
+                    .drain_deferred_output(&cx, now, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                !router.connections[&cid].deferred_spaces[2],
+                "cwnd-blocked data is not immediate readiness"
+            );
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .pending_outbound_datagram_count(),
+                1
+            );
+
+            let mut peer_connection =
+                NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            establish_for_application_data(&cx, &mut peer_connection);
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            let zero = crate::net::VarInt(0);
+            let ack = QuicFrame::Ack {
+                largest_acknowledged: zero,
+                ack_delay: zero,
+                ack_range_count: zero,
+                first_ack_range: zero,
+                ack_ranges: Vec::new(),
+                ecn_counts: None,
+            };
+            let mut payload = BytesMut::new();
+            ack.encode(&mut payload).unwrap();
+            let packet = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut peer_connection,
+                &mut protection,
+                &[ack],
+                &payload,
+                2_000,
+                false,
+            )
+            .await
+            .unwrap();
+            let result = router
+                .route_packet_with_output(
+                    &cx,
+                    ReceivedPacket {
+                        src_addr: peer,
+                        data: packet,
+                        receive_time: now,
+                        transmit_time: None,
+                    },
+                    false,
+                )
+                .await
+                .unwrap();
+            let RoutingResult::Routed {
+                outgoing_packets, ..
+            } = result
+            else {
+                panic!("ACK must reach connection")
+            };
+            assert!(outgoing_packets.is_empty());
+            let connection = &router.connections[&cid].connection;
+            assert_eq!(connection.transport().packets_acked_total(), 1);
+            assert_eq!(connection.transport().bytes_in_flight(), 10_800);
+            assert!(connection.transport().can_send(1_200));
+            assert_eq!(connection.pending_outbound_datagram_count(), 1);
+            assert_eq!(connection.datagrams_sent(), 0);
+            assert!(router.connections[&cid].deferred_spaces[2]);
+            assert!(
+                router
+                    .drain_deferred_output(&cx, now, 0)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let output = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].connection_id, cid);
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .pending_outbound_datagram_count(),
+                0
+            );
+            let packet = &output[0].packet.data;
+            let ProtectedHeaderPrefix::Short { dst_cid, .. } =
+                ProtectedHeaderPrefix::decode(packet, cid.len()).unwrap()
+            else {
+                panic!("protected short packet")
+            };
+            assert_eq!(dst_cid, cid);
+            let plaintext = unprotect_1rtt_packet(&cx, cid, &mut protection, packet)
+                .await
+                .unwrap()
+                .plaintext;
+            let mut decoded = plaintext.as_slice();
+            let frame = QuicFrame::decode(&mut decoded).unwrap().unwrap();
+            assert!(
+                matches!(frame, QuicFrame::Datagram { data } if data.as_ref() == b"deferred actual data")
+            );
+            assert!(decoded.is_empty());
+            assert!(
+                router
+                    .drain_deferred_output(&cx, now, 1)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(!router.connections[&cid].deferred_spaces[2]);
+        });
+    }
+
+    #[test]
+    fn managed_router_timer_batch_yields_and_keeps_committed_prefix_after_drop() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let peer = "127.0.0.1:4454".parse().unwrap();
+            let mut ids = Vec::new();
+            for index in 0..=TIMER_CONNECTIONS_PER_TURN {
+                let cid = ConnectionId::new(&(index as u64).to_be_bytes()).unwrap();
+                ids.push(cid);
+                add_protected_test_connection(&cx, &mut router, cid, peer).await;
+                let handle = router.connections.get_mut(&cid).unwrap();
+                handle
+                    .connection
+                    .on_packet_sent(
+                        &cx,
+                        PacketNumberSpace::ApplicationData,
+                        1_200,
+                        true,
+                        true,
+                        1_000,
+                    )
+                    .unwrap();
+                let origin = router.clock_origin;
+                ConnectionRouter::refresh_connection_timer(
+                    &cx,
+                    cid,
+                    handle,
+                    origin,
+                    1_000,
+                    origin + Duration::from_micros(1_000),
+                )
+                .unwrap();
+            }
+            let now = router.next_timer_deadline().unwrap();
+            let pending = HashSet::new();
+            {
+                let mut timers =
+                    std::pin::pin!(router.process_managed_timer_events(&cx, now, &pending));
+                assert!(
+                    timers
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            }
+            assert_eq!(
+                router.pending_timer_packets.len(),
+                TIMER_CONNECTIONS_PER_TURN
+            );
+            for cid in &ids[..TIMER_CONNECTIONS_PER_TURN] {
+                assert!(router.connections[cid].next_timer_deadline.unwrap() > now);
+            }
+            let last = ids[TIMER_CONNECTIONS_PER_TURN];
+            assert_eq!(router.connections[&last].next_timer_deadline, Some(now));
+            let prefix: Vec<_> = router
+                .pending_timer_packets
+                .iter()
+                .map(|routed| (routed.connection_id, routed.packet.data.clone()))
+                .collect();
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                router
+                    .process_managed_timer_events(&cancelled, now, &pending)
+                    .await,
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            assert_eq!(
+                router.pending_timer_packets.len(),
+                TIMER_CONNECTIONS_PER_TURN
+            );
+            let resumed = router
+                .process_managed_timer_events(&cx, now, &pending)
+                .await
+                .unwrap();
+            assert_eq!(resumed.len(), TIMER_CONNECTIONS_PER_TURN + 1);
+            assert_eq!(
+                resumed
+                    .iter()
+                    .map(|routed| routed.connection_id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                resumed.len()
+            );
+            for (routed, (cid, packet)) in resumed.iter().zip(prefix) {
+                assert_eq!(routed.connection_id, cid);
+                assert_eq!(routed.packet.data, packet);
+            }
+            for cid in ids {
+                let handle = &router.connections[&cid];
+                assert_eq!(handle.connection.transport().pto_count(), 1);
+                assert!(handle.next_timer_deadline.unwrap() > now);
+            }
+            assert!(router.pending_timer_packets.is_empty());
+        });
+    }
+
+    #[test]
+    fn managed_router_restarted_timer_handoff_does_not_wait_for_future_deadline() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let peer = "127.0.0.1:4455".parse().unwrap();
+            for index in 0..TIMER_CONNECTIONS_PER_TURN {
+                let cid = ConnectionId::new(&(index as u64).to_be_bytes()).unwrap();
+                add_protected_test_connection(&cx, &mut router, cid, peer).await;
+                let handle = router.connections.get_mut(&cid).unwrap();
+                handle
+                    .connection
+                    .on_packet_sent(
+                        &cx,
+                        PacketNumberSpace::ApplicationData,
+                        1_200,
+                        true,
+                        true,
+                        1_000,
+                    )
+                    .unwrap();
+                let origin = router.clock_origin;
+                ConnectionRouter::refresh_connection_timer(
+                    &cx,
+                    cid,
+                    handle,
+                    origin,
+                    1_000,
+                    origin + Duration::from_micros(1_000),
+                )
+                .unwrap();
+            }
+            // An idle final CID makes the traversal yield after all due
+            // connections have already been rearmed into the future.
+            let idle =
+                ConnectionId::new(&(TIMER_CONNECTIONS_PER_TURN as u64).to_be_bytes()).unwrap();
+            router
+                .create_connection(&cx, idle, peer, false)
+                .await
+                .unwrap();
+            let now = router.next_timer_deadline().unwrap();
+            let pending = HashSet::new();
+            {
+                let mut timers =
+                    std::pin::pin!(router.process_managed_timer_events(&cx, now, &pending));
+                assert!(
+                    timers
+                        .as_mut()
+                        .poll(&mut Context::from_waker(Waker::noop()))
+                        .is_pending()
+                );
+            }
+            assert!(router.next_timer_deadline().unwrap() > now);
+            assert!(router.connections[&idle].next_timer_deadline.is_none());
+            let expected: Vec<_> = router
+                .pending_timer_packets
+                .iter()
+                .map(|routed| (routed.connection_id, routed.packet.data.clone()))
+                .collect();
+            assert_eq!(expected.len(), TIMER_CONNECTIONS_PER_TURN);
+            assert!(router.take_pending_timer_output(0).is_empty());
+            assert_eq!(router.pending_timer_packets.len(), expected.len());
+            let mut output = router.take_pending_timer_output(3);
+            assert_eq!(output.len(), 3);
+            assert_eq!(router.pending_timer_packets.len(), expected.len() - 3);
+            output.extend(router.take_pending_timer_output(TIMER_CONNECTIONS_PER_TURN));
+            assert_eq!(output.len(), expected.len());
+            for (routed, (cid, bytes)) in output.iter().zip(expected) {
+                assert_eq!(routed.connection_id, cid);
+                assert_eq!(routed.packet.data, bytes);
+                assert_eq!(routed.packet.dst_addr, peer);
+                assert_eq!(
+                    router.connections[&cid].connection.transport().pto_count(),
+                    1
+                );
+            }
+            assert!(router.take_pending_timer_output(1).is_empty());
+            assert!(router.next_timer_deadline().unwrap() > now);
+        });
+    }
+
+    #[test]
+    fn managed_router_deferred_budget_rotates_peers_and_keeps_prefix_on_error() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let ids = [1u8, 2, 3].map(|id| ConnectionId::new(&[10, 0, 0, id]).unwrap());
+            let peer = "127.0.0.1:4453".parse().unwrap();
+            for cid in ids {
+                add_protected_test_connection(&cx, &mut router, cid, peer).await;
+                router
+                    .connections
+                    .get_mut(&cid)
+                    .unwrap()
+                    .connection
+                    .queue_ping(&cx)
+                    .unwrap();
+            }
+            let now = router.clock_origin + Duration::from_micros(1_000);
+            let first = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(first.len(), 1);
+            assert_eq!(first[0].connection_id, ids[0]);
+            router
+                .connections
+                .get_mut(&ids[0])
+                .unwrap()
+                .connection
+                .queue_ping(&cx)
+                .unwrap();
+            let second = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(second[0].connection_id, ids[1]);
+            let third = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(third[0].connection_id, ids[2]);
+            // The next pass commits CID 1 before CID 2 fails its real missing
+            // protection gate. The good prefix must still be returned.
+            router
+                .connections
+                .get_mut(&ids[1])
+                .unwrap()
+                .packet_protection = None;
+            let prefix = router.drain_deferred_output(&cx, now, 3).await.unwrap();
+            assert_eq!(prefix.len(), 1);
+            assert_eq!(prefix[0].connection_id, ids[0]);
+            let bytes = prefix[0].packet.data.clone();
+            router.pending_deferred_packets.extend(prefix);
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                router.drain_deferred_output(&cancelled, now, 1).await,
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            assert_eq!(router.pending_deferred_packets.len(), 1);
+            let recovered = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].packet.data, bytes);
+        });
+    }
+
+    fn timer_test_context(
+        epoch: crate::Time,
+    ) -> (
+        Cx,
+        std::sync::Arc<crate::time::VirtualClock>,
+        TimerDriverHandle,
+    ) {
+        let clock = std::sync::Arc::new(crate::time::VirtualClock::starting_at(epoch));
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
+        let cx = Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(0, 1),
+            crate::types::TaskId::new_for_test(0, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(driver.clone()),
+            None,
+        );
+        (cx, clock, driver)
+    }
+
+    #[test]
+    fn timer_uses_explicit_nonzero_epoch_and_survives_a_losing_wait() {
+        let (cx, clock, driver) = timer_test_context(crate::Time::from_secs(123));
+        let (ambient, _, ambient_driver) = timer_test_context(crate::Time::from_secs(900));
+        let _ambient = Cx::set_current(Some(ambient));
+        let mut scheduler = QuicTimerScheduler::new();
+        let start = scheduler.now(&cx).unwrap();
+        let deadline = start + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, deadline)).unwrap();
+        let mut task_cx = Context::from_waker(Waker::noop());
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&cx));
+            assert!(wait.as_mut().poll(&mut task_cx).is_pending());
+        }
+        assert_eq!(scheduler.current_deadline(), Some(deadline));
+        assert_eq!(driver.pending_count(), 1);
+        assert_eq!(ambient_driver.pending_count(), 0);
+        clock.advance(1_999_999_999);
+        assert_eq!(driver.process_timers(), 0);
+        assert!(scheduler.poll_timer(&mut task_cx).is_pending());
+        clock.advance(1);
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(
+            scheduler.poll_timer(&mut task_cx),
+            Poll::Ready(Some(deadline))
+        );
+        assert_eq!(scheduler.poll_timer(&mut task_cx), Poll::Ready(None));
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    #[test]
+    fn timer_overdue_reschedule_and_removal_keep_one_registration() {
+        let (cx, clock, driver) = timer_test_context(crate::Time::from_secs(100));
+        let mut scheduler = QuicTimerScheduler::new();
+        let start = scheduler.now(&cx).unwrap();
+        let mut task_cx = Context::from_waker(Waker::noop());
+        let overdue = start
+            .checked_sub(Duration::from_secs(1))
+            .expect("test clock supports an overdue deadline");
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, overdue)).unwrap();
+        assert!(scheduler.has_pending_timer());
+        assert_eq!(
+            scheduler.poll_timer(&mut task_cx),
+            Poll::Ready(Some(overdue))
+        );
+        assert_eq!(scheduler.poll_timer(&mut task_cx), Poll::Ready(None));
+
+        let early = start + Duration::from_secs(2);
+        let late = start + Duration::from_secs(4);
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, late)).unwrap();
+        assert!(scheduler.poll_timer(&mut task_cx).is_pending());
+        assert_eq!(driver.pending_count(), 1);
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, early)).unwrap();
+        assert_eq!(
+            driver.pending_count(),
+            0,
+            "old registration removed on rearm"
+        );
+        assert!(scheduler.poll_timer(&mut task_cx).is_pending());
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, late)).unwrap();
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, early)).unwrap();
+        assert_eq!(scheduler.current_deadline(), Some(early));
+        assert_eq!(driver.pending_count(), 1);
+        clock.advance(2_000_000_000);
+        assert_eq!(driver.process_timers(), 1);
+        assert_eq!(scheduler.poll_timer(&mut task_cx), Poll::Ready(Some(early)));
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, late)).unwrap();
+        assert!(scheduler.poll_timer(&mut task_cx).is_pending());
+        scheduler.cancel();
+        assert_eq!(driver.pending_count(), 0);
+        assert_eq!(scheduler.current_deadline(), None);
+    }
+
+    #[test]
+    fn timer_refuses_missing_changed_or_overflowing_clock_without_losing_current_timer() {
+        // This newly authored strict-owner test targets managed admission.
+        // The established public API allows no-ops and independent caller cancellation.
+        let mut scheduler = QuicTimerScheduler::new();
+        let missing = Cx::for_testing();
+        assert!(matches!(
+            futures_lite::future::block_on(
+                scheduler.schedule_timer_bound(&missing, Instant::now())
+            ),
+            Err(ConnectionRouterError::TimerSchedulingFailed(_))
+        ));
+        let (cx, _, _) = timer_test_context(crate::Time::from_nanos(u64::MAX - 100));
+        let start = scheduler.now(&cx).unwrap();
+        assert!(matches!(
+            futures_lite::future::block_on(
+                scheduler.schedule_timer_bound(&cx, start + Duration::from_secs(1))
+            ),
+            Err(ConnectionRouterError::TimerSchedulingFailed(_))
+        ));
+        assert!(!scheduler.has_pending_timer());
+        futures_lite::future::block_on(scheduler.schedule_timer_bound(&cx, start)).unwrap();
+        let (other, _, _) = timer_test_context(crate::Time::ZERO);
+        assert!(matches!(
+            scheduler.now(&other),
+            Err(ConnectionRouterError::TimerSchedulingFailed(_))
+        ));
+        for refused in [&other, &missing] {
+            assert!(matches!(
+                futures_lite::future::block_on(
+                    scheduler.schedule_timer_bound(refused, start + Duration::from_secs(1))
+                ),
+                Err(ConnectionRouterError::TimerSchedulingFailed(_))
+            ));
+            assert!(matches!(
+                scheduler.now(refused),
+                Err(ConnectionRouterError::TimerSchedulingFailed(_))
+            ));
+        }
+        assert_eq!(scheduler.current_deadline(), Some(start));
+    }
+
+    struct TimerSignal(std::sync::mpsc::Sender<()>);
+
+    impl std::task::Wake for TimerSignal {
+        fn wake(self: std::sync::Arc<Self>) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn timer_signal() -> (Waker, std::sync::mpsc::Receiver<()>) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        (
+            Waker::from(std::sync::Arc::new(TimerSignal(sender))),
+            receiver,
+        )
+    }
+
+    #[test]
+    fn public_timer_noop_and_cancel_allow_a_new_driver_without_old_wakes() {
+        let (first, first_clock, first_driver) = timer_test_context(crate::Time::from_secs(123));
+        let (second, second_clock, second_driver) = timer_test_context(crate::Time::from_secs(987));
+        let mut scheduler = QuicTimerScheduler::new();
+        let first_deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&first, first_deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&first));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+        }
+        assert_eq!(first_driver.pending_count(), 1);
+        let first_registered = first_driver.next_deadline();
+        futures_lite::future::block_on(
+            scheduler.schedule_timer(&second, first_deadline + Duration::from_secs(1)),
+        )
+        .unwrap();
+        assert_eq!(scheduler.current_deadline(), Some(first_deadline));
+        assert_eq!(first_driver.next_deadline(), first_registered);
+        assert_eq!(first_driver.pending_count(), 1);
+        assert_eq!(second_driver.pending_count(), 0);
+        scheduler.cancel();
+        assert_eq!(first_driver.pending_count(), 0);
+        assert!(scheduler.clock.is_none());
+        let second_deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&second, second_deadline)).unwrap();
+        let due = scheduler.current_sleep.as_ref().unwrap().deadline();
+        let advance = due.as_nanos() - second_driver.now().as_nanos();
+        assert!(advance > 0);
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&second));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(second_driver.pending_count(), 1);
+            first_clock.advance(3_000_000_000);
+            assert_eq!(first_driver.process_timers(), 0);
+            second_clock.advance(advance - 1);
+            assert_eq!(second_driver.process_timers(), 0);
+            assert!(matches!(
+                signal.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            second_clock.advance(1);
+            assert_eq!(second_driver.process_timers(), 1);
+            signal
+                .try_recv()
+                .expect("new driver must wake the current waiter");
+            assert_eq!(
+                wait.as_mut().poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Ok(Some(second_deadline)))
+            );
+        }
+        assert_eq!(first_driver.pending_count(), 0);
+        assert_eq!(second_driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        println!(
+            "quic_timer_public_reuse first_epoch_s=123 second_epoch_s=987 no_op_kept_registration=true old_driver_firings=0 new_driver_firings=1 pending_after=0"
+        );
+    }
+
+    #[test]
+    fn public_wait_keeps_created_driver_and_observes_callers_cancellation() {
+        let (owner, _, owner_driver) = timer_test_context(crate::Time::from_secs(41));
+        let (caller, caller_clock, caller_driver) = timer_test_context(crate::Time::from_secs(800));
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer(&owner, deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&caller));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(owner_driver.pending_count(), 1);
+            assert_eq!(caller_driver.pending_count(), 0);
+            caller_clock.advance(10_000_000_000);
+            assert_eq!(caller_driver.process_timers(), 0);
+            assert!(matches!(
+                signal.try_recv(),
+                Err(std::sync::mpsc::TryRecvError::Empty)
+            ));
+            caller.cancel_with(crate::types::CancelKind::User, None);
+            signal
+                .try_recv()
+                .expect("explicit caller cancellation must wake its wait");
+            assert_eq!(
+                wait.as_mut().poll(&mut Context::from_waker(&waker)),
+                Poll::Ready(Err(ConnectionRouterError::Cancelled))
+            );
+        }
+        assert_eq!(scheduler.current_deadline(), Some(deadline));
+        scheduler.cancel();
+        assert_eq!(owner_driver.pending_count(), 0);
+        assert_eq!(caller_driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+    }
+
+    #[test]
+    fn public_driverless_timer_uses_shared_epoch_and_real_fallback_wake() {
+        let missing = Cx::for_testing();
+        assert!(missing.timer_driver().is_none());
+        let (ambient, _, ambient_driver) = timer_test_context(crate::Time::from_secs(9_000));
+        let _ambient = Cx::set_current(Some(ambient));
+        let epoch = crate::time::process_epoch();
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_millis(150);
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, deadline)).unwrap();
+        let sleep = scheduler.current_sleep.as_ref().unwrap();
+        assert_eq!(
+            sleep.deadline(),
+            crate::Time::from_nanos(
+                u64::try_from(deadline.duration_since(epoch).as_nanos()).unwrap()
+            )
+        );
+        assert!(!sleep.has_custom_time_getter());
+        assert!(scheduler.clock.is_none());
+        let (waker, signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&missing));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&waker))
+                    .is_pending()
+            );
+            assert_eq!(ambient_driver.pending_count(), 0);
+            // The maintained shared fallback must wake us; no speculative
+            // repolls, including if a wheel wake only requests a rearm.
+            let limit = Instant::now() + Duration::from_secs(2);
+            loop {
+                assert!(
+                    Instant::now() < limit,
+                    "shared fallback did not complete within its test bound"
+                );
+                signal
+                    .recv_timeout(limit.saturating_duration_since(Instant::now()))
+                    .expect("shared wall-clock fallback wake");
+                if let Poll::Ready(result) = wait.as_mut().poll(&mut Context::from_waker(&waker)) {
+                    assert_eq!(result, Ok(Some(deadline)));
+                    assert!(
+                        Instant::now() >= deadline,
+                        "fallback completed before the absolute deadline"
+                    );
+                    break;
+                }
+            }
+        }
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        assert_eq!(ambient_driver.pending_count(), 0);
+        // An already due fallback deadline is observed once instead of discarded.
+        let overdue = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .expect("test clock supports an overdue deadline");
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, overdue)).unwrap();
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&missing)),
+            Ok(Some(overdue))
+        );
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&missing)),
+            Ok(None)
+        );
+        scheduler.cancel();
+        assert!(scheduler.clock.is_none());
+        println!(
+            "quic_timer_public_fallback source=shared_process_epoch actual_wake=true custom_getter=false unrelated_driver_pending=0 owned_timer_after=none"
+        );
+    }
+
+    #[test]
+    fn public_fallback_wait_adopts_nonzero_driver_before_polling() {
+        let missing = Cx::for_testing();
+        let (adopter, clock, driver) = timer_test_context(crate::Time::from_secs(700));
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        futures_lite::future::block_on(scheduler.schedule_timer(&missing, deadline)).unwrap();
+        let (old_waker, old_signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&missing));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&old_waker))
+                    .is_pending()
+            );
+        }
+        assert!(scheduler.clock.is_none());
+        let (new_waker, new_signal) = timer_signal();
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&adopter));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&new_waker))
+                    .is_pending()
+            );
+        }
+        let bound = scheduler.clock.as_ref().unwrap();
+        assert!(bound.driver.ptr_eq(&driver));
+        assert_eq!(bound.runtime_origin, crate::Time::from_secs(700));
+        assert_eq!(driver.now(), crate::Time::from_secs(700));
+        let due = scheduler.current_sleep.as_ref().unwrap().deadline();
+        assert_eq!(
+            due.as_nanos(),
+            bound.runtime_origin.as_nanos()
+                + u64::try_from(deadline.duration_since(bound.instant_origin).as_nanos()).unwrap()
+        );
+        let advance = due.as_nanos() - driver.now().as_nanos();
+        assert!(advance > 0);
+        assert_eq!(driver.pending_count(), 1);
+        // Cross the retired wall-clock deadline while the adopted virtual clock
+        // stays fixed. A leaked old registration would wake old_signal here.
+        assert!(matches!(
+            old_signal.recv_timeout(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(50)
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+        assert!(matches!(
+            new_signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(advance - 1);
+        assert_eq!(driver.process_timers(), 0);
+        assert!(matches!(
+            new_signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(1);
+        assert_eq!(driver.process_timers(), 1);
+        new_signal
+            .try_recv()
+            .expect("adopted nonzero-epoch driver must wake the retained timer");
+        assert_eq!(
+            futures_lite::future::block_on(scheduler.wait_for_timer(&adopter)),
+            Ok(Some(deadline))
+        );
+        assert_eq!(driver.pending_count(), 0);
+        assert!(!scheduler.has_pending_timer());
+        assert_eq!(scheduler.current_deadline(), None);
+        println!(
+            "quic_timer_public_adoption virtual_epoch_s=700 retired_fallback_wakes=0 early_virtual_firings=0 due_virtual_firings=1 pending_after=0"
+        );
+    }
+
+    #[test]
+    fn managed_timer_wrong_owner_keeps_pending_registration() {
+        let (owner, clock, driver) = timer_test_context(crate::Time::from_secs(63));
+        let (other, _, other_driver) = timer_test_context(crate::Time::from_secs(900));
+        let missing = Cx::for_testing();
+        let mut scheduler = QuicTimerScheduler::new();
+        let start = scheduler.now(&owner).unwrap();
+        let deadline = start + Duration::from_secs(2);
+        futures_lite::future::block_on(scheduler.schedule_timer_bound(&owner, deadline)).unwrap();
+        let (waker, signal) = timer_signal();
+        assert!(
+            scheduler
+                .poll_timer(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        let registered = driver.next_deadline();
+        assert_eq!(driver.pending_count(), 1);
+        for refused in [&other, &missing] {
+            for candidate in [
+                deadline
+                    .checked_sub(Duration::from_secs(1))
+                    .expect("test deadline has one second of headroom"),
+                deadline + Duration::from_secs(1),
+            ] {
+                assert!(matches!(
+                    futures_lite::future::block_on(
+                        scheduler.schedule_timer_bound(refused, candidate)
+                    ),
+                    Err(ConnectionRouterError::TimerSchedulingFailed(_))
+                ));
+                assert_eq!(driver.next_deadline(), registered);
+                assert_eq!(driver.pending_count(), 1);
+                assert_eq!(other_driver.pending_count(), 0);
+            }
+            assert!(matches!(
+                scheduler.now(refused),
+                Err(ConnectionRouterError::TimerSchedulingFailed(_))
+            ));
+        }
+        assert!(matches!(
+            signal.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        clock.advance(1_999_999_999);
+        assert_eq!(driver.process_timers(), 0);
+        clock.advance(1);
+        assert_eq!(driver.process_timers(), 1);
+        signal
+            .try_recv()
+            .expect("refusals must retain the original timer's wake");
+        assert_eq!(
+            scheduler.poll_timer(&mut Context::from_waker(&waker)),
+            Poll::Ready(Some(deadline))
+        );
+        scheduler.cancel_pending();
+        assert_eq!(driver.pending_count(), 0);
+        assert_eq!(scheduler.current_deadline(), None);
+        assert!(scheduler.clock.as_ref().unwrap().driver.ptr_eq(&driver));
+        assert!(matches!(
+            futures_lite::future::block_on(scheduler.schedule_timer_bound(&other, deadline)),
+            Err(ConnectionRouterError::TimerSchedulingFailed(_))
+        ));
+    }
+
+    #[test]
+    fn explicit_timer_cancellation_wakes_the_current_waiter_and_cleans_up_on_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counter(AtomicUsize);
+        impl std::task::Wake for Counter {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let (cx, _, driver) = timer_test_context(crate::Time::from_secs(5));
+        let mut scheduler = QuicTimerScheduler::new();
+        let deadline = scheduler.now(&cx).unwrap() + Duration::from_secs(10);
+        futures_lite::future::block_on(scheduler.schedule_timer(&cx, deadline)).unwrap();
+        let first = std::sync::Arc::new(Counter(AtomicUsize::new(0)));
+        let second = std::sync::Arc::new(Counter(AtomicUsize::new(0)));
+        let first_waker = Waker::from(first.clone());
+        let second_waker = Waker::from(second.clone());
+        {
+            let mut wait = std::pin::pin!(scheduler.wait_for_timer(&cx));
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&first_waker))
+                    .is_pending()
+            );
+            assert!(
+                wait.as_mut()
+                    .poll(&mut Context::from_waker(&second_waker))
+                    .is_pending()
+            );
+            cx.cancel_with(crate::types::CancelKind::User, None);
+            assert_eq!(first.0.load(Ordering::SeqCst), 0);
+            assert!(second.0.load(Ordering::SeqCst) > 0);
+            assert_eq!(
+                wait.as_mut().poll(&mut Context::from_waker(&second_waker)),
+                Poll::Ready(Err(ConnectionRouterError::Cancelled))
+            );
+        }
+        scheduler.cancel();
+        assert_eq!(driver.pending_count(), 0);
+    }
+
+    fn encode_long_packet(
+        dst_cid: ConnectionId,
+        packet_type: LongPacketType,
+        packet_number: u64,
+        frame: QuicFrame,
+    ) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        frame.encode(&mut payload).expect("frame encode");
+        let header = PacketHeader::Long(LongHeader {
+            packet_type,
+            version: 1,
+            dst_cid,
+            src_cid: ConnectionId::new(&[0x01, 0x02, 0x03, 0x04]).expect("src cid"),
+            token: Vec::new(),
+            payload_length: payload.len() as u64 + 1,
+            packet_number,
+            packet_number_len: 1,
+        });
+        let mut out = Vec::new();
+        header.encode(&mut out).expect("header encode");
+        out.extend_from_slice(&payload);
+        out
+    }
+
+    async fn deterministic_one_rtt_protection(cx: &Cx) -> AtpPacketProtection {
+        let mut transcript = QuicHandshakeTranscript::new();
+        transcript.record("client_initial", b"a1 client hello");
+        transcript.record("server_handshake", b"a1 server hello");
+        let mut protection =
+            AtpPacketProtection::new_client(true).expect("deterministic ATP packet protection");
+        protection
+            .derive_keys(
+                cx,
+                PacketProtectionSpace::OneRtt,
+                &transcript,
+                b"asupersync a1 protected udp handoff",
+            )
+            .await
+            .expect("derive 1-RTT keys");
+        protection
+    }
+
+    #[test]
+    fn managed_key_updates_require_acknowledgement_of_the_current_generation() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-acks").unwrap();
+            let peer = "127.0.0.1:4460".parse().unwrap();
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let handle = router.connections.get_mut(&cid).unwrap();
+            handle
+                .packet_protection
+                .as_mut()
+                .unwrap()
+                .protection
+                .set_key_update_confidentiality_threshold(2);
+
+            // PN 0/1 use the initial key; PN 2 initiates generation one.
+            // Matching peer phases, old ACKs, unsent ACKs, and other packet
+            // spaces must not authorize the second update.
+            for (pn, phase) in [
+                (0, false),
+                (1, false),
+                (2, true),
+                (3, true),
+                (4, true),
+                (5, true),
+                (6, false),
+                (7, false),
+                (8, false),
+                (9, true),
+            ] {
+                if pn == 4 {
+                    handle.connection.on_peer_key_phase_pn(&cx, true, 0).unwrap();
+                    handle.connection.on_ack_received(
+                        &cx, PacketNumberSpace::ApplicationData, &[0, 999], 0, pn,
+                    ).unwrap();
+                    handle.connection.on_ack_received(
+                        &cx, PacketNumberSpace::Handshake, &[2], 0, pn,
+                    ).unwrap();
+                }
+                if pn == 6 || pn == 9 {
+                    let acknowledged = if pn == 6 { 2 } else { 6 };
+                    let ack = QuicFrame::Ack {
+                        largest_acknowledged: VarInt::from_u64_unchecked(acknowledged),
+                        ack_delay: VarInt::from_u64_unchecked(0),
+                        ack_range_count: VarInt::from_u64_unchecked(0),
+                        first_ack_range: VarInt::from_u64_unchecked(0),
+                        ack_ranges: Vec::new(),
+                        ecn_counts: None,
+                    };
+                    handle.connection.process_frame(
+                        &cx, &ack, PacketNumberSpace::ApplicationData,
+                    ).unwrap();
+                }
+                handle.connection.queue_ping(&cx).unwrap();
+                let packets = drain_connection_frames(
+                    &cx, cid, handle, PacketNumberSpace::ApplicationData, peer, Instant::now(), pn,
+                ).await.unwrap();
+                assert_eq!(packets.len(), 1, "packet {pn}");
+                assert_eq!(handle.connection.tls().local_key_phase(), phase, "packet {pn}");
+                assert_eq!(
+                    handle.connection.next_packet_number_for_protection(
+                        PacketNumberSpace::ApplicationData,
+                    ).unwrap(),
+                    pn + 1,
+                );
+                if matches!(pn, 2 | 6 | 9) {
+                    assert_eq!(
+                        handle.packet_protection.as_ref().unwrap().protection
+                            .protected_packet_count(PacketProtectionSpace::OneRtt),
+                        1,
+                        "exactly one encryption under the new key",
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn managed_key_update_waits_for_handshake_confirmation_before_ratcheting() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-hs").unwrap();
+            let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            connection.begin_handshake(&cx).unwrap();
+            connection.on_handshake_keys_available(&cx).unwrap();
+            connection.on_1rtt_keys_available(&cx).unwrap();
+            connection.record_verified_server_identity();
+            connection.on_authenticated_handshake_complete(&cx).unwrap();
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            protection.set_key_update_confidentiality_threshold(1);
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+            assert!(connection.can_send_1rtt());
+            assert!(!connection.tls().handshake_confirmed());
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            assert!(!connection.tls().local_key_phase());
+            assert!(!protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, true));
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1);
+
+            connection.on_handshake_confirmed(&cx).unwrap();
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            assert!(connection.tls().local_key_phase());
+            assert!(protection.next_gen_keys_installed(PacketProtectionSpace::OneRtt, true));
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 0);
+        });
+    }
+
+    #[test]
+    fn managed_key_limit_closes_before_encrypting_application_probe_or_close() {
+        run_test_with_cx(|cx| async move {
+            for mode in ["application", "probe", "close"] {
+                let cid = ConnectionId::new(b"key-limit").unwrap();
+                let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+                establish_for_application_data(&cx, &mut connection);
+                let mut protection = deterministic_one_rtt_protection(&cx).await;
+                protection.set_key_update_confidentiality_threshold(1);
+                protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+                prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+                assert!(!connection.can_initiate_local_key_update());
+                protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1 << 23);
+                let frames = if mode == "close" {
+                    connection.begin_close(&cx, 0, 7).unwrap();
+                    vec![QuicFrame::ConnectionClose {
+                        error_code: VarInt::from_u64_unchecked(7),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    }]
+                } else {
+                    vec![QuicFrame::Ping]
+                };
+                let mut payload = BytesMut::new();
+                NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+                let error = assemble_protected_1rtt_packet_inner(
+                    &cx, cid, &mut connection, &mut protection, &frames, &payload, 0,
+                    mode != "close", mode == "probe",
+                ).await.unwrap_err();
+                assert!(matches!(error, ConnectionRouterError::PacketProcessingFailed {
+                    reason, ..
+                } if reason.starts_with("AEAD_LIMIT_REACHED:")), "{mode}");
+                assert_eq!(connection.state(), QuicConnectionState::Closed, "{mode}");
+                assert_eq!(connection.transport().close_code(), Some(0x0f));
+                assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+                assert_eq!(connection.next_packet_number_for_protection(
+                    PacketNumberSpace::ApplicationData,
+                ).unwrap(), 0, "refusal must not consume a packet number");
+            }
+        });
+    }
+
+    #[test]
+    fn managed_key_limit_allows_the_last_packet_without_confirming_an_update() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"key-last").unwrap();
+            let mut connection = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            establish_for_application_data(&cx, &mut connection);
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            protection.set_key_update_confidentiality_threshold(1);
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, 1);
+            prepare_one_rtt_send_key(&cx, cid, &mut connection, &mut protection).unwrap();
+            protection.set_protected_packet_count_for_test(PacketProtectionSpace::OneRtt, (1 << 23) - 1);
+            let frames = [QuicFrame::Ping];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let packet = assemble_protected_1rtt_packet(
+                &cx, cid, &mut connection, &mut protection, &frames, &payload, 0, true,
+            ).await.unwrap();
+            assert!(!packet.is_empty());
+            assert!(connection.tls().local_key_phase());
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+            assert_eq!(connection.state(), QuicConnectionState::Established);
+            assert!(!connection.can_initiate_local_key_update());
+            let error = assemble_protected_1rtt_packet(
+                &cx, cid, &mut connection, &mut protection, &frames, &payload, 1, true,
+            ).await.unwrap_err();
+            assert!(matches!(error, ConnectionRouterError::PacketProcessingFailed {
+                reason, ..
+            } if reason.starts_with("AEAD_LIMIT_REACHED:")));
+            assert_eq!(connection.state(), QuicConnectionState::Closed);
+            assert_eq!(protection.protected_packet_count(PacketProtectionSpace::OneRtt), 1 << 23);
+        });
+    }
+
+    #[test]
+    fn authenticated_handshake_ack_does_not_request_finished_retransmission() {
+        run_test_with_cx(|cx| async move {
+            let cid = ConnectionId::new(b"ack-peer").unwrap();
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            let mut transcript = QuicHandshakeTranscript::new();
+            transcript.record("handshake", b"ack classification");
+            protection
+                .derive_keys(
+                    &cx,
+                    PacketProtectionSpace::Handshake,
+                    &transcript,
+                    b"ack test",
+                )
+                .await
+                .expect("derive handshake keys");
+            for (number, frame, expected) in [
+                (
+                    1,
+                    QuicFrame::Ack {
+                        largest_acknowledged: VarInt::from_u64_unchecked(0),
+                        ack_delay: VarInt::from_u64_unchecked(0),
+                        ack_range_count: VarInt::from_u64_unchecked(0),
+                        first_ack_range: VarInt::from_u64_unchecked(0),
+                        ack_ranges: Vec::new(),
+                        ecn_counts: None,
+                    },
+                    true,
+                ),
+                (
+                    2,
+                    QuicFrame::Crypto {
+                        offset: VarInt::from_u64_unchecked(0),
+                        data: Bytes::from_static(b"finished"),
+                    },
+                    false,
+                ),
+            ] {
+                let mut payload = BytesMut::new();
+                frame.encode(&mut payload).unwrap();
+                let header = PacketHeader::Long(LongHeader {
+                    packet_type: LongPacketType::Handshake,
+                    version: 1,
+                    dst_cid: cid,
+                    src_cid: cid,
+                    token: Vec::new(),
+                    payload_length: 4 + payload.len() as u64 + 16,
+                    packet_number: number,
+                    packet_number_len: 4,
+                });
+                let mut packet = Vec::new();
+                header.encode(&mut packet).unwrap();
+                let associated_data = packet.clone();
+                let offset = packet.len() - 4;
+                let protected = protection
+                    .protect_packet_now(
+                        &cx,
+                        PacketProtectionRequest {
+                            space: PacketProtectionSpace::Handshake,
+                            key_phase: false,
+                            packet_number: number,
+                            associated_data: &packet,
+                            payload: &payload,
+                        },
+                    )
+                    .expect("protect");
+                packet.extend_from_slice(&protected.ciphertext);
+                packet.extend_from_slice(&protected.tag);
+                let sample = header_protection_sample(&packet, offset).unwrap();
+                let mask = protection
+                    .header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample)
+                    .expect("mask");
+                apply_header_protection(&mut packet, offset, mask.bytes).unwrap();
+                let mut forged = packet.clone();
+                *forged.last_mut().unwrap() ^= 1;
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    cid,
+                    &mut protection,
+                    &forged
+                ));
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    ConnectionId::new(b"wrongcid").unwrap(),
+                    &mut protection,
+                    &packet
+                ));
+                assert_eq!(
+                    authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet),
+                    expected
+                );
+                // An exact replay must retain its authenticated frame class:
+                // ACKs stay silent, while CRYPTO still requests recovery.
+                assert_eq!(
+                    authenticated_handshake_ack_only(&cx, cid, &mut protection, &packet),
+                    expected
+                );
+                assert!(!authenticated_handshake_ack_only(
+                    &cx,
+                    cid,
+                    &mut protection,
+                    &forged
+                ));
+                // Inspection never grants delivery admission for a replay.
+                assert!(matches!(
+                    protection.unprotect_packet_now(&cx, &protected, &associated_data),
+                    Outcome::Err(crate::net::atp::protocol::outcome::AtpError::Auth(
+                        crate::net::atp::protocol::outcome::AuthError::ReplayedNonce
+                    ))
+                ));
+                let mut wrong_space = protected.clone();
+                wrong_space.space = PacketProtectionSpace::OneRtt;
+                assert!(matches!(
+                    protection.inspect_handshake_packet_now(&cx, &wrong_space, &associated_data),
+                    Outcome::Err(crate::net::atp::protocol::outcome::AtpError::Protocol(
+                        crate::net::atp::protocol::outcome::ProtocolError::SessionStateMismatch
+                    ))
+                ));
+            }
+        });
+    }
+
+    async fn add_protected_test_connection(
+        cx: &Cx,
+        router: &mut ConnectionRouter,
+        cid: ConnectionId,
+        peer: SocketAddr,
+    ) {
+        router
+            .create_connection(cx, cid, peer, false)
+            .await
+            .unwrap();
+        router
+            .install_packet_protection(cx, cid, deterministic_one_rtt_protection(cx).await)
+            .unwrap();
+        establish_for_application_data(
+            cx,
+            &mut router.connections.get_mut(&cid).unwrap().connection,
+        );
+    }
+
+    #[test]
+    fn lifecycle_reaping_rejected_packets_and_repeated_sends_do_not_extend_idle() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            router.set_idle_timeout_micros(10_000_000);
+            let cid = ConnectionId::new(b"activity").unwrap();
+            let peer = "127.0.0.1:4450".parse().unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let origin = router.clock_origin;
+            router.connections.get_mut(&cid).unwrap().last_activity = origin;
+            let mut sender = NativeQuicConnection::new(NativeQuicConnectionConfig::default());
+            establish_for_application_data(&cx, &mut sender);
+            let mut protection = deterministic_one_rtt_protection(&cx).await;
+            let frames = [QuicFrame::Ping];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let ciphertext = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut protection,
+                &frames,
+                &payload,
+                2_000_000,
+                true,
+            )
+            .await
+            .unwrap();
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data: ciphertext,
+                receive_time: origin + Duration::from_secs(2),
+                transmit_time: None,
+            };
+            let mut damaged = packet.clone();
+            *damaged.data.last_mut().unwrap() ^= 1;
+            assert!(
+                router
+                    .route_packet_with_output(&cx, damaged, false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(10))
+            );
+            assert!(matches!(
+                router
+                    .route_packet_with_output(&cx, packet.clone(), false)
+                    .await
+                    .unwrap(),
+                RoutingResult::Routed { .. }
+            ));
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(12))
+            );
+            let mut outgoing = RoutedOutgoingPacket {
+                connection_id: cid,
+                packet: OutgoingPacket {
+                    dst_addr: peer,
+                    data: vec![0],
+                    send_time: None,
+                },
+                final_handshake_flight: false,
+                ack_eliciting: false,
+            };
+            router.packet_sent(&outgoing, Some(origin + Duration::from_secs(3)));
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(12))
+            );
+            outgoing.ack_eliciting = true;
+            router.packet_sent(&outgoing, Some(origin + Duration::from_secs(4)));
+            router.packet_sent(&outgoing, Some(origin + Duration::from_secs(8)));
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(14))
+            );
+            let mut replay = packet;
+            replay.receive_time = origin + Duration::from_secs(9);
+            assert!(
+                router
+                    .route_packet_with_output(&cx, replay, false)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(14))
+            );
+            assert!(
+                router
+                    .process_timer_events(&cx, origin + Duration::from_secs(14))
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(router.connection_stats().active_connections, 0);
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn lifecycle_reaping_negotiation_cannot_extend_the_local_idle_limit() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            router.set_idle_timeout_micros(10_000_000);
+            let cid = ConnectionId::new(b"idle-cap").unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, "127.0.0.1:4450".parse().unwrap())
+                .await;
+            let origin = router.clock_origin;
+            let local = crate::net::quic_core::TransportParameters::default();
+            let mut peer = crate::net::quic_core::TransportParameters {
+                max_idle_timeout: Some(120_000),
+                ..crate::net::quic_core::TransportParameters::default()
+            };
+            let handle = router.connections.get_mut(&cid).unwrap();
+            handle.last_activity = origin;
+            handle.connection.set_negotiated_idle_timeout(&local, &peer);
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(10)),
+                "a long peer timeout must not bypass the configured local limit"
+            );
+            router.set_idle_timeout_micros(0);
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(120)),
+                "disabling the local limit still honors a finite peer timeout"
+            );
+            router.set_idle_timeout_micros(10_000_000);
+            peer.max_idle_timeout = Some(5_000);
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .set_negotiated_idle_timeout(&local, &peer);
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(5)),
+                "a shorter negotiated timeout must still win"
+            );
+            peer.max_idle_timeout = Some(0);
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .set_negotiated_idle_timeout(&local, &peer);
+            assert_eq!(
+                router.next_timer_deadline(),
+                Some(origin + Duration::from_secs(10))
+            );
+            router.set_idle_timeout_micros(0);
+            assert!(router.next_timer_deadline().is_none());
+        });
+    }
+
+    #[test]
+    fn lifecycle_reaping_pto_backoff_and_queued_probes_cannot_keep_a_peer_alive() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            router.set_idle_timeout_micros(1);
+            let cid = ConnectionId::new(b"lostpeer").unwrap();
+            let peer = "127.0.0.1:4450".parse().unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let origin = router.clock_origin;
+            let handle = router.connections.get_mut(&cid).unwrap();
+            handle.last_activity = origin;
+            let floor = handle.connection.transport().idle_timeout_floor_micros();
+            assert!(floor > 2_000_000);
+            handle
+                .connection
+                .on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1_200,
+                    true,
+                    true,
+                    0,
+                )
+                .unwrap();
+            ConnectionRouter::refresh_connection_timer(&cx, cid, handle, origin, 0, origin)
+                .unwrap();
+            let mut probes = 0;
+            while let Some(deadline) = router.next_timer_deadline() {
+                let packets = router
+                    .process_managed_timer_events(&cx, deadline, &HashSet::new())
+                    .await
+                    .unwrap();
+                for packet in packets {
+                    assert!(packet.ack_eliciting);
+                    router.packet_sent(&packet, Some(deadline));
+                    probes += 1;
+                }
+                if let Some(handle) = router.connections.get(&cid) {
+                    assert_eq!(
+                        handle.connection.transport().idle_timeout_floor_micros(),
+                        floor
+                    );
+                    assert!(deadline < origin + Duration::from_secs(5));
+                }
+                assert!(probes < 4, "repeated PTO must give way to idle expiry");
+            }
+            assert!(probes > 0);
+            assert_eq!(router.connection_stats().active_connections, 0);
+        });
+    }
+
+    #[test]
+    fn lifecycle_reaping_draining_connection_releases_capacity_at_its_deadline() {
+        run_test_with_cx(|cx| async move {
+            let mut router =
+                ConnectionRouter::with_max_connections(NativeQuicConnectionConfig::default(), 1);
+            let cid = ConnectionId::new(b"expired").unwrap();
+            let replacement = ConnectionId::new(b"new-peer").unwrap();
+            let peer = "127.0.0.1:4450".parse().unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, peer).await;
+            let origin = router.clock_origin;
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .begin_close(&cx, 1_000, 0x17)
+                .unwrap();
+            let deadline = origin + Duration::from_micros(3_001_000);
+            assert_eq!(router.next_timer_deadline(), Some(deadline));
+            assert!(
+                router
+                    .create_connection(&cx, replacement, peer, false)
+                    .await
+                    .is_err()
+            );
+            let just_before_deadline = deadline.checked_sub(Duration::from_micros(1)).unwrap();
+            assert!(
+                router
+                    .process_timer_events(&cx, just_before_deadline)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(router.connection_stats().active_connections, 1);
+            assert!(
+                router
+                    .process_timer_events(&cx, deadline)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(router.connection_stats().active_connections, 0);
+            assert!(router.next_timer_deadline().is_none());
+            router
+                .create_connection(&cx, replacement, peer, false)
+                .await
+                .unwrap();
+            assert_eq!(router.connection_stats().active_connections, 1);
+        });
+    }
+
+    #[test]
+    fn lifecycle_reaping_closed_connection_needs_no_recovery_flight() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"closed").unwrap();
+            add_protected_test_connection(&cx, &mut router, cid, "127.0.0.1:4450".parse().unwrap())
+                .await;
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .close_immediately(&cx, 0x18)
+                .unwrap();
+            assert!(router.next_timer_deadline().is_some());
+            assert!(
+                router
+                    .process_timer_events(&cx, Instant::now())
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(router.connection_stats().active_connections, 0);
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_input_commits_all_frames_when_stream_wake_requests_cancel() {
+        struct CancelOnReadable {
+            cx: Cx,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+        impl std::task::Wake for CancelOnReadable {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.wake_by_ref();
+            }
+            fn wake_by_ref(self: &std::sync::Arc<Self>) {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.cx.cancel_with(crate::types::CancelKind::User, None);
+            }
+        }
+        run_test_with_cx(|cx| async move {
+            let observer = Cx::for_testing();
+            let config = NativeQuicConnectionConfig::default();
+            let mut receiver = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"receive").unwrap();
+            let peer_cid = ConnectionId::new(b"other-cid").unwrap();
+            let peer: SocketAddr = "127.0.0.1:4459".parse().unwrap();
+            add_protected_test_connection(&cx, &mut receiver, cid, peer).await;
+            // This deliberately establishes unit state and fixture keys. It
+            // tests the real imported-input transaction, not TLS authentication.
+            let origin = receiver.clock_origin;
+            let handle = receiver.connections.get_mut(&cid).unwrap();
+            let mut application = super::super::QuicConnection::client(config);
+            establish_for_application_data(&cx, application.inner_mut());
+            handle.connection = RoutedConnection::Authenticated(application);
+            handle.peer_connection_id = Some(peer_cid);
+            handle.clock_origin = Some(origin);
+            handle.authenticated = Some(AuthenticatedRouting {
+                negotiated_alpn: b"h3".to_vec(),
+                final_handshake_flight: Vec::new(),
+                last_final_flight_retransmit: None,
+                pending_final_flight_packets: 0,
+            });
+            let wake = std::sync::Arc::new(CancelOnReadable {
+                cx: cx.clone(),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let waker = Waker::from(std::sync::Arc::clone(&wake));
+            assert!(
+                handle
+                    .connection
+                    .poll_next_readable_stream(&cx, &mut Context::from_waker(&waker),)
+                    .is_pending()
+            );
+            let frames = [
+                QuicFrame::Stream {
+                    stream_id: crate::net::VarInt(1),
+                    offset: None,
+                    data: Bytes::from_static(b"first"),
+                    fin: false,
+                },
+                QuicFrame::Stream {
+                    stream_id: crate::net::VarInt(1),
+                    offset: Some(crate::net::VarInt(5)),
+                    data: Bytes::from_static(b"-last"),
+                    fin: true,
+                },
+            ];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let data = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                13_000,
+                true,
+            )
+            .await
+            .unwrap();
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data,
+                receive_time: origin + Duration::from_micros(13_000),
+                transmit_time: None,
+            };
+            assert!(
+                matches!(receiver.route_packet_with_output(&cx, packet.clone(), true).await,
+                Ok(RoutingResult::Routed { connection_id, outgoing_packets })
+                    if connection_id == cid && outgoing_packets.is_empty())
+            );
+            assert!(
+                wake.calls.load(std::sync::atomic::Ordering::SeqCst) > 0,
+                "first STREAM frame must invoke the registered cancelling waker"
+            );
+            assert!(
+                cx.checkpoint().is_err(),
+                "cancel is visible after bounded commitment"
+            );
+            let handle = receiver.connections.get_mut(&cid).unwrap();
+            assert!(
+                handle.deferred_spaces[2],
+                "ACK/control output remains owned"
+            );
+            let stream = crate::net::quic_native::StreamId(1);
+            let readiness = handle
+                .connection
+                .next_readable_stream(&observer)
+                .unwrap()
+                .expect("both authenticated STREAM frames are committed before cancellation");
+            assert_eq!(readiness.stream_id, stream);
+            assert_eq!(readiness.readable_bytes, 10);
+            assert!(readiness.fin_received);
+            assert_eq!(readiness.reset, None);
+            assert_eq!(readiness.receive_stopped, None);
+            // Reads return the committed bytes in one or more chunks; small
+            // frames may already be joined (asupersync-4gdidf). Drain all ten
+            // without routing another packet or polling I/O.
+            let mut received = Vec::new();
+            while received.len() < 10 {
+                let bytes = handle
+                    .connection
+                    .read_stream_bytes(&observer, stream, 32)
+                    .unwrap();
+                assert!(!bytes.is_empty(), "committed bytes stay readable");
+                received.extend_from_slice(&bytes);
+            }
+            assert_eq!(received.as_slice(), b"first-last");
+            assert!(
+                handle
+                    .connection
+                    .read_stream_bytes(&observer, stream, 32)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                matches!(receiver.route_packet_with_output(&observer, packet, false).await,
+                Err(ConnectionRouterError::PacketProcessingFailed { reason, .. })
+                    if reason.contains("ReplayedNonce")),
+                "the fully committed packet is accepted by the replay window exactly once"
+            );
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    async fn add_authenticated_close_test_connection(
+        cx: &Cx,
+        router: &mut ConnectionRouter,
+        cid: ConnectionId,
+        peer_cid: ConnectionId,
+        peer: SocketAddr,
+        origin: Instant,
+    ) {
+        add_protected_test_connection(cx, router, cid, peer).await;
+        // Synthetic authenticated-owner state and deterministic fixture keys
+        // exercise close ownership, protection and timing. Real TLS admission
+        // is covered by the live UDP tests, not by this unit fixture.
+        let mut application = super::super::QuicConnection::client(router.config_template);
+        establish_for_application_data(cx, application.inner_mut());
+        let handle = router.connections.get_mut(&cid).unwrap();
+        handle.connection = RoutedConnection::Authenticated(application);
+        handle.peer_connection_id = Some(peer_cid);
+        handle.clock_origin = Some(origin);
+        handle.last_activity = origin;
+        handle.established_at = Some(origin);
+        handle.deferred_spaces = [false; 3];
+        handle.authenticated = Some(AuthenticatedRouting {
+            negotiated_alpn: b"h3".to_vec(),
+            final_handshake_flight: Vec::new(),
+            last_final_flight_retransmit: None,
+            pending_final_flight_packets: 0,
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_close_waits_for_buffered_output_and_acknowledged_flight() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"closing").unwrap();
+            let peer_cid = ConnectionId::new(b"close-peer").unwrap();
+            let peer = "127.0.0.1:4490".parse().unwrap();
+            let origin = router.clock_origin;
+            let now = origin + Duration::from_secs(1);
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            let stream = router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .open_local_bidi(&cx)
+                .unwrap();
+            router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .write_stream_bytes(
+                    &cx,
+                    stream,
+                    Bytes::from_static(b"keep this response"),
+                    false,
+                )
+                .unwrap();
+
+            assert!(matches!(
+                router.request_authenticated_close(&cx, cid, now, u64::MAX, true),
+                Err(ConnectionRouterError::InvalidConnectionState { connection_id, .. })
+                    if connection_id == cid
+            ));
+            let cancelled = Cx::for_testing();
+            cancelled.set_cancel_requested(true);
+            assert!(matches!(
+                router.request_authenticated_close(&cancelled, cid, now, 42, true),
+                Err(ConnectionRouterError::Cancelled)
+            ));
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            assert_eq!(handle.connection.transport().close_code(), None);
+            assert_eq!(handle.local_close_output, None);
+            assert_eq!(handle.connection.pending_stream_data_bytes(), 18);
+            let frames = handle
+                .connection
+                .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200)
+                .unwrap();
+            assert!(frames.iter().any(|frame| matches!(frame,
+                QuicFrame::Stream { data, .. } if data.as_ref() == b"keep this response"
+            )));
+            assert!(!handle.connection.has_pending_stream_frames());
+
+            // Control output alone must also finish before graceful retirement.
+            handle.connection.queue_ping(&cx).unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert!(handle.connection.has_pending_control_frames());
+            assert_eq!(
+                handle
+                    .connection
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200,)
+                    .unwrap(),
+                vec![QuicFrame::Ping]
+            );
+
+            handle
+                .connection
+                .send_datagram(&cx, Bytes::from_static(b"queued datagram"))
+                .unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.pending_outbound_datagram_count(), 1);
+            assert_eq!(
+                handle
+                    .connection
+                    .generate_frames(&cx, PacketNumberSpace::ApplicationData, 1200,)
+                    .unwrap(),
+                vec![QuicFrame::Datagram {
+                    data: Bytes::from_static(b"queued datagram")
+                }]
+            );
+
+            for timer_queue in [true, false] {
+                let packet = RoutedOutgoingPacket {
+                    connection_id: cid,
+                    packet: OutgoingPacket {
+                        dst_addr: peer,
+                        data: b"already protected output".to_vec(),
+                        send_time: Some(now),
+                    },
+                    final_handshake_flight: false,
+                    ack_eliciting: true,
+                };
+                if timer_queue {
+                    router.pending_timer_packets.push(packet);
+                } else {
+                    router.pending_deferred_packets.push(packet);
+                }
+                assert_eq!(router.pending_datagram_count_for(cid), 1);
+                assert!(
+                    !router
+                        .request_authenticated_close(&cx, cid, now, 42, false)
+                        .unwrap()
+                );
+                assert_eq!(router.pending_datagram_count_for(cid), 1);
+                let retained = if timer_queue {
+                    router.pending_timer_packets.pop().unwrap()
+                } else {
+                    router.pending_deferred_packets.pop().unwrap()
+                };
+                assert_eq!(retained.packet.data, b"already protected output");
+                assert_eq!(retained.packet.send_time, Some(now));
+            }
+
+            // A frame leaving every local queue is still outstanding until the
+            // peer acknowledges its transport packet.
+            let packet_number = router
+                .connections
+                .get_mut(&cid)
+                .unwrap()
+                .connection
+                .on_packet_sent(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    1200,
+                    true,
+                    true,
+                    900_000,
+                )
+                .unwrap();
+            assert!(
+                !router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.transport().bytes_in_flight(), 1200);
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            handle
+                .connection
+                .on_ack_received(
+                    &cx,
+                    PacketNumberSpace::ApplicationData,
+                    &[packet_number],
+                    0,
+                    1_000_000,
+                )
+                .unwrap();
+            assert_eq!(handle.connection.transport().bytes_in_flight(), 0);
+            assert!(
+                router
+                    .request_authenticated_close(&cx, cid, now, 42, false)
+                    .unwrap()
+            );
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Requested)
+            );
+        });
+    }
+
+    /// br-asupersync-tzjbn9 F3: the managed endpoint logged a peer's stream
+    /// violation and kept the connection open, with the packet partly applied
+    /// and unacknowledged, so every retransmission failed again. The route now
+    /// closes with the transport code, and the next deferred-output turn sends
+    /// the transport CONNECTION_CLOSE that names the frame type.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_peer_flow_control_violation_sends_a_transport_close() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"violated").unwrap();
+            let peer_cid = ConnectionId::new(b"violator").unwrap();
+            let peer = "127.0.0.1:4493".parse().unwrap();
+            let origin = router.clock_origin;
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            // Past both the stream and the connection receive limits.
+            let frames = [QuicFrame::Stream {
+                stream_id: VarInt(1),
+                offset: Some(VarInt(config.recv_window.max(config.connection_recv_limit))),
+                data: Bytes::from_static(b"x"),
+                fin: false,
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let data = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                1_000,
+                true,
+            )
+            .await
+            .unwrap();
+            let now = origin + Duration::from_millis(1);
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data,
+                receive_time: now,
+                transmit_time: None,
+            };
+            assert!(matches!(
+                router.route_packet_with_output(&cx, packet, true).await,
+                Err(ConnectionRouterError::PacketProcessingFailed { .. })
+            ));
+            let handle = &router.connections[&cid];
+            assert_eq!(handle.connection.state(), QuicConnectionState::Draining);
+            assert_eq!(handle.connection.transport().close_code(), Some(0x03));
+
+            let packets = router.drain_deferred_output(&cx, now, 8).await.unwrap();
+            assert_eq!(packets.len(), 1, "only the close leaves");
+            assert_eq!(packets[0].packet.dst_addr, peer);
+            let mut verifier = deterministic_one_rtt_protection(&cx).await;
+            let decoded =
+                unprotect_1rtt_packet(&cx, peer_cid, &mut verifier, &packets[0].packet.data)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                vec![QuicFrame::ConnectionClose {
+                    error_code: VarInt(0x03),
+                    frame_type: Some(VarInt(0x0c)),
+                    reason_phrase: Bytes::new(),
+                }],
+                "FLOW_CONTROL_ERROR for a STREAM frame with an offset"
+            );
+        });
+    }
+
+    /// Review r29-e8 of 168379675 (H1): a peer that still holds Handshake keys
+    /// coalesces `[Handshake(ACK)][1-RTT(STREAM)]` in one datagram (RFC 9000
+    /// section 12.2), as mainstream stacks do until HANDSHAKE_DONE. The router
+    /// adopted the 1-RTT tail but kept the leading long header's Handshake
+    /// packet-number space, so the STREAM frame broke RFC 9000 section 12.4:
+    /// on the broken code the route returns `Err(PacketProcessingFailed)` and
+    /// the connection closes with PROTOCOL_VIOLATION. The tail belongs to
+    /// ApplicationData: its data is delivered and only that space owes output.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_coalesced_one_rtt_tail_is_processed_in_application_data_space() {
+        run_test_with_cx(|cx| async move {
+            let config = NativeQuicConnectionConfig::default();
+            let mut router = ConnectionRouter::new(config);
+            let cid = ConnectionId::new(b"coalesce").unwrap();
+            let peer_cid = ConnectionId::new(b"coal-peer").unwrap();
+            let peer = "127.0.0.1:4494".parse().unwrap();
+            let origin = router.clock_origin;
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+
+            // The leading packet is a sealed Handshake ACK. The router never
+            // authenticates it: only its Length field bounds the 1-RTT tail.
+            let mut handshake_protection = deterministic_one_rtt_protection(&cx).await;
+            let mut transcript = QuicHandshakeTranscript::new();
+            transcript.record("handshake", b"coalesced 1-RTT tail");
+            handshake_protection
+                .derive_keys(
+                    &cx,
+                    PacketProtectionSpace::Handshake,
+                    &transcript,
+                    b"coalesced test",
+                )
+                .await
+                .expect("derive handshake keys");
+            let mut ack = BytesMut::new();
+            QuicFrame::Ack {
+                largest_acknowledged: VarInt::from_u64_unchecked(0),
+                ack_delay: VarInt::from_u64_unchecked(0),
+                ack_range_count: VarInt::from_u64_unchecked(0),
+                first_ack_range: VarInt::from_u64_unchecked(0),
+                ack_ranges: Vec::new(),
+                ecn_counts: None,
+            }
+            .encode(&mut ack)
+            .unwrap();
+            let header = PacketHeader::Long(LongHeader {
+                packet_type: LongPacketType::Handshake,
+                version: 1,
+                dst_cid: cid,
+                src_cid: peer_cid,
+                token: Vec::new(),
+                payload_length: 4 + ack.len() as u64 + 16,
+                packet_number: 0,
+                packet_number_len: 4,
+            });
+            let mut datagram = Vec::new();
+            header.encode(&mut datagram).unwrap();
+            let offset = datagram.len() - 4;
+            let sealed = handshake_protection
+                .protect_packet_now(
+                    &cx,
+                    PacketProtectionRequest {
+                        space: PacketProtectionSpace::Handshake,
+                        key_phase: false,
+                        packet_number: 0,
+                        associated_data: &datagram,
+                        payload: &ack,
+                    },
+                )
+                .expect("protect");
+            datagram.extend_from_slice(&sealed.ciphertext);
+            datagram.extend_from_slice(&sealed.tag);
+            let sample = header_protection_sample(&datagram, offset).unwrap();
+            let mask = handshake_protection
+                .header_protection_mask_now(&cx, PacketProtectionSpace::Handshake, &sample)
+                .expect("mask");
+            apply_header_protection(&mut datagram, offset, mask.bytes).unwrap();
+
+            // The coalesced tail: a genuine 1-RTT packet with application data.
+            let frames = [QuicFrame::Stream {
+                stream_id: VarInt(1),
+                offset: None,
+                data: Bytes::from_static(b"x"),
+                fin: false,
+            }];
+            let mut payload = BytesMut::new();
+            NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+            let mut sender = NativeQuicConnection::new(config);
+            establish_for_application_data(&cx, &mut sender);
+            let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+            let tail = assemble_protected_1rtt_packet(
+                &cx,
+                cid,
+                &mut sender,
+                &mut sender_protection,
+                &frames,
+                &payload,
+                1_000,
+                true,
+            )
+            .await
+            .unwrap();
+            datagram.extend_from_slice(&tail);
+
+            let packet = ReceivedPacket {
+                src_addr: peer,
+                data: datagram,
+                receive_time: origin + Duration::from_millis(1),
+                transmit_time: None,
+            };
+            match router.route_packet_with_output(&cx, packet, true).await {
+                Ok(RoutingResult::Routed {
+                    connection_id,
+                    outgoing_packets,
+                }) => {
+                    assert_eq!(connection_id, cid);
+                    assert!(outgoing_packets.is_empty());
+                }
+                other => panic!("the coalesced 1-RTT packet must be processed: {other:?}"),
+            }
+            let handle = router.connections.get_mut(&cid).unwrap();
+            assert_eq!(handle.connection.state(), QuicConnectionState::Established);
+            assert_eq!(handle.connection.transport().close_code(), None);
+            assert_eq!(
+                handle.deferred_spaces,
+                [false, false, true],
+                "the tail's ACK is owed in ApplicationData, never in Handshake"
+            );
+            let stream = crate::net::quic_native::StreamId(1);
+            let readiness = handle
+                .connection
+                .next_readable_stream(&cx)
+                .unwrap()
+                .expect("the coalesced STREAM frame is delivered");
+            assert_eq!(readiness.stream_id, stream);
+            assert_eq!(
+                handle
+                    .connection
+                    .read_stream_bytes(&cx, stream, 32)
+                    .unwrap(),
+                Bytes::from_static(b"x")
+            );
+        });
+    }
+
+    /// Seal one Handshake packet under fixture keys.
+    #[cfg(feature = "tls")]
+    fn seal_handshake_packet(
+        cx: &Cx,
+        protection: &mut AtpPacketProtection,
+        dst_cid: ConnectionId,
+        src_cid: ConnectionId,
+        packet_number: u64,
+        frame: &QuicFrame,
+    ) -> Vec<u8> {
+        let mut payload = BytesMut::new();
+        frame.encode(&mut payload).unwrap();
+        let header = PacketHeader::Long(LongHeader {
+            packet_type: LongPacketType::Handshake,
+            version: 1,
+            dst_cid,
+            src_cid,
+            token: Vec::new(),
+            payload_length: 4 + payload.len() as u64 + 16,
+            packet_number,
+            packet_number_len: 4,
+        });
+        let mut packet = Vec::new();
+        header.encode(&mut packet).unwrap();
+        let offset = packet.len() - 4;
+        let sealed = protection
+            .protect_packet_now(
+                cx,
+                PacketProtectionRequest {
+                    space: PacketProtectionSpace::Handshake,
+                    key_phase: false,
+                    packet_number,
+                    associated_data: &packet,
+                    payload: &payload,
+                },
+            )
+            .expect("protect");
+        packet.extend_from_slice(&sealed.ciphertext);
+        packet.extend_from_slice(&sealed.tag);
+        let sample = header_protection_sample(&packet, offset).unwrap();
+        let mask = protection
+            .header_protection_mask_now(cx, PacketProtectionSpace::Handshake, &sample)
+            .expect("mask");
+        apply_header_protection(&mut packet, offset, mask.bytes).unwrap();
+        packet
+    }
+
+    /// br-asupersync-1r3f5u L2/L4: each long-header packet of a datagram is
+    /// classified on its own, bounded by its Length field, and a 1-RTT tail
+    /// after any number of them is processed. A peer that still holds
+    /// Handshake keys sends [Handshake(ACK)][1-RTT]; that requests no
+    /// final-flight retransmission, nor does trailing padding. A Handshake
+    /// packet carrying more than ACKs still requests it, and a tail for
+    /// another connection is ignored.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_coalesced_long_header_packets_are_classified_one_by_one() {
+        run_test_with_cx(|cx| async move {
+            let ack = QuicFrame::Ack {
+                largest_acknowledged: VarInt::from_u64_unchecked(0),
+                ack_delay: VarInt::from_u64_unchecked(0),
+                ack_range_count: VarInt::from_u64_unchecked(0),
+                first_ack_range: VarInt::from_u64_unchecked(0),
+                ack_ranges: Vec::new(),
+                ecn_counts: None,
+            };
+            let crypto = QuicFrame::Crypto {
+                offset: VarInt::from_u64_unchecked(0),
+                data: Bytes::from_static(b"finished"),
+            };
+            let cid = ConnectionId::new(b"coalesce").unwrap();
+            let stranger = ConnectionId::new(b"stranger").unwrap();
+            let peer_cid = ConnectionId::new(b"coal-peer").unwrap();
+            let peer = "127.0.0.1:4495".parse().unwrap();
+            // (case, leading Handshake frames, padding, 1-RTT tail CID,
+            // final flight requested, tail delivered)
+            for (case, leading, padding, tail_cid, requested, delivered) in [
+                ("ack + tail", vec![&ack], 0, Some(cid), false, true),
+                (
+                    "ack + ack + tail",
+                    vec![&ack, &ack],
+                    0,
+                    Some(cid),
+                    false,
+                    true,
+                ),
+                ("crypto + tail", vec![&crypto], 0, Some(cid), true, true),
+                (
+                    "ack + stranger's tail",
+                    vec![&ack],
+                    0,
+                    Some(stranger),
+                    false,
+                    false,
+                ),
+                ("ack + padding", vec![&ack], 24, None, false, false),
+            ] {
+                let config = NativeQuicConnectionConfig::default();
+                let mut router = ConnectionRouter::new(config);
+                let origin = router.clock_origin;
+                add_authenticated_close_test_connection(
+                    &cx,
+                    &mut router,
+                    cid,
+                    peer_cid,
+                    peer,
+                    origin,
+                )
+                .await;
+                let mut transcript = QuicHandshakeTranscript::new();
+                transcript.record("handshake", b"coalesced classification");
+                let mut handshake_protection = deterministic_one_rtt_protection(&cx).await;
+                handshake_protection
+                    .derive_keys(
+                        &cx,
+                        PacketProtectionSpace::Handshake,
+                        &transcript,
+                        b"classification test",
+                    )
+                    .await
+                    .expect("derive handshake keys");
+                {
+                    let handle = router.connections.get_mut(&cid).unwrap();
+                    handle
+                        .packet_protection
+                        .as_mut()
+                        .unwrap()
+                        .protection
+                        .derive_keys(
+                            &cx,
+                            PacketProtectionSpace::Handshake,
+                            &transcript,
+                            b"classification test",
+                        )
+                        .await
+                        .expect("derive the router's handshake keys");
+                    handle
+                        .authenticated
+                        .as_mut()
+                        .unwrap()
+                        .final_handshake_flight = vec![OutgoingPacket {
+                        dst_addr: peer,
+                        data: vec![0xe5; 48],
+                        send_time: None,
+                    }];
+                }
+
+                let mut datagram = Vec::new();
+                for (number, frame) in (0u64..).zip(&leading) {
+                    datagram.extend(seal_handshake_packet(
+                        &cx,
+                        &mut handshake_protection,
+                        cid,
+                        peer_cid,
+                        number,
+                        frame,
+                    ));
+                }
+                datagram.resize(datagram.len() + padding, 0);
+                if let Some(tail_cid) = tail_cid {
+                    let frames = [QuicFrame::Stream {
+                        stream_id: VarInt(1),
+                        offset: None,
+                        data: Bytes::from_static(b"x"),
+                        fin: false,
+                    }];
+                    let mut payload = BytesMut::new();
+                    NativeQuicConnection::encode_frames(&frames, &mut payload).unwrap();
+                    let mut sender = NativeQuicConnection::new(config);
+                    establish_for_application_data(&cx, &mut sender);
+                    let mut sender_protection = deterministic_one_rtt_protection(&cx).await;
+                    datagram.extend(
+                        assemble_protected_1rtt_packet(
+                            &cx,
+                            tail_cid,
+                            &mut sender,
+                            &mut sender_protection,
+                            &frames,
+                            &payload,
+                            1_000,
+                            true,
+                        )
+                        .await
+                        .unwrap(),
+                    );
+                }
+
+                let packet = ReceivedPacket {
+                    src_addr: peer,
+                    data: datagram,
+                    receive_time: origin + Duration::from_millis(1),
+                    transmit_time: None,
+                };
+                match router.route_packet_with_output(&cx, packet, true).await {
+                    Ok(RoutingResult::Routed {
+                        connection_id,
+                        outgoing_packets,
+                    }) => {
+                        assert_eq!(connection_id, cid, "{case}");
+                        assert!(outgoing_packets.is_empty(), "{case}");
+                    }
+                    other => panic!("{case}: the datagram must be routed: {other:?}"),
+                }
+                let retransmitted = router
+                    .pending_deferred_packets
+                    .iter()
+                    .filter(|packet| packet.final_handshake_flight)
+                    .count();
+                assert_eq!(
+                    retransmitted,
+                    usize::from(requested),
+                    "{case}: final flight requested"
+                );
+                let handle = router.connections.get_mut(&cid).unwrap();
+                assert_eq!(
+                    handle.connection.state(),
+                    QuicConnectionState::Established,
+                    "{case}"
+                );
+                assert_eq!(handle.connection.transport().close_code(), None, "{case}");
+                assert_eq!(
+                    handle.deferred_spaces,
+                    [false, false, delivered],
+                    "{case}: only a processed tail owes output, in ApplicationData"
+                );
+                let readable = handle.connection.next_readable_stream(&cx).unwrap();
+                assert_eq!(readable.is_some(), delivered, "{case}: tail delivered");
+                if delivered {
+                    assert_eq!(
+                        handle
+                            .connection
+                            .read_stream_bytes(&cx, crate::net::quic_native::StreamId(1), 32)
+                            .unwrap(),
+                        Bytes::from_static(b"x"),
+                        "{case}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_forced_close_preserves_other_peer_and_original_drain_clock() {
+        run_test_with_cx(|cx| async move {
+            for acknowledge_close in [false, true] {
+                let config = NativeQuicConnectionConfig {
+                    drain_timeout_micros: 3_000_000,
+                    ..NativeQuicConnectionConfig::default()
+                };
+                let mut router = ConnectionRouter::new(config);
+                router.set_idle_timeout_micros(0);
+                let a = ConnectionId::new(b"close-a").unwrap();
+                let b = ConnectionId::new(b"close-b").unwrap();
+                let peer_a = ConnectionId::new(b"peer-a").unwrap();
+                let peer_b = ConnectionId::new(b"peer-b").unwrap();
+                let address_a = "127.0.0.1:4491".parse().unwrap();
+                let address_b = "127.0.0.1:4492".parse().unwrap();
+                let origin_a = router.clock_origin + Duration::from_secs(17);
+                let origin_b = router.clock_origin;
+                let now = origin_a + Duration::from_secs(7);
+                let deadline = origin_a + Duration::from_secs(10);
+                for (cid, peer_cid, address, origin) in [
+                    (a, peer_a, address_a, origin_a),
+                    (b, peer_b, address_b, origin_b),
+                ] {
+                    add_authenticated_close_test_connection(
+                        &cx,
+                        &mut router,
+                        cid,
+                        peer_cid,
+                        address,
+                        origin,
+                    )
+                    .await;
+                    let handle = router.connections.get_mut(&cid).unwrap();
+                    let stream = handle.connection.open_local_bidi(&cx).unwrap();
+                    handle
+                        .connection
+                        .write_stream_bytes(
+                            &cx,
+                            stream,
+                            Bytes::from_static(b"owned response"),
+                            false,
+                        )
+                        .unwrap();
+                    handle.connection.queue_ping(&cx).unwrap();
+                    for timer_queue in [true, false] {
+                        let packet = RoutedOutgoingPacket {
+                            connection_id: cid,
+                            packet: OutgoingPacket {
+                                dst_addr: address,
+                                data: cid.as_bytes().to_vec(),
+                                send_time: Some(now),
+                            },
+                            final_handshake_flight: false,
+                            ack_eliciting: false,
+                        };
+                        if timer_queue {
+                            router.pending_timer_packets.push(packet);
+                        } else {
+                            router.pending_deferred_packets.push(packet);
+                        }
+                    }
+                }
+                assert!(
+                    router
+                        .request_authenticated_close(&cx, a, now, 42, true)
+                        .unwrap()
+                );
+                assert_eq!(router.pending_datagram_count_for(a), 0);
+                assert_eq!(router.pending_datagram_count_for(b), 2);
+                assert_eq!(
+                    router.connections[&a].connection.state(),
+                    QuicConnectionState::Draining
+                );
+                assert_eq!(
+                    router.connections[&a]
+                        .connection
+                        .transport()
+                        .drain_deadline_micros(),
+                    Some(10_000_000)
+                );
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+                assert_eq!(
+                    router.connections[&b].connection.state(),
+                    QuicConnectionState::Established
+                );
+                assert_eq!(
+                    router.connections[&b]
+                        .connection
+                        .pending_stream_data_bytes(),
+                    14
+                );
+                assert!(
+                    router.connections[&b]
+                        .connection
+                        .has_pending_control_frames()
+                );
+
+                let packets = router.drain_deferred_output(&cx, now, 8).await.unwrap();
+                assert_eq!(packets.len(), 2);
+                let close = packets
+                    .iter()
+                    .find(|packet| packet.connection_id == a)
+                    .unwrap();
+                assert_eq!(close.packet.dst_addr, address_a);
+                assert!(!close.ack_eliciting);
+                assert!(!close.final_handshake_flight);
+                let ciphertext = close.packet.data.clone();
+                let mut verifier = deterministic_one_rtt_protection(&cx).await;
+                let decoded = unprotect_1rtt_packet(&cx, peer_a, &mut verifier, &ciphertext)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    NativeQuicConnection::decode_frames(&decoded.plaintext).unwrap(),
+                    vec![QuicFrame::ConnectionClose {
+                        error_code: VarInt(42),
+                        frame_type: None,
+                        reason_phrase: Bytes::new(),
+                    },]
+                );
+                router.pending_deferred_packets.extend(packets);
+                router.discard_terminal_output();
+                assert!(router.connection_can_send_queued(a));
+                assert_eq!(
+                    router.connections[&a].local_close_output,
+                    Some(LocalCloseOutput::Queued)
+                );
+                assert_eq!(router.pending_datagram_count_for(a), 1);
+
+                let cancelled = Cx::for_testing();
+                cancelled.set_cancel_requested(true);
+                assert!(matches!(
+                    router.drain_deferred_output(&cancelled, now, 8).await,
+                    Err(ConnectionRouterError::Cancelled)
+                ));
+                assert_eq!(
+                    router
+                        .pending_deferred_packets
+                        .iter()
+                        .find(|packet| packet.connection_id == a)
+                        .unwrap()
+                        .packet
+                        .data,
+                    ciphertext
+                );
+                let other = router.pending_deferred_packets.remove(
+                    router
+                        .pending_deferred_packets
+                        .iter()
+                        .position(|packet| packet.connection_id == b)
+                        .unwrap(),
+                );
+                assert_eq!(other.packet.data, b.as_bytes());
+                router.packet_sent(&other, Some(now));
+                assert_eq!(
+                    router.connections[&a].local_close_output,
+                    Some(LocalCloseOutput::Queued)
+                );
+                assert_eq!(router.connections[&b].local_close_output, None);
+                router.pending_deferred_packets.push(other);
+
+                if acknowledge_close {
+                    let sent = router.pending_deferred_packets.remove(
+                        router
+                            .pending_deferred_packets
+                            .iter()
+                            .position(|packet| packet.connection_id == a)
+                            .unwrap(),
+                    );
+                    router.packet_sent(&sent, Some(now));
+                    router.packet_sent(&sent, Some(now));
+                    assert_eq!(
+                        router.connections[&a].local_close_output,
+                        Some(LocalCloseOutput::Sent)
+                    );
+                    assert!(!router.connection_can_send_queued(a));
+                }
+                // Repeating close neither changes its code/deadline nor makes
+                // another protected packet after the first has been committed.
+                assert!(router.request_authenticated_close(
+                    &cx, a, now + Duration::from_secs(1), 99, true,
+                ).unwrap());
+                assert_eq!(
+                    router.connections[&a].connection.transport().close_code(),
+                    Some(42)
+                );
+                assert_eq!(router.next_timer_deadline(), Some(deadline));
+                assert!(
+                    router
+                        .expired_connections(
+                            deadline.checked_sub(Duration::from_micros(1)).unwrap()
+                        )
+                        .is_empty()
+                );
+                assert_eq!(router.expired_connections(deadline), vec![a]);
+                let remaining = router
+                    .process_managed_timer_events(&cx, deadline, &HashSet::new())
+                    .await
+                    .unwrap();
+                assert_eq!(remaining.len(), 1);
+                assert_eq!(remaining[0].connection_id, b);
+                assert_eq!(remaining[0].packet.data, b.as_bytes());
+                assert!(!router.connections.contains_key(&a));
+                assert_eq!(router.pending_datagram_count_for(a), 0);
+                assert_eq!(router.pending_datagram_count_for(b), 1);
+                assert_eq!(
+                    router.connections[&b].connection.state(),
+                    QuicConnectionState::Established
+                );
+                assert_eq!(
+                    router.connections[&b]
+                        .connection
+                        .pending_stream_data_bytes(),
+                    14
+                );
+                assert!(router.next_timer_deadline().is_none());
+            }
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn authenticated_close_shutdown_transfers_committed_ciphertext_once() {
+        run_test_with_cx(|cx| async move {
+            let mut router = ConnectionRouter::new(NativeQuicConnectionConfig::default());
+            let cid = ConnectionId::new(b"close-shutdown").unwrap();
+            let peer_cid = ConnectionId::new(b"shutdown-peer").unwrap();
+            let peer = "127.0.0.1:4493".parse().unwrap();
+            let origin = router.clock_origin + Duration::from_secs(17);
+            let now = origin + Duration::from_secs(7);
+            let deadline = origin + Duration::from_secs(10);
+            add_authenticated_close_test_connection(&cx, &mut router, cid, peer_cid, peer, origin)
+                .await;
+            assert!(
+                router
+                    .request_authenticated_close(&cx, cid, now, 42, true)
+                    .unwrap()
+            );
+            let packets = router.drain_deferred_output(&cx, now, 1).await.unwrap();
+            assert_eq!(packets.len(), 1);
+            let ciphertext = packets[0].packet.data.clone();
+            router.pending_deferred_packets.extend(packets);
+            assert_eq!(router.queued_local_close_deadline(cid), Some(deadline));
+
+            let mut shutdown = router
+                .prepare_shutdown_close_packets(&cx, now)
+                .await
+                .unwrap();
+            assert_eq!(shutdown.len(), 1);
+            assert_eq!(shutdown[0].0.data, ciphertext);
+            assert_eq!(shutdown[0].0.dst_addr, peer);
+            assert_eq!(shutdown[0].1, deadline);
+            assert_eq!(router.pending_datagram_count_for(cid), 0);
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Queued)
+            );
+            assert!(
+                router
+                    .prepare_shutdown_close_packets(&cx, now)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                router.connections[&cid].connection.transport().close_code(),
+                Some(42)
+            );
+
+            let (packet, _) = shutdown.pop().unwrap();
+            let sent = RoutedOutgoingPacket {
+                connection_id: cid,
+                packet,
+                final_handshake_flight: false,
+                ack_eliciting: false,
+            };
+            router.packet_sent(&sent, Some(now));
+            assert_eq!(
+                router.connections[&cid].local_close_output,
+                Some(LocalCloseOutput::Sent)
+            );
+            assert_eq!(router.queued_local_close_deadline(cid), None);
+            assert!(
+                router
+                    .prepare_shutdown_close_packets(&cx, now + Duration::from_secs(1),)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(sent.packet.data, ciphertext);
+            assert_eq!(
+                router.connections[&cid]
+                    .connection
+                    .transport()
+                    .drain_deadline_micros(),
+                Some(10_000_000)
+            );
+        });
+    }
+
+    fn establish_for_application_data(cx: &Cx, connection: &mut NativeQuicConnection) {
+        connection.begin_handshake(cx).expect("begin");
+        connection
+            .on_handshake_keys_available(cx)
+            .expect("handshake keys");
+        connection.on_1rtt_keys_available(cx).expect("1rtt keys");
+        connection.record_verified_server_identity();
+        connection
+            .on_handshake_confirmed(cx)
+            .expect("handshake confirmed");
+    }
+}

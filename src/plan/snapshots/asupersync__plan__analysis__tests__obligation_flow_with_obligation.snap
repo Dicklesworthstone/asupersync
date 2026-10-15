@@ -1,0 +1,5 @@
+---
+source: src/plan/analysis.rs
+expression: "format!(\"{}\", flow_with_obligation)"
+---
+reserves=["test_obligation"] must_resolve=["test_obligation"] leak_on_cancel=["test_obligation"] [all-paths-ok]

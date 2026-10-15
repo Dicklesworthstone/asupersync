@@ -1,0 +1,30 @@
+{
+  "schema_version": "doctor-visual-harness-fixture-pack-v1",
+  "description": "Baseline golden fixtures for visual regression harness",
+  "fixtures": [
+    {
+      "fixture_id": "visual-success-baseline",
+      "outcome_class": "success",
+      "expected_visual_profile": "frankentui-stable",
+      "expected_focused_panel": "summary_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-cancelled-baseline",
+      "outcome_class": "cancelled",
+      "expected_visual_profile": "frankentui-cancel",
+      "expected_focused_panel": "triage_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    },
+    {
+      "fixture_id": "visual-failed-baseline",
+      "outcome_class": "failed",
+      "expected_visual_profile": "frankentui-alert",
+      "expected_focused_panel": "triage_panel",
+      "viewport_width": 132,
+      "viewport_height": 44
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+---
+source: tests/scheduler_decision_trace_replay_conformance.rs
+assertion_line: 109
+expression: "&trace_run_a"
+---
+[
+  5,
+  9,
+  0,
+  4,
+  2,
+  6,
+  11,
+  8,
+  1,
+  7,
+  3,
+  10
+]

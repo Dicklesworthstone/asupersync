@@ -1,0 +1,41 @@
+{
+  "schema_version": "touched-surface-proof-selector-input-v1",
+  "touched_files": ["src/http/h2/frame.rs"],
+  "lanes": [
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "command": "rch exec -- cargo test -p asupersync --lib",
+      "guarantee_ids": ["lib-test-frontier"],
+      "source_paths": ["src/**"],
+      "covers": "runtime crate unit-test frontier",
+      "explicit_not_covered": "integration tests and fuzz targets",
+      "broad_frontier": false
+    }
+  ],
+  "selection_rules": [
+    {
+      "rule_id": "runtime-source",
+      "patterns": ["src/**"],
+      "lane_ids": ["lib-tests"],
+      "reason": "runtime source change needs lib-frontier proof"
+    }
+  ],
+  "dirty_tree_receipt": {
+    "schema_version": "dirty-tree-ownership-receipt-v1",
+    "rows": [
+      {
+        "path": ".beads/issues.jsonl",
+        "status": " M",
+        "classification": "tracker-state",
+        "owner": "BeigeDog",
+        "staging_guidance": {
+          "decision": "do-not-stage"
+        },
+        "evidence": {
+          "reservation_holder": "BeigeDog"
+        }
+      }
+    ]
+  }
+}

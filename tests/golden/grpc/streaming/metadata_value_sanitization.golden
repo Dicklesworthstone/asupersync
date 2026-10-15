@@ -1,0 +1,47 @@
+Input:  "normal-value"
+Output: "normal-value"
+Same:   true
+
+Input:  "value with spaces"
+Output: "value with spaces"
+Same:   true
+
+Input:  "value\rwith\rcarriage\rreturns"
+Output: "valuewithcarriagereturns"
+Same:   false
+
+Input:  "value\nwith\nnewlines"
+Output: "valuewithnewlines"
+Same:   false
+
+Input:  "value\r\nwith\r\nboth"
+Output: "valuewithboth"
+Same:   false
+
+Input:  "value\r\n\r\nwith\r\n\r\nmultiple"
+Output: "valuewithmultiple"
+Same:   false
+
+Input:  "A\0B\tC\u{1f}D\u{7f}EαF"
+Output: "ABCDEF"
+Same:   false
+
+Input:  ""
+Output: ""
+Same:   true
+
+Input:  "single\r"
+Output: "single"
+Same:   false
+
+Input:  "single\n"
+Output: "single"
+Same:   false
+
+Input:  "symbols!@#$%^&*()"
+Output: "symbols!@#$%^&*()"
+Same:   true
+
+Input:  "unicode-αβγδε"
+Output: "unicode-"
+Same:   false

@@ -1,0 +1,53 @@
+{
+  "contract_version": "shadow-promote-rollback-receipts-smoke-contract-v1",
+  "runner_script": "scripts/run_shadow_promote_rollback_receipts_smoke.sh",
+  "report_artifacts": [
+    "shadow_promote_rollback_receipt.json",
+    "run_report.json"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-SHADOW-PROMOTE-ROLLBACK-RECEIPT-64C-256G",
+      "description": "Shadow promotion receipt for a 64-core / 256 GiB locality-first candidate compared against the conservative baseline on the same evidence snapshot.",
+      "expected_decision": "promote",
+      "required_report_fields": [
+        "schema_version",
+        "scenario_id",
+        "decision",
+        "accepted",
+        "no_win",
+        "fallback_decision",
+        "baseline_bundle_digest_sha256",
+        "candidate_bundle_digest_sha256",
+        "candidate_manifest_digest_sha256",
+        "baseline_evidence_hash_sha256",
+        "candidate_evidence_hash_sha256",
+        "capacity_certificate_id",
+        "latency_certificate_id",
+        "shadow_run_decision",
+        "regret_margin_basis_points",
+        "p99_delta_ns",
+        "p999_delta_ns",
+        "shadow_hold_reasons",
+        "refusal_reasons",
+        "rollback_receipt_digest_sha256",
+        "rollback_receipt_path",
+        "dirty_artifacts",
+        "replay_command",
+        "promotion_receipt_digest_sha256"
+      ],
+      "acceptance": {
+        "fallback_decision": "promote_candidate_bundle",
+        "shadow_run_decision": "promote",
+        "maximum_p99_delta_ns": 0,
+        "maximum_p999_delta_ns": 0,
+        "minimum_regret_margin_basis_points": 250,
+        "expected_refusal_reasons": 0,
+        "expected_dirty_artifacts": 0,
+        "capacity_certificate_id": "artifacts/capacity_envelope_planner_smoke_contract_v1.json",
+        "latency_certificate_id": "artifacts/runtime_latency_budget_certificate_contract_v1.json",
+        "rollback_receipt_path": "shadow_promote_rollback_receipt.json"
+      }
+    }
+  ]
+}

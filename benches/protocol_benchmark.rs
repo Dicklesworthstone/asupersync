@@ -1,0 +1,600 @@
+//! Protocol benchmark suite for Asupersync.
+//!
+//! Benchmarks the performance of protocol implementations:
+//! - HTTP/1.1: Request parsing, response serialization
+//! - HTTP/2: HPACK compression, frame parsing
+//! - WebSocket: Frame encoding/decoding, masking
+//!
+//! Performance targets:
+//! - HTTP/1 request parsing: < 500ns for typical GET request
+//! - HPACK header decoding: < 1μs for typical header block
+//! - WebSocket frame parsing: < 100ns for data frames
+
+#![allow(missing_docs)]
+#![allow(clippy::semicolon_if_nothing_returned)]
+
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use memchr::{memchr_iter, memmem};
+use smallvec::SmallVec;
+use std::hint::black_box;
+
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::codec::Decoder;
+use asupersync::http::h1::Http1Codec;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder};
+use asupersync::net::websocket::{FrameCodec, Role};
+
+// =============================================================================
+// HTTP/1.1 BENCHMARKS
+// =============================================================================
+
+/// Sample HTTP/1.1 GET request for benchmarking.
+const SIMPLE_GET_REQUEST: &[u8] = b"GET /api/v1/users HTTP/1.1\r\n\
+Host: example.com\r\n\
+User-Agent: bench/1.0\r\n\
+Accept: application/json\r\n\
+Accept-Encoding: gzip, deflate\r\n\
+Connection: keep-alive\r\n\
+\r\n";
+
+/// HTTP/1.1 POST request with body.
+const POST_REQUEST_WITH_BODY: &[u8] = b"POST /api/v1/data HTTP/1.1\r\n\
+Host: example.com\r\n\
+Content-Type: application/json\r\n\
+Content-Length: 45\r\n\
+\r\n\
+{\"name\":\"test\",\"value\":42,\"active\":true}";
+
+/// HTTP/1.1 request with many headers.
+fn request_with_many_headers(header_count: usize) -> Vec<u8> {
+    let mut request = b"GET /api/test HTTP/1.1\r\nHost: example.com\r\n".to_vec();
+    for i in 0..header_count {
+        request.extend_from_slice(format!("X-Custom-Header-{i}: value-{i}\r\n").as_bytes());
+    }
+    request.extend_from_slice(b"\r\n");
+    request
+}
+
+/// Build a pipelined HTTP/1.1 request stream for keep-alive decode benchmarks.
+fn pipelined_requests(request_count: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(SIMPLE_GET_REQUEST.len() * request_count);
+    for _ in 0..request_count {
+        buf.extend_from_slice(SIMPLE_GET_REQUEST);
+    }
+    buf
+}
+
+fn legacy_find_crlf(buf: &[u8]) -> Option<usize> {
+    // Mirror the short-line scan retained by the chunked body decoders in
+    // `http/h1/{client,stream}.rs`. Keep this benchmark tied to the production
+    // call-site shape so it can justify (or refute) replacing that exact code.
+    buf.windows(2).position(|window| window == b"\r\n")
+}
+
+fn optimized_find_crlf(buf: &[u8]) -> Option<usize> {
+    memmem::find(buf, b"\r\n")
+}
+
+fn legacy_collect_crlf_positions(buf: &[u8], out: &mut SmallVec<[usize; 32]>) {
+    out.clear();
+    for idx in memchr_iter(b'\n', buf) {
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            out.push(idx - 1);
+        }
+    }
+}
+
+fn optimized_collect_crlf_positions(buf: &[u8], out: &mut SmallVec<[usize; 32]>) {
+    out.clear();
+    out.extend(memmem::find_iter(buf, b"\r\n"));
+}
+
+fn bench_http1_parsing(c: &mut Criterion) {
+    let mut group = c.benchmark_group("http1/parse");
+
+    // Simple GET request
+    group.throughput(Throughput::Bytes(SIMPLE_GET_REQUEST.len() as u64));
+    group.bench_function("simple_get", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let codec = Http1Codec::new();
+                let buf = BytesMut::from(SIMPLE_GET_REQUEST);
+                (codec, buf)
+            },
+            |(mut codec, mut buf)| {
+                let result = codec.decode(&mut buf);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("simple_get_borrowed", |b: &mut criterion::Bencher| {
+        let codec = Http1Codec::new();
+        b.iter(|| {
+            black_box(
+                codec
+                    .inspect_request_head(black_box(SIMPLE_GET_REQUEST))
+                    .expect("borrowed inspection succeeds"),
+            )
+        })
+    });
+
+    // POST request with body
+    group.throughput(Throughput::Bytes(POST_REQUEST_WITH_BODY.len() as u64));
+    group.bench_function("post_with_body", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let codec = Http1Codec::new();
+                let buf = BytesMut::from(POST_REQUEST_WITH_BODY);
+                (codec, buf)
+            },
+            |(mut codec, mut buf)| {
+                let result = codec.decode(&mut buf);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+    group.bench_function("post_with_body_borrowed", |b: &mut criterion::Bencher| {
+        let codec = Http1Codec::new();
+        b.iter(|| {
+            black_box(
+                codec
+                    .inspect_request_head(black_box(POST_REQUEST_WITH_BODY))
+                    .expect("borrowed inspection succeeds"),
+            )
+        })
+    });
+
+    // Requests with varying header counts
+    for &header_count in &[5, 20, 50] {
+        let request = request_with_many_headers(header_count);
+        group.throughput(Throughput::Bytes(request.len() as u64));
+        group.bench_with_input(
+            BenchmarkId::new("headers", header_count),
+            &request,
+            |b, request| {
+                b.iter_batched(
+                    || {
+                        let codec = Http1Codec::new();
+                        let buf = BytesMut::from(&request[..]);
+                        (codec, buf)
+                    },
+                    |(mut codec, mut buf)| {
+                        let result = codec.decode(&mut buf);
+                        black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("headers_borrowed", header_count),
+            &request,
+            |b, request| {
+                let codec = Http1Codec::new();
+                b.iter(|| {
+                    black_box(
+                        codec
+                            .inspect_request_head(black_box(request.as_slice()))
+                            .expect("borrowed inspection succeeds"),
+                    )
+                })
+            },
+        );
+    }
+
+    // Keep-alive/pipelined decode throughput: one connection, many in-buffer requests.
+    for &request_count in &[8usize, 32, 128] {
+        let stream = pipelined_requests(request_count);
+        group.throughput(Throughput::Elements(request_count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("keepalive_pipeline", request_count),
+            &stream,
+            |b, stream| {
+                b.iter_batched(
+                    || {
+                        let codec = Http1Codec::new();
+                        let buf = BytesMut::from(&stream[..]);
+                        (codec, buf)
+                    },
+                    |(mut codec, mut buf)| {
+                        let mut decoded = 0usize;
+                        while let Some(req) = codec.decode(&mut buf).expect("decode succeeds") {
+                            black_box(req);
+                            decoded += 1;
+                        }
+                        black_box(decoded)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("keepalive_pipeline_borrowed", request_count),
+            &stream,
+            |b, stream| {
+                let codec = Http1Codec::new();
+                b.iter(|| {
+                    let mut remaining = stream.as_slice();
+                    let mut decoded = 0usize;
+                    while !remaining.is_empty() {
+                        let head = codec
+                            .inspect_request_head(remaining)
+                            .expect("borrowed inspection succeeds")
+                            .expect("complete pipelined head");
+                        let consumed = head.consumed_len();
+                        black_box(head);
+                        remaining = &remaining[consumed..];
+                        decoded += 1;
+                    }
+                    black_box(decoded)
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_http1_crlf_scan(c: &mut Criterion) {
+    let mut group = c.benchmark_group("http1/crlf_scan");
+    let request = request_with_many_headers(20);
+    group.throughput(Throughput::Bytes(request.len() as u64));
+
+    group.bench_function("find/legacy_scalar", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(legacy_find_crlf(black_box(request.as_slice()))))
+    });
+
+    group.bench_function("find/memmem", |b: &mut criterion::Bencher| {
+        b.iter(|| black_box(optimized_find_crlf(black_box(request.as_slice()))))
+    });
+
+    group.bench_function("collect/legacy_scalar", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            SmallVec::<[usize; 32]>::new,
+            |mut positions| {
+                legacy_collect_crlf_positions(black_box(request.as_slice()), &mut positions);
+                black_box(positions.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.bench_function("collect/memmem", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            SmallVec::<[usize; 32]>::new,
+            |mut positions| {
+                optimized_collect_crlf_positions(black_box(request.as_slice()), &mut positions);
+                black_box(positions.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
+// HPACK BENCHMARKS (HTTP/2)
+// =============================================================================
+
+/// Typical HTTP/2 request headers.
+fn typical_request_headers() -> Vec<Header> {
+    vec![
+        Header::new(":method", "GET"),
+        Header::new(":path", "/api/v1/users"),
+        Header::new(":scheme", "https"),
+        Header::new(":authority", "example.com"),
+        Header::new("accept", "application/json"),
+        Header::new("accept-encoding", "gzip, deflate, br"),
+        Header::new("accept-language", "en-US,en;q=0.9"),
+        Header::new("user-agent", "Mozilla/5.0 (compatible; Bench/1.0)"),
+    ]
+}
+
+/// Typical HTTP/2 response headers.
+fn typical_response_headers() -> Vec<Header> {
+    vec![
+        Header::new(":status", "200"),
+        Header::new("content-type", "application/json; charset=utf-8"),
+        Header::new("content-length", "1234"),
+        Header::new("cache-control", "max-age=3600"),
+        Header::new("date", "Sun, 01 Feb 2026 00:00:00 GMT"),
+        Header::new("server", "asupersync/0.1.0"),
+    ]
+}
+
+fn bench_hpack_encoding(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hpack/encode");
+
+    // Encode typical request headers
+    group.bench_function("request_headers", |b: &mut criterion::Bencher| {
+        let headers = typical_request_headers();
+        b.iter_batched(
+            || {
+                let encoder = HpackEncoder::new();
+                let buf = BytesMut::with_capacity(256);
+                (encoder, headers.clone(), buf)
+            },
+            |(mut encoder, headers, mut buf)| {
+                encoder.encode(&headers, &mut buf);
+                black_box(buf.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Encode typical response headers
+    group.bench_function("response_headers", |b: &mut criterion::Bencher| {
+        let headers = typical_response_headers();
+        b.iter_batched(
+            || {
+                let encoder = HpackEncoder::new();
+                let buf = BytesMut::with_capacity(256);
+                (encoder, headers.clone(), buf)
+            },
+            |(mut encoder, headers, mut buf)| {
+                encoder.encode(&headers, &mut buf);
+                black_box(buf.len())
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Benchmark repeated encoding (dynamic table optimization)
+    group.bench_function("repeated_headers", |b: &mut criterion::Bencher| {
+        let headers = typical_request_headers();
+        let mut encoder = HpackEncoder::new();
+        let mut buf = BytesMut::with_capacity(256);
+
+        // Warm up the dynamic table
+        for _ in 0..10 {
+            buf.clear();
+            encoder.encode(&headers, &mut buf);
+        }
+
+        b.iter(|| {
+            buf.clear();
+            encoder.encode(&headers, &mut buf);
+            black_box(buf.len())
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_hpack_decoding(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hpack/decode");
+
+    // Pre-encode headers for decoding benchmarks
+    let request_headers = typical_request_headers();
+    let response_headers = typical_response_headers();
+
+    let mut encoder = HpackEncoder::new();
+    let mut encoded_request_buf = BytesMut::with_capacity(256);
+    encoder.encode(&request_headers, &mut encoded_request_buf);
+    let encoded_request: Bytes = encoded_request_buf.freeze();
+
+    let mut encoded_response_buf = BytesMut::with_capacity(256);
+    encoder.encode(&response_headers, &mut encoded_response_buf);
+    let encoded_response: Bytes = encoded_response_buf.freeze();
+
+    // Decode request headers
+    group.throughput(Throughput::Bytes(encoded_request.len() as u64));
+    group.bench_function("request_headers", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let decoder = HpackDecoder::new();
+                (decoder, encoded_request.clone())
+            },
+            |(mut decoder, mut encoded): (HpackDecoder, Bytes)| {
+                let result = decoder.decode(&mut encoded);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Decode response headers
+    group.throughput(Throughput::Bytes(encoded_response.len() as u64));
+    group.bench_function("response_headers", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let decoder = HpackDecoder::new();
+                (decoder, encoded_response.clone())
+            },
+            |(mut decoder, mut encoded): (HpackDecoder, Bytes)| {
+                let result = decoder.decode(&mut encoded);
+                black_box(result)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // Benchmark with varying dynamic table sizes
+    for &table_size in &[256, 4096, 16384] {
+        group.bench_with_input(
+            BenchmarkId::new("table_size", table_size),
+            &table_size,
+            |b, &table_size| {
+                b.iter_batched(
+                    || {
+                        let decoder = HpackDecoder::with_max_size(table_size);
+                        (decoder, encoded_request.clone())
+                    },
+                    |(mut decoder, mut encoded): (HpackDecoder, Bytes)| {
+                        let result = decoder.decode(&mut encoded);
+                        black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// WEBSOCKET BENCHMARKS
+// =============================================================================
+
+/// Create a WebSocket binary frame with masking.
+fn create_ws_frame(payload_len: usize, masked: bool) -> Vec<u8> {
+    let mut frame = Vec::with_capacity(14 + payload_len);
+
+    // First byte: FIN=1, opcode=0x2 (binary)
+    frame.push(0x82);
+
+    // Second byte: MASK bit + length
+    let mask_bit = if masked { 0x80 } else { 0x00 };
+
+    if payload_len < 126 {
+        frame.push(mask_bit | (payload_len as u8));
+    } else if payload_len < 65536 {
+        frame.push(mask_bit | 0x7E);
+        frame.extend_from_slice(&(payload_len as u16).to_be_bytes());
+    } else {
+        frame.push(mask_bit | 0x7F);
+        frame.extend_from_slice(&(payload_len as u64).to_be_bytes());
+    }
+
+    // Masking key (if masked)
+    if masked {
+        frame.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    }
+
+    // Payload
+    frame.extend(std::iter::repeat_n(0xAB, payload_len));
+
+    frame
+}
+
+fn bench_websocket_frame(c: &mut Criterion) {
+    let mut group = c.benchmark_group("websocket/frame");
+
+    // Frame parsing for different payload sizes
+    for &size in &[64, 1024, 8192, 65536] {
+        let frame = create_ws_frame(size, true);
+        group.throughput(Throughput::Bytes(frame.len() as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("parse_masked", size),
+            &frame,
+            |b, frame| {
+                b.iter_batched(
+                    || {
+                        let codec = FrameCodec::new(Role::Server);
+                        let buf = BytesMut::from(&frame[..]);
+                        (codec, buf)
+                    },
+                    |(mut codec, mut buf)| {
+                        let result = codec.decode(&mut buf);
+                        black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Unmasked frame parsing (server-to-client)
+    for &size in &[64, 1024, 8192] {
+        let frame = create_ws_frame(size, false);
+        group.throughput(Throughput::Bytes(frame.len() as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("parse_unmasked", size),
+            &frame,
+            |b, frame| {
+                b.iter_batched(
+                    || {
+                        let codec = FrameCodec::new(Role::Client);
+                        let buf = BytesMut::from(&frame[..]);
+                        (codec, buf)
+                    },
+                    |(mut codec, mut buf)| {
+                        let result = codec.decode(&mut buf);
+                        black_box(result)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// THROUGHPUT BENCHMARKS
+// =============================================================================
+
+fn bench_protocol_throughput(c: &mut Criterion) {
+    let mut group = c.benchmark_group("protocol/throughput");
+    group.sample_size(50);
+
+    // HTTP/1 request parsing throughput
+    for &count in &[100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("http1_requests", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    for _ in 0..count {
+                        let mut codec = Http1Codec::new();
+                        let mut buf = BytesMut::from(SIMPLE_GET_REQUEST);
+                        let result = codec.decode(&mut buf);
+                        let _ = black_box(result);
+                    }
+                })
+            },
+        );
+    }
+
+    // HPACK encode/decode throughput
+    let headers = typical_request_headers();
+    for &count in &[100, 1000] {
+        group.throughput(Throughput::Elements(count));
+        group.bench_with_input(
+            BenchmarkId::new("hpack_roundtrips", count),
+            &count,
+            |b, &count| {
+                b.iter(|| {
+                    let mut hpack_encoder = HpackEncoder::new();
+                    let mut hpack_decoder = HpackDecoder::new();
+                    let mut buf = BytesMut::with_capacity(256);
+
+                    for _ in 0..count {
+                        buf.clear();
+                        hpack_encoder.encode(&headers, &mut buf);
+                        // Convert BytesMut to Bytes for decoding
+                        let mut encoded_bytes = Bytes::from(buf.as_ref().to_vec());
+                        let decoded_headers = hpack_decoder.decode(&mut encoded_bytes);
+                        let _ = black_box(decoded_headers);
+                    }
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+// =============================================================================
+// MAIN
+// =============================================================================
+
+criterion_group!(
+    benches,
+    bench_http1_parsing,
+    bench_http1_crlf_scan,
+    bench_hpack_encoding,
+    bench_hpack_decoding,
+    bench_websocket_frame,
+    bench_protocol_throughput,
+);
+
+criterion_main!(benches);

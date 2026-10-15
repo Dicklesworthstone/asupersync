@@ -1,0 +1,17 @@
+# RFC 6330 Section 6 Systematic + Repair Symbol Mix Test
+# Input: 32 bytes, expected K=4, repair=2
+# Systematic symbols: ESI 0-3 (must match source data)
+# Repair symbols: ESI 4-5 (must be linearly independent)
+
+systematic esi=0000 verified_match=true data_hex=4142434445464748
+systematic esi=0001 verified_match=true data_hex=494a4b4c4d4e4f50
+systematic esi=0002 verified_match=true data_hex=5152535455565758
+systematic esi=0003 verified_match=true data_hex=595a5b5c5d5e5f60
+repair esi=0004 data_hex=4e093487bafdc086
+repair esi=0005 data_hex=ac8d92cfd0f1ee26
+
+# RFC 6330 Section 6 Compliance Summary
+systematic_symbols=4 repair_symbols=2
+total_symbols=6
+rfc6330_section6_compliance=PASS
+pipeline_stats bytes_in=32 blocks=1 source_symbols=4 repair_symbols=2

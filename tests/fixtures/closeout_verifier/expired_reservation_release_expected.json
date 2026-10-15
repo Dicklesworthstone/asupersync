@@ -1,0 +1,86 @@
+{
+  "commit": "bcd7890abc",
+  "current_date": "2026-05-10",
+  "fixture_path": "tests/fixtures/closeout_verifier/expired_reservation_release.json",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-10T08:35:00Z",
+  "non_mutating": true,
+  "overall_status": "pass",
+  "rows": [
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main",
+        "expected_commit": "bcd7890abc",
+        "observed_commit": "bcd7890abc"
+      },
+      "row_id": "main_pushed",
+      "status": "pass",
+      "summary": "origin/main points at the closeout commit"
+    },
+    {
+      "evidence": {
+        "command": "git rev-parse origin/main origin/master",
+        "expected_commit": "bcd7890abc",
+        "origin_main": "bcd7890abc",
+        "origin_master": "bcd7890abc"
+      },
+      "row_id": "master_synced",
+      "status": "pass",
+      "summary": "origin/master is synced to origin/main at the closeout commit"
+    },
+    {
+      "evidence": {
+        "bead_id": "asupersync-expired-reservation",
+        "command": "br show asupersync-expired-reservation --json",
+        "observed_status": "closed"
+      },
+      "row_id": "bead_closed",
+      "status": "pass",
+      "summary": "bead asupersync-expired-reservation is closed"
+    },
+    {
+      "evidence": {
+        "expected_commit": "bcd7890abc",
+        "matched_message_ids": [
+          1007
+        ],
+        "thread_id": "asupersync-expired-reservation"
+      },
+      "row_id": "closeout_mail",
+      "status": "pass",
+      "summary": "closeout mail found for the slice"
+    },
+    {
+      "evidence": {
+        "active_reservations": [],
+        "agent": "GentleCitadel"
+      },
+      "row_id": "reservations_released",
+      "status": "pass",
+      "summary": "no active closeout-owner reservations remain"
+    },
+    {
+      "evidence": {
+        "closeout_validation_reported": null,
+        "mail_mentions_validation": true
+      },
+      "row_id": "validation_reported",
+      "status": "pass",
+      "summary": "validation evidence is reported"
+    }
+  ],
+  "schema_version": "closeout-verifier-v1",
+  "slice_id": "asupersync-expired-reservation",
+  "slice_mode": "bead-backed",
+  "summary": {
+    "fail": 0,
+    "pass": 6,
+    "warn": 0
+  }
+}

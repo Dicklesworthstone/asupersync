@@ -1,0 +1,211 @@
+{
+  "schema_version": "wasm-typescript-package-policy-v1",
+  "description": "Deterministic TypeScript package topology and boundary contract for Browser Edition.",
+  "enforcement_mode": "mandatory",
+  "required_packages": [
+    "@asupersync/browser-core",
+    "@asupersync/browser",
+    "@asupersync/react",
+    "@asupersync/next"
+  ],
+  "topology": {
+    "packages": [
+      {
+        "name": "@asupersync/browser-core",
+        "layer": "core",
+        "stability": "public",
+        "semver_surface": "stable",
+        "exports": [
+          {
+            "subpath": ".",
+            "kind": "runtime-core",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          },
+          {
+            "subpath": "./types",
+            "kind": "type-surface",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          }
+        ]
+      },
+      {
+        "name": "@asupersync/browser",
+        "layer": "sdk",
+        "stability": "public",
+        "semver_surface": "stable",
+        "exports": [
+          {
+            "subpath": ".",
+            "kind": "high-level-sdk",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          },
+          {
+            "subpath": "./tracing",
+            "kind": "diagnostics",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          }
+        ]
+      },
+      {
+        "name": "@asupersync/react",
+        "layer": "adapter",
+        "stability": "public",
+        "semver_surface": "preview",
+        "exports": [
+          {
+            "subpath": ".",
+            "kind": "react-adapter",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          }
+        ]
+      },
+      {
+        "name": "@asupersync/next",
+        "layer": "adapter",
+        "stability": "public",
+        "semver_surface": "preview",
+        "exports": [
+          {
+            "subpath": ".",
+            "kind": "next-adapter",
+            "tree_shake_safe": true,
+            "module_modes": ["esm", "cjs"]
+          }
+        ]
+      }
+    ],
+    "forbidden_public_subpath_prefixes": [
+      "./internal/",
+      "./native/"
+    ],
+    "allowed_layer_edges": [
+      {
+        "from": "@asupersync/browser-core",
+        "to": "@asupersync/browser"
+      },
+      {
+        "from": "@asupersync/browser",
+        "to": "@asupersync/react"
+      },
+      {
+        "from": "@asupersync/browser",
+        "to": "@asupersync/next"
+      }
+    ]
+  },
+  "type_surface": {
+    "required_symbols": [
+      "Outcome",
+      "Budget",
+      "CancellationToken",
+      "RegionHandle"
+    ],
+    "symbol_owners": {
+      "Outcome": "@asupersync/browser-core",
+      "Budget": "@asupersync/browser-core",
+      "CancellationToken": "@asupersync/browser",
+      "RegionHandle": "@asupersync/browser"
+    }
+  },
+  "resolution_matrix": {
+    "required_frameworks": ["vanilla-ts", "react", "next"],
+    "required_module_modes": ["esm", "cjs"],
+    "required_bundlers": ["vite", "webpack", "next-turbopack"],
+    "scenarios": [
+      {
+        "id": "TS-PKG-VANILLA-ESM",
+        "framework": "vanilla-ts",
+        "package": "@asupersync/browser",
+        "entrypoint": "@asupersync/browser",
+        "module_mode": "esm",
+        "bundler": "vite",
+        "adapter_path": "none",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/vanilla-ts install",
+        "run_command": "pnpm --dir examples/browser/vanilla-ts build"
+      },
+      {
+        "id": "TS-PKG-VANILLA-CJS",
+        "framework": "vanilla-ts",
+        "package": "@asupersync/browser",
+        "entrypoint": "@asupersync/browser",
+        "module_mode": "cjs",
+        "bundler": "webpack",
+        "adapter_path": "none",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/vanilla-ts-cjs install",
+        "run_command": "pnpm --dir examples/browser/vanilla-ts-cjs build"
+      },
+      {
+        "id": "TS-PKG-REACT-ESM",
+        "framework": "react",
+        "package": "@asupersync/react",
+        "entrypoint": "@asupersync/react",
+        "module_mode": "esm",
+        "bundler": "vite",
+        "adapter_path": "react/provider",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/react install",
+        "run_command": "pnpm --dir examples/browser/react build"
+      },
+      {
+        "id": "TS-PKG-REACT-CJS",
+        "framework": "react",
+        "package": "@asupersync/react",
+        "entrypoint": "@asupersync/react",
+        "module_mode": "cjs",
+        "bundler": "webpack",
+        "adapter_path": "react/provider",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/react-cjs install",
+        "run_command": "pnpm --dir examples/browser/react-cjs build"
+      },
+      {
+        "id": "TS-PKG-NEXT-ESM",
+        "framework": "next",
+        "package": "@asupersync/next",
+        "entrypoint": "@asupersync/next",
+        "module_mode": "esm",
+        "bundler": "next-turbopack",
+        "adapter_path": "next/app-router",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/next install",
+        "run_command": "pnpm --dir examples/browser/next build"
+      },
+      {
+        "id": "TS-PKG-NEXT-CJS",
+        "framework": "next",
+        "package": "@asupersync/next",
+        "entrypoint": "@asupersync/next",
+        "module_mode": "cjs",
+        "bundler": "webpack",
+        "adapter_path": "next/pages-router",
+        "runtime_profile": "FP-BR-DEV",
+        "install_command": "pnpm --dir examples/browser/next-cjs install",
+        "run_command": "pnpm --dir examples/browser/next-cjs build"
+      }
+    ]
+  },
+  "logging": {
+    "required_fields": [
+      "scenario_id",
+      "step_id",
+      "package_entrypoint",
+      "adapter_path",
+      "runtime_profile",
+      "diagnostic_category",
+      "outcome",
+      "artifact_log_path",
+      "repro_command"
+    ]
+  },
+  "output": {
+    "summary_path": "artifacts/wasm_typescript_package_summary.json",
+    "log_path": "artifacts/wasm_typescript_package_log.ndjson"
+  }
+}

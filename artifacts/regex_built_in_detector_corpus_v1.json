@@ -1,0 +1,1405 @@
+{
+  "schema_version": 1,
+  "artifact_id": "regex-built-in-detector-corpus-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-5z2scg.8.2.1",
+  "capability_id": "CAP-REGEX-PRIVACY",
+  "captured_date_utc": "2026-08-04",
+  "source_revision": "3b222630d3814ea0bd254709d10e14953f90441e",
+  "authority_revision": "5f208e04f24d8addaa051c9bf7465f7b398848fe",
+  "baseline_authority_revision": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+  "r1_evidence_revision": "8b399fa722e47e55950164655dd18276d9fc85fc",
+  "supersedes_detector_corpus": "artifacts/regex_privacy_capability_inventory_v1.json#built_in_detector_corpus",
+  "authority": {
+    "source": "artifacts/dependency_capability_registry_v1.json#CAP-REGEX-PRIVACY",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "fast_path_state": "DISABLED_AFTER_NAMED_HOST_RESOURCE_REGRESSION",
+    "cutover_state": "KEEP_INCUMBENT_TERMINAL",
+    "dependency_exit_allowed": false,
+    "custom_pattern_fast_path_allowed": false,
+    "email_and_ssn_owner": "asupersync-5z2scg.8.2.2",
+    "card_and_luhn_owner": "asupersync-5z2scg.8.2.3",
+    "phone_and_dispatch_owner": "asupersync-5z2scg.8.2.4",
+    "terminal_receipt_owner": "asupersync-5z2scg.8.2.5"
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "corpus_state": "STATIC_INDEPENDENT_BASELINE",
+    "execution_state": "NOT_RUN_BY_R2_1_STATIC_LANE",
+    "incumbent_role": "POST_AUTHORING_DIFFERENTIAL_ORACLE_ONLY",
+    "span_unit": "UTF8_BYTE_OFFSET",
+    "span_interval": "HALF_OPEN",
+    "match_iteration": "LEFTMOST_FIRST_NON_OVERLAPPING",
+    "detector_vector_output_rule": "AUTO_ENABLED_ACCEPT_USES_DETECTOR_TOKEN_ELSE_PRESERVE_INPUT",
+    "unrecognized_or_conflicting_dispatch": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT",
+    "accepted_states": [
+      "STATIC_INDEPENDENT_BASELINE",
+      "PRESENT",
+      "ABSENT",
+      "ROUTED",
+      "BLOCKED",
+      "NOT_RUN_BY_R2_1_STATIC_LANE",
+      "SPECIFICATION_ONLY_NOT_IMPLEMENTED"
+    ]
+  },
+  "source_pin_scope": {
+    "rule": "Every dependency selector, resolution, live detector source, source gate, R1 baseline, ADR, capability authority and baseline authority used by this corpus is pinned.",
+    "path_count": 8,
+    "paths_sha256": "b5ba6ff6a6eb152e0c3bb263205e8a7d9f9a58fbbb27ec13fd276eb909d9552a",
+    "line_count_semantics": "Rust str::lines record count"
+  },
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "0f02e4fefedf5e9013054df794ece6f8fb259134fdbd95376e61d486c043fde3",
+      "line_count": 1074,
+      "role": "optional regex dependency selector and metrics feature gate"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "513cfba8f8671e69aab32317e042bd00737b9bfb30e2234012d6605f320f7a6a",
+      "line_count": 4664,
+      "role": "incumbent regex dependency resolution"
+    },
+    {
+      "path": "src/observability/otel.rs",
+      "sha256": "f0e0586716bc3871b0d18cfa16a846c42453cdb530c6b2055942155c9557b562",
+      "line_count": 15908,
+      "role": "live custom-first incumbent regex redaction pipeline, four disabled bounded scanner implementations retained for equivalence tests, detector order, tokens and allocation-free Luhn join"
+    },
+    {
+      "path": "src/observability/mod.rs",
+      "sha256": "2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b",
+      "line_count": 1194,
+      "role": "observability compilation and feature gate"
+    },
+    {
+      "path": "artifacts/regex_privacy_capability_inventory_v1.json",
+      "sha256": "2f0264e45f9362d4b299c235f82b415d553b8f6fd40a05aef25f84c948f75a5e",
+      "line_count": 1015,
+      "role": "R1 capability and historical detector baseline"
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_012_regex_privacy.md",
+      "sha256": "76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c",
+      "line_count": 145,
+      "role": "accepted keep-incumbent and no-narrowing decision"
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "450e301a6c3ef5ea5068dad40470bb58bcc0b956da36d8b1e00b0a949e29e1f6",
+      "line_count": 6927,
+      "role": "CAP-REGEX-PRIVACY authority"
+    },
+    {
+      "path": "artifacts/dependency_capability_baseline_v1.json",
+      "sha256": "70ae911193a4b3d9d1d38ac5581dd5064bae1c5efb947e022619ea1e2eef6858",
+      "line_count": 3264,
+      "role": "executable-partial blocking baseline authority"
+    }
+  ],
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner": "asupersync-ghxhvm",
+    "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
+    "execution_receipts_rebound": false,
+    "reviewed_changes": "Current release metadata and registry/API inventories are reviewed separately from the frozen R2 vectors and named-host handoff. otel.rs changes only an equivalent optional-value predicate and an existing Unicode-test lint exemption; detector order, patterns, disabled fast paths and KEEP_INCUMBENT remain unchanged. R1 adds current source pins without rewriting its original corpus.",
+    "source_pins": [
+      {"path":"Cargo.toml","sha256":"5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e","line_count":1121},
+      {"path":"Cargo.lock","sha256":"8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb","line_count":4664},
+      {"path":"src/observability/otel.rs","sha256":"2f344446249759aad8880a443d1bdb87249630cb7e010ae35b69daca0d97803b","line_count":15911},
+      {"path":"src/observability/mod.rs","sha256":"2c1fe00b759c05d6d92437f94178690861d84040c2dc7558284afca3ade19e6b","line_count":1194},
+      {"path":"artifacts/regex_privacy_capability_inventory_v1.json","sha256":"a19f39988dccde57c7368823918cfe567180ec2af52517d23021f3630e1adf55","line_count":1039},
+      {"path":"docs/adr/dep_plan_adr_012_regex_privacy.md","sha256":"76456b9192cc828f59b9c9a5bb19d20b31dc7e8171554e73bc8f4391c892301c","line_count":145},
+      {"path":"artifacts/dependency_capability_registry_v1.json","sha256":"660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa","line_count":7067},
+      {"path":"artifacts/dependency_capability_baseline_v1.json","sha256":"49e85f8defbccb4e9cce3c37d302e965b36de518f8929999928d9464e83ee791","line_count":3296}
+    ]
+  },
+  "post_capture_provenance_refresh": {
+    "refresh_id": "RGX-R2-SOURCE-PIN-REFRESH-2026-08-06",
+    "recorded_date_utc": "2026-08-06",
+    "refresh_state": "STATIC_SOURCE_PIN_MAINTENANCE",
+    "execution_state": "NOT_RUN_BY_R2_1_STATIC_LANE",
+    "path": "artifacts/dependency_capability_baseline_v1.json",
+    "previous_pin": {
+      "authority_revision": "7390d33f4ac297cd28138c8e1ece38f60b278660",
+      "sha256": "88575b016105828ce8c1792492355fd34e8a3687ef6be2509e0412dee949cda8",
+      "line_count": 1357
+    },
+    "current_pin": {
+      "last_change_revision": "4376cddb3ec421767029bff87ed1ef747e693ce5",
+      "sha256": "7d73dc99cf9be276ce6adcd66b631a1e60bfe0e44a419d574e5a2414c967befc",
+      "line_count": 3210
+    },
+    "change_classification": {
+      "classification": "APPEND_ONLY_INDEPENDENT_PHASE2_STATIC_AUDITS",
+      "inserted_lines": 1853,
+      "deleted_lines": 0,
+      "added_top_level_objects": [
+        "hash_map_static_audit",
+        "host_benchmark_metadata_static_audit",
+        "phase2_terminal_readiness_static_audit",
+        "slab_static_audit",
+        "visibility_macro_static_audit"
+      ],
+      "change_revisions": [
+        "4d5748b3de2c15985af55e3dfe3c35626d6be543",
+        "42a66e7f4e6733c28c59405c052c68f7a32ea0d7",
+        "1472b388e365460c2dc067b57f084291e6d8d407",
+        "33f94643ced8f5415ad3c1f0a30cd42ddcb738c9",
+        "612a82a546634ba1de2d06fe6e429bf85516a475",
+        "4376cddb3ec421767029bff87ed1ef747e693ce5"
+      ],
+      "unchanged_capability_rows": {
+        "CAP-REGEX-PRIVACY": "5053806ac9a546ea240a6efc0190969da549f31ed03cf17e4b7b40f45adedc5b",
+        "CAP-LAB-DETERMINISM": "335025c213cd9a79c1d95dbe4b8fae77787478e6cff42bf141a265f597fd348b"
+      }
+    },
+    "preservation": {
+      "detector_vectors_changed": false,
+      "pipeline_vectors_changed": false,
+      "dispatch_negative_fixtures_changed": false,
+      "dispatch_allowset_changed": false,
+      "corpus_policy_changed": false,
+      "authority_decision_changed": false,
+      "production_source_changed": false,
+      "dependency_exit_allowed": false
+    },
+    "no_claim_boundary": "This refresh classifies one shared baseline pin drift and records the current content hash. The five added top-level objects belong to independent Phase-2 static audits, while the CAP-REGEX-PRIVACY and CAP-LAB-DETERMINISM rows remain byte-equivalent after canonicalization. It does not execute the R2.1 contract, change any corpus vector or dispatch rule, implement a scanner, prove performance or protection, authorize dependency exit or cutover, close the tracker, or establish broad workspace health."
+  },
+  "r1_case_crosswalk": [
+    {"r1_case_id": "RGX-PII-001", "r2_case_id": "RGX-R2-PIPE-004", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-002", "r2_case_id": "RGX-R2-EMAIL-004", "relationship": "EXACT_INPUT_AND_OUTCOME"},
+    {"r1_case_id": "RGX-PII-003", "r2_case_id": "RGX-R2-EMAIL-005", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-004", "r2_case_id": "RGX-R2-PIPE-005", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-005", "r2_case_id": "RGX-R2-CARD-007", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-006", "r2_case_id": "RGX-R2-CARD-008", "relationship": "EXACT_INPUT_AND_OUTCOME"},
+    {"r1_case_id": "RGX-PII-007", "r2_case_id": "RGX-R2-CARD-009", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-008", "r2_case_id": "RGX-R2-PIPE-008", "relationship": "EXACT_INPUT_AND_OUTCOME"},
+    {"r1_case_id": "RGX-PII-009", "r2_case_id": "RGX-R2-PIPE-009", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-010", "r2_case_id": "RGX-R2-PIPE-013", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"},
+    {"r1_case_id": "RGX-PII-011", "r2_case_id": "RGX-R2-PIPE-004", "relationship": "SEMANTIC_EQUIVALENT_OUTCOME_CLASS"}
+  ],
+  "provenance": [
+    {
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "source_class": "INDEPENDENT_HAND_AUTHORED",
+      "method": "Synthetic values, expected UTF-8 byte spans and outcomes were authored from the published detector languages and boundary rules without generating expected rows from the incumbent engine.",
+      "incumbent_use": "The incumbent is applied only after authorship as a differential oracle."
+    },
+    {
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "source_class": "EXPANDED_HISTORICAL_BASELINE",
+      "method": "Synthetic cases expand the R1 eleven-row detector baseline with exact spans and missing boundary classes.",
+      "incumbent_use": "R1 is historical provenance, not the sole specification."
+    },
+    {
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "source_class": "INDEPENDENT_ALGORITHM_VECTOR",
+      "method": "Synthetic minimum, common and maximum-length card candidates were selected against the right-to-left Luhn mod-10 rule before differential comparison.",
+      "incumbent_use": "The private production Luhn helper is not used to generate expected validity."
+    },
+    {
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "source_class": "INDEPENDENT_BOUNDARY_MATRIX",
+      "method": "ASCII word, Unicode word, emoji, separator, adjacency and no-sliding-window rows were hand-authored against Unicode word-boundary and UTF-8 byte-offset semantics.",
+      "incumbent_use": "Observed disagreements fail the future fast path closed to the incumbent."
+    }
+  ],
+  "capabilities": [
+    {
+      "capability_id": "RGX-BUILTIN-EMAIL-SPANS",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Exact email detector identity and UTF-8 byte spans"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-SSN-SPANS",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Exact SSN detector identity and UTF-8 byte spans"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-CARD-CANDIDATES",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Exact payment-card candidate spans before validation"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-CARD-LUHN",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Right-to-left Luhn acceptance joined to candidate spans"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-PHONE-SPANS",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Exact phone detector identity and UTF-8 byte spans"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-DETECTOR-ORDER",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Custom first, then email, SSN, valid card and phone"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-WHOLE-VALUE-REDACTION",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "A selected detector replaces the complete input value with its class token"
+    },
+    {
+      "capability_id": "RGX-BUILTIN-INCUMBENT-FALLBACK",
+      "parent_capability_id": "CAP-REGEX-PRIVACY",
+      "description": "Unrecognized, custom, drifted or conflicting dispatch identities stay on the incumbent"
+    }
+  ],
+  "detectors": [
+    {
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "origin": "BUILTIN",
+      "order": 1,
+      "pattern": "(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,63}\\b",
+      "regex_mode": "CASE_INSENSITIVE_UNICODE_DEFAULT",
+      "match_strategy": "IS_MATCH_WITH_LEFTMOST_FIRST_SPAN_ORACLE",
+      "post_filter": "NONE",
+      "output_token": "[EMAIL_REDACTED]",
+      "replacement_scope": "WHOLE_INPUT_VALUE",
+      "span_capability_id": "RGX-BUILTIN-EMAIL-SPANS",
+      "implementation_owner": "asupersync-5z2scg.8.2.2"
+    },
+    {
+      "detector_id": "RGX-BUILTIN-SSN",
+      "origin": "BUILTIN",
+      "order": 2,
+      "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      "regex_mode": "UNICODE_DEFAULT",
+      "match_strategy": "IS_MATCH_WITH_LEFTMOST_FIRST_SPAN_ORACLE",
+      "post_filter": "NONE",
+      "output_token": "[SSN_REDACTED]",
+      "replacement_scope": "WHOLE_INPUT_VALUE",
+      "span_capability_id": "RGX-BUILTIN-SSN-SPANS",
+      "implementation_owner": "asupersync-5z2scg.8.2.2"
+    },
+    {
+      "detector_id": "RGX-BUILTIN-CARD",
+      "origin": "BUILTIN",
+      "order": 3,
+      "pattern": "\\b(?:\\d[ -]?){13,19}\\b",
+      "regex_mode": "UNICODE_DEFAULT",
+      "match_strategy": "FIND_ITER_ALL_NON_OVERLAPPING_THEN_ANY",
+      "post_filter": "LUHN_13_TO_19_DIGITS",
+      "output_token": "[CARD_REDACTED]",
+      "replacement_scope": "WHOLE_INPUT_VALUE",
+      "span_capability_id": "RGX-BUILTIN-CARD-CANDIDATES",
+      "post_filter_capability_id": "RGX-BUILTIN-CARD-LUHN",
+      "implementation_owner": "asupersync-5z2scg.8.2.3"
+    },
+    {
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "origin": "BUILTIN",
+      "order": 4,
+      "pattern": "(?x)\\b(?:\\+?1[\\s.-]?)?(?:\\(?\\d{3}\\)?[\\s.-]?)\\d{3}[\\s.-]?\\d{4}\\b",
+      "regex_mode": "EXTENDED_UNICODE_DEFAULT",
+      "match_strategy": "IS_MATCH_WITH_LEFTMOST_FIRST_SPAN_ORACLE",
+      "post_filter": "NONE",
+      "output_token": "[PHONE_REDACTED]",
+      "replacement_scope": "WHOLE_INPUT_VALUE",
+      "span_capability_id": "RGX-BUILTIN-PHONE-SPANS",
+      "implementation_owner": "asupersync-5z2scg.8.2.4"
+    }
+  ],
+  "dispatch_allowset": {
+    "state": "IMPLEMENTED_EXACT_BUILTINS_CUSTOM_ON_INCUMBENT",
+    "identity_fields": [
+      "origin",
+      "detector_id",
+      "pattern",
+      "regex_mode",
+      "match_strategy",
+      "post_filter",
+      "output_token",
+      "replacement_scope"
+    ],
+    "allowed_detector_ids": [
+      "RGX-BUILTIN-EMAIL",
+      "RGX-BUILTIN-SSN",
+      "RGX-BUILTIN-CARD",
+      "RGX-BUILTIN-PHONE"
+    ],
+    "custom_pattern_text_equality_is_builtin_identity": false,
+    "duplicate_or_conflicting_identity_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT",
+    "unrecognized_identity_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+  },
+  "required_coverage_tags_per_detector": [
+    "positive",
+    "negative",
+    "empty",
+    "boundary",
+    "maximum",
+    "unicode-adjacent",
+    "separator",
+    "adjacent",
+    "overlapping",
+    "malformed",
+    "false-positive-guard",
+    "false-negative-guard"
+  ],
+  "detector_vectors": [
+    {
+      "case_id": "RGX-R2-EMAIL-001",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["empty", "negative", "false-positive-guard"],
+      "input": "",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-002",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "boundary", "false-negative-guard"],
+      "input": "a@b.co",
+      "expected_matches": [{"start_byte": 0, "end_byte": 6}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-003",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "separator"],
+      "input": "pre a.b+tag@example.co post",
+      "expected_matches": [{"start_byte": 4, "end_byte": 22}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-004",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive"],
+      "input": "ADMIN@EXAMPLE.COM",
+      "expected_matches": [{"start_byte": 0, "end_byte": 17}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-005",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "a@b.c",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-006",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "maximum", "false-negative-guard"],
+      "input_recipe": {"prefix": "x@y.", "repeat": "a", "repeat_count": 63, "suffix": ""},
+      "expected_matches": [{"start_byte": 0, "end_byte": 67}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-007",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["negative", "maximum", "malformed", "false-positive-guard"],
+      "input_recipe": {"prefix": "x@y.", "repeat": "a", "repeat_count": 64, "suffix": ""},
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-008",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["negative", "boundary", "unicode-adjacent", "false-positive-guard"],
+      "input": "éa@b.co",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-009",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "boundary", "unicode-adjacent", "false-negative-guard"],
+      "input": "🙂a@b.co🙂",
+      "expected_matches": [{"start_byte": 4, "end_byte": 10}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-010",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "separator", "adjacent"],
+      "input": "a@b.co,c@d.io",
+      "expected_matches": [{"start_byte": 0, "end_byte": 6}, {"start_byte": 7, "end_byte": 13}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-011",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "overlapping", "malformed"],
+      "input": "a@b.co@c.io",
+      "expected_matches": [{"start_byte": 0, "end_byte": 6}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-012",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "a@@b.com",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-013",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "unicode-adjacent", "false-negative-guard"],
+      "input": "ſ@x.co",
+      "expected_matches": [{"start_byte": 0, "end_byte": 7}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-014",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "unicode-adjacent", "false-negative-guard"],
+      "input": "a@K.co",
+      "expected_matches": [{"start_byte": 0, "end_byte": 8}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-EMAIL-015",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-EMAIL",
+      "coverage_tags": ["positive", "boundary", "separator", "false-negative-guard"],
+      "input": ".a@b.co",
+      "expected_matches": [{"start_byte": 1, "end_byte": 7}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-001",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["empty", "negative", "false-positive-guard"],
+      "input": "",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-002",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "boundary", "maximum", "false-negative-guard"],
+      "input": "123-45-6789",
+      "expected_matches": [{"start_byte": 0, "end_byte": 11}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-003",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "separator"],
+      "input": "id=123-45-6789.",
+      "expected_matches": [{"start_byte": 3, "end_byte": 14}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-004",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "separator", "adjacent"],
+      "input": "123-45-6789/987-65-4321",
+      "expected_matches": [{"start_byte": 0, "end_byte": 11}, {"start_byte": 12, "end_byte": 23}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-005",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "123456789",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-006",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "12-34-5678",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-007",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["negative", "boundary", "false-positive-guard"],
+      "input": "x123-45-6789",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-008",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["negative", "boundary", "unicode-adjacent", "false-positive-guard"],
+      "input": "é123-45-6789",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-009",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "boundary", "unicode-adjacent", "false-negative-guard"],
+      "input": "🙂123-45-6789🙂",
+      "expected_matches": [{"start_byte": 4, "end_byte": 15}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-010",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "unicode-adjacent", "false-negative-guard"],
+      "input": "١٢٣-٤٥-٦٧٨٩",
+      "expected_matches": [{"start_byte": 0, "end_byte": 20}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-SSN-011",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["negative", "separator", "malformed", "false-positive-guard"],
+      "input": "123–45–6789",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-SSN-012",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-SSN",
+      "coverage_tags": ["positive", "overlapping", "maximum"],
+      "input": "123-45-6789-12-3456",
+      "expected_matches": [{"start_byte": 0, "end_byte": 11}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-001",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["empty", "negative", "false-positive-guard"],
+      "input": "",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-002",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "boundary", "false-negative-guard"],
+      "input": "4222222222222",
+      "expected_matches": [{"start_byte": 0, "end_byte": 13, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-003",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive"],
+      "input": "4111111111111111",
+      "expected_matches": [{"start_byte": 0, "end_byte": 16, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-004",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "maximum", "overlapping", "false-negative-guard"],
+      "input": "4000000000000000006",
+      "expected_matches": [{"start_byte": 0, "end_byte": 19, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-005",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "boundary", "malformed", "false-positive-guard"],
+      "input": "411111111111",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-006",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "maximum", "malformed", "false-positive-guard"],
+      "input": "40000000000000000006",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-007",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "separator", "false-negative-guard"],
+      "input": "4111 1111 1111 1111",
+      "expected_matches": [{"start_byte": 0, "end_byte": 19, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-008",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "separator", "false-negative-guard"],
+      "input": "4111-1111-1111-1111",
+      "expected_matches": [{"start_byte": 0, "end_byte": 19, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-009",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "false-positive-guard"],
+      "input": "4111111111111112",
+      "expected_matches": [{"start_byte": 0, "end_byte": 16, "luhn_valid": false}],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-010",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "boundary", "false-positive-guard"],
+      "input": "x4111111111111111",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-011",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "boundary", "unicode-adjacent", "false-negative-guard"],
+      "input": "🙂4111111111111111🙂",
+      "expected_matches": [{"start_byte": 4, "end_byte": 20, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-012",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "separator", "adjacent"],
+      "input": "4111111111111112/4012888888881881",
+      "expected_matches": [{"start_byte": 0, "end_byte": 16, "luhn_valid": false}, {"start_byte": 17, "end_byte": 33, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-013",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "overlapping", "maximum", "false-positive-guard"],
+      "input": "41111111111111114111111111111111",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-014",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "separator", "malformed", "false-positive-guard"],
+      "input": "4111_1111_1111_1111",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-CARD-015",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "separator", "boundary"],
+      "input": "4111111111111111 next",
+      "expected_matches": [{"start_byte": 0, "end_byte": 17, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-016",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["positive", "separator", "boundary"],
+      "input": "4111111111111111 ",
+      "expected_matches": [{"start_byte": 0, "end_byte": 16, "luhn_valid": true}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-CARD-017",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "detector_id": "RGX-BUILTIN-CARD",
+      "coverage_tags": ["negative", "unicode-adjacent", "false-positive-guard"],
+      "input": "٤١١١١١١١١١١١١١١١",
+      "expected_matches": [{"start_byte": 0, "end_byte": 32, "luhn_valid": false}],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-001",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["empty", "negative", "false-positive-guard"],
+      "input": "",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-002",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "boundary", "false-negative-guard"],
+      "input": "4155552671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 10}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-003",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "separator"],
+      "input": "415-555-2671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 12}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-004",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "maximum", "separator", "overlapping", "false-negative-guard"],
+      "input": "1-415-555-2671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 14}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-005",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "maximum", "separator", "boundary", "false-negative-guard"],
+      "input": "+1 (415) 555-2671",
+      "expected_matches": [{"start_byte": 1, "end_byte": 17}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-006",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "separator", "boundary", "false-negative-guard"],
+      "input": "(415) 555-2671",
+      "expected_matches": [{"start_byte": 1, "end_byte": 14}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-007",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "separator"],
+      "input": "415.555.2671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 12}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-008",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "separator"],
+      "input": "415 555 2671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 12}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-009",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "415555267",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-010",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "boundary", "false-positive-guard"],
+      "input": "x4155552671",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-011",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "boundary", "unicode-adjacent", "false-positive-guard"],
+      "input": "é4155552671",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-012",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "boundary", "unicode-adjacent", "false-negative-guard"],
+      "input": "🙂4155552671🙂",
+      "expected_matches": [{"start_byte": 4, "end_byte": 14}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-013",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "separator", "malformed", "false-positive-guard"],
+      "input": "415--555-2671",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-014",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "separator", "adjacent"],
+      "input": "4155552671/2125550100",
+      "expected_matches": [{"start_byte": 0, "end_byte": 10}, {"start_byte": 11, "end_byte": 21}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-015",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "overlapping", "maximum", "false-positive-guard"],
+      "input": "41555526714155552671",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-016",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "unicode-adjacent", "false-negative-guard"],
+      "input": "٤١٥٥٥٥٢٦٧١",
+      "expected_matches": [{"start_byte": 0, "end_byte": 20}],
+      "expected_detector_accepts": true
+    },
+    {
+      "case_id": "RGX-R2-PHONE-017",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["negative", "malformed", "false-positive-guard"],
+      "input": "415-555-2671x9",
+      "expected_matches": [],
+      "expected_detector_accepts": false
+    },
+    {
+      "case_id": "RGX-R2-PHONE-018",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "detector_id": "RGX-BUILTIN-PHONE",
+      "coverage_tags": ["positive", "unicode-adjacent", "separator", "false-negative-guard"],
+      "input": "415 555 2671",
+      "expected_matches": [{"start_byte": 0, "end_byte": 14}],
+      "expected_detector_accepts": true
+    }
+  ],
+  "pipeline_vectors": [
+    {
+      "case_id": "RGX-R2-PIPE-001",
+      "capability_ids": ["RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": false,
+      "input": "a@b.co",
+      "expected_visited_detectors": [],
+      "expected_selected_detector": null,
+      "expected_output": "a@b.co",
+      "fallback_disposition": "PRESERVE_INPUT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-002",
+      "capability_ids": ["RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": true,
+      "input": "",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD", "RGX-BUILTIN-PHONE"],
+      "expected_selected_detector": null,
+      "expected_output": "",
+      "fallback_disposition": "PRESERVE_INPUT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-003",
+      "capability_ids": ["RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": true,
+      "input": "ordinary synthetic text",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD", "RGX-BUILTIN-PHONE"],
+      "expected_selected_detector": null,
+      "expected_output": "ordinary synthetic text",
+      "fallback_disposition": "PRESERVE_INPUT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-004",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "input": "prefix a@b.co suffix",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL"],
+      "expected_selected_detector": "RGX-BUILTIN-EMAIL",
+      "expected_output": "[EMAIL_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-005",
+      "capability_ids": ["RGX-BUILTIN-SSN-SPANS", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "input": "prefix 123-45-6789 suffix",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN"],
+      "expected_selected_detector": "RGX-BUILTIN-SSN",
+      "expected_output": "[SSN_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-006",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "input": "prefix 4111111111111111 suffix",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD"],
+      "expected_selected_detector": "RGX-BUILTIN-CARD",
+      "expected_output": "[CARD_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-007",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN", "RGX-BUILTIN-INCUMBENT-FALLBACK"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "auto_pii_detection": true,
+      "input": "4222222222223",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD", "RGX-BUILTIN-PHONE"],
+      "expected_selected_detector": null,
+      "expected_output": "4222222222223",
+      "fallback_disposition": "PRESERVE_INPUT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-008",
+      "capability_ids": ["RGX-BUILTIN-PHONE-SPANS", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "input": "Call +1 (415) 555-2671",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD", "RGX-BUILTIN-PHONE"],
+      "expected_selected_detector": "RGX-BUILTIN-PHONE",
+      "expected_output": "[PHONE_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-009",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "input": "123-45-6789 a@b.co",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL"],
+      "expected_selected_detector": "RGX-BUILTIN-EMAIL",
+      "expected_output": "[EMAIL_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-010",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": true,
+      "input": "4111111111111111 123-45-6789",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN"],
+      "expected_selected_detector": "RGX-BUILTIN-SSN",
+      "expected_output": "[SSN_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-011",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": true,
+      "input": "4155552671 4111111111111111",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD"],
+      "expected_selected_detector": "RGX-BUILTIN-CARD",
+      "expected_output": "[CARD_REDACTED]",
+      "fallback_disposition": "NOT_APPLICABLE"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-012",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "auto_pii_detection": true,
+      "custom_pattern": "(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,63}\\b",
+      "input": "a@b.co",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-013",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-R1-BASELINE",
+      "auto_pii_detection": true,
+      "custom_pattern": "case-[0-9]+",
+      "input": "case-7 a@b.co",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-014",
+      "capability_ids": ["RGX-BUILTIN-CARD-CANDIDATES", "RGX-BUILTIN-CARD-LUHN", "RGX-BUILTIN-PHONE-SPANS", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-LUHN-VECTORS",
+      "auto_pii_detection": true,
+      "input": "000 000 000 0001",
+      "expected_visited_detectors": ["RGX-BUILTIN-EMAIL", "RGX-BUILTIN-SSN", "RGX-BUILTIN-CARD", "RGX-BUILTIN-PHONE"],
+      "expected_selected_detector": "RGX-BUILTIN-PHONE",
+      "expected_output": "[PHONE_REDACTED]",
+      "fallback_disposition": "CONTINUE_AFTER_INVALID_CARD"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-015",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "auto_pii_detection": true,
+      "custom_pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+      "input": "123-45-6789",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-016",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "auto_pii_detection": true,
+      "custom_pattern": "\\b(?:\\d[ -]?){13,19}\\b",
+      "input": "4111111111111111",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-017",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-BOUNDARY-MATRIX",
+      "auto_pii_detection": true,
+      "custom_pattern": "(?x)\\b(?:\\+?1[\\s.-]?)?(?:\\(?\\d{3}\\)?[\\s.-]?)\\d{3}[\\s.-]?\\d{4}\\b",
+      "input": "4155552671",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-018",
+      "capability_ids": ["RGX-BUILTIN-EMAIL-SPANS", "RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": true,
+      "custom_pattern": "case-[0-9]+",
+      "input": "a@b.co",
+      "expected_visited_detectors": ["CUSTOM", "RGX-BUILTIN-EMAIL"],
+      "expected_selected_detector": "RGX-BUILTIN-EMAIL",
+      "expected_output": "[EMAIL_REDACTED]",
+      "fallback_disposition": "CUSTOM_NONMATCH_CONTINUES_TO_AUTOMATIC"
+    },
+    {
+      "case_id": "RGX-R2-PIPE-019",
+      "capability_ids": ["RGX-BUILTIN-DETECTOR-ORDER", "RGX-BUILTIN-INCUMBENT-FALLBACK", "RGX-BUILTIN-WHOLE-VALUE-REDACTION"],
+      "provenance_id": "RGX-R2-PROV-HAND-VECTORS",
+      "auto_pii_detection": false,
+      "custom_pattern": "case-[0-9]+",
+      "input": "case-7",
+      "expected_visited_detectors": ["CUSTOM"],
+      "expected_selected_detector": "CUSTOM",
+      "expected_output": "[REDACTED]",
+      "fallback_disposition": "CUSTOM_REMAINS_ON_INCUMBENT"
+    }
+  ],
+  "dispatch_negative_fixtures": [
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-001",
+      "base_detector_id": "RGX-BUILTIN-EMAIL",
+      "mutation_field": "origin",
+      "candidate_value": "CUSTOM",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-002",
+      "base_detector_id": "RGX-BUILTIN-EMAIL",
+      "mutation_field": "pattern",
+      "candidate_value": "(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,64}\\b",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-003",
+      "base_detector_id": "RGX-BUILTIN-SSN",
+      "mutation_field": "regex_mode",
+      "candidate_value": "ASCII_ONLY",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-004",
+      "base_detector_id": "RGX-BUILTIN-CARD",
+      "mutation_field": "post_filter",
+      "candidate_value": "NONE",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-005",
+      "base_detector_id": "RGX-BUILTIN-PHONE",
+      "mutation_field": "match_strategy",
+      "candidate_value": "FIRST_CAPTURE_ONLY",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-006",
+      "base_detector_id": "RGX-BUILTIN-EMAIL",
+      "mutation_field": "output_token",
+      "candidate_value": "[REDACTED]",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-007",
+      "base_detector_id": "RGX-BUILTIN-SSN",
+      "mutation_field": "replacement_scope",
+      "candidate_value": "MATCH_ONLY",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    },
+    {
+      "fixture_id": "RGX-R2-DISPATCH-NEG-008",
+      "base_detector_id": "RGX-BUILTIN-PHONE",
+      "mutation_field": "detector_id",
+      "candidate_value": "RGX-BUILTIN-PHONE-DRIFTED",
+      "expected_action": "FALL_THROUGH_TO_INCUMBENT_WITHOUT_PARTIAL_RESULT"
+    }
+  ],
+  "coverage_matrix": {
+    "detector_vector_count": 62,
+    "pipeline_vector_count": 19,
+    "dispatch_negative_fixture_count": 8,
+    "detector_counts": {
+      "RGX-BUILTIN-EMAIL": 15,
+      "RGX-BUILTIN-SSN": 12,
+      "RGX-BUILTIN-CARD": 17,
+      "RGX-BUILTIN-PHONE": 18
+    },
+    "class_coverage_state": "COMPLETE_FOR_REQUIRED_STATIC_MATRIX",
+    "synthetic_values_only": true,
+    "unknown_rows": 0
+  },
+  "downstream_handoff": {
+    "r2_2_email_ssn_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_2_email_ssn_evidence": {
+      "remote_job_id": "j-29988810699833424",
+      "corpus_contract_job_id": "j-29988810699833426",
+      "worker": "ovh-a",
+      "test_filter": "fixed_email_and_ssn",
+      "tests_passed": 3,
+      "tests_failed": 0,
+      "corpus_contract_tests_passed": 8,
+      "claims": [
+        "ALL_27_R2_1_EMAIL_AND_SSN_VECTORS",
+        "GENERATED_UNICODE_BOUNDARY_DIFFERENTIAL_MATRIX",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "CUSTOM_PATTERN_NON_DISPATCH"
+      ]
+    },
+    "r2_3_card_luhn_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_3_card_luhn_evidence": {
+      "implementation_revision": "702f1cc7849dc9cce9e30590566563c4d78cac88",
+      "source_sha256": "a0ddc92dd9a91e8ac8b62dbee6bf2505aadba0f4504a525eb6ae32ebd28540ef",
+      "remote_job_id": "j-29988810699833430",
+      "worker": "ovh-a",
+      "test_filter": "fixed_card",
+      "tests_passed": 4,
+      "tests_failed": 0,
+      "clean_overlay_base": "fa11b2c822c68785e3cfef8d00d80262c4d77ab4",
+      "clean_overlay_fingerprint": "abb75afdaaf08bf82661d737a04633adb1eef0228d8a9b89ef79c5108f683baf",
+      "corpus_contract_state": "PASSED_FOCUSED_REMOTE_CONTRACT",
+      "corpus_contract_job_id": "j-29988810699833433",
+      "corpus_contract_tests_passed": 8,
+      "corpus_contract_tests_failed": 0,
+      "corpus_contract_clean_overlay_base": "dcdc8915aa3fe227939ca4eb14ee0d5b38473ef6",
+      "corpus_contract_clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+      "discarded_zero_test_job_id": "j-29988810699833429",
+      "discarded_zero_test_reason": "SHARED_PATH_SOURCE_SYNC_DID_NOT_INCLUDE_DIRTY_SCANNER_SOURCE",
+      "non_final_contract_attempts": [
+        {
+          "job_id": "j-29988810699833431",
+          "result": "SEVEN_PASS_ONE_CONTRACT_LOCAL_CANONICAL_HASH_DRIFT"
+        },
+        {
+          "job_id": "j-29988810699833432",
+          "result": "SHARED_PATH_REMOTE_CHECKOUT_DID_NOT_MATCH_COMMITTED_HEAD"
+        }
+      ],
+      "claims": [
+        "ALL_17_R2_1_CARD_CANDIDATE_AND_LUHN_VECTORS",
+        "GENERATED_LENGTH_SEPARATOR_AND_UNICODE_BOUNDARY_DIFFERENTIAL_MATRIX",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "EXACT_CUSTOM_PATTERN_NON_DISPATCH",
+        "WHOLE_VALUE_CARD_REDACTION_OUTCOMES"
+      ]
+    },
+    "r2_4_phone_dispatch_state": "IMPLEMENTED_FOCUSED_REMOTE_PROOF",
+    "r2_4_phone_dispatch_evidence": {
+      "implementation_revision": "5285afb061c77389b553e0ca536486a6c0275375",
+      "source_sha256": "63f77b2b3e198f87abfec86d9ff36ba135b573224ca28b83a6bacb3336db67b2",
+      "remote_job_id": "j-29988810699833435",
+      "worker": "ovh-a",
+      "test_filter": "fixed_phone",
+      "tests_passed": 5,
+      "tests_failed": 0,
+      "clean_overlay_base": "c0599ebc6507429b4e5dad833fc13a8438a8971c",
+      "clean_overlay_fingerprint": "926a8ac4260971a302070de69abaeee19218bafbf19adf80267025e5f35c44da",
+      "corpus_contract_state": "PASSED_FOCUSED_REMOTE_CONTRACT",
+      "corpus_contract_job_id": "j-29988810699833436",
+      "corpus_contract_tests_passed": 8,
+      "corpus_contract_tests_failed": 0,
+      "corpus_contract_clean_overlay_base": "6fc933a4acdfb2a5d078252f904fb640efc06f22",
+      "corpus_contract_clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+      "claims": [
+        "ALL_18_R2_1_PHONE_VECTORS",
+        "GENERATED_SHAPE_SEPARATOR_COUNTRY_CODE_AND_UNICODE_BOUNDARY_MATRIX",
+        "ALL_19_R2_1_PIPELINE_OUTCOMES",
+        "BOUNDED_LARGE_INPUT_AND_LIMIT_FALLBACK",
+        "EXACT_AND_DRIFTED_CUSTOM_PATTERN_NON_DISPATCH",
+        "WHOLE_VALUE_PHONE_REDACTION_OUTCOMES"
+      ]
+    },
+    "r2_5_terminal_receipt_state": "KEEP_INCUMBENT_FIXED_FAST_PATHS_DISABLED_PENDING_FINAL_CONTRACT",
+    "r2_5_terminal_receipt_evidence": {
+      "artifact_path": "artifacts/regex_fixed_detector_terminal_receipt_v1.json",
+      "measurement_harness_revision": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+      "measurement_harness_sha256": "9389878ba089a80034cee88b214907e48e45a841faaafbf3cb178b624bf474a5",
+      "measurement_region_sha256": "72f85949072c4828b351b428a97f6d22885a1f39a1bcf0552570878a8d8f638a",
+      "clean_overlay_fingerprint": "fe0d5151031be8fda7951fe7fe1f42f7ce344018fdb3ed21e6ada866b230b195",
+      "latency_jobs": [
+        {
+          "job_id": "j-29988810699833441",
+          "worker": "ovh-a",
+          "clean_overlay_base": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+          "tests_passed": 1,
+          "tests_failed": 0
+        },
+        {
+          "job_id": "j-29988810699833442",
+          "worker": "vmi1293453",
+          "clean_overlay_base": "03a6fa83274c65f383c04d9a541bb94b2d3ee54f",
+          "tests_passed": 1,
+          "tests_failed": 0
+        }
+      ],
+      "allocation_jobs": [
+        {
+          "job_id": "j-29988810699833444",
+          "worker": "ts2",
+          "operation": "candidate",
+          "clean_overlay_base": "2264da2b68b026016dc7ed77119f0b585a881f9f",
+          "allocation_calls": 191937,
+          "temporary_allocations": 61441,
+          "tests_passed": 1,
+          "tests_failed": 0
+        },
+        {
+          "job_id": "j-29988810699833445",
+          "worker": "ts2",
+          "operation": "incumbent",
+          "clean_overlay_base": "2264da2b68b026016dc7ed77119f0b585a881f9f",
+          "allocation_calls": 39127,
+          "temporary_allocations": 26336,
+          "tests_passed": 1,
+          "tests_failed": 0
+        }
+      ],
+      "relevant_surface_delta_between_bases": "NONE"
+    },
+    "mismatch_action": "DISABLE_AFFECTED_FAST_PATH_AND_KEEP_INCUMBENT",
+    "custom_pattern_action": "KEEP_ON_COMPLETE_INCUMBENT_ENGINE"
+  },
+  "rollback_triggers": [
+    "Any changed expected span, candidate validity, detector order or whole-value token",
+    "Any custom, drifted, unrecognized or conflicting identity entering the built-in allowset",
+    "Any scanner returning a partial result instead of falling through on disagreement",
+    "Any accepted detector configuration losing incumbent fallback",
+    "Any source pin or capability authority drift without reviewed corpus refresh"
+  ],
+  "no_claim_boundaries": [
+    "R2.1 freezes incumbent built-in detector and whole-value redaction behavior but implements no scanner or fast path.",
+    "The corpus does not authorize changing or removing regex, dispatching custom patterns to built-in scanners, or production cutover.",
+    "The corpus does not claim exhaustive detection, absence of false positives or false negatives, or complete privacy protection.",
+    "Observed acceptance and rejection rows are compatibility facts and are not declarations that every behavior is desirable.",
+    "All spans are half-open UTF-8 byte offsets, not Unicode scalar, code-point, display-column or grapheme indexes.",
+    "The corpus does not prove production multi-signal privacy wiring or protection of log bodies, resource attributes, identifiers or event names.",
+    "The corpus does not prove latency, throughput, allocation, memory, cancellation, denial-of-service resistance or performance parity.",
+    "All values are synthetic and the corpus proves nothing about handling real secrets or personal data.",
+    "The corpus does not prove broad workspace health, release readiness, live RCH fleet availability, or local Cargo fallback approval.",
+    "The corpus does not authorize tracker closure, dependency exit, file deletion, or cancellation of peer work."
+  ]
+}

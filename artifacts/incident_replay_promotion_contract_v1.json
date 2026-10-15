@@ -1,0 +1,126 @@
+{
+  "schema_version": "incident-replay-promotion-contract-v1",
+  "bead_id": "asupersync-lkygsb.4",
+  "module": "src/trace/incident.rs",
+  "description": "Contract for promoting minimized incident repro packages into durable regression proofs or explicit blocked work items while preserving oracle, provenance, minimizer summary, feature flags, redaction policy, and rch proof commands.",
+  "regression_proof_schema_version": 1,
+  "minimization_contract": "artifacts/incident_replay_minimization_contract_v1.json",
+  "promotion_targets": [
+    "unit_test",
+    "integration_test",
+    "golden_artifact",
+    "fuzz_seed",
+    "conformance_fixture",
+    "fixture_only",
+    "blocker_bead"
+  ],
+  "promotion_verdicts": [
+    "promoted",
+    "fixture_only",
+    "blocked"
+  ],
+  "block_kinds": [
+    "unsupported_promotion_target",
+    "duplicate_seed",
+    "stale_fixture_hash",
+    "missing_redaction_policy",
+    "proof_command_not_rch",
+    "missing_blocker_bead"
+  ],
+  "promotion_policy": {
+    "unit_test": "crash-pack, cancellation, obligation, or quiescence repros with rch proof commands become normal unit-level regressions",
+    "integration_test": "trace-log, support-bundle, or rch proof failures become integration tests when the preserved command is executable through rch",
+    "golden_artifact": "claim-drift/readme failures become deterministic golden artifacts",
+    "fuzz_seed": "trace/crash repro material may become a seed only if its deterministic seed identity is not already committed",
+    "conformance_fixture": "protocol/conformance failures become conformance fixtures",
+    "fixture_only": "operator-approved repros that are deterministic but not directly executable remain redacted fixtures",
+    "blocker_bead": "unsupported or stale repro material records an explicit follow-up bead instead of silently downgrading"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "promote-crashpack-unit-proof",
+      "minimization_scenario": "minimize-crashpack-trace",
+      "expected_verdict": "promoted",
+      "expected_target": "unit_test",
+      "expected_oracle_kind": "panic",
+      "policy": {
+        "redaction_policy_id": "incident-redaction-v1",
+        "expected_fixture_hashes": {
+          "crashpack-main": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        }
+      }
+    },
+    {
+      "scenario_id": "block-duplicate-seed",
+      "minimization_scenario": "minimize-crashpack-trace",
+      "expected_verdict": "blocked",
+      "expected_target": "unit_test",
+      "expected_block_kinds": [
+        "duplicate_seed"
+      ],
+      "duplicate_seed_from_scenario": "promote-crashpack-unit-proof",
+      "policy": {
+        "redaction_policy_id": "incident-redaction-v1"
+      }
+    },
+    {
+      "scenario_id": "block-stale-fixture-hash",
+      "minimization_scenario": "minimize-crashpack-trace",
+      "expected_verdict": "blocked",
+      "expected_target": "unit_test",
+      "expected_block_kinds": [
+        "stale_fixture_hash"
+      ],
+      "policy": {
+        "redaction_policy_id": "incident-redaction-v1",
+        "expected_fixture_hashes": {
+          "crashpack-main": "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+        }
+      }
+    },
+    {
+      "scenario_id": "unsupported-conformance-target",
+      "minimization_scenario": "minimize-crashpack-trace",
+      "expected_verdict": "blocked",
+      "expected_target": "conformance_fixture",
+      "expected_block_kinds": [
+        "unsupported_promotion_target"
+      ],
+      "policy": {
+        "target": "conformance_fixture",
+        "redaction_policy_id": "incident-redaction-v1"
+      }
+    },
+    {
+      "scenario_id": "fixture-only-redacted-repro",
+      "minimization_scenario": "already-minimal-single-source",
+      "expected_verdict": "fixture_only",
+      "expected_target": "fixture_only",
+      "expected_oracle_kind": "panic",
+      "policy": {
+        "target": "fixture_only",
+        "allow_fixture_only": true,
+        "redaction_policy_id": "incident-redaction-v1"
+      }
+    }
+  ],
+  "e2e_script": "scripts/validate_incident_replay_promotion.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "verdict",
+    "target",
+    "proof_id",
+    "block_kinds",
+    "source_repro_id",
+    "oracle_kind",
+    "proof_command",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "rch exec -- rustfmt --edition 2024 --check src/trace/incident.rs src/trace/mod.rs tests/incident_replay_promotion.rs",
+    "bash scripts/validate_incident_replay_promotion.sh --output-root target/incident-replay-promotion --run-id asupersync-lkygsb.4",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_promotion CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_replay_promotion --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_promotion_check CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo check -p asupersync --test incident_replay_promotion --features test-internals"
+  ]
+}

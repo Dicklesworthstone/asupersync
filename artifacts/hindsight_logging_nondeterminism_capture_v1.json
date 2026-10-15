@@ -1,0 +1,318 @@
+{
+  "contract_version": "hindsight-logging-nondeterminism-capture-v1",
+  "bead_id": "asupersync-1508v.6.4",
+  "runner_bundle_schema_version": "hindsight-logging-smoke-bundle-v1",
+  "runner_report_schema_version": "hindsight-logging-smoke-run-report-v1",
+  "runner_script": "scripts/run_hindsight_logging_smoke.sh",
+  "replay_schema_version": 1,
+  "required_nondeterminism_sources": [
+    {
+      "source_id": "ND-SCHED-TASK-SCHEDULED",
+      "category": "scheduling",
+      "replay_event_variant": "TaskScheduled",
+      "description": "Task chosen from ready queue for execution",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 17,
+      "capture_point": "scheduler task selection loop"
+    },
+    {
+      "source_id": "ND-SCHED-TASK-YIELDED",
+      "category": "scheduling",
+      "replay_event_variant": "TaskYielded",
+      "description": "Task voluntarily yielded execution",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "yield_now poll point"
+    },
+    {
+      "source_id": "ND-SCHED-TASK-COMPLETED",
+      "category": "scheduling",
+      "replay_event_variant": "TaskCompleted",
+      "description": "Task completed with an outcome",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 10,
+      "capture_point": "task future poll returns Ready"
+    },
+    {
+      "source_id": "ND-SCHED-TASK-SPAWNED",
+      "category": "scheduling",
+      "replay_event_variant": "TaskSpawned",
+      "description": "New task spawned into a region",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 25,
+      "capture_point": "Cx::spawn / scope::spawn"
+    },
+    {
+      "source_id": "ND-TIME-ADVANCED",
+      "category": "time",
+      "replay_event_variant": "TimeAdvanced",
+      "description": "Virtual time progressed",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 17,
+      "capture_point": "runtime time advance step"
+    },
+    {
+      "source_id": "ND-TIME-TIMER-CREATED",
+      "category": "time",
+      "replay_event_variant": "TimerCreated",
+      "description": "Timer registered with deadline",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 17,
+      "capture_point": "timer heap insertion"
+    },
+    {
+      "source_id": "ND-TIME-TIMER-FIRED",
+      "category": "time",
+      "replay_event_variant": "TimerFired",
+      "description": "Timer deadline reached and fired",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "timer wheel pop"
+    },
+    {
+      "source_id": "ND-TIME-TIMER-CANCELLED",
+      "category": "time",
+      "replay_event_variant": "TimerCancelled",
+      "description": "Timer cancelled before firing",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "timer cancellation path"
+    },
+    {
+      "source_id": "ND-IO-READY",
+      "category": "io",
+      "replay_event_variant": "IoReady",
+      "description": "I/O readiness notification from reactor",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 10,
+      "capture_point": "reactor poll dispatch"
+    },
+    {
+      "source_id": "ND-IO-RESULT",
+      "category": "io",
+      "replay_event_variant": "IoResult",
+      "description": "I/O operation result (bytes transferred)",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 17,
+      "capture_point": "simulated I/O completion"
+    },
+    {
+      "source_id": "ND-IO-ERROR",
+      "category": "io",
+      "replay_event_variant": "IoError",
+      "description": "I/O error injected or observed",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 10,
+      "capture_point": "I/O error path"
+    },
+    {
+      "source_id": "ND-RNG-SEED",
+      "category": "entropy",
+      "replay_event_variant": "RngSeed",
+      "description": "RNG seeded (captures OS entropy input)",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "PRNG initialization"
+    },
+    {
+      "source_id": "ND-RNG-VALUE",
+      "category": "entropy",
+      "replay_event_variant": "RngValue",
+      "description": "RNG value generated (verification checkpoint)",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "PRNG next_u64 call"
+    },
+    {
+      "source_id": "ND-CHAOS-INJECTION",
+      "category": "fault_injection",
+      "replay_event_variant": "ChaosInjection",
+      "description": "Chaos/fault injection decision",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 19,
+      "capture_point": "chaos injection hook"
+    },
+    {
+      "source_id": "ND-REGION-CREATED",
+      "category": "region_lifecycle",
+      "replay_event_variant": "RegionCreated",
+      "description": "Structured concurrency region established",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 25,
+      "capture_point": "region creation path"
+    },
+    {
+      "source_id": "ND-REGION-CLOSED",
+      "category": "region_lifecycle",
+      "replay_event_variant": "RegionClosed",
+      "description": "Region closed after all children complete",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 10,
+      "capture_point": "region close/drain completion"
+    },
+    {
+      "source_id": "ND-REGION-CANCELLED",
+      "category": "region_lifecycle",
+      "replay_event_variant": "RegionCancelled",
+      "description": "Region received cancellation request",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 10,
+      "capture_point": "region cancel protocol entry"
+    },
+    {
+      "source_id": "ND-WAKER-WAKE",
+      "category": "waker_delivery",
+      "replay_event_variant": "WakerWake",
+      "description": "Single waker invoked for a task",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 9,
+      "capture_point": "waker wake() implementation"
+    },
+    {
+      "source_id": "ND-WAKER-BATCH-WAKE",
+      "category": "waker_delivery",
+      "replay_event_variant": "WakerBatchWake",
+      "description": "Batch wakeup of multiple tasks",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 5,
+      "capture_point": "batch wakeup path"
+    },
+    {
+      "source_id": "ND-CHECKPOINT",
+      "category": "checkpoint",
+      "replay_event_variant": "Checkpoint",
+      "description": "Replay synchronization checkpoint",
+      "owner_file": "src/trace/replay.rs",
+      "compact_size_bytes": 25,
+      "capture_point": "periodic checkpoint emission"
+    }
+  ],
+  "nondeterminism_categories": [
+    "scheduling",
+    "time",
+    "io",
+    "entropy",
+    "fault_injection",
+    "region_lifecycle",
+    "waker_delivery",
+    "checkpoint"
+  ],
+  "excluded_derived_state": [
+    {
+      "field": "ready_queue_len",
+      "derivation_source": "TaskScheduled + TaskSpawned + TaskCompleted events",
+      "reason": "Running counter derivable from scheduling event stream"
+    },
+    {
+      "field": "cancel_lane_len",
+      "derivation_source": "RegionCancelled events",
+      "reason": "Count of active cancellations derivable from region events"
+    },
+    {
+      "field": "finalize_lane_len",
+      "derivation_source": "RegionClosed events",
+      "reason": "Count of closing regions derivable from lifecycle events"
+    },
+    {
+      "field": "total_tasks",
+      "derivation_source": "TaskSpawned + TaskCompleted events",
+      "reason": "Running counter of spawn minus completion"
+    },
+    {
+      "field": "active_regions",
+      "derivation_source": "RegionCreated + RegionClosed events",
+      "reason": "Running counter of create minus close"
+    },
+    {
+      "field": "cancel_streak_current",
+      "derivation_source": "Sequential TaskScheduled events",
+      "reason": "Derived from task selection sequence in cancel lane"
+    },
+    {
+      "field": "outstanding_obligations",
+      "derivation_source": "Task lifecycle events + obligation protocol",
+      "reason": "Derived from obligation create/commit/abort sequence"
+    },
+    {
+      "field": "obligation_leak_count",
+      "derivation_source": "Obligation lifecycle events",
+      "reason": "Cumulative counter derivable from obligation outcomes"
+    },
+    {
+      "field": "governor_state",
+      "derivation_source": "Configuration + epoch advance events",
+      "reason": "Deterministic state machine given config"
+    },
+    {
+      "field": "worker_park_state",
+      "derivation_source": "TaskScheduled events + worker assignment",
+      "reason": "Derivable from task availability and scheduling decisions"
+    },
+    {
+      "field": "blocking_pool_state",
+      "derivation_source": "Spawn-blocking events",
+      "reason": "Running counter of active blocking tasks"
+    },
+    {
+      "field": "timer_heap_structure",
+      "derivation_source": "TimerCreated + TimerFired + TimerCancelled events",
+      "reason": "Fully reconstructable from timer lifecycle events"
+    },
+    {
+      "field": "calibration_scores",
+      "derivation_source": "Controller decision events",
+      "reason": "Computed from evidence ledger entries"
+    }
+  ],
+  "size_budget": {
+    "max_event_bytes": 25,
+    "typical_event_bytes": 12,
+    "overhead_budget_fraction": 0.10,
+    "overhead_budget_description": "Trace overhead MUST be less than 10% of total runtime memory for typical workloads (<=100K events)"
+  },
+  "structured_log_fields_required": [
+    "trace_id",
+    "workload_id",
+    "replay_schema_version",
+    "config_hash",
+    "capture_event_count",
+    "capture_bytes",
+    "excluded_fields",
+    "missing_source_fields",
+    "replay_divergence_point",
+    "replay_status"
+  ],
+  "replay_status_values": [
+    "success",
+    "diverged",
+    "incomplete",
+    "schema_mismatch"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA06-SMOKE-NONDETERMINISM-CATALOG",
+      "description": "Verify nondeterminism source catalog matches ReplayEvent variants",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa061 cargo test --test hindsight_logging_nondeterminism_capture_contract nondeterminism_source_catalog -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-DERIVED-STATE-EXCLUSION",
+      "description": "Verify excluded derived state is not captured in replay events",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa061 cargo test --test hindsight_logging_nondeterminism_capture_contract excluded_derived -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-SIZE-BUDGET",
+      "description": "Verify replay event sizes are within budget",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa061 cargo test --test hindsight_logging_nondeterminism_capture_contract size_budget -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-SMOKE-REPLAY-FORMAT",
+      "description": "Verify replay trace format round-trips correctly",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa061 cargo test --test hindsight_logging_nondeterminism_capture_contract replay_format -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.4",
+    "asupersync-1508v.9.4",
+    "asupersync-1508v.6.5"
+  ]
+}

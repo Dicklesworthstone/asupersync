@@ -1,0 +1,66 @@
+---
+source: src/cli/output.rs
+expression: snapshot
+---
+{
+  "json_raw": "[{\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"workspace scan complete\",\"state\":\"normal\"},{\"code\":\"cache_stale\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"using cached dependency graph\",\"state\":\"warn\"},{\"code\":\"metadata_error\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"cargo metadata failed\",\"state\":\"error\"}]\n",
+  "json_value": [
+    {
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "workspace scan complete",
+      "state": "normal"
+    },
+    {
+      "code": "cache_stale",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "using cached dependency graph",
+      "state": "warn"
+    },
+    {
+      "code": "metadata_error",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "cargo metadata failed",
+      "state": "error"
+    }
+  ],
+  "json_pretty_raw": "[\n  {\n    \"generated_at\": \"<scrubbed-timestamp>\",\n    \"message\": \"workspace scan complete\",\n    \"state\": \"normal\"\n  },\n  {\n    \"code\": \"cache_stale\",\n    \"generated_at\": \"<scrubbed-timestamp>\",\n    \"message\": \"using cached dependency graph\",\n    \"state\": \"warn\"\n  },\n  {\n    \"code\": \"metadata_error\",\n    \"generated_at\": \"<scrubbed-timestamp>\",\n    \"message\": \"cargo metadata failed\",\n    \"state\": \"error\"\n  }\n]\n",
+  "json_pretty_value": [
+    {
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "workspace scan complete",
+      "state": "normal"
+    },
+    {
+      "code": "cache_stale",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "using cached dependency graph",
+      "state": "warn"
+    },
+    {
+      "code": "metadata_error",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "cargo metadata failed",
+      "state": "error"
+    }
+  ],
+  "stream_json_raw": "{\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"workspace scan complete\",\"state\":\"normal\"}\n{\"code\":\"cache_stale\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"using cached dependency graph\",\"state\":\"warn\"}\n{\"code\":\"metadata_error\",\"generated_at\":\"<scrubbed-timestamp>\",\"message\":\"cargo metadata failed\",\"state\":\"error\"}\n",
+  "stream_json_values": [
+    {
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "workspace scan complete",
+      "state": "normal"
+    },
+    {
+      "code": "cache_stale",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "using cached dependency graph",
+      "state": "warn"
+    },
+    {
+      "code": "metadata_error",
+      "generated_at": "<scrubbed-timestamp>",
+      "message": "cargo metadata failed",
+      "state": "error"
+    }
+  ]
+}

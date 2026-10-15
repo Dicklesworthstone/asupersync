@@ -1,0 +1,17 @@
+error[E0277]: `Rc<u64>` cannot be sent between threads safely
+  --> tests/compile_fail/proto_message_requires_send.rs:21:23
+   |
+21 | impl ProtoMessage for NotSend {
+   |                       ^^^^^^^ `Rc<u64>` cannot be sent between threads safely
+   |
+   = help: within `NotSend`, the trait `std::marker::Send` is not implemented for `Rc<u64>`
+note: required because it appears within the type `NotSend`
+  --> tests/compile_fail/proto_message_requires_send.rs:17:8
+   |
+17 | struct NotSend {
+   |        ^^^^^^^
+note: required by a bound in `ProtoMessage`
+  --> src/grpc/protobuf.rs
+   |
+   | pub trait ProtoMessage: Default + Send + Sized + 'static {
+   |                                   ^^^^ required by this bound in `ProtoMessage`

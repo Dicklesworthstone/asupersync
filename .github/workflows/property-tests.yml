@@ -1,0 +1,72 @@
+name: Property Tests
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'scripts/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  schedule:
+    - cron: '0 3 * * *'
+
+# Newest pending run per ref wins; in-progress runs on `main` finish (see ci.yml).
+concurrency:
+  group: property-tests-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUST_LOG: info
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
+
+jobs:
+  property-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cases: [1000, 10000]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proptest-${{ matrix.cases }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run property tests
+        env:
+          PROPTEST_CASES: ${{ matrix.cases }}
+          PROPTEST_SEED: ${{ github.run_id }}
+        run: ./scripts/run_property_tests.sh
+
+      - name: Upload proptest logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proptest-logs-${{ matrix.cases }}
+          path: target/proptest-results/

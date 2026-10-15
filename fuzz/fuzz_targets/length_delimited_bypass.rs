@@ -1,0 +1,697 @@
+//! Length-delimited codec bypass attempt fuzz target.
+//!
+//! This fuzzer tests security vulnerabilities in length-delimited frame parsing per
+//! RFC 9110 Section 6.1 "Message Parsing and Routing" with focus on:
+//! - Length field length bypass attempts (malformed length prefixes)
+//! - Length adjustment negative exploitation (integer overflow/underflow)
+//! - Endianness flip attacks (big-endian vs little-endian confusion)
+//! - Concatenated frames validation (frame boundary confusion)
+//! - Zero-length frame idempotent behavior (edge case handling)
+
+#![no_main]
+
+use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
+use std::io;
+use std::sync::OnceLock;
+
+use asupersync::bytes::BytesMut;
+use asupersync::codec::length_delimited::LengthDelimitedCodec;
+use asupersync::codec::{Decoder, Encoder};
+
+/// Maximum reasonable frame length for bypass testing
+const MAX_FRAME_LENGTH: usize = 1_048_576; // 1MB
+
+static FIXED_CANARIES: OnceLock<()> = OnceLock::new();
+
+/// Bypass attack patterns for length-delimited frame parsing
+#[derive(Arbitrary, Debug, Clone)]
+enum BypassPattern {
+    /// Length field length bypass (malformed length prefixes)
+    LengthFieldLength {
+        /// Number of bytes claimed to encode length (1-8)
+        field_length: u8,
+        /// Actual length value to encode
+        length_value: u32,
+        /// Payload to append after length field
+        payload: Vec<u8>,
+    },
+    /// Length adjustment negative exploitation
+    LengthAdjustmentNegative {
+        /// Negative adjustment value (should cause underflow)
+        adjustment: i64,
+        /// Base length value
+        base_length: u32,
+        /// Frame data
+        data: Vec<u8>,
+    },
+    /// Endianness flip attack (confusion between big/little endian)
+    EndiannessFlip {
+        /// Length value in little-endian
+        le_length: u32,
+        /// Same value interpreted as big-endian
+        be_length: u32,
+        /// Frame payload
+        payload: Vec<u8>,
+        /// Which endianness to use for encoding
+        use_big_endian: bool,
+    },
+    /// Concatenated frames boundary confusion
+    ConcatenatedFrames {
+        /// First frame data
+        frame1: Vec<u8>,
+        /// Second frame data
+        frame2: Vec<u8>,
+        /// Third frame data
+        frame3: Vec<u8>,
+        /// Malformed boundary data between frames
+        boundary_corruption: Vec<u8>,
+    },
+    /// Zero-length frame edge cases
+    ZeroLength {
+        /// Should be empty but may contain data
+        payload: Vec<u8>,
+        /// Number of zero-length frames to chain
+        chain_count: u8,
+    },
+}
+
+impl BypassPattern {
+    /// Convert bypass pattern to raw bytes for fuzzing
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            BypassPattern::LengthFieldLength {
+                field_length,
+                length_value,
+                payload,
+            } => {
+                let mut result = Vec::new();
+                let field_len = (*field_length as usize).clamp(1, 8);
+                let len_val = *length_value as usize;
+
+                // Encode length with potentially malformed field length
+                match field_len {
+                    1 => result.extend_from_slice(&(len_val as u8).to_be_bytes()),
+                    2 => result.extend_from_slice(&(len_val as u16).to_be_bytes()),
+                    3 => {
+                        let bytes = (len_val as u32).to_be_bytes();
+                        result.extend_from_slice(&bytes[1..]);
+                    }
+                    4 => result.extend_from_slice(&(len_val as u32).to_be_bytes()),
+                    5..=8 => {
+                        let bytes = (len_val as u64).to_be_bytes();
+                        result.extend_from_slice(&bytes[8 - field_len..]);
+                    }
+                    _ => unreachable!(),
+                }
+
+                result.extend_from_slice(payload);
+                result
+            }
+            BypassPattern::LengthAdjustmentNegative {
+                adjustment,
+                base_length,
+                data,
+            } => {
+                let mut result = Vec::new();
+                // Attempt to create a scenario where negative adjustment causes issues
+                let adjusted_length = (*base_length as i64).wrapping_add(*adjustment);
+                if adjusted_length >= 0 && adjusted_length <= MAX_FRAME_LENGTH as i64 {
+                    let len = adjusted_length as u32;
+                    result.extend_from_slice(&len.to_be_bytes());
+                    result.extend_from_slice(data);
+                }
+                result
+            }
+            BypassPattern::EndiannessFlip {
+                le_length,
+                be_length,
+                payload,
+                use_big_endian,
+            } => {
+                let mut result = Vec::new();
+                if *use_big_endian {
+                    result.extend_from_slice(&be_length.to_be_bytes());
+                } else {
+                    result.extend_from_slice(&le_length.to_le_bytes());
+                }
+                result.extend_from_slice(payload);
+                result
+            }
+            BypassPattern::ConcatenatedFrames {
+                frame1,
+                frame2,
+                frame3,
+                boundary_corruption,
+            } => {
+                let mut result = Vec::new();
+
+                // Frame 1
+                result.extend_from_slice(&(frame1.len() as u32).to_be_bytes());
+                result.extend_from_slice(frame1);
+
+                // Boundary corruption
+                result.extend_from_slice(boundary_corruption);
+
+                // Frame 2
+                result.extend_from_slice(&(frame2.len() as u32).to_be_bytes());
+                result.extend_from_slice(frame2);
+
+                // Frame 3
+                result.extend_from_slice(&(frame3.len() as u32).to_be_bytes());
+                result.extend_from_slice(frame3);
+
+                result
+            }
+            BypassPattern::ZeroLength {
+                payload,
+                chain_count,
+            } => {
+                let mut result = Vec::new();
+                let count = (*chain_count as usize).min(10); // Limit chains
+
+                for _ in 0..count {
+                    // Zero-length frame but may have payload (malformed)
+                    result.extend_from_slice(&0u32.to_be_bytes());
+                    if !payload.is_empty() {
+                        // This is malformed - zero length but has data
+                        result.extend_from_slice(payload);
+                    }
+                }
+                result
+            }
+        }
+    }
+}
+
+/// Fuzz input structure for bypass testing
+#[derive(Arbitrary, Debug)]
+struct LengthDelimitedBypassFuzz {
+    /// The bypass attack pattern to test
+    pattern: BypassPattern,
+    /// Codec configuration for testing
+    length_field_length: u8, // 1-8 bytes
+    length_adjustment: i64, // Can be negative
+    num_skip: u64,          // Bytes to skip before length field
+    max_frame_length: u32,  // Maximum allowed frame length
+}
+
+fuzz_target!(|input: LengthDelimitedBypassFuzz| {
+    FIXED_CANARIES.get_or_init(assert_fixed_decode_canaries);
+
+    let raw_data = input.pattern.to_bytes();
+    if raw_data.is_empty() || raw_data.len() > MAX_FRAME_LENGTH {
+        return;
+    }
+
+    // Build codec with potentially vulnerable configuration
+    let field_len = (input.length_field_length as usize).clamp(1, 8);
+    let max_len = (input.max_frame_length as usize).min(MAX_FRAME_LENGTH);
+    let num_skip = usize::try_from(input.num_skip).unwrap_or(usize::MAX);
+    let mut codec = configured_codec(field_len, input.length_adjustment, num_skip, max_len);
+
+    // ASSERTION 1: Length field length bypass prevention
+    // The codec must reject malformed length fields that don't match configuration
+    if let BypassPattern::LengthFieldLength {
+        field_length,
+        length_value,
+        ..
+    } = &input.pattern
+    {
+        let configured_field_len = field_len;
+        let attempted_field_len = (*field_length as usize).clamp(1, 8);
+
+        // If attempted field length doesn't match config, parsing should fail or be consistent
+        if attempted_field_len != configured_field_len {
+            let mut buf = BytesMut::from(&raw_data[..]);
+            let result = codec.decode(&mut buf);
+
+            // Either should fail gracefully or handle consistently
+            match result {
+                Ok(Some(_frame)) => {
+                    // If it succeeds, the frame length calculation must be consistent
+                    // with the configured field length, not the malformed one
+                    assert!(
+                        *length_value <= max_len as u32,
+                        "Length field length bypass: accepted oversized frame {} > {}",
+                        length_value,
+                        max_len
+                    );
+                }
+                Ok(None) => {
+                    // Need more data - acceptable
+                }
+                Err(_) => {
+                    // Error is acceptable for malformed input
+                }
+            }
+        }
+    }
+
+    // ASSERTION 2: Length adjustment negative exploitation protection
+    // Negative adjustments must not cause integer underflow or buffer access violations
+    if let BypassPattern::LengthAdjustmentNegative {
+        adjustment,
+        base_length,
+        ..
+    } = &input.pattern
+        && *adjustment < 0
+    {
+        let mut buf = BytesMut::from(&raw_data[..]);
+        let result = codec.decode(&mut buf);
+
+        match result {
+            Ok(Some(frame)) => {
+                // If parsing succeeds with negative adjustment, frame size must be reasonable
+                assert!(
+                    frame.len() <= max_len,
+                    "Negative length adjustment bypass: frame too large {} > {}",
+                    frame.len(),
+                    max_len
+                );
+
+                // Frame size must not be larger than original base length
+                assert!(
+                    frame.len() <= *base_length as usize,
+                    "Negative adjustment resulted in larger frame: {} > {}",
+                    frame.len(),
+                    base_length
+                );
+            }
+            Ok(None) => {
+                // Need more data - acceptable
+            }
+            Err(_) => {
+                // Error is the expected behavior for negative adjustment exploitation
+            }
+        }
+    }
+
+    // ASSERTION 3: Endianness flip attack prevention
+    // Parser must consistently interpret length fields regardless of endianness confusion
+    if let BypassPattern::EndiannessFlip {
+        le_length,
+        be_length,
+        payload,
+        use_big_endian,
+    } = &input.pattern
+    {
+        let declared_hint = if *use_big_endian {
+            *be_length
+        } else {
+            u32::from_be_bytes(le_length.to_le_bytes())
+        };
+        let mut buf = BytesMut::from(&raw_data[..]);
+        let result = codec.decode(&mut buf);
+
+        match result {
+            Ok(Some(frame)) => {
+                if *use_big_endian {
+                    // Big-endian interpretation should be used consistently
+                    let expected_len = payload.len().min(max_len);
+                    assert!(
+                        frame.len() <= expected_len.max(declared_hint as usize),
+                        "Endianness flip attack: inconsistent frame length {} vs expected {}",
+                        frame.len(),
+                        expected_len
+                    );
+                } else {
+                    // Little-endian should not be accepted if codec expects big-endian
+                    // Most length-delimited codecs use big-endian by convention
+                    if field_len <= 4 {
+                        assert!(
+                            frame.len() <= max_len,
+                            "Endianness flip bypass: frame too large {} > {}",
+                            frame.len(),
+                            max_len
+                        );
+                    }
+                }
+            }
+            Ok(None) => {
+                // Need more data - acceptable
+            }
+            Err(_) => {
+                // Error is acceptable for malformed endianness
+            }
+        }
+    }
+
+    // ASSERTION 4: Concatenated frames boundary validation
+    // Frame boundaries must be strictly respected, no frame bleeding
+    if let BypassPattern::ConcatenatedFrames {
+        frame1,
+        frame2,
+        frame3,
+        boundary_corruption,
+    } = &input.pattern
+        && !boundary_corruption.is_empty()
+    {
+        let mut buf = BytesMut::from(&raw_data[..]);
+        let mut frame_count = 0;
+        let mut decoded_frames = Vec::new();
+
+        // Attempt to decode multiple frames
+        while !buf.is_empty() && frame_count < 5 {
+            match codec.decode(&mut buf) {
+                Ok(Some(frame)) => {
+                    decoded_frames.push(frame);
+                    frame_count += 1;
+                }
+                Ok(None) => break, // Need more data
+                Err(_) => break,   // Parse error
+            }
+        }
+
+        // If boundary corruption didn't prevent parsing, frames must match originals
+        for (i, decoded_frame) in decoded_frames.iter().enumerate() {
+            let expected_frame = match i {
+                0 => frame1,
+                1 => frame2,
+                2 => frame3,
+                _ => break,
+            };
+
+            // Frame content must not be corrupted by boundary issues
+            if decoded_frame.len() == expected_frame.len() {
+                assert_eq!(
+                    decoded_frame.as_ref(),
+                    expected_frame.as_slice(),
+                    "Concatenated frames boundary corruption: frame {} content mismatch",
+                    i
+                );
+            }
+
+            assert!(
+                decoded_frame.len() <= max_len,
+                "Concatenated frames bypass: frame {} too large {} > {}",
+                i,
+                decoded_frame.len(),
+                max_len
+            );
+        }
+    }
+
+    // ASSERTION 5: Zero-length frame idempotent behavior
+    // Zero-length frames must be handled consistently and not cause state corruption
+    if let BypassPattern::ZeroLength {
+        payload,
+        chain_count,
+    } = &input.pattern
+    {
+        let mut buf = BytesMut::from(&raw_data[..]);
+        let mut zero_frames_decoded = 0;
+        let mut has_non_empty_payload = false;
+
+        // Decode all frames in the chain
+        while !buf.is_empty() && zero_frames_decoded < 10 {
+            match codec.decode(&mut buf) {
+                Ok(Some(frame)) => {
+                    if frame.is_empty() {
+                        zero_frames_decoded += 1;
+                    } else if !payload.is_empty() {
+                        // Zero-length prefix but non-empty payload - this is malformed
+                        has_non_empty_payload = true;
+                        break;
+                    }
+
+                    // Frame must not exceed max length even in zero-length chain
+                    assert!(
+                        frame.len() <= max_len,
+                        "Zero-length chain bypass: frame too large {} > {}",
+                        frame.len(),
+                        max_len
+                    );
+                }
+                Ok(None) => break, // Need more data
+                Err(_) => break,   // Parse error (acceptable for malformed zero-length)
+            }
+        }
+
+        // Zero-length frames with payload should either be rejected or payload ignored
+        if has_non_empty_payload && zero_frames_decoded > 0 {
+            // This indicates the codec incorrectly parsed zero-length frame with payload
+            panic!(
+                "Zero-length idempotent violation: parsed {} zero-length frames with non-empty payload",
+                zero_frames_decoded
+            );
+        }
+
+        // Multiple zero-length frames should be handled consistently (idempotent)
+        if *chain_count > 1 && zero_frames_decoded >= 2 {
+            // All zero-length frames in chain should behave identically
+            assert!(
+                zero_frames_decoded <= *chain_count as usize,
+                "Zero-length chain inconsistency: decoded {} frames from {} chain count",
+                zero_frames_decoded,
+                chain_count
+            );
+        }
+    }
+
+    // General robustness: codec must never panic or cause memory safety violations
+    let mut buf = BytesMut::from(&raw_data[..]);
+    let observation = observe_decode_observation(&mut codec, &mut buf, max_len);
+    assert_general_decode_observation(
+        "general bypass decode",
+        &observation,
+        buf.len(),
+        raw_data.len(),
+        max_len,
+    );
+
+    // Additional round-trip test if decoding succeeded
+    let mut buf2 = BytesMut::from(&raw_data[..]);
+    if let Ok(Some(frame)) = codec.decode(&mut buf2) {
+        // Re-encoding the frame should be safe and deterministic
+        let mut encoder_buf = BytesMut::new();
+        let encode_result = codec.encode(frame.clone(), &mut encoder_buf);
+
+        if encode_result.is_ok() {
+            // Re-encoded frame should decode to the same result
+            let mut roundtrip_buf = encoder_buf;
+            if let Ok(Some(roundtrip_frame)) = codec.decode(&mut roundtrip_buf) {
+                assert_eq!(
+                    frame.len(),
+                    roundtrip_frame.len(),
+                    "Round-trip bypass: frame length changed {} -> {}",
+                    frame.len(),
+                    roundtrip_frame.len()
+                );
+
+                assert_eq!(
+                    frame, roundtrip_frame,
+                    "Round-trip bypass: frame content corrupted"
+                );
+            }
+        }
+    }
+});
+
+fn configured_codec(
+    field_len: usize,
+    length_adjustment: i64,
+    num_skip: usize,
+    max_len: usize,
+) -> LengthDelimitedCodec {
+    let mut builder = LengthDelimitedCodec::builder()
+        .length_field_length(field_len)
+        .max_frame_length(max_len);
+
+    if length_adjustment != 0 {
+        let adjustment = isize::try_from(length_adjustment).unwrap_or(if length_adjustment < 0 {
+            isize::MIN
+        } else {
+            isize::MAX
+        });
+        builder = builder.length_adjustment(adjustment);
+    }
+
+    if num_skip > 0 {
+        builder = builder.num_skip(num_skip);
+    }
+
+    builder.new_codec()
+}
+
+#[derive(Debug)]
+enum DecodeObservation {
+    Frame(BytesMut),
+    Incomplete,
+    Rejected(io::ErrorKind),
+}
+
+fn observe_decode(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    max_len: usize,
+) -> Option<BytesMut> {
+    match observe_decode_observation(codec, buf, max_len) {
+        DecodeObservation::Frame(frame) => Some(frame),
+        DecodeObservation::Incomplete | DecodeObservation::Rejected(_) => None,
+    }
+}
+
+fn observe_decode_observation(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    max_len: usize,
+) -> DecodeObservation {
+    let before_len = buf.len();
+    let result = codec.decode(buf);
+    assert!(
+        buf.len() <= before_len,
+        "length-delimited decoder grew the input buffer"
+    );
+
+    match result {
+        Ok(Some(frame)) => {
+            assert!(
+                frame.len() <= max_len,
+                "decoded frame exceeded configured max length: {} > {}",
+                frame.len(),
+                max_len
+            );
+            DecodeObservation::Frame(frame)
+        }
+        Ok(None) => DecodeObservation::Incomplete,
+        Err(err) => {
+            let kind = err.kind();
+            assert!(
+                matches!(
+                    kind,
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ),
+                "unexpected length-delimited decode error kind: {err:?}"
+            );
+            assert!(
+                !err.to_string().trim().is_empty(),
+                "length-delimited decode errors should expose diagnostics"
+            );
+            DecodeObservation::Rejected(kind)
+        }
+    }
+}
+
+fn assert_decode_rejection(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    expected_kind: io::ErrorKind,
+    expected_message: &str,
+    expected_remaining: &[u8],
+) {
+    let before_len = buf.len();
+    let err = codec
+        .decode(buf)
+        .expect_err("fixed canary should reject this length-delimited frame");
+    assert!(
+        buf.len() <= before_len,
+        "rejected length-delimited decode grew the input buffer"
+    );
+    assert_eq!(
+        err.kind(),
+        expected_kind,
+        "length-delimited rejection kind changed"
+    );
+    assert_eq!(
+        err.to_string(),
+        expected_message,
+        "length-delimited rejection diagnostic changed"
+    );
+    assert_eq!(
+        buf.as_ref(),
+        expected_remaining,
+        "length-delimited rejection left unexpected bytes buffered"
+    );
+}
+
+fn assert_general_decode_observation(
+    context: &str,
+    observation: &DecodeObservation,
+    remaining_len: usize,
+    original_len: usize,
+    max_len: usize,
+) {
+    assert!(
+        remaining_len <= original_len,
+        "{context}: decoder left more bytes than it started with"
+    );
+
+    match observation {
+        DecodeObservation::Frame(frame) => {
+            assert!(
+                frame.len() <= max_len,
+                "{context}: decoded frame exceeded configured max length"
+            );
+            assert!(
+                frame.len() <= original_len,
+                "{context}: decoded frame exceeded original input length"
+            );
+        }
+        DecodeObservation::Incomplete => {
+            assert!(
+                remaining_len <= original_len,
+                "{context}: incomplete decode should retain only original bytes"
+            );
+        }
+        DecodeObservation::Rejected(kind) => {
+            assert!(
+                matches!(
+                    kind,
+                    io::ErrorKind::InvalidData | io::ErrorKind::UnexpectedEof
+                ),
+                "{context}: rejected decode had unexpected error kind {kind:?}"
+            );
+        }
+    }
+}
+
+fn assert_fixed_decode_canaries() {
+    let mut complete = BytesMut::from(&b"\0\0\0\x05hello"[..]);
+    let mut codec = LengthDelimitedCodec::new();
+    let frame = observe_decode(&mut codec, &mut complete, MAX_FRAME_LENGTH)
+        .expect("complete length-delimited frame should decode");
+    assert_eq!(frame.as_ref(), b"hello");
+    assert!(complete.is_empty());
+
+    let mut incomplete_header = BytesMut::from(&b"\0\0"[..]);
+    let mut codec = LengthDelimitedCodec::new();
+    assert!(observe_decode(&mut codec, &mut incomplete_header, MAX_FRAME_LENGTH).is_none());
+    assert_eq!(incomplete_header.as_ref(), b"\0\0");
+
+    let mut incomplete_payload = BytesMut::from(&b"\0\0\0\x05he"[..]);
+    let mut codec = LengthDelimitedCodec::new();
+    assert!(observe_decode(&mut codec, &mut incomplete_payload, MAX_FRAME_LENGTH).is_none());
+    assert_eq!(incomplete_payload.as_ref(), b"he");
+
+    let mut zero = BytesMut::from(&b"\0\0\0\0"[..]);
+    let mut codec = LengthDelimitedCodec::new();
+    let frame = observe_decode(&mut codec, &mut zero, MAX_FRAME_LENGTH)
+        .expect("zero-length frame should decode");
+    assert!(frame.is_empty());
+    assert!(zero.is_empty());
+
+    let mut too_large = BytesMut::from(&b"\0\0\0\x03abc"[..]);
+    let mut codec = LengthDelimitedCodec::builder()
+        .max_frame_length(2)
+        .new_codec();
+    assert_decode_rejection(
+        &mut codec,
+        &mut too_large,
+        io::ErrorKind::InvalidData,
+        "frame length exceeds max_frame_length",
+        b"abc",
+    );
+    assert!(observe_decode(&mut codec, &mut too_large, 2).is_none());
+    assert!(too_large.is_empty());
+
+    let mut codec = LengthDelimitedCodec::new();
+    let mut encoded = BytesMut::new();
+    codec
+        .encode(BytesMut::from(&b"rt"[..]), &mut encoded)
+        .expect("round-trip canary should encode");
+    let frame = observe_decode(&mut codec, &mut encoded, MAX_FRAME_LENGTH)
+        .expect("round-trip canary should decode");
+    assert_eq!(frame.as_ref(), b"rt");
+    assert!(encoded.is_empty());
+}

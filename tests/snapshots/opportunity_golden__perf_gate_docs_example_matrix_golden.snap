@@ -1,0 +1,9 @@
+---
+source: tests/opportunity_golden.rs
+expression: out
+---
+Pre-size BinaryHeap lanes   | Impact=3.0 × Confidence=0.8 / Effort=1.0 = 2.40 | decision=IMPLEMENT
+Arena-backed task nodes     | Impact=4.0 × Confidence=0.6 / Effort=3.0 = 0.80 | decision=REJECT
+Intrusive queues            | Impact=4.0 × Confidence=0.6 / Effort=4.0 = 0.60 | decision=REJECT
+Reuse steal_batch Vec       | Impact=2.0 × Confidence=1.0 / Effort=1.0 = 2.00 | decision=IMPLEMENT
+SIMD for RaptorQ GF ops     | Impact=5.0 × Confidence=0.4 / Effort=3.0 = 0.67 | decision=REJECT

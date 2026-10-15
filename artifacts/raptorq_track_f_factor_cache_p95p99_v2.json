@@ -1,0 +1,283 @@
+{
+  "schema_version": "raptorq-track-f-factor-cache-p95p99-v2",
+  "artifact_id": "raptorq_track_f_factor_cache_p95p99_v2",
+  "generated_at_utc": "2026-02-20T20:20:26Z",
+  "track_bead_id": "asupersync-n5fk6",
+  "external_ref": "bd-37ryw",
+  "source_logs": [
+    "cargo test --test ci_regression_gates g2_f7_burst_cache_p95p99_multiscenario_report -- --nocapture",
+    "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture"
+  ],
+  "methodology": {
+    "suite_id": "RQ-F7-CACHE-BURST-CMP-V2",
+    "replay_ref": "replay:rq-track-f-factor-cache-v2",
+    "scenario_count": 3,
+    "scenario_id_list": [
+      "RQ-F7-CACHE-BURST-CMP-001",
+      "RQ-F7-CACHE-BURST-CMP-002",
+      "RQ-F7-CACHE-BURST-CMP-003"
+    ],
+    "percentile_method": "nearest-rank over per-sample average wall-time/throughput observations (4 decode repetitions per mode per sample)",
+    "mode_definitions": {
+      "baseline": "fresh decoder decode with no reuse (averaged across 4 repetitions)",
+      "warmed_cache": "single decoder with warmup then cache-reuse decode path (averaged across 4 repetitions)",
+      "rollback_proxy": "fresh decoder conservative decode path as rollback proxy (averaged across 4 repetitions)"
+    },
+    "rollback_rehearsal": {
+      "command": "cargo test --test ci_regression_gates g2_f7_factor_cache_observed -- --nocapture",
+      "expected": "PASS",
+      "outcome": "pass"
+    }
+  },
+  "per_scenario_percentiles": [
+    {
+      "burst_drop_range": {
+        "end_exclusive": 32,
+        "start": 12
+      },
+      "delta_vs_baseline": {
+        "warmed_cache": {
+          "throughput_mib_s": {
+            "p95_delta_pct": 0.1540249904245491,
+            "p99_delta_pct": 0.10249133129630447
+          },
+          "time_us": {
+            "p95_delta_pct": 0.3445037809047188,
+            "p99_delta_pct": 0.8594617637822637
+          }
+        }
+      },
+      "extra_repair_symbols": 6,
+      "k": 48,
+      "material_gain": false,
+      "material_gain_thresholds": {
+        "throughput_mib_s": {
+          "p95_delta_pct_gte": 1.0,
+          "p99_delta_pct_gte": 1.0
+        },
+        "time_us": {
+          "p95_delta_pct_lte": -1.0,
+          "p99_delta_pct_lte": -1.0
+        }
+      },
+      "modes": [
+        {
+          "mode": "baseline",
+          "throughput_mib_s": {
+            "p50": 2.3834144253545873,
+            "p95": 2.4002590590001343,
+            "p99": 2.4018427706325984
+          },
+          "time_us": {
+            "p50": 19667.163,
+            "p95": 19827.794,
+            "p99": 19934.91825
+          }
+        },
+        {
+          "cache_hit_rate": 1.0,
+          "cache_hit_samples": 25,
+          "mode": "warmed_cache",
+          "throughput_mib_s": {
+            "p50": 2.396990637699736,
+            "p95": 2.4039560577859236,
+            "p99": 2.404304451263864
+          },
+          "time_us": {
+            "p50": 19555.771,
+            "p95": 19896.1015,
+            "p99": 20106.25125
+          }
+        },
+        {
+          "mode": "rollback_proxy",
+          "throughput_mib_s": {
+            "p50": 2.3914226213504457,
+            "p95": 2.399976868062955,
+            "p99": 2.403227292007855
+          },
+          "time_us": {
+            "p50": 19601.303249999997,
+            "p95": 19964.3755,
+            "p99": 19979.41825
+          }
+        }
+      ],
+      "sample_count": 25,
+      "scenario_id": "RQ-F7-CACHE-BURST-CMP-001",
+      "symbol_size": 1024
+    },
+    {
+      "burst_drop_range": {
+        "end_exclusive": 28,
+        "start": 8
+      },
+      "delta_vs_baseline": {
+        "warmed_cache": {
+          "throughput_mib_s": {
+            "p95_delta_pct": 0.22031453234006446,
+            "p99_delta_pct": 0.22031453234006446
+          },
+          "time_us": {
+            "p95_delta_pct": 7.7434306555443655,
+            "p99_delta_pct": 7.7434306555443655
+          }
+        }
+      },
+      "extra_repair_symbols": 6,
+      "k": 48,
+      "material_gain": false,
+      "material_gain_thresholds": {
+        "throughput_mib_s": {
+          "p95_delta_pct_gte": 1.0,
+          "p99_delta_pct_gte": 1.0
+        },
+        "time_us": {
+          "p95_delta_pct_lte": -1.0,
+          "p99_delta_pct_lte": -1.0
+        }
+      },
+      "modes": [
+        {
+          "mode": "baseline",
+          "throughput_mib_s": {
+            "p50": 2.4597448220053875,
+            "p95": 2.480999338241393,
+            "p99": 2.480999338241393
+          },
+          "time_us": {
+            "p50": 28528.040499999996,
+            "p95": 29211.77125,
+            "p99": 29211.77125
+          }
+        },
+        {
+          "cache_hit_rate": 1.0,
+          "cache_hit_samples": 16,
+          "mode": "warmed_cache",
+          "throughput_mib_s": {
+            "p50": 2.467781586843138,
+            "p95": 2.4864653403307995,
+            "p99": 2.4864653403307995
+          },
+          "time_us": {
+            "p50": 28487.097,
+            "p95": 31473.764499999997,
+            "p99": 31473.764499999997
+          }
+        },
+        {
+          "mode": "rollback_proxy",
+          "throughput_mib_s": {
+            "p50": 2.462520870137988,
+            "p95": 2.482548719654516,
+            "p99": 2.482548719654516
+          },
+          "time_us": {
+            "p50": 28535.99325,
+            "p95": 31739.421000000002,
+            "p99": 31739.421000000002
+          }
+        }
+      ],
+      "sample_count": 16,
+      "scenario_id": "RQ-F7-CACHE-BURST-CMP-002",
+      "symbol_size": 1536
+    },
+    {
+      "burst_drop_range": {
+        "end_exclusive": 36,
+        "start": 16
+      },
+      "delta_vs_baseline": {
+        "warmed_cache": {
+          "throughput_mib_s": {
+            "p95_delta_pct": 0.3676847318838924,
+            "p99_delta_pct": 0.3676847318838924
+          },
+          "time_us": {
+            "p95_delta_pct": -0.7142744113489768,
+            "p99_delta_pct": -0.7142744113489768
+          }
+        }
+      },
+      "extra_repair_symbols": 8,
+      "k": 48,
+      "material_gain": false,
+      "material_gain_thresholds": {
+        "throughput_mib_s": {
+          "p95_delta_pct_gte": 1.0,
+          "p99_delta_pct_gte": 1.0
+        },
+        "time_us": {
+          "p95_delta_pct_lte": -1.0,
+          "p99_delta_pct_lte": -1.0
+        }
+      },
+      "modes": [
+        {
+          "mode": "baseline",
+          "throughput_mib_s": {
+            "p50": 2.3803054366042873,
+            "p95": 2.395554418266983,
+            "p99": 2.395554418266983
+          },
+          "time_us": {
+            "p50": 39381.05275,
+            "p95": 40033.843499999995,
+            "p99": 40033.843499999995
+          }
+        },
+        {
+          "cache_hit_rate": 1.0,
+          "cache_hit_samples": 12,
+          "mode": "warmed_cache",
+          "throughput_mib_s": {
+            "p50": 2.3713776013545913,
+            "p95": 2.4043625061069207,
+            "p99": 2.4043625061069207
+          },
+          "time_us": {
+            "p50": 39521.0555,
+            "p95": 39747.892,
+            "p99": 39747.892
+          }
+        },
+        {
+          "mode": "rollback_proxy",
+          "throughput_mib_s": {
+            "p50": 2.375165422354449,
+            "p95": 2.4011182833830405,
+            "p99": 2.4011182833830405
+          },
+          "time_us": {
+            "p50": 39446.126,
+            "p95": 39965.33875,
+            "p99": 39965.33875
+          }
+        }
+      ],
+      "sample_count": 12,
+      "scenario_id": "RQ-F7-CACHE-BURST-CMP-003",
+      "symbol_size": 2048
+    }
+  ],
+  "summary": {
+    "limitations": [
+      "Wall-time measurements are deterministic in setup but still sensitive to host jitter.",
+      "Closure promotion should require representative multi-workload material gain, not a single favorable scenario."
+    ],
+    "material_gain_scenarios": 0,
+    "scenario_count": 3
+  },
+  "findings": [
+    "Cache reuse activates deterministically in every tested scenario (cache_hit_rate=1.0 for all scenarios).",
+    "Across three burst workloads, warmed cache throughput p95/p99 deltas remain modest (<1%) and no scenario meets current material-gain thresholds.",
+    "Observed tail-latency behavior remains variable across reruns, including warmed-cache p95 regressions in some captures, indicating unresolved tail-risk under representative workloads."
+  ],
+  "limitations": [
+    "Wall-time measurements are deterministic in setup but still sensitive to host jitter.",
+    "Closure promotion should require representative multi-workload material gain, not a single favorable scenario.",
+    "Current evidence improves confidence in deterministic behavior and rollback rehearsal, but does not satisfy closure-grade material p95/p99 gain requirements for F7 promotion."
+  ]
+}

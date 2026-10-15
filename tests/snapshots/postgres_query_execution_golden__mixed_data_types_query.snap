@@ -1,0 +1,44 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12349
+SQL: SELECT id, metadata, binary_data, created_at FROM documents WHERE id = $1
+Execution Time: 23ms
+Status: SUCCESS
+Rows Returned: 1
+
+--- Column Description ---
+Column 0: id
+  Type OID: 20
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 1
+  Format: 0
+Column 1: metadata
+  Type OID: 3802
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 2
+  Format: 0
+Column 2: binary_data
+  Type OID: 17
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 3
+  Format: 0
+Column 3: created_at
+  Type OID: 1184
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 4
+  Format: 0
+
+--- Sample Rows (first 3) ---
+Row 0:
+  id: 9876543210
+  metadata: "{"tags": ["important", "urgent"]}"
+  binary_data: \xff00abcd
+  created_at: "2024-03-15 14:30:00+00"
+=====================================

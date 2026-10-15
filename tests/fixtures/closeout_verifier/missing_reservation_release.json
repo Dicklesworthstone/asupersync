@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Closed and pushed `asupersync-open-reservation` at `def4567abc`. Validation: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_closeout_reservation cargo test passed.",
+        "from": "GentleCitadel",
+        "id": 1002,
+        "subject": "Closed asupersync-open-reservation",
+        "thread_id": "asupersync-open-reservation"
+      }
+    ],
+    "reservations": [
+      {
+        "agent": "GentleCitadel",
+        "expires_ts": "2026-05-10T10:00:00Z",
+        "id": 42,
+        "path": "scripts/closeout_verifier.py"
+      }
+    ]
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-open-reservation",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-open-reservation",
+    "commit": "def4567abc",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-open-reservation",
+    "thread_id": "asupersync-open-reservation"
+  },
+  "git": {
+    "main_head": "def4567abc",
+    "origin_main": "def4567abc",
+    "origin_master": "def4567abc"
+  }
+}

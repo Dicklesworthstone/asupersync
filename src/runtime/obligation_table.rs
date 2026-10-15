@@ -1,0 +1,2033 @@
+//! Obligation table for tracked resource obligations.
+//!
+//! Encapsulates the obligation arena and provides domain-level operations for
+//! obligation lifecycle management. This separation enables finer-grained locking
+//! in the sharded runtime state (each table behind its own lock).
+
+use crate::error::{Error, ErrorKind};
+use crate::obligation::ledger::{ObligationAuditRecord, ObligationCounts};
+use crate::record::{
+    ObligationAbortReason, ObligationKind, ObligationRecord, ObligationResolution, SourceLocation,
+};
+use crate::types::{ObligationId, RegionId, TaskId, Time};
+use crate::util::{Arena, ArenaIndex};
+use smallvec::SmallVec;
+use std::backtrace::Backtrace;
+use std::collections::{BTreeSet, VecDeque};
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+
+type HolderIds = SmallVec<[ObligationId; 4]>;
+type HolderBucket = SmallVec<[(TaskId, HolderIds); 1]>;
+
+/// Information returned when an obligation is committed.
+#[derive(Debug, Clone)]
+pub struct ObligationCommitInfo {
+    /// The obligation ID.
+    pub id: ObligationId,
+    /// The task that held the obligation.
+    pub holder: TaskId,
+    /// The region the obligation belongs to.
+    pub region: RegionId,
+    /// The kind of obligation.
+    pub kind: ObligationKind,
+    /// Duration the obligation was held (nanoseconds).
+    pub duration: u64,
+}
+
+/// Information returned when an obligation is aborted.
+#[derive(Debug, Clone)]
+pub struct ObligationAbortInfo {
+    /// The obligation ID.
+    pub id: ObligationId,
+    /// The task that held the obligation.
+    pub holder: TaskId,
+    /// The region the obligation belongs to.
+    pub region: RegionId,
+    /// The kind of obligation.
+    pub kind: ObligationKind,
+    /// Duration the obligation was held (nanoseconds).
+    pub duration: u64,
+    /// The reason for the abort.
+    pub reason: ObligationAbortReason,
+}
+
+/// Information returned when an obligation is marked as leaked.
+#[derive(Debug, Clone)]
+pub struct ObligationLeakInfo {
+    /// The obligation ID.
+    pub id: ObligationId,
+    /// The task that held the obligation.
+    pub holder: TaskId,
+    /// The region the obligation belongs to.
+    pub region: RegionId,
+    /// The kind of obligation.
+    pub kind: ObligationKind,
+    /// Duration the obligation was held (nanoseconds).
+    pub duration: u64,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: SourceLocation,
+    /// Optional backtrace from when the obligation was acquired.
+    pub acquire_backtrace: Option<Arc<Backtrace>>,
+    /// Optional description.
+    pub description: Option<String>,
+}
+
+/// Arguments for creating an obligation record.
+///
+/// Kept as a struct (instead of many positional parameters) to make callsites
+/// explicit and to keep clippy pedantic clean under `-D warnings`.
+#[derive(Debug, Clone)]
+pub struct ObligationCreateArgs {
+    /// Obligation kind.
+    pub kind: ObligationKind,
+    /// Task that holds the obligation.
+    pub holder: TaskId,
+    /// Region that owns the obligation.
+    pub region: RegionId,
+    /// Current time at reservation.
+    pub now: Time,
+    /// Optional description for diagnostics.
+    pub description: Option<String>,
+    /// Source location where the obligation was acquired.
+    pub acquired_at: SourceLocation,
+    /// Optional backtrace captured at acquisition time.
+    pub acquire_backtrace: Option<Arc<Backtrace>>,
+}
+
+/// Number of variants in [`ObligationKind`] — sized at compile time so we can
+/// stash per-kind counters in a fixed array without boxing.
+const OBLIGATION_KIND_COUNT: usize = 6;
+
+/// Committed and aborted records the table keeps queryable before reclaiming
+/// the oldest (br-asupersync-fu6cr0). Every mpsc send, oneshot,
+/// permit and lease resolves an obligation, so keeping every resolved record
+/// grew the table, its holder index and every full scan without bound.
+/// Leaked records are never reclaimed: leak diagnostics read them.
+const RESOLVED_RETENTION: usize = 4096;
+
+/// Finalized regions the fence remembers, most recent first. A finalized
+/// region has no pending obligation (region close requires none), so an older
+/// region's records already refuse commit and abort as resolved; the fence
+/// only keeps the more specific `RegionFinalized` error for recent regions.
+const FINALIZED_FENCE_RETENTION: usize = 4096;
+
+/// Debug builds compare the cached pending counters with a full scan on every
+/// call while the table is small, then every this-many calls.
+#[cfg(debug_assertions)]
+const COUNTER_CHECK_ALWAYS_UP_TO: usize = 64;
+#[cfg(debug_assertions)]
+const COUNTER_CHECK_INTERVAL: usize = 4096;
+
+/// Encapsulates the obligation arena for resource tracking operations.
+///
+/// Provides both low-level arena access and domain-level methods for
+/// obligation lifecycle management (create, commit, abort, leak).
+/// Cross-cutting concerns (tracing, metrics) remain in RuntimeState.
+///
+/// Maintains a secondary index (`by_holder`) mapping each `TaskId` to its
+/// obligation IDs. This turns holder-based lookups (leak detection, orphan
+/// abort) from O(arena_capacity) scans to O(obligations_per_task).
+#[derive(Debug, Default)]
+pub struct ObligationTable {
+    obligations: Arena<ObligationRecord>,
+    /// Secondary index: arena slot → per-generation task → obligation IDs.
+    ///
+    /// Task arena slots are generation-counted and can be reused. Keep each
+    /// generation distinct so task-specific lookups remain correct across reuse.
+    by_holder: Vec<HolderBucket>,
+    /// Cached count of pending (Reserved) obligations.
+    ///
+    /// Maintained incrementally: +1 on create, -1 on commit/abort/leak.
+    /// This turns `pending_count()` from an O(arena_capacity) scan to O(1).
+    cached_pending: usize,
+    /// Per-kind pending counts, indexed by [`kind_index`]. Supports O(1)
+    /// Lyapunov snapshots (br-asupersync-xxcss5): the governor's per-kind
+    /// obligation breakdown no longer iterates the arena each snapshot.
+    pending_by_kind: [usize; OBLIGATION_KIND_COUNT],
+    /// Running sum of `reserved_at.as_nanos()` over currently pending
+    /// obligations. Combined with the virtual-time `now` at snapshot time,
+    /// `obligation_age_sum_ns = now.as_nanos().saturating_mul(pending) -
+    /// pending_reserved_at_sum_ns` yields the total age in nanoseconds without
+    /// scanning the arena. `u128` is wide enough that a billion-obligation,
+    /// century-long runtime still fits.
+    pending_reserved_at_sum_ns: u128,
+    /// Regions that have been finalized and should reject further obligation operations.
+    ///
+    /// This implements the region finalization fence pattern from ObligationLedger
+    /// to prevent drop-late commit/abort after region close. Obligations for
+    /// finalized regions are rejected with RegionFinalized error.
+    finalized_regions: BTreeSet<RegionId>,
+    /// `finalized_regions` in finalization order, for bounded retention.
+    finalized_order: VecDeque<RegionId>,
+    /// Committed and aborted obligations, oldest first, for bounded retention.
+    resolved_order: VecDeque<ObligationId>,
+    /// Calls of the debug counter check, for sampling.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    counter_checks: AtomicUsize,
+}
+
+/// Stable index for `ObligationKind` in the per-kind counter array.
+///
+/// `SemaphorePermit` is bucketed with `Lease` in the governor snapshot to
+/// match the existing `StateSnapshot::from_runtime_state` aggregation, so we
+/// still give it a distinct counter slot here to keep the running sum
+/// book-keeping simple.
+#[inline]
+#[must_use]
+const fn kind_index(kind: ObligationKind) -> usize {
+    match kind {
+        ObligationKind::SendPermit => 0,
+        ObligationKind::Ack => 1,
+        ObligationKind::Lease => 2,
+        ObligationKind::IoOp => 3,
+        ObligationKind::SemaphorePermit => 4,
+        ObligationKind::Transaction => 5,
+    }
+}
+
+impl ObligationTable {
+    /// Creates an empty obligation table.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            obligations: Arena::new(),
+            by_holder: Vec::with_capacity(32),
+            cached_pending: 0,
+            pending_by_kind: [0; OBLIGATION_KIND_COUNT],
+            pending_reserved_at_sum_ns: 0,
+            finalized_regions: BTreeSet::new(),
+            finalized_order: VecDeque::new(),
+            resolved_order: VecDeque::new(),
+            counter_checks: AtomicUsize::new(0),
+        }
+    }
+
+    /// Creates an obligation table with pre-allocated capacity.
+    ///
+    /// Pre-sizing eliminates reallocation overhead during initial obligation creation.
+    /// Based on benchmark analysis, arena growth contributes ~28% of allocations.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            obligations: Arena::with_capacity(capacity),
+            by_holder: Vec::with_capacity(capacity.max(32)),
+            cached_pending: 0,
+            pending_by_kind: [0; OBLIGATION_KIND_COUNT],
+            pending_reserved_at_sum_ns: 0,
+            finalized_regions: BTreeSet::new(),
+            finalized_order: VecDeque::new(),
+            resolved_order: VecDeque::new(),
+            counter_checks: AtomicUsize::new(0),
+        }
+    }
+
+    /// Returns the reserved obligation arena capacity.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    #[inline]
+    #[must_use]
+    pub(crate) fn capacity(&self) -> usize {
+        self.obligations.capacity()
+    }
+
+    /// Atomically bump the pending counters for a newly-created obligation.
+    #[inline]
+    fn note_pending_added(&mut self, kind: ObligationKind, reserved_at: Time) {
+        self.cached_pending += 1;
+        self.pending_by_kind[kind_index(kind)] += 1;
+        self.pending_reserved_at_sum_ns = self
+            .pending_reserved_at_sum_ns
+            .saturating_add(u128::from(reserved_at.as_nanos()));
+    }
+
+    /// Atomically decrement the pending counters when an obligation leaves the
+    /// `Reserved` state (commit / abort / leak / removal-while-pending).
+    #[inline]
+    fn note_pending_removed(&mut self, kind: ObligationKind, reserved_at: Time) {
+        let kind_slot = kind_index(kind);
+        let reserved_at_ns = u128::from(reserved_at.as_nanos());
+
+        let cached_pending = self.cached_pending.checked_sub(1).unwrap_or_else(|| {
+            panic!(
+                "pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+            )
+        });
+        let pending_for_kind = self.pending_by_kind[kind_slot]
+            .checked_sub(1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "per-kind pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+                )
+            });
+        let pending_reserved_at_sum_ns = self
+            .pending_reserved_at_sum_ns
+            .checked_sub(reserved_at_ns)
+            .unwrap_or_else(|| {
+                panic!(
+                    "pending reserved-at sum underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+                )
+            });
+
+        self.cached_pending = cached_pending;
+        self.pending_by_kind[kind_slot] = pending_for_kind;
+        self.pending_reserved_at_sum_ns = pending_reserved_at_sum_ns;
+    }
+
+    #[cfg(debug_assertions)]
+    fn debug_assert_pending_counters_match(&self) {
+        let calls = self
+            .counter_checks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if self.obligations.len() > COUNTER_CHECK_ALWAYS_UP_TO
+            && !calls.is_multiple_of(COUNTER_CHECK_INTERVAL)
+        {
+            return;
+        }
+        let mut pending = 0usize;
+        let mut by_kind = [0usize; OBLIGATION_KIND_COUNT];
+        let mut reserved_at_sum = 0u128;
+
+        for (_, record) in self.obligations.iter() {
+            if record.is_pending() {
+                pending += 1;
+                by_kind[kind_index(record.kind)] += 1;
+                reserved_at_sum =
+                    reserved_at_sum.saturating_add(u128::from(record.reserved_at.as_nanos()));
+            }
+        }
+
+        debug_assert_eq!(
+            self.cached_pending, pending,
+            "pending counter drift: cached count no longer matches arena scan"
+        );
+        debug_assert_eq!(
+            self.pending_by_kind, by_kind,
+            "pending counter drift: per-kind cached counts no longer match arena scan"
+        );
+        debug_assert_eq!(
+            self.pending_reserved_at_sum_ns, reserved_at_sum,
+            "pending counter drift: cached reserved-at sum no longer matches arena scan"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[inline]
+    fn debug_assert_pending_counters_match(&self) {}
+
+    // =========================================================================
+    // Low-level arena access
+    // =========================================================================
+
+    /// Returns a shared reference to an obligation record by arena index.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, index: ArenaIndex) -> Option<&ObligationRecord> {
+        self.obligations.get(index)
+    }
+
+    /// Returns a mutable reference to an obligation record by arena index.
+    #[inline]
+    pub fn get_mut(&mut self, index: ArenaIndex) -> Option<&mut ObligationRecord> {
+        self.obligations.get_mut(index)
+    }
+
+    /// Inserts a new obligation record into the arena.
+    pub fn insert(&mut self, mut record: ObligationRecord) -> ArenaIndex {
+        let is_pending = record.is_pending();
+        let holder = record.holder;
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
+        let idx = self.obligations.insert_with(|idx| {
+            // The arena slot defines the canonical obligation ID. Normalize the
+            // stored record so low-level callers cannot desynchronize `record.id`
+            // from the holder index or later lifecycle operations.
+            record.id = ObligationId::from_arena(idx);
+            record
+        });
+        self.push_holder_id(holder, ObligationId::from_arena(idx));
+        if is_pending {
+            self.note_pending_added(kind, reserved_at);
+        }
+        self.debug_assert_pending_counters_match();
+        idx
+    }
+
+    #[inline]
+    fn push_holder_id(&mut self, holder: TaskId, ob_id: ObligationId) {
+        let slot = holder.arena_index().index() as usize;
+        if slot >= self.by_holder.len() {
+            self.by_holder.resize_with(slot + 1, SmallVec::new);
+        }
+        let entries = &mut self.by_holder[slot];
+        if let Some((_, ids)) = entries.iter_mut().find(|(task_id, _)| *task_id == holder) {
+            ids.push(ob_id);
+            return;
+        }
+
+        let mut ids = SmallVec::new();
+        ids.push(ob_id);
+        entries.push((holder, ids));
+    }
+
+    /// Rebind an accepted handoff without changing identity, age, or counts.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn rebind_pending(
+        &mut self,
+        id: ObligationId,
+        holder: TaskId,
+        region: RegionId,
+    ) -> Result<(), Error> {
+        let record = self
+            .obligations
+            .get(id.arena_index())
+            .filter(|record| record.is_pending())
+            .ok_or_else(|| Error::new(ErrorKind::ObligationAlreadyResolved))?;
+        let old_holder = record.holder;
+        // Allocate the destination index before retiring the old index.
+        self.push_holder_id(holder, id);
+        let slot = old_holder.arena_index().index() as usize;
+        if let Some(entries) = self.by_holder.get_mut(slot) {
+            if let Some(entry) = entries.iter().position(|(task, _)| *task == old_holder) {
+                let (_, ids) = &mut entries[entry];
+                if let Some(index) = ids.iter().position(|candidate| *candidate == id) {
+                    ids.swap_remove(index);
+                }
+                if ids.is_empty() {
+                    entries.swap_remove(entry);
+                }
+            }
+        }
+        let record = self
+            .obligations
+            .get_mut(id.arena_index())
+            .expect("pending record retained across index update");
+        record.holder = holder;
+        record.region = region;
+        self.debug_assert_pending_counters_match();
+        Ok(())
+    }
+
+    /// Inserts a new obligation record produced by `f` into the arena.
+    ///
+    /// The closure receives the assigned `ArenaIndex`.
+    pub fn insert_with<F>(&mut self, f: F) -> ArenaIndex
+    where
+        F: FnOnce(ArenaIndex) -> ObligationRecord,
+    {
+        let idx = self.obligations.insert_with(|idx| {
+            let mut record = f(idx);
+            // Mirror `insert()`: the assigned arena slot is the only stable ID.
+            record.id = ObligationId::from_arena(idx);
+            record
+        });
+        let note = self.obligations.get(idx).map(|record| {
+            (
+                record.holder,
+                record.kind,
+                record.reserved_at,
+                record.is_pending(),
+            )
+        });
+        if let Some((holder, kind, reserved_at, is_pending)) = note {
+            self.push_holder_id(holder, ObligationId::from_arena(idx));
+            if is_pending {
+                self.note_pending_added(kind, reserved_at);
+            }
+        }
+        self.debug_assert_pending_counters_match();
+        idx
+    }
+
+    /// Removes an obligation record from the arena.
+    #[inline]
+    pub fn remove(&mut self, index: ArenaIndex) -> Option<ObligationRecord> {
+        let record = self.obligations.remove(index)?;
+        if record.is_pending() {
+            self.note_pending_removed(record.kind, record.reserved_at);
+        }
+        let ob_id = ObligationId::from_arena(index);
+        let slot = record.holder.arena_index().index() as usize;
+        if let Some(entries) = self.by_holder.get_mut(slot) {
+            if let Some(entry_index) = entries
+                .iter()
+                .position(|(holder, _)| *holder == record.holder)
+            {
+                let (_, ids) = &mut entries[entry_index];
+                if let Some(pos) = ids.iter().position(|id| *id == ob_id) {
+                    ids.swap_remove(pos);
+                }
+                if ids.is_empty() {
+                    entries.swap_remove(entry_index);
+                }
+            }
+        }
+        self.debug_assert_pending_counters_match();
+        Some(record)
+    }
+
+    /// Returns an iterator over all obligation records.
+    pub fn iter(&self) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations.iter()
+    }
+
+    /// Returns the number of obligation records in the table.
+    #[inline]
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.obligations.len()
+    }
+
+    /// Returns `true` if the obligation table is empty.
+    #[inline]
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.obligations.is_empty()
+    }
+
+    // =========================================================================
+    // Domain-level obligation operations
+    // =========================================================================
+
+    /// Creates a new obligation and returns its ID.
+    ///
+    /// Callers are responsible for checking region admission limits
+    /// (via `RegionTable::try_reserve_obligation`) before calling this.
+    /// Callers are also responsible for emitting trace events.
+    #[track_caller]
+    pub fn create(&mut self, args: ObligationCreateArgs) -> ObligationId {
+        let ObligationCreateArgs {
+            kind,
+            holder,
+            region,
+            now,
+            description,
+            acquired_at,
+            acquire_backtrace,
+        } = args;
+
+        let idx = if let Some(desc) = description {
+            self.obligations.insert_with(|idx| {
+                ObligationRecord::with_description_and_context(
+                    ObligationId::from_arena(idx),
+                    kind,
+                    holder,
+                    region,
+                    now,
+                    desc,
+                    acquired_at,
+                    acquire_backtrace,
+                )
+            })
+        } else {
+            self.obligations.insert_with(|idx| {
+                ObligationRecord::new_with_context(
+                    ObligationId::from_arena(idx),
+                    kind,
+                    holder,
+                    region,
+                    now,
+                    acquired_at,
+                    acquire_backtrace,
+                )
+            })
+        };
+        let ob_id = ObligationId::from_arena(idx);
+        self.push_holder_id(holder, ob_id);
+        let reserved_at = self
+            .obligations
+            .get(idx)
+            .map_or(now, |record| record.reserved_at);
+        self.note_pending_added(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
+        ob_id
+    }
+
+    /// Commits an obligation, transitioning it from Reserved to Committed.
+    ///
+    /// Returns commit info for the caller to emit trace events.
+    /// Callers are responsible for calling `RegionTable::resolve_obligation`
+    /// and `advance_region_state` after this.
+    #[allow(clippy::result_large_err)]
+    pub fn commit(
+        &mut self,
+        obligation: ObligationId,
+        now: Time,
+    ) -> Result<ObligationCommitInfo, Error> {
+        // First check if obligation exists and get region for finalization check
+        let region = {
+            let record = self
+                .obligations
+                .get(obligation.arena_index())
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::ObligationAlreadyResolved)
+                        .with_message("obligation not found")
+                })?;
+            record.region
+        };
+
+        // Region finalization fence: reject commits after region close
+        if self.is_region_finalized(region) {
+            return Err(Error::new(ErrorKind::RegionFinalized)
+                .with_message("cannot commit obligation: region has been finalized"));
+        }
+
+        // Now get mutable reference for the actual commit
+        let record = self.obligations.get_mut(obligation.arena_index()).unwrap();
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
+        let duration = record.resolve(now, ObligationResolution::Commit);
+        let info = ObligationCommitInfo {
+            id: record.id,
+            holder: record.holder,
+            region: record.region,
+            kind,
+            duration,
+        };
+        self.note_pending_removed(kind, reserved_at);
+        self.retain_resolved(info.id);
+        self.debug_assert_pending_counters_match();
+        Ok(info)
+    }
+
+    /// Aborts an obligation, transitioning it from Reserved to Aborted.
+    ///
+    /// Returns abort info for the caller to emit trace events.
+    /// Callers are responsible for calling `RegionTable::resolve_obligation`
+    /// and `advance_region_state` after this.
+    #[allow(clippy::result_large_err)]
+    pub fn abort(
+        &mut self,
+        obligation: ObligationId,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> Result<ObligationAbortInfo, Error> {
+        // First check if obligation exists and get region for finalization check
+        let region = {
+            let record = self
+                .obligations
+                .get(obligation.arena_index())
+                .ok_or_else(|| {
+                    Error::new(ErrorKind::ObligationAlreadyResolved)
+                        .with_message("obligation not found")
+                })?;
+            record.region
+        };
+
+        // Region finalization fence: reject aborts after region close
+        if self.is_region_finalized(region) {
+            return Err(Error::new(ErrorKind::RegionFinalized)
+                .with_message("cannot abort obligation: region has been finalized"));
+        }
+
+        // Now get mutable reference for the actual abort
+        let record = self.obligations.get_mut(obligation.arena_index()).unwrap();
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
+        let duration = record.resolve(now, ObligationResolution::Abort(reason));
+        let info = ObligationAbortInfo {
+            id: record.id,
+            holder: record.holder,
+            region: record.region,
+            kind,
+            duration,
+            reason,
+        };
+        self.note_pending_removed(kind, reserved_at);
+        self.retain_resolved(info.id);
+        self.debug_assert_pending_counters_match();
+        Ok(info)
+    }
+
+    /// Keeps a committed or aborted record queryable for the next
+    /// [`RESOLVED_RETENTION`] resolutions, then reclaims it with its holder
+    /// index entry. A reclaimed id reads as absent, and commit or abort on it
+    /// fails as already resolved, which it is.
+    fn retain_resolved(&mut self, obligation: ObligationId) {
+        self.resolved_order.push_back(obligation);
+        while self.resolved_order.len() > RESOLVED_RETENTION {
+            let Some(oldest) = self.resolved_order.pop_front() else {
+                break;
+            };
+            if self
+                .obligations
+                .get(oldest.arena_index())
+                .is_some_and(|record| !record.is_pending())
+            {
+                let _ = self.remove(oldest.arena_index());
+            }
+        }
+    }
+
+    /// Marks an obligation as leaked, transitioning it from Reserved to Leaked.
+    ///
+    /// Returns leak info for the caller to emit trace/error events.
+    #[allow(clippy::result_large_err)]
+    pub fn mark_leaked(
+        &mut self,
+        obligation: ObligationId,
+        now: Time,
+    ) -> Result<ObligationLeakInfo, Error> {
+        let record = self
+            .obligations
+            .get_mut(obligation.arena_index())
+            .ok_or_else(|| {
+                Error::new(ErrorKind::ObligationAlreadyResolved)
+                    .with_message("obligation not found")
+            })?;
+
+        if !record.is_pending() {
+            return Err(Error::new(ErrorKind::ObligationAlreadyResolved));
+        }
+
+        let kind = record.kind;
+        let reserved_at = record.reserved_at;
+        let duration = record.resolve(now, ObligationResolution::Leak);
+        let info = ObligationLeakInfo {
+            id: record.id,
+            holder: record.holder,
+            region: record.region,
+            kind,
+            duration,
+            acquired_at: record.acquired_at,
+            acquire_backtrace: record.acquire_backtrace.clone(),
+            description: record.description.clone(),
+        };
+        self.note_pending_removed(kind, reserved_at);
+        self.debug_assert_pending_counters_match();
+        Ok(info)
+    }
+
+    /// Returns obligation IDs held by a specific task (O(1) lookup via index).
+    ///
+    /// Returns all obligation IDs for the task, including the resolved ones
+    /// the table still retains.
+    /// Callers should filter by `is_pending()` if only active obligations are needed.
+    #[must_use]
+    pub fn ids_for_holder(&self, task_id: TaskId) -> &[ObligationId] {
+        let slot = task_id.arena_index().index() as usize;
+        if let Some(entries) = self.by_holder.get(slot) {
+            if let Some((_, ids)) = entries.iter().find(|(holder, _)| *holder == task_id) {
+                return ids.as_slice();
+            }
+        }
+        &[]
+    }
+
+    /// Collects pending obligation IDs for a task using the holder index.
+    ///
+    /// Sorted by `ObligationId` for deterministic processing order.
+    #[must_use]
+    pub fn sorted_pending_ids_for_holder(&self, task_id: TaskId) -> SmallVec<[ObligationId; 4]> {
+        let mut result: SmallVec<[ObligationId; 4]> = self
+            .ids_for_holder(task_id)
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.obligations
+                    .get(id.arena_index())
+                    .is_some_and(ObligationRecord::is_pending)
+            })
+            .collect();
+        result.sort_unstable();
+        result
+    }
+
+    /// Returns an iterator over obligations held by a specific task.
+    pub fn for_task(
+        &self,
+        task_id: TaskId,
+    ) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations
+            .iter()
+            .filter(move |(_, r)| r.holder == task_id)
+    }
+
+    /// Returns an iterator over obligations belonging to a specific region.
+    pub fn for_region(
+        &self,
+        region: RegionId,
+    ) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations
+            .iter()
+            .filter(move |(_, r)| r.region == region)
+    }
+
+    /// Returns an iterator over pending obligations held by a specific task.
+    pub fn pending_for_task(
+        &self,
+        task_id: TaskId,
+    ) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations
+            .iter()
+            .filter(move |(_, r)| r.holder == task_id && r.is_pending())
+    }
+
+    /// Returns an iterator over pending obligations in a specific region.
+    pub fn pending_for_region(
+        &self,
+        region: RegionId,
+    ) -> impl Iterator<Item = (ArenaIndex, &ObligationRecord)> {
+        self.obligations
+            .iter()
+            .filter(move |(_, r)| r.region == region && r.is_pending())
+    }
+
+    /// Returns the count of pending obligations across all regions.
+    ///
+    /// O(1) — maintained incrementally via `cached_pending`.
+    #[inline]
+    #[must_use]
+    pub fn pending_count(&self) -> usize {
+        self.debug_assert_pending_counters_match();
+        self.cached_pending
+    }
+
+    /// Returns the pending count for a specific [`ObligationKind`].
+    ///
+    /// O(1) — maintained incrementally alongside `cached_pending`
+    /// (br-asupersync-xxcss5). The Lyapunov governor reads these counters
+    /// instead of iterating the arena on every snapshot.
+    #[inline]
+    #[must_use]
+    pub fn pending_count_for_kind(&self, kind: ObligationKind) -> usize {
+        self.debug_assert_pending_counters_match();
+        self.pending_by_kind[kind_index(kind)]
+    }
+
+    /// Returns counts across all obligations in the table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let base = |kind, region, now| ObligationCreateArgs {
+    ///     kind,
+    ///     holder: task,
+    ///     region,
+    ///     now,
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// };
+    ///
+    /// table.create(base(ObligationKind::Lease, region, Time::from_nanos(10)));
+    /// let ack = table.create(base(ObligationKind::Ack, region, Time::from_nanos(20)));
+    /// table.commit(ack, Time::from_nanos(30))?;
+    ///
+    /// assert_eq!(table.counts().total(), 2);
+    /// assert_eq!(table.counts_for_region(region).pending, 1);
+    /// assert_eq!(table.counts_for_task(task).total(), 2);
+    /// assert_eq!(table.counts_for_kind(ObligationKind::Ack).committed, 1);
+    /// assert_eq!(
+    ///     table
+    ///         .counts_for_region_and_kind(region, ObligationKind::Lease)
+    ///         .pending,
+    ///     1
+    /// );
+    /// # Ok::<(), asupersync::error::Error>(())
+    /// ```
+    #[must_use]
+    pub fn counts(&self) -> ObligationCounts {
+        ObligationCounts::from_records(self.obligations.iter().map(|(_, record)| record))
+    }
+
+    /// Returns counts for obligations belonging to `region`.
+    #[must_use]
+    pub fn counts_for_region(&self, region: RegionId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.region == region),
+        )
+    }
+
+    /// Returns counts for obligations held by `task`.
+    #[must_use]
+    pub fn counts_for_task(&self, task: TaskId) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.holder == task),
+        )
+    }
+
+    /// Returns counts for obligations of `kind`.
+    #[must_use]
+    pub fn counts_for_kind(&self, kind: ObligationKind) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.kind == kind),
+        )
+    }
+
+    /// Returns counts for obligations matching both `region` and `kind`.
+    #[must_use]
+    pub fn counts_for_region_and_kind(
+        &self,
+        region: RegionId,
+        kind: ObligationKind,
+    ) -> ObligationCounts {
+        ObligationCounts::from_records(
+            self.obligations
+                .iter()
+                .map(|(_, record)| record)
+                .filter(|record| record.region == region && record.kind == kind),
+        )
+    }
+
+    /// Returns the lifecycle state for `id`, if it is known to this table.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, ObligationState, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let id = table.create(ObligationCreateArgs {
+    ///     kind: ObligationKind::Lease,
+    ///     holder: TaskId::testing_default(),
+    ///     region: RegionId::testing_default(),
+    ///     now: Time::from_nanos(10),
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// });
+    ///
+    /// assert_eq!(table.obligation_state(id), Some(ObligationState::Reserved));
+    /// ```
+    #[must_use]
+    pub fn obligation_state(&self, id: ObligationId) -> Option<crate::record::ObligationState> {
+        self.obligations
+            .get(id.arena_index())
+            .map(|record| record.state)
+    }
+
+    /// Returns owned audit snapshots for every obligation.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use asupersync::record::{ObligationKind, SourceLocation};
+    /// use asupersync::runtime::ObligationTable;
+    /// use asupersync::runtime::obligation_table::ObligationCreateArgs;
+    /// use asupersync::types::{RegionId, TaskId, Time};
+    ///
+    /// let mut table = ObligationTable::new();
+    /// let task = TaskId::testing_default();
+    /// let region = RegionId::testing_default();
+    /// let base = |kind, holder| ObligationCreateArgs {
+    ///     kind,
+    ///     holder,
+    ///     region,
+    ///     now: Time::from_nanos(10),
+    ///     description: None,
+    ///     acquired_at: SourceLocation::unknown(),
+    ///     acquire_backtrace: None,
+    /// };
+    ///
+    /// table.create(base(ObligationKind::Lease, task));
+    /// table.create(base(ObligationKind::Ack, task));
+    ///
+    /// assert_eq!(table.audit(Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_region(region, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_task(task, Time::from_nanos(30)).len(), 2);
+    /// assert_eq!(table.audit_kind(ObligationKind::Lease, Time::from_nanos(30)).len(), 1);
+    /// ```
+    #[must_use]
+    pub fn audit(&self, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations belonging to `region`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_region(&self, region: RegionId, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.region == region)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations held by `task`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_task(&self, task: TaskId, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.holder == task)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns owned audit snapshots for obligations of `kind`.
+    ///
+    /// Results are ordered by [`ObligationId`] for deterministic diagnostics.
+    #[must_use]
+    pub fn audit_kind(&self, kind: ObligationKind, now: Time) -> Vec<ObligationAuditRecord> {
+        let mut records: Vec<_> = self
+            .obligations
+            .iter()
+            .map(|(_, record)| record)
+            .filter(|record| record.kind == kind)
+            .map(|record| ObligationAuditRecord::from_record(record, now))
+            .collect();
+        records.sort_unstable_by_key(|record| record.id);
+        records
+    }
+
+    /// Returns the running sum of `reserved_at.as_nanos()` across all pending
+    /// obligations. Combined with the current virtual time, yields the total
+    /// obligation age in O(1) — see
+    /// [`StateSnapshot::from_runtime_state`](crate::obligation::lyapunov::StateSnapshot::from_runtime_state).
+    #[inline]
+    #[must_use]
+    pub fn pending_reserved_at_sum_ns(&self) -> u128 {
+        self.debug_assert_pending_counters_match();
+        self.pending_reserved_at_sum_ns
+    }
+
+    /// Marks a region as finalized to prevent further obligation operations.
+    ///
+    /// After this call, all `commit()` and `abort()` operations for obligations
+    /// belonging to this region will fail with `ErrorKind::RegionFinalized`.
+    /// This implements the region finalization fence to ensure structured
+    /// concurrency invariants: no obligation mutations after region close.
+    ///
+    /// Idempotent - calling multiple times on the same region is safe.
+    ///
+    /// The fence remembers the most recent `FINALIZED_FENCE_RETENTION`
+    /// regions. An older region's obligations are all resolved or leaked (a
+    /// region closes with none pending), so `commit()` and `abort()` still
+    /// refuse them, as already resolved.
+    pub fn mark_region_finalized(&mut self, region: RegionId) {
+        if self.finalized_regions.insert(region) {
+            self.finalized_order.push_back(region);
+            while self.finalized_order.len() > FINALIZED_FENCE_RETENTION {
+                if let Some(oldest) = self.finalized_order.pop_front() {
+                    self.finalized_regions.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// Returns `true` if the given region has been marked as finalized.
+    #[must_use]
+    pub fn is_region_finalized(&self, region: RegionId) -> bool {
+        self.finalized_regions.contains(&region)
+    }
+
+    /// Collects IDs of pending obligations held by a specific task.
+    #[must_use]
+    pub fn pending_obligation_ids_for_task(&self, task_id: TaskId) -> Vec<ObligationId> {
+        self.sorted_pending_ids_for_holder(task_id).into_vec()
+    }
+
+    /// Collects IDs of pending obligations in a specific region.
+    #[must_use]
+    pub fn pending_obligation_ids_for_region(&self, region: RegionId) -> Vec<ObligationId> {
+        let mut ids: Vec<ObligationId> = self
+            .obligations
+            .iter()
+            .filter(|(_, r)| r.region == region && r.is_pending())
+            .map(|(idx, _)| ObligationId::from_arena(idx))
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::record::ObligationState;
+
+    fn make_obligation(
+        table: &mut ObligationTable,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+    ) -> ObligationId {
+        table.create(ObligationCreateArgs {
+            kind,
+            holder,
+            region,
+            now: Time::ZERO,
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        })
+    }
+
+    fn test_task_id(n: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    fn test_task_id_with_generation(n: u32, generation: u32) -> TaskId {
+        TaskId::from_arena(ArenaIndex::new(n, generation))
+    }
+
+    fn test_region_id(n: u32) -> RegionId {
+        RegionId::from_arena(ArenaIndex::new(n, 0))
+    }
+
+    // br-asupersync-fu6cr0: resolved records were never
+    // reclaimed, so every mpsc send, permit or lease grew the table forever.
+
+    #[test]
+    fn resolved_records_past_the_retention_are_reclaimed() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(1);
+        let mut ids = Vec::new();
+        for n in 0..RESOLVED_RETENTION + 100 {
+            let holder = test_task_id((n % 7) as u32);
+            let id = make_obligation(&mut table, ObligationKind::SendPermit, holder, region);
+            if n % 2 == 0 {
+                table.commit(id, Time::from_nanos(1)).unwrap();
+            } else {
+                table
+                    .abort(id, Time::from_nanos(1), ObligationAbortReason::Cancel)
+                    .unwrap();
+            }
+            ids.push(id);
+        }
+        assert_eq!(table.len(), RESOLVED_RETENTION);
+        assert!(table.get(ids[0].arena_index()).is_none());
+        assert!(table.get(ids[99].arena_index()).is_none());
+        let newest = table.get(ids[ids.len() - 1].arena_index()).unwrap();
+        assert_eq!(newest.state, ObligationState::Aborted);
+        let indexed: usize = (0..7)
+            .map(|n| table.ids_for_holder(test_task_id(n)).len())
+            .sum();
+        assert_eq!(
+            indexed, RESOLVED_RETENTION,
+            "the holder index forgets reclaimed ids"
+        );
+        let error = table.commit(ids[0], Time::from_nanos(2)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ObligationAlreadyResolved);
+    }
+
+    #[test]
+    fn holder_buckets_stay_bounded_across_task_slot_reuse() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(1);
+        for generation in 0..(RESOLVED_RETENTION + 100) as u32 {
+            let holder = test_task_id_with_generation(0, generation);
+            let id = make_obligation(&mut table, ObligationKind::Ack, holder, region);
+            table.commit(id, Time::from_nanos(1)).unwrap();
+        }
+        assert_eq!(table.by_holder[0].len(), RESOLVED_RETENTION);
+    }
+
+    #[test]
+    fn leaked_and_pending_records_are_never_reclaimed() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(1);
+        let pending = make_obligation(&mut table, ObligationKind::Lease, test_task_id(1), region);
+        let leaked = make_obligation(&mut table, ObligationKind::IoOp, test_task_id(2), region);
+        table.mark_leaked(leaked, Time::from_nanos(1)).unwrap();
+        for _ in 0..RESOLVED_RETENTION + 10 {
+            let id = make_obligation(
+                &mut table,
+                ObligationKind::SendPermit,
+                test_task_id(3),
+                region,
+            );
+            table.commit(id, Time::from_nanos(1)).unwrap();
+        }
+        assert!(table.get(pending.arena_index()).unwrap().is_pending());
+        assert_eq!(table.pending_count(), 1);
+        assert_eq!(
+            table.get(leaked.arena_index()).unwrap().state,
+            ObligationState::Leaked
+        );
+    }
+
+    #[test]
+    fn the_finalized_region_fence_is_bounded_and_keeps_recent_regions() {
+        let mut table = ObligationTable::new();
+        let total = (FINALIZED_FENCE_RETENTION + 10) as u32;
+        let recent = test_region_id(total - 1);
+        let pending = make_obligation(&mut table, ObligationKind::Ack, test_task_id(1), recent);
+        for n in 0..total {
+            table.mark_region_finalized(test_region_id(n));
+        }
+        assert_eq!(table.finalized_regions.len(), FINALIZED_FENCE_RETENTION);
+        assert!(!table.is_region_finalized(test_region_id(0)));
+        assert!(table.is_region_finalized(recent));
+        let error = table.commit(pending, Time::from_nanos(1)).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::RegionFinalized);
+    }
+
+    #[test]
+    fn create_and_query_obligation() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(1);
+
+        let id = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        assert_eq!(table.len(), 1);
+
+        let record = table.get(id.arena_index()).unwrap();
+        assert_eq!(record.kind, ObligationKind::SendPermit);
+        assert_eq!(record.holder, task);
+        assert_eq!(record.region, region);
+        assert!(record.is_pending());
+    }
+
+    #[test]
+    fn commit_obligation() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(1);
+
+        let id = make_obligation(&mut table, ObligationKind::Ack, task, region);
+        let info = table.commit(id, Time::from_nanos(1000)).unwrap();
+
+        assert_eq!(info.id, id);
+        assert_eq!(info.holder, task);
+        assert_eq!(info.region, region);
+        assert_eq!(info.kind, ObligationKind::Ack);
+        assert_eq!(info.duration, 1000);
+
+        let record = table.get(id.arena_index()).unwrap();
+        assert!(!record.is_pending());
+        assert_eq!(record.state, ObligationState::Committed);
+    }
+
+    #[test]
+    fn abort_obligation() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(2);
+        let region = test_region_id(1);
+
+        let id = make_obligation(&mut table, ObligationKind::Lease, task, region);
+        let info = table
+            .abort(id, Time::from_nanos(500), ObligationAbortReason::Cancel)
+            .unwrap();
+
+        assert_eq!(info.id, id);
+        assert_eq!(info.reason, ObligationAbortReason::Cancel);
+
+        let record = table.get(id.arena_index()).unwrap();
+        assert_eq!(record.state, ObligationState::Aborted);
+    }
+
+    #[test]
+    fn mark_leaked_obligation() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(3);
+        let region = test_region_id(1);
+
+        let id = make_obligation(&mut table, ObligationKind::IoOp, task, region);
+        let info = table.mark_leaked(id, Time::from_nanos(2000)).unwrap();
+
+        assert_eq!(info.id, id);
+        assert_eq!(info.kind, ObligationKind::IoOp);
+
+        let record = table.get(id.arena_index()).unwrap();
+        assert_eq!(record.state, ObligationState::Leaked);
+    }
+
+    #[test]
+    fn double_commit_fails() {
+        let mut table = ObligationTable::new();
+        let id = make_obligation(
+            &mut table,
+            ObligationKind::SendPermit,
+            test_task_id(1),
+            test_region_id(1),
+        );
+
+        assert!(table.commit(id, Time::from_nanos(100)).is_ok());
+        assert!(table.commit(id, Time::from_nanos(200)).is_err());
+    }
+
+    #[test]
+    fn nonexistent_obligation_fails() {
+        let mut table = ObligationTable::new();
+        let unknown_obligation = ObligationId::from_arena(ArenaIndex::new(99, 0));
+
+        assert!(
+            table
+                .commit(unknown_obligation, Time::from_nanos(100))
+                .is_err()
+        );
+        assert!(
+            table
+                .abort(
+                    unknown_obligation,
+                    Time::from_nanos(100),
+                    ObligationAbortReason::Cancel
+                )
+                .is_err()
+        );
+        assert!(
+            table
+                .mark_leaked(unknown_obligation, Time::from_nanos(100))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn query_by_task_and_region() {
+        let mut table = ObligationTable::new();
+        let task1 = test_task_id(1);
+        let task2 = test_task_id(2);
+        let region1 = test_region_id(1);
+        let region2 = test_region_id(2);
+
+        make_obligation(&mut table, ObligationKind::SendPermit, task1, region1);
+        make_obligation(&mut table, ObligationKind::Ack, task1, region2);
+        make_obligation(&mut table, ObligationKind::Lease, task2, region1);
+
+        assert_eq!(table.for_task(task1).count(), 2);
+        assert_eq!(table.for_task(task2).count(), 1);
+        assert_eq!(table.for_region(region1).count(), 2);
+        assert_eq!(table.for_region(region2).count(), 1);
+    }
+
+    #[test]
+    fn audit_counts_and_state_queries_are_deterministic() {
+        let mut table = ObligationTable::new();
+        let task1 = test_task_id(1);
+        let task2 = test_task_id(2);
+        let region1 = test_region_id(1);
+        let region2 = test_region_id(2);
+
+        let pending = make_obligation(&mut table, ObligationKind::SendPermit, task1, region1);
+        let committed = make_obligation(&mut table, ObligationKind::Ack, task1, region1);
+        let aborted = make_obligation(&mut table, ObligationKind::Lease, task2, region2);
+        let leaked = make_obligation(&mut table, ObligationKind::IoOp, task1, region1);
+
+        table.commit(committed, Time::from_nanos(50)).unwrap();
+        table
+            .abort(aborted, Time::from_nanos(60), ObligationAbortReason::Cancel)
+            .unwrap();
+        table.mark_leaked(leaked, Time::from_nanos(70)).unwrap();
+
+        let region_counts = table.counts_for_region(region1);
+        assert_eq!(region_counts.pending, 1);
+        assert_eq!(region_counts.committed, 1);
+        assert_eq!(region_counts.leaked, 1);
+        assert_eq!(
+            table
+                .counts_for_region_and_kind(region1, ObligationKind::SendPermit)
+                .pending,
+            1
+        );
+        assert_eq!(table.counts_for_task(task1).total(), 3);
+        assert_eq!(table.counts_for_kind(ObligationKind::Lease).aborted, 1);
+        assert_eq!(
+            table.obligation_state(aborted),
+            Some(ObligationState::Aborted)
+        );
+
+        let audit = table.audit_region(region1, Time::from_nanos(100));
+        let audit_ids: Vec<_> = audit.iter().map(|record| record.id).collect();
+        assert_eq!(audit_ids, vec![pending, committed, leaked]);
+        assert_eq!(audit[0].age_ns, 100);
+        assert_eq!(audit[1].resolved_at, Some(Time::from_nanos(50)));
+        assert_eq!(audit[2].state, ObligationState::Leaked);
+    }
+
+    #[test]
+    fn pending_count_decreases_on_resolve() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(1);
+
+        let id1 = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        let id2 = make_obligation(&mut table, ObligationKind::Ack, task, region);
+        let _id3 = make_obligation(&mut table, ObligationKind::Lease, task, region);
+
+        assert_eq!(table.pending_count(), 3);
+
+        table.commit(id1, Time::from_nanos(100)).unwrap();
+        assert_eq!(table.pending_count(), 2);
+
+        table
+            .abort(id2, Time::from_nanos(200), ObligationAbortReason::Cancel)
+            .unwrap();
+        assert_eq!(table.pending_count(), 1);
+    }
+
+    #[test]
+    fn pending_obligation_ids_for_task() {
+        let mut table = ObligationTable::new();
+        let task1 = test_task_id(1);
+        let task2 = test_task_id(2);
+        let region = test_region_id(1);
+
+        let id1 = make_obligation(&mut table, ObligationKind::SendPermit, task1, region);
+        let _id2 = make_obligation(&mut table, ObligationKind::Ack, task2, region);
+        let id3 = make_obligation(&mut table, ObligationKind::Lease, task1, region);
+
+        table.commit(id1, Time::from_nanos(100)).unwrap();
+
+        let pending = table.pending_obligation_ids_for_task(task1);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], id3);
+    }
+
+    #[test]
+    fn holder_index_preserves_same_slot_task_generations() {
+        let mut table = ObligationTable::new();
+        let older = test_task_id_with_generation(9, 0);
+        let newer = test_task_id_with_generation(9, 1);
+        let region = test_region_id(1);
+
+        let older_id = make_obligation(&mut table, ObligationKind::SendPermit, older, region);
+        let newer_id = make_obligation(&mut table, ObligationKind::Ack, newer, region);
+
+        assert_eq!(table.ids_for_holder(older), &[older_id]);
+        assert_eq!(table.ids_for_holder(newer), &[newer_id]);
+        assert_eq!(
+            table.sorted_pending_ids_for_holder(older).as_slice(),
+            &[older_id]
+        );
+        assert_eq!(table.pending_obligation_ids_for_task(newer), vec![newer_id]);
+    }
+
+    #[test]
+    fn pending_obligation_ids_for_task_is_sorted_after_slot_reuse() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(7);
+        let region = test_region_id(1);
+
+        let id0 = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        let id1 = make_obligation(&mut table, ObligationKind::Ack, task, region);
+        let id2 = make_obligation(&mut table, ObligationKind::Lease, task, region);
+
+        // Reuse a hole at id1's arena slot so insertion order diverges from ID order.
+        let _removed = table.remove(id1.arena_index()).expect("obligation exists");
+        let id1_reused = make_obligation(&mut table, ObligationKind::IoOp, task, region);
+
+        let pending = table.pending_obligation_ids_for_task(task);
+        assert_eq!(pending.len(), 3);
+
+        let mut expected = vec![id0, id2, id1_reused];
+        expected.sort_unstable();
+        assert_eq!(pending, expected, "pending IDs should be canonicalized");
+    }
+
+    #[test]
+    fn holder_index_100_obligations_10_tasks() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(1);
+        let kinds = [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+        ];
+
+        // Create 100 obligations across 10 tasks (10 per task)
+        for task_n in 0..10 {
+            let task = test_task_id(task_n);
+            for i in 0..10 {
+                let kind = kinds[(task_n as usize * 10 + i) % kinds.len()];
+                let id = make_obligation(&mut table, kind, task, region);
+                let _ = id;
+            }
+        }
+        assert_eq!(table.len(), 100);
+
+        // Verify index returns correct counts
+        for task_n in 0..10 {
+            let task = test_task_id(task_n);
+            assert_eq!(table.ids_for_holder(task).len(), 10);
+            assert_eq!(table.sorted_pending_ids_for_holder(task).len(), 10);
+        }
+
+        // Commit half the obligations for task 0
+        let task0 = test_task_id(0);
+        let task0_ids: Vec<_> = table.ids_for_holder(task0).to_vec();
+        for id in &task0_ids[..5] {
+            table.commit(*id, Time::from_nanos(100)).unwrap();
+        }
+        // Index still has all 10, but pending only 5
+        assert_eq!(table.ids_for_holder(task0).len(), 10);
+        assert_eq!(table.sorted_pending_ids_for_holder(task0).len(), 5);
+
+        // Abort remaining for task 0
+        for id in &task0_ids[5..] {
+            table
+                .abort(*id, Time::from_nanos(200), ObligationAbortReason::Cancel)
+                .unwrap();
+        }
+        assert_eq!(table.sorted_pending_ids_for_holder(task0).len(), 0);
+
+        // Other tasks unaffected
+        for task_n in 1..10 {
+            let task = test_task_id(task_n);
+            assert_eq!(table.sorted_pending_ids_for_holder(task).len(), 10);
+        }
+
+        // Remove one obligation via arena remove
+        let task5 = test_task_id(5);
+        let task5_first_id = table.ids_for_holder(task5)[0];
+        table.remove(task5_first_id.arena_index());
+        assert_eq!(table.ids_for_holder(task5).len(), 9);
+
+        // sorted_pending_ids_for_holder is sorted by ObligationId
+        let task3 = test_task_id(3);
+        let sorted = table.sorted_pending_ids_for_holder(task3);
+        for window in sorted.windows(2) {
+            assert!(window[0] < window[1], "should be sorted");
+        }
+    }
+
+    #[test]
+    fn insert_normalizes_record_id_to_assigned_slot() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(11);
+        let region = test_region_id(4);
+        let stale_id = ObligationId::from_arena(ArenaIndex::new(99, 0));
+
+        let idx = table.insert(ObligationRecord::new(
+            stale_id,
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::ZERO,
+        ));
+        let canonical = ObligationId::from_arena(idx);
+        let record = table.get(idx).expect("obligation exists");
+
+        assert_eq!(record.id, canonical);
+        assert_ne!(record.id, stale_id);
+        assert_eq!(table.ids_for_holder(task), &[canonical]);
+    }
+
+    #[test]
+    fn insert_with_normalizes_record_id_to_assigned_slot() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(12);
+        let region = test_region_id(5);
+        let stale_id = ObligationId::from_arena(ArenaIndex::new(77, 1));
+
+        let idx = table.insert_with(|_| {
+            ObligationRecord::new(stale_id, ObligationKind::Ack, task, region, Time::ZERO)
+        });
+        let canonical = ObligationId::from_arena(idx);
+        let record = table.get(idx).expect("obligation exists");
+
+        assert_eq!(record.id, canonical);
+        assert_ne!(record.id, stale_id);
+        assert_eq!(table.pending_obligation_ids_for_task(task), vec![canonical]);
+    }
+
+    #[test]
+    fn metamorphic_resolution_reordering_preserves_table_invariants() {
+        #[derive(Clone, Copy)]
+        enum Resolution {
+            Commit(ObligationId, Time),
+            Abort(ObligationId, Time, ObligationAbortReason),
+            Leak(ObligationId, Time),
+        }
+
+        fn apply_resolutions(table: &mut ObligationTable, resolutions: &[Resolution]) {
+            for resolution in resolutions {
+                match *resolution {
+                    Resolution::Commit(id, now) => {
+                        table.commit(id, now).expect("commit should succeed");
+                    }
+                    Resolution::Abort(id, now, reason) => {
+                        table.abort(id, now, reason).expect("abort should succeed");
+                    }
+                    Resolution::Leak(id, now) => {
+                        table.mark_leaked(id, now).expect("leak should succeed");
+                    }
+                }
+            }
+        }
+
+        fn build_table() -> (
+            ObligationTable,
+            [ObligationId; 5],
+            TaskId,
+            TaskId,
+            RegionId,
+            RegionId,
+        ) {
+            let mut table = ObligationTable::new();
+            let task_a = test_task_id(21);
+            let task_b = test_task_id(22);
+            let region_x = test_region_id(7);
+            let region_y = test_region_id(8);
+
+            let ids = [
+                make_obligation(&mut table, ObligationKind::SendPermit, task_a, region_x),
+                make_obligation(&mut table, ObligationKind::Ack, task_a, region_y),
+                make_obligation(&mut table, ObligationKind::Lease, task_b, region_x),
+                make_obligation(&mut table, ObligationKind::IoOp, task_b, region_y),
+                make_obligation(&mut table, ObligationKind::SendPermit, task_b, region_y),
+            ];
+
+            (table, ids, task_a, task_b, region_x, region_y)
+        }
+
+        let (mut baseline, ids, task_a, task_b, region_x, region_y) = build_table();
+        let resolutions = [
+            Resolution::Commit(ids[0], Time::from_nanos(100)),
+            Resolution::Abort(ids[2], Time::from_nanos(200), ObligationAbortReason::Cancel),
+            Resolution::Leak(ids[4], Time::from_nanos(300)),
+        ];
+        apply_resolutions(&mut baseline, &resolutions);
+
+        let (mut reordered, reordered_ids, _, _, _, _) = build_table();
+        let reversed = [
+            Resolution::Leak(reordered_ids[4], Time::from_nanos(300)),
+            Resolution::Abort(
+                reordered_ids[2],
+                Time::from_nanos(200),
+                ObligationAbortReason::Cancel,
+            ),
+            Resolution::Commit(reordered_ids[0], Time::from_nanos(100)),
+        ];
+        apply_resolutions(&mut reordered, &reversed);
+
+        assert_eq!(baseline.pending_count(), reordered.pending_count());
+        assert_eq!(
+            baseline.pending_obligation_ids_for_task(task_a),
+            reordered.pending_obligation_ids_for_task(task_a)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_task(task_b),
+            reordered.pending_obligation_ids_for_task(task_b)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_region(region_x),
+            reordered.pending_obligation_ids_for_region(region_x)
+        );
+        assert_eq!(
+            baseline.pending_obligation_ids_for_region(region_y),
+            reordered.pending_obligation_ids_for_region(region_y)
+        );
+        assert_eq!(
+            baseline.ids_for_holder(task_a),
+            reordered.ids_for_holder(task_a)
+        );
+        assert_eq!(
+            baseline.ids_for_holder(task_b),
+            reordered.ids_for_holder(task_b)
+        );
+
+        for id in ids {
+            let baseline_record = baseline.get(id.arena_index()).expect("record exists");
+            let reordered_record = reordered.get(id.arena_index()).expect("record exists");
+            assert_eq!(baseline_record.state, reordered_record.state);
+            assert_eq!(baseline_record.holder, reordered_record.holder);
+            assert_eq!(baseline_record.region, reordered_record.region);
+            assert_eq!(baseline_record.kind, reordered_record.kind);
+        }
+    }
+
+    // Pure data-type tests (wave 34 – CyanBarn)
+
+    #[test]
+    fn obligation_commit_info_debug_clone() {
+        let info = ObligationCommitInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(1),
+            region: test_region_id(1),
+            kind: ObligationKind::SendPermit,
+            duration: 42,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationCommitInfo"));
+        let cloned = info;
+        assert_eq!(cloned.duration, 42);
+        assert_eq!(cloned.kind, ObligationKind::SendPermit);
+    }
+
+    #[test]
+    fn obligation_abort_info_debug_clone() {
+        let info = ObligationAbortInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(2),
+            region: test_region_id(1),
+            kind: ObligationKind::Ack,
+            duration: 500,
+            reason: ObligationAbortReason::Cancel,
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationAbortInfo"));
+        let cloned = info;
+        assert_eq!(cloned.duration, 500);
+        assert_eq!(cloned.reason, ObligationAbortReason::Cancel);
+    }
+
+    #[test]
+    fn obligation_leak_info_debug_clone() {
+        let info = ObligationLeakInfo {
+            id: ObligationId::from_arena(ArenaIndex::new(0, 0)),
+            holder: test_task_id(3),
+            region: test_region_id(1),
+            kind: ObligationKind::IoOp,
+            duration: 2000,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+            description: Some("test leak".into()),
+        };
+        let dbg = format!("{info:?}");
+        assert!(dbg.contains("ObligationLeakInfo"));
+        let cloned = info;
+        assert_eq!(cloned.duration, 2000);
+        assert_eq!(cloned.description.as_deref(), Some("test leak"));
+    }
+
+    #[test]
+    fn obligation_create_args_debug_clone() {
+        let args = ObligationCreateArgs {
+            kind: ObligationKind::Lease,
+            holder: test_task_id(5),
+            region: test_region_id(2),
+            now: Time::ZERO,
+            description: Some("test create".into()),
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        };
+        let dbg = format!("{args:?}");
+        assert!(dbg.contains("ObligationCreateArgs"));
+        let cloned = args;
+        assert_eq!(cloned.kind, ObligationKind::Lease);
+        assert_eq!(cloned.description.as_deref(), Some("test create"));
+    }
+
+    #[test]
+    fn obligation_table_debug() {
+        let table = ObligationTable::new();
+        let dbg = format!("{table:?}");
+        assert!(dbg.contains("ObligationTable"));
+    }
+
+    #[test]
+    fn obligation_table_default() {
+        let table = ObligationTable::default();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+    }
+
+    #[test]
+    fn obligation_table_new_empty() {
+        let table = ObligationTable::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
+        assert_eq!(table.pending_count(), 0);
+    }
+
+    /// Regression for br-asupersync-xxcss5: per-kind pending counters and the
+    /// running reserved_at sum stay consistent with the arena across
+    /// create/commit/abort/leak/remove, so the Lyapunov governor can read
+    /// them directly instead of scanning obligations on every snapshot.
+    #[test]
+    fn incremental_counters_track_all_mutations() {
+        let mut table = ObligationTable::new();
+        let task_a = test_task_id(10);
+        let task_b = test_task_id(11);
+        let region = test_region_id(3);
+
+        let send = table.create(ObligationCreateArgs {
+            kind: ObligationKind::SendPermit,
+            holder: task_a,
+            region,
+            now: Time::from_nanos(100),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let ack = table.create(ObligationCreateArgs {
+            kind: ObligationKind::Ack,
+            holder: task_a,
+            region,
+            now: Time::from_nanos(150),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let lease = table.create(ObligationCreateArgs {
+            kind: ObligationKind::Lease,
+            holder: task_b,
+            region,
+            now: Time::from_nanos(200),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+        let sem = table.create(ObligationCreateArgs {
+            kind: ObligationKind::SemaphorePermit,
+            holder: task_b,
+            region,
+            now: Time::from_nanos(250),
+            description: None,
+            acquired_at: SourceLocation::unknown(),
+            acquire_backtrace: None,
+        });
+
+        assert_eq!(table.pending_count(), 4);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::SendPermit), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Ack), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Lease), 1);
+        assert_eq!(
+            table.pending_count_for_kind(ObligationKind::SemaphorePermit),
+            1
+        );
+        assert_eq!(table.pending_count_for_kind(ObligationKind::IoOp), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 100 + 150 + 200 + 250);
+
+        // Commit → pending count & kind bucket decrement, and reserved_at sum
+        // loses exactly the committed obligation's nanos.
+        table.commit(send, Time::from_nanos(300)).unwrap();
+        assert_eq!(table.pending_count(), 3);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::SendPermit), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 150 + 200 + 250);
+
+        // Abort decrements the Ack bucket.
+        table
+            .abort(ack, Time::from_nanos(400), ObligationAbortReason::Cancel)
+            .unwrap();
+        assert_eq!(table.pending_count(), 2);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Ack), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 200 + 250);
+
+        // Mark-leaked decrements the Lease bucket.
+        table.mark_leaked(lease, Time::from_nanos(500)).unwrap();
+        assert_eq!(table.pending_count(), 1);
+        assert_eq!(table.pending_count_for_kind(ObligationKind::Lease), 0);
+        assert_eq!(table.pending_reserved_at_sum_ns(), 250);
+
+        // Removing a still-pending obligation must also decrement.
+        let removed = table.remove(sem.arena_index()).unwrap();
+        assert_eq!(removed.kind, ObligationKind::SemaphorePermit);
+        assert_eq!(table.pending_count(), 0);
+        assert_eq!(
+            table.pending_count_for_kind(ObligationKind::SemaphorePermit),
+            0
+        );
+        assert_eq!(table.pending_reserved_at_sum_ns(), 0);
+
+        // Per-kind counters must bottom out at zero on normal lifecycle paths.
+        for kind in [
+            ObligationKind::SendPermit,
+            ObligationKind::Ack,
+            ObligationKind::Lease,
+            ObligationKind::IoOp,
+            ObligationKind::SemaphorePermit,
+        ] {
+            assert_eq!(table.pending_count_for_kind(kind), 0);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "pending counter underflow")]
+    fn pending_counter_underflow_is_not_silent() {
+        let mut table = ObligationTable::new();
+        table.note_pending_removed(ObligationKind::Ack, Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "per-kind pending counter underflow")]
+    fn pending_counter_per_kind_underflow_is_not_silent() {
+        let mut table = ObligationTable::new();
+        table.cached_pending = 1;
+        table.pending_by_kind[kind_index(ObligationKind::Lease)] = 1;
+
+        table.note_pending_removed(ObligationKind::Ack, Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "pending reserved-at sum underflow")]
+    fn pending_reserved_at_sum_underflow_is_not_silent() {
+        let mut table = ObligationTable::new();
+        table.cached_pending = 1;
+        table.pending_by_kind[kind_index(ObligationKind::Ack)] = 1;
+
+        table.note_pending_removed(ObligationKind::Ack, Time::from_nanos(1));
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "pending counter drift")]
+    fn pending_counter_scan_catches_cached_count_drift_in_debug() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(12);
+        let region = test_region_id(4);
+
+        make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+        table.cached_pending = 0;
+
+        table.debug_assert_pending_counters_match();
+    }
+
+    #[test]
+    fn region_finalization_fence_prevents_commit_after_finalization() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(42);
+
+        // Create an obligation
+        let obligation_id = make_obligation(&mut table, ObligationKind::SendPermit, task, region);
+
+        // Should be able to commit before finalization
+        assert!(!table.is_region_finalized(region));
+
+        // Finalize the region
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        // Attempt to commit after finalization should fail
+        let result = table.commit(obligation_id, Time::from_nanos(100));
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), ErrorKind::RegionFinalized);
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("cannot commit obligation: region has been finalized")
+            );
+        }
+
+        // Obligation should still be pending since commit failed
+        let record = table.get(obligation_id.arena_index()).unwrap();
+        assert!(record.is_pending());
+    }
+
+    #[test]
+    fn region_finalization_fence_prevents_abort_after_finalization() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let region = test_region_id(42);
+
+        // Create an obligation
+        let obligation_id = make_obligation(&mut table, ObligationKind::Ack, task, region);
+
+        // Finalize the region
+        table.mark_region_finalized(region);
+
+        // Attempt to abort after finalization should fail
+        let result = table.abort(
+            obligation_id,
+            Time::from_nanos(100),
+            ObligationAbortReason::Cancel,
+        );
+        assert!(result.is_err());
+        if let Err(error) = result {
+            assert_eq!(error.kind(), ErrorKind::RegionFinalized);
+            assert!(
+                error
+                    .message()
+                    .unwrap()
+                    .contains("cannot abort obligation: region has been finalized")
+            );
+        }
+
+        // Obligation should still be pending since abort failed
+        let record = table.get(obligation_id.arena_index()).unwrap();
+        assert!(record.is_pending());
+    }
+
+    #[test]
+    fn region_finalization_fence_allows_operations_on_non_finalized_regions() {
+        let mut table = ObligationTable::new();
+        let task = test_task_id(1);
+        let finalized_region = test_region_id(42);
+        let active_region = test_region_id(99);
+
+        // Create obligations in both regions
+        let finalized_obligation = make_obligation(
+            &mut table,
+            ObligationKind::SendPermit,
+            task,
+            finalized_region,
+        );
+        let active_obligation =
+            make_obligation(&mut table, ObligationKind::Ack, task, active_region);
+
+        // Finalize only one region
+        table.mark_region_finalized(finalized_region);
+
+        // Operations on finalized region should fail
+        assert!(
+            table
+                .commit(finalized_obligation, Time::from_nanos(100))
+                .is_err()
+        );
+
+        // Operations on non-finalized region should succeed
+        assert!(
+            table
+                .commit(active_obligation, Time::from_nanos(100))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn region_finalization_is_idempotent() {
+        let mut table = ObligationTable::new();
+        let region = test_region_id(42);
+
+        // Mark region finalized multiple times
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+
+        table.mark_region_finalized(region);
+        assert!(table.is_region_finalized(region));
+    }
+}

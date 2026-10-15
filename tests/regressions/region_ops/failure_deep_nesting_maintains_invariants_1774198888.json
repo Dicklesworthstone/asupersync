@@ -1,0 +1,35 @@
+[
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "create_child",
+    "parent": 0
+  },
+  {
+    "op": "cancel",
+    "region": 0,
+    "reason": "user"
+  }
+]

@@ -1,0 +1,104 @@
+{
+  "schema_version": "1.0.0",
+  "description": "Bundle-size budgets and regression gates for Browser Edition packages",
+  "measurement_unit": "bytes",
+  "gzip_ceiling_ratio": 0.6,
+  "delta_review_threshold_ratio": 0.1,
+  "profiles": {
+    "release": {
+      "enforced": true,
+      "note": "Only release-profile artifacts shipped via npm publish are gated"
+    },
+    "dev": {
+      "enforced": false,
+      "note": "Debug and development profiles are exempt from size budgets"
+    },
+    "profiling": {
+      "enforced": false,
+      "note": "Profiling profiles are exempt from size budgets"
+    }
+  },
+  "excluded_from_totals": [
+    "*.js.map",
+    "*.wasm.map"
+  ],
+  "packages": {
+    "@asupersync/browser-core": {
+      "directory": "packages/browser-core",
+      "artifacts": {
+        "asupersync_bg.wasm": {
+          "category": "wasm_binary",
+          "warning_bytes": 409600,
+          "ceiling_bytes": 524288,
+          "gzip_ceiling_bytes": 314572
+        },
+        "index.js": {
+          "category": "js_facade",
+          "warning_bytes": 36864,
+          "ceiling_bytes": 40960,
+          "gzip_ceiling_bytes": 24576
+        },
+        "asupersync.js": {
+          "category": "wasm_bindgen_glue",
+          "warning_bytes": 32768,
+          "ceiling_bytes": 45056,
+          "gzip_ceiling_bytes": 27033
+        },
+        "index.d.ts": {
+          "category": "type_declarations",
+          "warning_bytes": 12288,
+          "ceiling_bytes": 20480,
+          "gzip_ceiling_bytes": 12288
+        },
+        "types.d.ts": {
+          "category": "type_declarations",
+          "warning_bytes": 4096,
+          "ceiling_bytes": 8192,
+          "gzip_ceiling_bytes": 4915
+        }
+      },
+      "total_publishable": {
+        "warning_bytes": 512000,
+        "ceiling_bytes": 655360
+      }
+    },
+    "@asupersync/browser": {
+      "directory": "packages/browser",
+      "dist_total": {
+        "warning_bytes": 12288,
+        "ceiling_bytes": 20480
+      },
+      "dist_types_total": {
+        "warning_bytes": 8192,
+        "ceiling_bytes": 16384
+      }
+    },
+    "@asupersync/react": {
+      "directory": "packages/react",
+      "dist_total": {
+        "warning_bytes": 8192,
+        "ceiling_bytes": 16384
+      },
+      "dist_types_total": {
+        "warning_bytes": 6144,
+        "ceiling_bytes": 12288
+      }
+    },
+    "@asupersync/next": {
+      "directory": "packages/next",
+      "dist_total": {
+        "warning_bytes": 10240,
+        "ceiling_bytes": 20480
+      },
+      "dist_types_total": {
+        "warning_bytes": 6144,
+        "ceiling_bytes": 12288
+      }
+    }
+  },
+  "bands": {
+    "green": "Below warning threshold",
+    "yellow": "Between warning and ceiling \u2014 CI passes with advisory",
+    "red": "Above ceiling \u2014 CI MUST fail"
+  }
+}

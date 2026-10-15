@@ -1,0 +1,171 @@
+{
+  "schema_version": "doctor-performance-budget-fixture-pack-v1",
+  "description": "Baseline performance budget matrix for gate validation",
+  "budgets": [
+    {
+      "budget_id": "scan-small",
+      "workflow_category": "scan",
+      "dataset_profile": "small",
+      "latency_p50_ms": 50,
+      "latency_p95_ms": 100,
+      "latency_p99_ms": 200,
+      "memory_ceiling_mb": 32,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "scan-medium",
+      "workflow_category": "scan",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 200,
+      "latency_p95_ms": 500,
+      "latency_p99_ms": 1000,
+      "memory_ceiling_mb": 64,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "scan-large",
+      "workflow_category": "scan",
+      "dataset_profile": "large",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 128,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "analyze-small",
+      "workflow_category": "analyze",
+      "dataset_profile": "small",
+      "latency_p50_ms": 100,
+      "latency_p95_ms": 250,
+      "latency_p99_ms": 500,
+      "memory_ceiling_mb": 48,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "analyze-medium",
+      "workflow_category": "analyze",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 96,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "analyze-large",
+      "workflow_category": "analyze",
+      "dataset_profile": "large",
+      "latency_p50_ms": 2000,
+      "latency_p95_ms": 5000,
+      "latency_p99_ms": 10000,
+      "memory_ceiling_mb": 256,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "ingest-small",
+      "workflow_category": "ingest",
+      "dataset_profile": "small",
+      "latency_p50_ms": 25,
+      "latency_p95_ms": 50,
+      "latency_p99_ms": 100,
+      "memory_ceiling_mb": 16,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "ingest-medium",
+      "workflow_category": "ingest",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 100,
+      "latency_p95_ms": 250,
+      "latency_p99_ms": 500,
+      "memory_ceiling_mb": 32,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "ingest-large",
+      "workflow_category": "ingest",
+      "dataset_profile": "large",
+      "latency_p50_ms": 250,
+      "latency_p95_ms": 750,
+      "latency_p99_ms": 1500,
+      "memory_ceiling_mb": 64,
+      "render_cost_max": 0,
+      "update_cost_max": 0
+    },
+    {
+      "budget_id": "remediate-small",
+      "workflow_category": "remediate",
+      "dataset_profile": "small",
+      "latency_p50_ms": 100,
+      "latency_p95_ms": 250,
+      "latency_p99_ms": 500,
+      "memory_ceiling_mb": 32,
+      "render_cost_max": 50,
+      "update_cost_max": 25
+    },
+    {
+      "budget_id": "remediate-medium",
+      "workflow_category": "remediate",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 64,
+      "render_cost_max": 100,
+      "update_cost_max": 50
+    },
+    {
+      "budget_id": "remediate-large",
+      "workflow_category": "remediate",
+      "dataset_profile": "large",
+      "latency_p50_ms": 2000,
+      "latency_p95_ms": 5000,
+      "latency_p99_ms": 10000,
+      "memory_ceiling_mb": 128,
+      "render_cost_max": 200,
+      "update_cost_max": 100
+    },
+    {
+      "budget_id": "render-small",
+      "workflow_category": "render",
+      "dataset_profile": "small",
+      "latency_p50_ms": 8,
+      "latency_p95_ms": 16,
+      "latency_p99_ms": 33,
+      "memory_ceiling_mb": 16,
+      "render_cost_max": 25,
+      "update_cost_max": 10
+    },
+    {
+      "budget_id": "render-medium",
+      "workflow_category": "render",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 16,
+      "latency_p95_ms": 33,
+      "latency_p99_ms": 50,
+      "memory_ceiling_mb": 32,
+      "render_cost_max": 50,
+      "update_cost_max": 25
+    },
+    {
+      "budget_id": "render-large",
+      "workflow_category": "render",
+      "dataset_profile": "large",
+      "latency_p50_ms": 33,
+      "latency_p95_ms": 50,
+      "latency_p99_ms": 100,
+      "memory_ceiling_mb": 64,
+      "render_cost_max": 100,
+      "update_cost_max": 50
+    }
+  ]
+}

@@ -1,0 +1,366 @@
+{
+  "contract_version": "controller-artifact-contract-v1",
+  "runner_bundle_schema_version": "controller-artifact-verifier-smoke-bundle-v1",
+  "runner_report_schema_version": "controller-artifact-verifier-smoke-run-report-v1",
+  "verifier_schema_version": "controller-artifact-verifier-v1",
+  "runtime_snapshot_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "required_manifest_fields": [
+    "artifact_id",
+    "manifest_schema_version",
+    "controller_name",
+    "controller_version",
+    "snapshot_version_range",
+    "required_snapshot_fields",
+    "target_seams",
+    "assumptions",
+    "bounds",
+    "fallback",
+    "payload",
+    "integrity"
+  ],
+  "required_integrity_fields": [
+    "payload_hash",
+    "hash_chain",
+    "signature_chain"
+  ],
+  "required_fallback_fields": [
+    "fallback_policy_id",
+    "rollback_pointer",
+    "activation_conditions"
+  ],
+  "supported_verdicts": [
+    "accept",
+    "reject_missing_field",
+    "reject_hash_mismatch",
+    "reject_signature_mismatch",
+    "reject_version_mismatch",
+    "reject_schema_mismatch"
+  ],
+  "structured_log_fields_required": [
+    "artifact_id",
+    "controller_name",
+    "verifier_schema_version",
+    "verdict",
+    "rejection_code",
+    "rejection_reason",
+    "payload_hash",
+    "hash_chain_ok",
+    "signature_chain_ok",
+    "snapshot_version_min",
+    "snapshot_version_max",
+    "runtime_snapshot_version",
+    "fallback_policy_id",
+    "rollback_pointer"
+  ],
+  "verification_cases": [
+    {
+      "case_id": "AA02-CASE-HAPPY-PATH",
+      "intent": "Accept a well-formed controller artifact manifest",
+      "expect_verdict": "accept",
+      "expect_rejection_code": "none",
+      "manifest": {
+        "artifact_id": "ctrl-scheduler-governor-v1",
+        "manifest_schema_version": "controller-artifact-manifest-v1",
+        "controller_name": "scheduler-governor",
+        "controller_version": "1.0.0",
+        "snapshot_version_range": {
+          "min": {
+            "major": 1,
+            "minor": 0
+          },
+          "max": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "required_snapshot_fields": [
+          "ready_queue_len",
+          "cancel_lane_len",
+          "workers_parked"
+        ],
+        "target_seams": [
+          "AA01-SEAM-SCHED-GOVERNOR"
+        ],
+        "assumptions": [
+          "governor telemetry is sampled once per epoch",
+          "fallback remains conservative and fail-closed"
+        ],
+        "bounds": {
+          "max_decisions_per_epoch": 32,
+          "max_decision_latency_us": 250
+        },
+        "fallback": {
+          "fallback_policy_id": "sched-governor-conservative",
+          "rollback_pointer": "artifacts/runtime_control_seam_inventory_v1.json#AA01-SEAM-SCHED-GOVERNOR",
+          "activation_conditions": [
+            "verifier rejection",
+            "calibration regression"
+          ]
+        },
+        "payload": {
+          "policy_table_ref": "policies/scheduler_governor_v1.json",
+          "compatibility_notes": [
+            "requires runtime snapshot schema 1.x"
+          ]
+        },
+        "integrity": {
+          "payload_hash": "sha256:ctrl-scheduler-governor-v1",
+          "hash_chain": {
+            "valid": true,
+            "head": "sha256:hash-chain-head"
+          },
+          "signature_chain": {
+            "valid": true,
+            "signatures": [
+              "ed25519:signature-1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "case_id": "AA02-CASE-MISSING-FIELD",
+      "intent": "Reject malformed manifest missing the payload section",
+      "expect_verdict": "reject_missing_field",
+      "expect_rejection_code": "missing_field:payload",
+      "manifest": {
+        "artifact_id": "ctrl-scheduler-governor-v1-missing-payload",
+        "manifest_schema_version": "controller-artifact-manifest-v1",
+        "controller_name": "scheduler-governor",
+        "controller_version": "1.0.0",
+        "snapshot_version_range": {
+          "min": {
+            "major": 1,
+            "minor": 0
+          },
+          "max": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "required_snapshot_fields": [
+          "ready_queue_len"
+        ],
+        "target_seams": [
+          "AA01-SEAM-SCHED-GOVERNOR"
+        ],
+        "assumptions": [
+          "fallback remains conservative and fail-closed"
+        ],
+        "bounds": {
+          "max_decisions_per_epoch": 32,
+          "max_decision_latency_us": 250
+        },
+        "fallback": {
+          "fallback_policy_id": "sched-governor-conservative",
+          "rollback_pointer": "artifacts/runtime_control_seam_inventory_v1.json#AA01-SEAM-SCHED-GOVERNOR",
+          "activation_conditions": [
+            "verifier rejection"
+          ]
+        },
+        "integrity": {
+          "payload_hash": "sha256:ctrl-scheduler-governor-v1",
+          "hash_chain": {
+            "valid": true,
+            "head": "sha256:hash-chain-head"
+          },
+          "signature_chain": {
+            "valid": true,
+            "signatures": [
+              "ed25519:signature-1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "case_id": "AA02-CASE-HASH-MISMATCH",
+      "intent": "Reject manifest with invalid hash-chain validation",
+      "expect_verdict": "reject_hash_mismatch",
+      "expect_rejection_code": "integrity:hash_chain",
+      "manifest": {
+        "artifact_id": "ctrl-scheduler-governor-v1-hash-mismatch",
+        "manifest_schema_version": "controller-artifact-manifest-v1",
+        "controller_name": "scheduler-governor",
+        "controller_version": "1.0.0",
+        "snapshot_version_range": {
+          "min": {
+            "major": 1,
+            "minor": 0
+          },
+          "max": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "required_snapshot_fields": [
+          "ready_queue_len",
+          "cancel_lane_len"
+        ],
+        "target_seams": [
+          "AA01-SEAM-SCHED-GOVERNOR"
+        ],
+        "assumptions": [
+          "fallback remains conservative and fail-closed"
+        ],
+        "bounds": {
+          "max_decisions_per_epoch": 32,
+          "max_decision_latency_us": 250
+        },
+        "fallback": {
+          "fallback_policy_id": "sched-governor-conservative",
+          "rollback_pointer": "artifacts/runtime_control_seam_inventory_v1.json#AA01-SEAM-SCHED-GOVERNOR",
+          "activation_conditions": [
+            "verifier rejection"
+          ]
+        },
+        "payload": {
+          "policy_table_ref": "policies/scheduler_governor_v1.json",
+          "compatibility_notes": [
+            "requires runtime snapshot schema 1.x"
+          ]
+        },
+        "integrity": {
+          "payload_hash": "sha256:ctrl-scheduler-governor-v1",
+          "hash_chain": {
+            "valid": false,
+            "head": "sha256:hash-chain-head"
+          },
+          "signature_chain": {
+            "valid": true,
+            "signatures": [
+              "ed25519:signature-1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "case_id": "AA02-CASE-SIGNATURE-MISMATCH",
+      "intent": "Reject manifest with invalid signature-chain validation",
+      "expect_verdict": "reject_signature_mismatch",
+      "expect_rejection_code": "integrity:signature_chain",
+      "manifest": {
+        "artifact_id": "ctrl-scheduler-governor-v1-signature-mismatch",
+        "manifest_schema_version": "controller-artifact-manifest-v1",
+        "controller_name": "scheduler-governor",
+        "controller_version": "1.0.0",
+        "snapshot_version_range": {
+          "min": {
+            "major": 1,
+            "minor": 0
+          },
+          "max": {
+            "major": 1,
+            "minor": 2
+          }
+        },
+        "required_snapshot_fields": [
+          "ready_queue_len",
+          "cancel_lane_len"
+        ],
+        "target_seams": [
+          "AA01-SEAM-SCHED-GOVERNOR"
+        ],
+        "assumptions": [
+          "fallback remains conservative and fail-closed"
+        ],
+        "bounds": {
+          "max_decisions_per_epoch": 32,
+          "max_decision_latency_us": 250
+        },
+        "fallback": {
+          "fallback_policy_id": "sched-governor-conservative",
+          "rollback_pointer": "artifacts/runtime_control_seam_inventory_v1.json#AA01-SEAM-SCHED-GOVERNOR",
+          "activation_conditions": [
+            "verifier rejection"
+          ]
+        },
+        "payload": {
+          "policy_table_ref": "policies/scheduler_governor_v1.json",
+          "compatibility_notes": [
+            "requires runtime snapshot schema 1.x"
+          ]
+        },
+        "integrity": {
+          "payload_hash": "sha256:ctrl-scheduler-governor-v1",
+          "hash_chain": {
+            "valid": true,
+            "head": "sha256:hash-chain-head"
+          },
+          "signature_chain": {
+            "valid": false,
+            "signatures": [
+              "ed25519:signature-1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "case_id": "AA02-CASE-VERSION-MISMATCH",
+      "intent": "Reject manifest whose snapshot compatibility range excludes the runtime",
+      "expect_verdict": "reject_version_mismatch",
+      "expect_rejection_code": "compatibility:snapshot_version",
+      "manifest": {
+        "artifact_id": "ctrl-scheduler-governor-v2-only",
+        "manifest_schema_version": "controller-artifact-manifest-v1",
+        "controller_name": "scheduler-governor",
+        "controller_version": "2.0.0",
+        "snapshot_version_range": {
+          "min": {
+            "major": 2,
+            "minor": 0
+          },
+          "max": {
+            "major": 2,
+            "minor": 1
+          }
+        },
+        "required_snapshot_fields": [
+          "ready_queue_len",
+          "cancel_lane_len"
+        ],
+        "target_seams": [
+          "AA01-SEAM-SCHED-GOVERNOR"
+        ],
+        "assumptions": [
+          "runtime has not yet upgraded to schema 2.x"
+        ],
+        "bounds": {
+          "max_decisions_per_epoch": 32,
+          "max_decision_latency_us": 250
+        },
+        "fallback": {
+          "fallback_policy_id": "sched-governor-conservative",
+          "rollback_pointer": "artifacts/runtime_control_seam_inventory_v1.json#AA01-SEAM-SCHED-GOVERNOR",
+          "activation_conditions": [
+            "verifier rejection"
+          ]
+        },
+        "payload": {
+          "policy_table_ref": "policies/scheduler_governor_v2.json",
+          "compatibility_notes": [
+            "requires runtime snapshot schema 2.x"
+          ]
+        },
+        "integrity": {
+          "payload_hash": "sha256:ctrl-scheduler-governor-v2",
+          "hash_chain": {
+            "valid": true,
+            "head": "sha256:hash-chain-head-v2"
+          },
+          "signature_chain": {
+            "valid": true,
+            "signatures": [
+              "ed25519:signature-2"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

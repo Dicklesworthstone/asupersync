@@ -1,0 +1,13 @@
+{
+  "schema": "semantic-verification-report-v1",
+  "profile": "smoke",
+  "total_duration_s": 150,
+  "profile_contract": {
+    "runtime_budget_s": 180,
+    "required_artifacts": [
+      "docs_output.txt",
+      "golden_output.txt"
+    ]
+  },
+  "report_dir": "report_artifacts"
+}

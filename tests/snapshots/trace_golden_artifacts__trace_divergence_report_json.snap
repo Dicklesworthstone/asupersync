@@ -1,0 +1,64 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: parsed
+---
+{
+  "actual": {
+    "details": "task=8 region=42",
+    "event_type": "Schedule",
+    "index": 17,
+    "region_id": 42,
+    "task_id": 8
+  },
+  "affected": {
+    "regions": [
+      42
+    ],
+    "scheduler_lane": "ready",
+    "tasks": [
+      7,
+      8
+    ],
+    "timers": []
+  },
+  "category": "SchedulingOrder",
+  "context_after": [
+    {
+      "details": "task=7 region=42",
+      "event_type": "Poll",
+      "index": 18,
+      "region_id": 42,
+      "task_id": 7
+    }
+  ],
+  "context_before": [
+    {
+      "details": "task=7 region=42",
+      "event_type": "Poll",
+      "index": 15,
+      "region_id": 42,
+      "task_id": 7
+    },
+    {
+      "details": "task=7 region=42",
+      "event_type": "Yield",
+      "index": 16,
+      "region_id": 42,
+      "task_id": 7
+    }
+  ],
+  "divergence_index": 17,
+  "expected": {
+    "details": "task=7 region=42",
+    "event_type": "Schedule",
+    "index": 17,
+    "region_id": 42,
+    "task_id": 7
+  },
+  "explanation": "expected task 7 to be scheduled next, but task 8 was scheduled instead (work-stealer raced)",
+  "minimal_prefix_len": 18,
+  "replay_progress_pct": 40.47619047619047,
+  "seed": 81985529216486895,
+  "suggestion": "re-run with --deterministic-stealer or pin worker count to 1",
+  "trace_length": 42
+}

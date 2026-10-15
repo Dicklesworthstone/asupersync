@@ -1,0 +1,332 @@
+{
+  "contract_version": "cohort-admission-steering-smoke-contract-v1",
+  "bead_id": "asupersync-j1980r",
+  "description": "Contract-backed deterministic replay for cohort-aware admission steering versus the conservative global routing baseline.",
+  "runner_script": "scripts/run_cohort_admission_steering_smoke.sh",
+  "runner_bundle_schema_version": "cohort-admission-steering-smoke-bundle-v1",
+  "runner_report_schema_version": "cohort-admission-steering-smoke-run-report-v1",
+  "required_bundle_fields": [
+    "schema_version",
+    "contract_version",
+    "scenario_id",
+    "description",
+    "run_id",
+    "mode",
+    "artifact_path",
+    "report_path",
+    "run_log_path",
+    "command",
+    "workload_seed",
+    "fixture",
+    "steering_profile",
+    "host_fingerprint",
+    "expected_report_projection",
+    "actual_report_projection",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "started_ts",
+    "ended_ts"
+  ],
+  "required_run_report_fields": [
+    "schema_version",
+    "contract_version",
+    "artifact_path",
+    "bundle_manifest_path",
+    "run_id",
+    "scenario_id",
+    "mode",
+    "command_exit_code",
+    "script_exit_code",
+    "validation_passed",
+    "status",
+    "message",
+    "workload_seed",
+    "fixture",
+    "steering_profile",
+    "host_fingerprint",
+    "report_path",
+    "expected_report_projection",
+    "actual_report_projection"
+  ],
+  "required_execute_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "cohort_admission_steering_report.json",
+    "run.log"
+  ],
+  "required_dry_run_output_files": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C",
+      "description": "High-confidence two-cohort replay where bounded redirect tokens cut wake-to-run tails and remote spill pressure versus conservative global routing.",
+      "workload_class": "locality-win",
+      "output_root": "target/cohort-admission-steering-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 424242,
+      "safe_fallback_profile": "conservative_global",
+      "expected_winner_profile": "cohort_steered",
+      "steering_profile": {
+        "enabled": true,
+        "local_ready_backlog_soft_limit": 192,
+        "local_ready_backlog_hard_limit": 256,
+        "remote_ready_backlog_limit": 160,
+        "remote_redirect_delta_min": 24,
+        "remote_spill_budget_per_epoch": 2,
+        "min_topology_confidence_percent": 70,
+        "fairness_escape_after_consecutive_defers": 3
+      },
+      "fixture": {
+        "replay_count": 2,
+        "windows": [
+          {
+            "window_id": "local_balanced",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [148, 128],
+            "topology_confidence_percent": 90,
+            "decision_epoch": 10,
+            "consecutive_local_defers": 0,
+            "outer_tail_risk_decision": "admit",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 148000,
+            "remote_wake_to_run_p99_ns": 142000
+          },
+          {
+            "window_id": "local_saturated",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [260, 84],
+            "topology_confidence_percent": 92,
+            "decision_epoch": 10,
+            "consecutive_local_defers": 1,
+            "outer_tail_risk_decision": "admit",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 236000,
+            "remote_wake_to_run_p99_ns": 146000
+          },
+          {
+            "window_id": "fairness_escape",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [244, 96],
+            "topology_confidence_percent": 90,
+            "decision_epoch": 10,
+            "consecutive_local_defers": 3,
+            "outer_tail_risk_decision": "admit",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 228000,
+            "remote_wake_to_run_p99_ns": 154000
+          }
+        ]
+      },
+      "template_env": {
+        "COHORT_ADMISSION_STEERING_SMOKE_OUTPUT_DIR": "Override the bundle and run-report output root.",
+        "COHORT_ADMISSION_STEERING_SMOKE_ARTIFACT_ROOT": "Override the extracted cohort steering report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "cohort-admission-steering-projection-v1",
+        "scenario_id": "AA-COHORT-ADMISSION-STEERING-LOCALITY-WIN-2C",
+        "workload_class": "locality-win",
+        "workload_seed": 424242,
+        "replay_count": 2,
+        "window_count": 3,
+        "decision_sequence": [
+          "admitlocal",
+          "redirectremote",
+          "redirectremote"
+        ],
+        "conservative_global_sequence": [
+          "admitlocal",
+          "admitlocal",
+          "admitlocal"
+        ],
+        "budget_start_sequence": [
+          2,
+          2,
+          1
+        ],
+        "budget_remaining_sequence": [
+          2,
+          1,
+          0
+        ],
+        "fallback_windows": [],
+        "fairness_windows": [
+          "fairness_escape"
+        ],
+        "steered": {
+          "admit_local_count": 2,
+          "redirect_remote_count": 2,
+          "defer_count": 2,
+          "fallback_used_count": 0,
+          "budget_exhausted_count": 4,
+          "fairness_escape_count": 2,
+          "admitted_units": 270,
+          "deferred_units": 18,
+          "remote_spill_count": 2,
+          "p95_latency_ns": 321505,
+          "p99_latency_ns": 325828,
+          "throughput_ratio": 0.9375
+        },
+        "conservative_global": {
+          "admit_local_count": 6,
+          "redirect_remote_count": 0,
+          "defer_count": 0,
+          "admitted_units": 288,
+          "deferred_units": 0,
+          "remote_spill_count": 14,
+          "p95_latency_ns": 566625,
+          "p99_latency_ns": 570948,
+          "throughput_ratio": 1.0
+        },
+        "comparison": {
+          "p95_latency_improvement_ns": 245120,
+          "p99_latency_improvement_ns": 245120,
+          "remote_spill_reduction": 12,
+          "throughput_delta_units": -18,
+          "winner_profile": "cohort_steered",
+          "no_win_trigger": false
+        }
+      }
+    },
+    {
+      "scenario_id": "AA-COHORT-ADMISSION-STEERING-KEEP-GLOBAL-2C",
+      "description": "Low-confidence and no-win replay that keeps the conservative global routing path pinned and records an explicit safe fallback verdict.",
+      "workload_class": "keep-global",
+      "output_root": "target/cohort-admission-steering-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 515151,
+      "safe_fallback_profile": "conservative_global",
+      "expected_winner_profile": "conservative_global",
+      "steering_profile": {
+        "enabled": true,
+        "local_ready_backlog_soft_limit": 192,
+        "local_ready_backlog_hard_limit": 256,
+        "remote_ready_backlog_limit": 160,
+        "remote_redirect_delta_min": 24,
+        "remote_spill_budget_per_epoch": 2,
+        "min_topology_confidence_percent": 70,
+        "fairness_escape_after_consecutive_defers": 3
+      },
+      "fixture": {
+        "replay_count": 1,
+        "windows": [
+          {
+            "window_id": "low_confidence",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [208, 198],
+            "topology_confidence_percent": 48,
+            "decision_epoch": 22,
+            "consecutive_local_defers": 0,
+            "outer_tail_risk_decision": "admit",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 204000,
+            "remote_wake_to_run_p99_ns": 201000
+          },
+          {
+            "window_id": "thin_remote_gain",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [214, 196],
+            "topology_confidence_percent": 88,
+            "decision_epoch": 23,
+            "consecutive_local_defers": 1,
+            "outer_tail_risk_decision": "admit",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 211000,
+            "remote_wake_to_run_p99_ns": 208000
+          },
+          {
+            "window_id": "tail_risk_outer_cap",
+            "local_cohort": 0,
+            "worker_to_cohort_map": [0, 0, 1, 1],
+            "cohort_ready_backlog": [228, 150],
+            "topology_confidence_percent": 90,
+            "decision_epoch": 24,
+            "consecutive_local_defers": 4,
+            "outer_tail_risk_decision": "defer",
+            "offered_work_units": 48,
+            "local_wake_to_run_p99_ns": 224000,
+            "remote_wake_to_run_p99_ns": 176000
+          }
+        ]
+      },
+      "template_env": {
+        "COHORT_ADMISSION_STEERING_SMOKE_OUTPUT_DIR": "Override the bundle and run-report output root.",
+        "COHORT_ADMISSION_STEERING_SMOKE_ARTIFACT_ROOT": "Override the extracted cohort steering report root."
+      },
+      "expected_report_projection": {
+        "schema_version": "cohort-admission-steering-projection-v1",
+        "scenario_id": "AA-COHORT-ADMISSION-STEERING-KEEP-GLOBAL-2C",
+        "workload_class": "keep-global",
+        "workload_seed": 515151,
+        "replay_count": 1,
+        "window_count": 3,
+        "decision_sequence": [
+          "admitlocal",
+          "admitlocal",
+          "defer"
+        ],
+        "conservative_global_sequence": [
+          "admitlocal",
+          "admitlocal",
+          "defer"
+        ],
+        "budget_start_sequence": [
+          2,
+          2,
+          2
+        ],
+        "budget_remaining_sequence": [
+          2,
+          2,
+          2
+        ],
+        "fallback_windows": [
+          "low_confidence"
+        ],
+        "fairness_windows": [],
+        "steered": {
+          "admit_local_count": 2,
+          "redirect_remote_count": 0,
+          "defer_count": 1,
+          "fallback_used_count": 1,
+          "budget_exhausted_count": 0,
+          "fairness_escape_count": 0,
+          "admitted_units": 135,
+          "deferred_units": 9,
+          "remote_spill_count": 0,
+          "p95_latency_ns": 439893,
+          "p99_latency_ns": 442775,
+          "throughput_ratio": 0.9375
+        },
+        "conservative_global": {
+          "admit_local_count": 2,
+          "redirect_remote_count": 0,
+          "defer_count": 1,
+          "admitted_units": 135,
+          "deferred_units": 9,
+          "remote_spill_count": 0,
+          "p95_latency_ns": 439893,
+          "p99_latency_ns": 442775,
+          "throughput_ratio": 0.9375
+        },
+        "comparison": {
+          "p95_latency_improvement_ns": 0,
+          "p99_latency_improvement_ns": 0,
+          "remote_spill_reduction": 0,
+          "throughput_delta_units": 0,
+          "winner_profile": "conservative_global",
+          "no_win_trigger": true
+        }
+      }
+    }
+  ]
+}

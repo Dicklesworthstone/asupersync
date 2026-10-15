@@ -1,0 +1,10 @@
+---
+source: src/atp/cache/mod.rs
+assertion_line: 719
+expression: key_with_scope
+---
+{
+  "manifest_hash": "sha256:a1b2c3d4e5f6g7h8",
+  "content_hash": "sha256:1234567890abcdef",
+  "grant_scope": "team:engineering"
+}

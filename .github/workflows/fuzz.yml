@@ -1,0 +1,372 @@
+# Fuzzing CI workflow for asupersync
+#
+# Runs fuzz targets on a schedule and on-demand to catch bugs early.
+# Uses cargo-fuzz with libFuzzer backend.
+
+name: Fuzz
+
+on:
+  # Compile every registered fuzz target on main updates so public API drift
+  # cannot silently disable fuzz coverage until the nightly fuzz run.
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/Cargo.toml'
+      - 'fuzz/fuzz_targets/**'
+      - '.github/workflows/fuzz.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'fuzz/Cargo.toml'
+      - 'fuzz/fuzz_targets/**'
+      - '.github/workflows/fuzz.yml'
+  # Run nightly
+  schedule:
+    - cron: '0 3 * * *'  # 3 AM UTC daily
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Fuzz target to run (or "all")'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - grpc_codec
+          - fuzz_http1_request
+          - fuzz_http1_response
+          - dns_resolver_name_compression
+          - h1_parsed_url
+          - length_delimited
+          - length_delimited_encode_width
+          - length_delimited_decoder_state
+          - fuzz_lines_codec
+          - length_delimited_frame_boundary
+          - bytes_slice_split_to
+          - bytes_cursor_reader
+          - bytes_take_adapter
+          - gf256_simd_edge_cases
+          - grpc_prost_codec_decode
+          - grpc_gzip_message_decode
+          - grpc_length_prefixed
+          - grpc_streaming
+          - fuzz_distributed_snapshot_merge
+          - h3_native_frames
+          - qpack_field_section
+          - kafka_protocol
+          - key_derivation_context
+          - region_heap_allocator
+          - otel_span_attributes
+          - quic_stream_flow
+          - symbol_auth
+          - symbol_cancel_broadcast
+          - postgres_bind_execute_sync
+          - postgres_scram
+          - mysql_ok_packet
+          - raptorq_decoder_gauss_matrix
+          - fuzz_distributed_recovery_decode
+          - mutex_poison_persistence
+          - source_payload_hash_verification
+          - fuzz_raptorq_rfc6330
+          - tls_stream_record_framing
+          - transport_router
+          - fuzz_websocket_frame_parsing
+          - fuzz_hpack_decode
+          - hpack_indexed
+          - fuzz_http2_frame
+          - h2_connection_window_update
+          - h2_frame_decoder
+          - fuzz_interest_flags
+      duration:
+        description: 'Fuzz duration in seconds'
+        required: true
+        default: '300'
+        type: string
+
+# Newest pending run per ref wins; in-progress runs on `main` finish (see ci.yml).
+concurrency:
+  group: fuzz-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Limit memory for fuzzing
+  ASAN_OPTIONS: malloc_context_size=64:quarantine_size_mb=256
+  # Use thin LTO for faster builds
+  CARGO_PROFILE_RELEASE_LTO: thin
+
+jobs:
+  fuzz-build-gate:
+    name: Fuzz target compile gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: nightly
+          components: llvm-tools-preview
+
+      - name: Resolve cargo executor
+        run: |
+          configured="${RCH_BIN:-}"
+          resolved=""
+          mode=""
+
+          if [[ -n "$configured" && -x "$configured" && "$configured" != *scripts/rch_ci_fallback.sh ]]; then
+            resolved="$configured"
+            mode="remote"
+          elif command -v rch >/dev/null 2>&1; then
+            resolved="$(command -v rch)"
+            mode="remote"
+          elif [[ -x "$HOME/.local/bin/rch" ]]; then
+            resolved="$HOME/.local/bin/rch"
+            mode="remote"
+          elif [[ -n "$configured" && -x "$configured" ]]; then
+            resolved="$configured"
+            mode="ci-fallback"
+          elif [[ -x "./scripts/rch_ci_fallback.sh" ]]; then
+            resolved="./scripts/rch_ci_fallback.sh"
+            mode="ci-fallback"
+          else
+            echo "a cargo executor is required for fuzz-target builds" >&2
+            exit 1
+          fi
+
+          case "$resolved" in
+            *scripts/rch_ci_fallback.sh)
+              mode="ci-fallback"
+              ;;
+          esac
+
+          echo "RCH_BIN=$resolved" >> "$GITHUB_ENV"
+          echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
+
+      - name: Check all fuzz targets compile
+        run: |
+          set -euo pipefail
+          target_dir="${TMPDIR:-/tmp}/rch_target_fuzz_build_gate_${GITHUB_RUN_ID:-local}_all_bins"
+
+          echo "::group::Fuzz build gate context"
+          echo "UTC start: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          echo "event: ${GITHUB_EVENT_NAME:-unknown}"
+          echo "sha: ${GITHUB_SHA:-unknown}"
+          echo "target dir: ${target_dir}"
+          echo "executor: ${RCH_BIN}"
+          echo "executor mode: ${RCH_EXECUTOR_MODE:-unknown}"
+          rustc -Vv
+          cargo -V
+          echo "::endgroup::"
+
+          echo "::group::RCH fuzz build gate: all bins"
+          if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
+            echo 'RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          else
+            echo '"$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR="${target_dir}" cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going'
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_DEV_DEBUG=0 \
+              CARGO_TARGET_DIR="${target_dir}" \
+              cargo check --manifest-path fuzz/Cargo.toml --bins --keep-going
+          fi
+          echo "::endgroup::"
+
+  fuzz:
+    name: Fuzz ${{ matrix.target }}
+    needs: fuzz-build-gate
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - grpc_codec
+          - fuzz_http1_request
+          - fuzz_http1_response
+          - dns_resolver_name_compression
+          - h1_parsed_url
+          - length_delimited
+          - length_delimited_encode_width
+          - length_delimited_decoder_state
+          - fuzz_lines_codec
+          - length_delimited_frame_boundary
+          - bytes_slice_split_to
+          - bytes_cursor_reader
+          - bytes_take_adapter
+          - gf256_simd_edge_cases
+          - grpc_prost_codec_decode
+          - grpc_gzip_message_decode
+          - grpc_length_prefixed
+          - grpc_streaming
+          - fuzz_distributed_snapshot_merge
+          - h3_native_frames
+          - qpack_field_section
+          - kafka_protocol
+          - key_derivation_context
+          - region_heap_allocator
+          - otel_span_attributes
+          - quic_stream_flow
+          - symbol_auth
+          - symbol_cancel_broadcast
+          - postgres_bind_execute_sync
+          - postgres_scram
+          - mysql_ok_packet
+          - raptorq_decoder_gauss_matrix
+          - fuzz_distributed_recovery_decode
+          - mutex_poison_persistence
+          - source_payload_hash_verification
+          - fuzz_raptorq_rfc6330
+          - tls_stream_record_framing
+          - transport_router
+          - fuzz_websocket_frame_parsing
+          - fuzz_hpack_decode
+          - hpack_indexed
+          - fuzz_http2_frame
+          - h2_connection_window_update
+          - h2_frame_decoder
+          - fuzz_interest_flags
+        include:
+          # Critical targets get more time
+          - target: fuzz_hpack_decode
+            duration: 600
+          - target: fuzz_http2_frame
+            duration: 600
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: nightly
+          components: llvm-tools-preview
+
+      - name: Resolve cargo executor
+        run: |
+          configured="${RCH_BIN:-}"
+          resolved=""
+          mode=""
+
+          if [[ -n "$configured" && -x "$configured" && "$configured" != *scripts/rch_ci_fallback.sh ]]; then
+            resolved="$configured"
+            mode="remote"
+          elif command -v rch >/dev/null 2>&1; then
+            resolved="$(command -v rch)"
+            mode="remote"
+          elif [[ -x "$HOME/.local/bin/rch" ]]; then
+            resolved="$HOME/.local/bin/rch"
+            mode="remote"
+          elif [[ -n "$configured" && -x "$configured" ]]; then
+            resolved="$configured"
+            mode="ci-fallback"
+          elif [[ -x "./scripts/rch_ci_fallback.sh" ]]; then
+            resolved="./scripts/rch_ci_fallback.sh"
+            mode="ci-fallback"
+          else
+            echo "a cargo executor is required for fuzz-target builds" >&2
+            exit 1
+          fi
+
+          case "$resolved" in
+            *scripts/rch_ci_fallback.sh)
+              mode="ci-fallback"
+              ;;
+          esac
+
+          echo "RCH_BIN=$resolved" >> "$GITHUB_ENV"
+          echo "RCH_EXECUTOR_MODE=$mode" >> "$GITHUB_ENV"
+
+      - name: Cache corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+
+      - name: Run fuzzer
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+          FUZZ_DURATION: ${{ matrix.duration || inputs.duration || '300' }}
+        run: |
+          DURATION="${FUZZ_DURATION}"
+          TARGET_DIR="${TMPDIR:-/tmp}/rch_target_fuzz_${FUZZ_TARGET}"
+          TARGET_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+          if [[ -z "$TARGET_TRIPLE" ]]; then
+            echo "failed to resolve rustc host target triple" >&2
+            exit 1
+          fi
+
+          TARGET_RUSTFLAGS_ENV="CARGO_TARGET_$(printf '%s' "$TARGET_TRIPLE" | tr '[:lower:]-' '[:upper:]_')_RUSTFLAGS"
+          TARGET_RUSTFLAGS="--cfg fuzzing -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=4 -Cllvm-args=-sanitizer-coverage-inline-8bit-counters -Cllvm-args=-sanitizer-coverage-pc-table -Cllvm-args=-sanitizer-coverage-trace-compares"
+          FUZZ_BIN="${TARGET_DIR}/${TARGET_TRIPLE}/release/${FUZZ_TARGET}"
+          echo "Fuzzing ${FUZZ_TARGET} for ${DURATION}s"
+          echo "executor: ${RCH_BIN}"
+          echo "executor mode: ${RCH_EXECUTOR_MODE:-unknown}"
+          mkdir -p "fuzz/artifacts/${FUZZ_TARGET}" "fuzz/corpus/${FUZZ_TARGET}"
+
+          if [[ "${RCH_EXECUTOR_MODE:-remote}" == "remote" ]]; then
+            RCH_REQUIRE_REMOTE=1 "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}" \
+              CARGO_TARGET_DIR="${TARGET_DIR}" \
+              "${TARGET_RUSTFLAGS_ENV}=${TARGET_RUSTFLAGS}" \
+              cargo build --manifest-path fuzz/Cargo.toml --release --target "${TARGET_TRIPLE}" --bin "${FUZZ_TARGET}"
+          else
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_RELEASE_LTO="${CARGO_PROFILE_RELEASE_LTO:-thin}" \
+              CARGO_TARGET_DIR="${TARGET_DIR}" \
+              "${TARGET_RUSTFLAGS_ENV}=${TARGET_RUSTFLAGS}" \
+              cargo build --manifest-path fuzz/Cargo.toml --release --target "${TARGET_TRIPLE}" --bin "${FUZZ_TARGET}"
+          fi
+
+          if [[ ! -x "$FUZZ_BIN" ]]; then
+            echo "built fuzz binary is missing or not executable: $FUZZ_BIN" >&2
+            exit 1
+          fi
+
+          "$FUZZ_BIN" \
+            "fuzz/corpus/${FUZZ_TARGET}" \
+            -artifact_prefix="fuzz/artifacts/${FUZZ_TARGET}/" \
+            -max_total_time="${DURATION}" \
+            -print_final_stats=1 \
+            -jobs=4 \
+            -workers=4
+
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crashes-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          retention-days: 30
+
+      - name: Upload corpus
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: corpus-${{ matrix.target }}
+          path: fuzz/corpus/${{ matrix.target }}/
+          retention-days: 7
+
+  # Aggregate results
+  summary:
+    name: Fuzz Summary
+    needs: fuzz
+    runs-on: ubuntu-latest
+    if: always() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+    steps:
+      - name: Check results
+        run: |
+          echo "Fuzzing completed"
+          # This job runs even if some fuzz jobs fail
+          # Crashes are uploaded as artifacts for analysis

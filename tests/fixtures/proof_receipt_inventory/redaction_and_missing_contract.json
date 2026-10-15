@@ -1,0 +1,18 @@
+{
+  "helpers": [
+    {
+      "capability_id": "operator-token-audit",
+      "commit": "",
+      "fixture_root": "",
+      "helper_id": "operator-token-audit-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/operator_token_audit_receipt.py",
+      "status": "draft",
+      "summary": "Investigates https://example.invalid/proof?token=abc123&sig=secret with api_key=sk-live-this-should-not-leak and bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.",
+      "test_path": "",
+      "validation": [
+        "python3 scripts/operator_token_audit_receipt.py --api_key=sk-live-validation-should-not-leak --token separated-secret-should-not-leak --endpoint https://example.invalid/proof?token=abc123&sig=secret"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "active_bead_ids": {
+    "in_progress": [],
+    "ready": [
+      "asupersync-ready2"
+    ],
+    "stale_in_progress": []
+  },
+  "agent": "CopperSpring",
+  "branch": {
+    "ahead": 0,
+    "behind": 0,
+    "current": "main",
+    "is_main": true,
+    "upstream": "origin/main"
+  },
+  "dirty_clusters": [
+    {
+      "actions": [
+        "coordinate with suspected owner/bead before staging or validation"
+      ],
+      "cluster": "peer-owned/channel-metamorphic",
+      "paths": [
+        "src/channel/mod.rs"
+      ]
+    }
+  ],
+  "generated_at": "2026-05-08T04:30:00Z",
+  "next_action": {
+    "category": "avoid-peer-owned-surface",
+    "path": "src/channel/mod.rs",
+    "reason": "dirty paths need owner attribution before staging or validation"
+  },
+  "proof_suggestions": [
+    "rustfmt-check"
+  ],
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  },
+  "repo_path": "/data/projects/asupersync",
+  "reservation_conflicts": [],
+  "reservation_snapshot": {
+    "available": true,
+    "classifications": []
+  },
+  "schema_version": "session-handoff-receipt-v1",
+  "subsystems": {
+    "agent_mail": "ok",
+    "beads": "ok",
+    "dirty_tree": "ok",
+    "git": "ok",
+    "proof_runner": "ok",
+    "rch": "ok"
+  }
+}

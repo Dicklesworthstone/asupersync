@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 72ca99456c11d58ea5808a826c91c94f41f09c0d9d9e24db73a936b7e7102879 # shrinks to base_delay = 50, max_retries = 1, jitter = None, entropy_seed = 2287124806551963531

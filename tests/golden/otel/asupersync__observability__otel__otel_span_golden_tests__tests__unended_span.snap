@@ -1,0 +1,32 @@
+---
+source: src/observability/otel_span_golden_tests.rs
+expression: test_span_snapshot(&span)
+---
+{
+  "attributes": {
+    "consumer.group": "analytics"
+  },
+  "baggage": {},
+  "end_time": null,
+  "events": [
+    {
+      "attributes": {
+        "message.size_bytes": "1024"
+      },
+      "name": "message.received",
+      "timestamp": "[TIMESTAMP]"
+    }
+  ],
+  "is_remote": false,
+  "kind": "Consumer",
+  "name": "long.running",
+  "parent_span_id": null,
+  "sampled": true,
+  "span_id": "[ID]",
+  "start_time": "[TIMESTAMP]",
+  "status": {
+    "kind": "unset"
+  },
+  "trace_id": "[ID]",
+  "trace_state": ""
+}

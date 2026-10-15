@@ -1,0 +1,27 @@
+atp: quic listening on 0.0.0.0:54117, dest /data/tmp/copperoak-gwmn38-20260907/matrix-after/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2410128/recv
+[atp-quic] receiver: manifest transfer=1d5fc0ae56215ef50755d5f4f77cf827 total_bytes=524288000 entries=1 symbol_size=1141 max_block_size=2048095
+[atp-quic] receiver: commit_decision transfer=1d5fc0ae56215ef50755d5f4f77cf827 committed=true sha_ok=true merkle_ok=true metadata_ok=true bytes_received=524288000 files=1
+[atp] progress metrics direction=receive transport=quic bytes=524288000 throughput_bytes_per_sec=5551631 symbols_sent=n/a symbols_accepted=0 feedback_rounds=0 decode_micros=0 fanout=1 ring_peak_occupancy=n/a ring_avg_occupancy=n/a drop_count=n/a park_count=n/a
+	Command being timed: "env -u ATP_RQ_AUTH_KEY_HEX -u RQ_AUTH_KEY_HEX /data/tmp/copperoak-gwmn38-20260907/bin/after recv /data/tmp/copperoak-gwmn38-20260907/matrix-after/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2410128/recv --listen 0.0.0.0:54117 --transport quic --once --peer-id atprecv-486370 --workers 4 --max-bytes 6442450944 --symbol-size 1141 --no-delta --rq-round0-loss-pct 2.0 --server-cert /data/tmp/copperoak-gwmn38-20260907/matrix-after/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2410128/cert.pem --server-key /data/tmp/copperoak-gwmn38-20260907/matrix-after/cells/whole-object-scorecard-v1/500M/bad/encrypted/atp-quic-tls13/streams1/rep3/attempt-2410128/key.pem"
+	User time (seconds): 17.51
+	System time (seconds): 15.69
+	Percent of CPU this job got: 35%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 1:34.44
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 27844
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 2
+	Minor (reclaiming a frame) page faults: 6865
+	Voluntary context switches: 2704347
+	Involuntary context switches: 116847
+	Swaps: 0
+	File system inputs: 200
+	File system outputs: 1024040
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

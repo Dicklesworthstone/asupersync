@@ -1,0 +1,37 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12351
+SQL: SELECT seq, data FROM large_table ORDER BY seq LIMIT 100
+Execution Time: 2340ms
+Status: SUCCESS
+Rows Returned: 100
+
+--- Column Description ---
+Column 0: seq
+  Type OID: 23
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 1
+  Format: 0
+Column 1: data
+  Type OID: 25
+  Type Size: -1
+  Table OID: 12345
+  Column ID: 2
+  Format: 0
+
+--- Sample Rows (first 3) ---
+Row 0:
+  seq: 1
+  data: "Generated data row 1"
+Row 1:
+  seq: 2
+  data: "Generated data row 2"
+Row 2:
+  seq: 3
+  data: "Generated data row 3"
+  ... and 97 more rows
+=====================================

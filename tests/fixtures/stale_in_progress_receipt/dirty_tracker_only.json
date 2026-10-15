@@ -1,0 +1,42 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-07T00:00:00Z",
+        "name": "OlderAgent"
+      }
+    ],
+    "available": true,
+    "messages": [],
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "OlderAgent",
+        "id": "asupersync-tracker1",
+        "title": "Ambiguous tracker state",
+        "updated_at": "2026-05-07T00:00:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "path": ".beads/issues.jsonl",
+        "status": " M"
+      },
+      {
+        "path": ".beads/beads.db",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [],
+    "status": "ok"
+  }
+}

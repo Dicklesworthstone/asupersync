@@ -1,0 +1,17 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "id": 20,
+        "from": "BoldPlateau",
+        "thread_id": "asupersync-aj7lx3.11",
+        "subject": "[asupersync-aj7lx3.11] Validation note",
+        "created_ts": "2026-05-08T05:24:00Z",
+        "body_md": "Validation passed with token=sk-live-this-should-not-leak and report at https://example.invalid/proof?token=abc123&sig=secret-signature. This body intentionally carries a very long explanation about receipt handling, handoff logs, source rows, peer messages, validation evidence, and operator review cues so the helper must truncate it before it can be pasted back into Agent Mail without overwhelming the thread or exposing the noisy original body."
+      }
+    ]
+  },
+  "git": {
+    "commits": []
+  }
+}

@@ -1,0 +1,71 @@
+---
+source: src/codec/lines.rs
+expression: report
+---
+lf_three_lines: input=610a620a630a (6B)
+  Ok(Some("a"))
+  Ok(Some("b"))
+  Ok(Some("c"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+crlf_three_lines: input=610d0a620d0a630d0a (9B)
+  Ok(Some("a"))
+  Ok(Some("b"))
+  Ok(Some("c"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+mixed_crlf_then_lf: input=610d0a620a630d0a (8B)
+  Ok(Some("a"))
+  Ok(Some("b"))
+  Ok(Some("c"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+mixed_lf_then_crlf: input=610a620d0a630a (7B)
+  Ok(Some("a"))
+  Ok(Some("b"))
+  Ok(Some("c"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+bare_cr_midline: input=666f6f0d6261720a (8B)
+  Ok(Some("foo\rbar"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+multiple_bare_cr_then_lf: input=610d620d630a640a (8B)
+  Ok(Some("a\rb\rc"))
+  Ok(Some("d"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+trailing_cr_no_lf: input=6162630d (4B)
+  Ok(None)
+  residual_len=4, next_index=4, is_discarding=false
+empty_line_lf: input=0a (1B)
+  Ok(Some(""))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+empty_line_crlf: input=0d0a (2B)
+  Ok(Some(""))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+only_cr_no_lf: input=0d (1B)
+  Ok(None)
+  residual_len=1, next_index=1, is_discarding=false
+only_lf_then_data: input=0a666f6f0a (5B)
+  Ok(Some(""))
+  Ok(Some("foo"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+crlf_separates_empty_lines: input=0d0a0d0a0d0a (6B)
+  Ok(Some(""))
+  Ok(Some(""))
+  Ok(Some(""))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+crlf_split_at_end: input=68656c6c6f0d0a (7B)
+  Ok(Some("hello"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false
+multibyte_utf8_with_crlf: input=68c3a96c6c6f0d0a77c3b6726c640a (15B)
+  Ok(Some("héllo"))
+  Ok(Some("wörld"))
+  Ok(None)
+  residual_len=0, next_index=0, is_discarding=false

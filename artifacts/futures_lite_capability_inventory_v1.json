@@ -1,0 +1,1808 @@
+{
+  "schema_version": 1,
+  "artifact_id": "futures-lite-capability-inventory-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-d24mms.6.1",
+  "capability_id": "CAP-FUTURES-STREAMS",
+  "captured_date_utc": "2026-07-24",
+  "baseline_revision": "ed1c0c3ae4ba68947cd2c0212f1aab2242f60724",
+  "authority_revision": "295136459f9e3e38e7373394e713866ec0693a8d",
+  "authority": {
+    "adr_id": "DEP-ADR-008",
+    "adr_path": "docs/adr/dep_plan_adr_008_futures_streams.md",
+    "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+    "marginal_ledger_path": "artifacts/dependency_marginal_ledger_v1.json",
+    "api_surface_map_path": "artifacts/api_surface_map_v1.json",
+    "decision": "KEEP_UNTIL_PARITY",
+    "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+    "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+    "dependency_exit_allowed": false
+  },
+  "policy": {
+    "zero_unknown_required": true,
+    "unknown_rows": 0,
+    "allowed_inventory_states": [
+      "FROZEN",
+      "EXPLICIT_ADJACENT",
+      "EXECUTED_TEST",
+      "COMMENT_ONLY",
+      "PLANNED",
+      "BLOCKED_GAP"
+    ],
+    "allowed_evidence_states": [
+      "SOURCE_BASELINED",
+      "EXECUTED_CONTRACT",
+      "EXISTING_TEST",
+      "PARTIAL_EXECUTED",
+      "PLANNED",
+      "BLOCKED_GAP",
+      "EXPLICIT_ADJACENT"
+    ],
+    "baseline_source_roots": [
+      "src",
+      "tests",
+      "benches",
+      "examples",
+      "asupersync-tokio-compat",
+      "fuzz"
+    ],
+    "baseline_exclusions": [
+      "tests/tests",
+      "target",
+      "tests/futures_lite_capability_inventory_contract.rs"
+    ],
+    "default_action": "Keep futures-lite on the root normal edge and the compatibility-member dev edge until A10 records SAME-or-BETTER public, runtime, test, marginal-graph, and rollback evidence."
+  },
+  "owned_stream_semantics_contract": {
+    "owner_bead": "asupersync-d24mms.6.2",
+    "trait": "asupersync::stream::Stream",
+    "extension_trait": "asupersync::stream::StreamExt",
+    "source_paths": [
+      "src/stream/stream.rs",
+      "src/stream/mod.rs",
+      "src/stream/next.rs"
+    ],
+    "dimensions": [
+      "pinning_and_unpin",
+      "pending_and_latest_waker",
+      "termination_and_fuse",
+      "size_hint_trust_boundary",
+      "cancellation_and_drop",
+      "send_sync_and_lifetimes",
+      "result_item_errors",
+      "forwarding_adapters"
+    ],
+    "next_future_cancellation": "dropping Next releases its mutable borrow but does not roll back state changes made by the underlying poll_next call",
+    "next_direct_compile_fail": {
+      "source": "src/stream/mod.rs",
+      "rejected_shape": "AddressSensitive: !Unpin; direct StreamExt::next call",
+      "required_bound": "Self: Unpin",
+      "implementation_state": "EXECUTED_RUSTDOC_COMPILE_FAIL"
+    },
+    "documentation_state": "EXECUTED_RUSTDOC",
+    "behavior_change": false,
+    "cutover_authorized": false
+  },
+  "a2_acceptance_status": {
+    "owner_bead": "asupersync-d24mms.6.2",
+    "overall_status": "PARTIAL_EXECUTED",
+    "requirements": [
+      {
+        "requirement_id": "FUT-A2-OWNED-API",
+        "source_status": "IMPLEMENTED_ALONGSIDE_INCUMBENT",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      {
+        "requirement_id": "FUT-A2-DOWNSTREAM-ERGONOMICS",
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_15_TESTS"
+      },
+      {
+        "requirement_id": "FUT-A2-COMPILE-FAIL-RUSTDOC",
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_RUSTDOC"
+      },
+      {
+        "requirement_id": "FUT-A2-PIN-DROP-BOUNDS",
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      {
+        "requirement_id": "FUT-A2-ERROR-ADAPTER",
+        "source_status": "IMPLEMENTED",
+        "terminal_status": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      {
+        "requirement_id": "FUT-A2-ATP-RUNTIME-E2E",
+        "source_status": "INLINE_BEHAVIOR_TESTS_EXECUTED",
+        "terminal_status": "MISSING_RUNTIME_E2E"
+      },
+      {
+        "requirement_id": "FUT-A2-USER-TRIAL",
+        "source_status": "MISSING",
+        "terminal_status": "MISSING_SAME_OR_BETTER_RECEIPT"
+      },
+      {
+        "requirement_id": "FUT-A2-CUTOVER",
+        "source_status": "BLOCKED",
+        "terminal_status": "BLOCKED_PENDING_ALL_RECEIPTS"
+      }
+    ],
+    "required_terminal_receipts": [
+      "focused compile",
+      "compile-fail rustdoc",
+      "downstream fixture",
+      "ATP runtime E2E",
+      "SAME-or-BETTER user trial"
+    ],
+    "validated_terminal_receipts": [
+      {
+        "receipt_id": "FUT-A2-DOWNSTREAM-CONSUMER-20260808",
+        "base_revision": "c8ad48df5122b14c8df5b316e874f3ca55bbd642",
+        "clean_overlay_fingerprint_prefix": "780d5c",
+        "command": "cargo test --manifest-path tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml --locked -- --nocapture",
+        "result": "PASS",
+        "tests_passed": 15,
+        "tests_failed": 0,
+        "scope": "owned ATP compile contract, pinned borrowed non-Send !Unpin stream behavior, drop cancellation shape, and fallible terminal adapter"
+      },
+      {
+        "receipt_id": "FUT-A2-STREAM-RUSTDOC-20260808",
+        "base_revision": "c8ad48df5122b14c8df5b316e874f3ca55bbd642",
+        "clean_overlay_fingerprint_prefix": "fe0d",
+        "command": "cargo test -p asupersync --doc stream -- --nocapture",
+        "result": "PASS",
+        "positive_examples_passed": 2,
+        "compile_fail_examples_passed": 1,
+        "scope": "owned Stream documentation and direct-next !Unpin compile-fail contract"
+      },
+      {
+        "receipt_id": "FUT-A2-ATP-OWNED-UNIT-20260808",
+        "base_revision": "3f130dbdaca0bc9ae0d25d6d227ab0c228c765b4",
+        "clean_overlay_fingerprint_prefix": "fe0d",
+        "build_id": 29967068015099952,
+        "worker": "ovh-a",
+        "command": "cargo test -p asupersync --locked --lib net::atp::sdk::stream::tests::owned_ -- --nocapture",
+        "result": "PASS",
+        "duration_ms": 896042,
+        "exit_code": 0,
+        "tests_passed": 2,
+        "tests_failed": 0,
+        "scope": "inline owned ATP Stream latest-waker registration, no-self-wake Pending behavior, sender wake delivery, and creation-context cancellation termination"
+      }
+    ],
+    "blocked_execution_receipts": [
+      {
+        "receipt_id": "FUT-A2-ATP-OWNED-TESTS-20260808",
+        "build_id": 29967068015099936,
+        "worker": "ovh-a",
+        "duration_ms": 289813,
+        "exit_code": 130,
+        "terminal_state": "CANCELLED_STUCK_LINK",
+        "tests_executed": 0,
+        "cleanup_ok": true,
+        "no_claim": "Compilation reached the final workspace crate without a source diagnostic, but no test output was emitted; this is not compile or behavior evidence."
+      }
+    ],
+    "closure_allowed": false
+  },
+  "a3_block_on_receipt": {
+    "owner_bead": "asupersync-d24mms.6.3",
+    "base_revision": "02b380ee063e7e643105b1a7997360a7021bf32e",
+    "implementation_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
+    "source_status": "ACCEPTANCE_IMPLEMENTED_ALONGSIDE_INCUMBENT",
+    "execution_status": "ACCEPTANCE_FOCUSED_TESTS_PASSED",
+    "module": "crate::util::future",
+    "visibility": "crate-private alongside-incumbent",
+    "current_source_pins": [
+      {
+        "path": "src/future.rs",
+        "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+        "line_count": 1479
+      },
+      {
+        "path": "src/util/mod.rs",
+        "sha256": "00a03123d4d96708dcc8d9c0fad8971f87130fae2ed172eb277b8a0b9c90121f",
+        "line_count": 40
+      }
+    ],
+    "kernel_projection": {
+      "path": "src/future.rs",
+      "start_marker": "pub(crate) enum BlockOnError",
+      "end_marker": "#[cfg(all(test, not(target_arch = \"wasm32\")))]",
+      "sha256": "6e176ebcc729d898d85eda7350f7d13c9d6e1577af2691e22bbeab2825037ce4"
+    },
+    "semantic_guarantees": [
+      "the future is pinned on the calling stack without Send, Unpin, or static bounds",
+      "one Arc-owned notification and stable waker identity are created per invocation",
+      "the wake flag is stored before unpark and consumed with acquire-release ordering",
+      "repeated wakes coalesce without losing the wake that races with park",
+      "a spurious park return does not cause an unnotified repoll",
+      "recursive ordinary-thread calls use independent state",
+      "future panic propagates without shared kernel poisoning",
+      "the kernel creates no executor, task, region, obligation, or ambient Cx",
+      "cancellation progress requires the future state change to schedule a wake"
+    ],
+    "context_policy": [
+      {
+        "context": "ordinary host thread",
+        "decision": "ADMIT",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "recursive ordinary-thread invocation",
+        "decision": "ADMIT",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "Asupersync blocking-pool thread",
+        "decision": "ADMIT",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "thread with an installed Asupersync runtime handle",
+        "decision": "REFUSE_BEFORE_POLL",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "Asupersync runtime driver versus scheduler worker",
+        "decision": "REFUSE_BOTH_CONSERVATIVELY",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "foreign executor thread",
+        "decision": "ADMIT_SELF_CONTAINED_FUTURE_ONLY",
+        "evidence": "FOCUSED_UNIT_TEST_PASSED"
+      },
+      {
+        "context": "wasm32 without host-thread parking",
+        "decision": "REFUSE_UNSUPPORTED_PLATFORM",
+        "evidence": "SOURCE_AUTHORED_NOT_EXECUTED"
+      }
+    ],
+    "authored_inline_tests": [
+      "ready_future_completes_without_parking",
+      "borrowed_non_send_future_and_recursive_call_are_admitted",
+      "wakes_during_poll_are_coalesced_without_parking",
+      "spurious_park_return_does_not_trigger_an_unnotified_poll",
+      "notification_state_model_exhausts_spurious_and_coalesced_wakes",
+      "repeated_polls_receive_the_same_waker_identity",
+      "wake_after_pending_makes_progress",
+      "explicit_cancellation_wake_makes_progress",
+      "future_panic_propagates_without_poisoning_kernel_state",
+      "installed_runtime_context_is_refused_before_poll",
+      "scheduler_worker_context_is_refused_before_poll",
+      "foreign_executor_admits_self_contained_nested_future",
+      "owned_kernel_leaves_lab_runtime_quiescent",
+      "blocking_pool_thread_is_admitted",
+      "block_on_incumbent_idle_cpu_and_ready_latency_receipt"
+    ],
+    "incumbent_production_sites": [
+      "src/web/router.rs:662",
+      "src/signal/shutdown.rs:161",
+      "src/signal/shutdown.rs:499"
+    ],
+    "missing_terminal_evidence": [],
+    "remaining_cutover_work": [
+      "migration of production and test call sites remains assigned to FUT A6 through A9"
+    ],
+    "terminal_compile_receipt": {
+      "receipt_id": "FUT-A3-OWNED-BLOCK-ON-CHECK-20260808",
+      "build_id": 29967986903220229,
+      "worker": "hz2",
+      "clean_overlay_base_revision": "96d59b686ecef0b50d3ffec01f0f89041cf531aa",
+      "overlay_fingerprint": "24ef86505fe606017c66d22bed85f82b645d57a5401b4bb0e125b640a6c2461c",
+      "source_sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+      "command": "cargo check --locked -p asupersync --lib",
+      "rustflags": "-D warnings -C debuginfo=0",
+      "started_at": "2026-08-08T23:46:50.964386808Z",
+      "completed_at": "2026-08-08T23:48:38.761606635Z",
+      "duration_ms": 107797,
+      "exit_code": 0,
+      "evidence_scope": "Current-source library compilation only; cfg(test) inline cases were not compiled or executed."
+    },
+    "focused_unit_test_receipt": {
+      "receipt_id": "FUT-A3-OWNED-BLOCK-ON-UNIT-20260809",
+      "build_id": 29967986903220231,
+      "worker": "hz2",
+      "clean_overlay_base_revision": "96d59b686ecef0b50d3ffec01f0f89041cf531aa",
+      "overlay_fingerprint": "24ef86505fe606017c66d22bed85f82b645d57a5401b4bb0e125b640a6c2461c",
+      "source_sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+      "command": "cargo test -p asupersync --lib util::future::tests -- --nocapture --test-threads=1",
+      "rustflags": "-D warnings -C debuginfo=0",
+      "started_at": "2026-08-08T23:52:14.735641994Z",
+      "completed_at": "2026-08-09T00:03:51.348375431Z",
+      "duration_ms": 696612,
+      "module_tests_passed": 26,
+      "a3_authored_tests_passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "filtered_out": 21826,
+      "exit_code": 0,
+      "evidence_scope": "The complete util::future focused module passed, including all fourteen A3-authored cases; this is not exhaustive interleaving, performance, or cutover evidence."
+    },
+    "performance_receipt": {
+      "receipt_id": "FUT-A3-OWNED-BLOCK-ON-PERF-20260809",
+      "build_id": 29967986903220250,
+      "worker": "hz2",
+      "clean_overlay_base_revision": "d301a85212c493d837f2a355c309385dceb5c0e6",
+      "overlay_fingerprint": "b407f779fb36cbf129efcbf0ce723e9c7687d9a2fbb85440b6411c4c5c13d695",
+      "source_sha256": "c2156b9b43b1caf9c172c736839bb877fc09854edc8ec245156d93d4822d7b88",
+      "kernel_projection_sha256": "6e176ebcc729d898d85eda7350f7d13c9d6e1577af2691e22bbeab2825037ce4",
+      "command": "cargo test -p asupersync --lib util::future::tests::block_on_incumbent_idle_cpu_and_ready_latency_receipt -- --ignored --exact --nocapture --test-threads=1",
+      "rustflags": "-D warnings -C debuginfo=0",
+      "started_at": "2026-08-09T00:22:17.276928609Z",
+      "completed_at": "2026-08-09T00:35:20.454785980Z",
+      "duration_ms": 783177,
+      "tests_passed": 1,
+      "failed": 0,
+      "filtered_out": 21852,
+      "exit_code": 0,
+      "platform": "linux",
+      "idle_wait_ms_per_implementation": 750,
+      "owned_idle_cpu_ticks": 0,
+      "incumbent_idle_cpu_ticks": 0,
+      "owned_idle_wall_ns": 750627442,
+      "incumbent_idle_wall_ns": 750338907,
+      "ready_iterations_per_sample": 50000,
+      "ready_samples_per_implementation": 7,
+      "owned_ready_median_batch_ns": 6755423,
+      "incumbent_ready_median_batch_ns": 1941878,
+      "interpretation": "The owned kernel matched the incumbent at zero observed process CPU ticks during the idle wait. Its median ready batch was slower: about 135 ns per call versus about 39 ns per call for the incumbent.",
+      "no_claim": "One remote Linux process run measures this bounded workload only; it is not cross-platform performance parity, a throughput claim, or exhaustive interleaving evidence."
+    },
+    "blocked_execution_receipts": [
+      {
+        "receipt_id": "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-A",
+        "build_id": null,
+        "worker": "ovh-a",
+        "source_sha256": "86a23894ae5f37d0541e12074ab8eecb0b3331bc4ae0e7627fd61b4926254b50",
+        "command": "cargo test -p asupersync --lib util::future::tests -- --nocapture",
+        "exit_code": 130,
+        "terminal_state": "CANCELLED_AFTER_DAEMON_LOST_JOB",
+        "tests_executed": 0,
+        "cleanup_ok": true,
+        "no_claim": "The clean-overlay job reached final workspace compilation, then disappeared when the RCH daemon restarted. No terminal compiler or test result exists."
+      },
+      {
+        "receipt_id": "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-B",
+        "build_id": 29967977726083073,
+        "worker": "hz2",
+        "source_sha256": "323eef3753247c3a659d662e2403d1917729acd3b89685c0df9db1d4fd1ef569",
+        "command": "cargo test -p asupersync --lib util::future::tests -- --nocapture",
+        "exit_code": 130,
+        "terminal_state": "CANCELLED_AFTER_DAEMON_LOST_JOB",
+        "tests_executed": 0,
+        "cleanup_ok": true,
+        "no_claim": "The clean-overlay job reached final workspace compilation with a fresh heartbeat, then disappeared when the RCH daemon restarted. No terminal compiler or test result exists."
+      },
+      {
+        "receipt_id": "FUT-A3-OWNED-BLOCK-ON-UNIT-20260808-C",
+        "build_id": 29967986903220226,
+        "worker": "hz2",
+        "source_sha256": "ec3463e516e26c40a5f690277ba1782e114fea93ea0e430abcd381426aa01779",
+        "command": "cargo test -p asupersync --lib util::future::tests -- --nocapture --test-threads=1",
+        "exit_code": 143,
+        "terminal_state": "CANCELLED_AFTER_BOUNDED_NO_PROGRESS_WINDOW",
+        "build_age_seconds": 620,
+        "progress_silence_seconds": 479,
+        "tests_executed": 0,
+        "cleanup_ok": true,
+        "no_claim": "The current-source clean-overlay job retained a fresh heartbeat but emitted no progress or test output during the bounded final-link window. Graceful cancellation is not a terminal compiler or test result and proves no source behavior."
+      }
+    ],
+    "cutover_authorized": false,
+    "closure_allowed": true
+  },
+  "a4_helper_receipt": {
+    "owner_bead": "asupersync-d24mms.6.4",
+    "first_base_revision": "050fd0f08e4cf127e348bbf545c1e46cc392f6b5",
+    "implementation_revisions": [
+      "da8d632b5ef51ea4074589aed0664cb8f5e33d41",
+      "9f3684b48af00f93a6717af8575bbb4c984d5873"
+    ],
+    "source_status": "PARTIAL_STATIC_SOURCE_PROGRESS",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "module": "crate::util::future",
+    "visibility": "crate-private alongside-incumbent",
+    "current_source_pin": {
+      "path": "src/future.rs",
+      "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+      "line_count": 1479
+    },
+    "helper_projection": {
+      "path": "src/future.rs",
+      "start_marker": "/// Builds a future that delegates every poll to an `FnMut` closure.",
+      "end_marker": "/// Catches a panic raised while polling `future`.",
+      "sha256": "91219a9fb6dd5e3674c68edc2cd6c1b15ea8a450cf998c5d501f4f9dc25d8c4d"
+    },
+    "live_helper_matrix": [
+      {
+        "api_id": "FUT-API-POLL-FN",
+        "implementation": "std::future::poll_fn re-export",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "one closure call per wrapper poll with the caller Context",
+        "allocation_policy": "no owned heap allocation"
+      },
+      {
+        "api_id": "FUT-API-POLL-ONCE",
+        "implementation": "owned async wrapper around one pinned inner poll",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "one inner poll; Ready maps to Some and Pending maps to None",
+        "allocation_policy": "stack-owned state with no explicit heap allocation"
+      },
+      {
+        "api_id": "FUT-API-YIELD-NOW",
+        "implementation": "owned YieldNow future",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "first poll self-wakes and yields; later polls remain Ready",
+        "allocation_policy": "one boolean inline"
+      },
+      {
+        "api_id": "FUT-API-PENDING",
+        "implementation": "std::future::pending re-export",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "always Pending without scheduling a wake",
+        "allocation_policy": "no owned heap allocation"
+      },
+      {
+        "api_id": "FUT-API-ZIP",
+        "implementation": "owned two-future Zip",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "left then right; completed children are dropped and never repolled",
+        "allocation_policy": "two children and two optional outputs inline; O(1) in pair size"
+      },
+      {
+        "api_id": "FUT-API-OR",
+        "implementation": "owned left-biased two-future Or",
+        "source_status": "SOURCE_AUTHORED_NOT_EXECUTED",
+        "poll_policy": "left first; right only after left returns Pending",
+        "allocation_policy": "two children inline; O(1) in pair size"
+      },
+      {
+        "api_id": "FUT-API-RACE",
+        "implementation": "missing",
+        "source_status": "MISSING_BLOCKED_POLICY",
+        "poll_policy": "incumbent randomizes first poll order on every wrapper poll",
+        "allocation_policy": "unresolved with deterministic fairness policy"
+      },
+      {
+        "api_id": "FUT-API-JOIN-ALL-MENTION",
+        "implementation": "not applicable",
+        "source_status": "COMMENT_ONLY_NOT_A_LIVE_HELPER",
+        "poll_policy": "not applicable",
+        "allocation_policy": "empty and large collection requirements are not applicable to this comment-only surface"
+      }
+    ],
+    "authored_inline_tests": [
+      "poll_fn_forwards_context_and_calls_once_per_wrapper_poll",
+      "poll_once_observes_ready_and_pending_without_waiting",
+      "yield_now_wakes_once_then_remains_ready",
+      "pending_never_completes_or_schedules_a_wake",
+      "zip_polls_left_then_right_and_stops_polling_completed_children",
+      "dropping_pending_zip_drops_retained_output_and_unfinished_child",
+      "or_is_left_biased_and_drops_the_loser_with_the_wrapper",
+      "zip_and_or_readiness_matrix_is_deterministic",
+      "helper_futures_quiesce_under_lab_dpor_exploration"
+    ],
+    "race_policy_boundary": {
+      "incumbent_first_poll_policy": "a newly seeded fastrand Rng advances and chooses the first child on every wrapper poll",
+      "incumbent_loser_policy": "the losing future is dropped when the completed race wrapper is dropped",
+      "project_required_loser_policy": "structured cancellation plus obligation-aware drain and quiescence",
+      "generic_future_limitation": "Future exposes poll and drop but no generic cancellation acknowledgement, obligation ledger, or drain-to-quiescence protocol",
+      "determinism_conflict": "ambient thread-local randomness cannot establish deterministic trace replay",
+      "decision": "KEEP_INCUMBENT_UNTIL_STRUCTURED_RACE_POLICY",
+      "drop_only_owned_race_allowed": false
+    },
+    "completion_boundary": "Future does not generally promise a post-Ready repoll contract; only the authored YieldNow explicitly remains Ready on later polls.",
+    "incumbent_call_sites_migrated": 0,
+    "missing_terminal_evidence": [
+      "focused compile and execution of the nine authored source cases",
+      "standalone property and differential corpus for every source-authored helper",
+      "LabRuntime or DPOR scheduling, cancellation, and trace evidence",
+      "expiry-independent tests that do not require the incumbent oracle",
+      "structured race cancellation, loser drain, and quiescence design",
+      "deterministic race fairness and trace policy",
+      "migration of any production or test call site"
+    ],
+    "cutover_authorized": false,
+    "closure_allowed": false
+  },
+  "a5_panic_boundary_receipt": {
+    "owner_bead": "asupersync-d24mms.6.5",
+    "claimed_base_revision": "fc687fbbe677f25e6c00d7a6adc9403be88a0f2b",
+    "source_status": "ACCEPTANCE_IMPLEMENTED",
+    "execution_status": "FOCUSED_REMOTE_EXECUTION_PASSED",
+    "current_source_pins": [
+      {
+        "path": "src/future.rs",
+        "sha256": "f70205cd4c9fb28e12c19ddee5726a11e466daef7dbd30d05b0474f7b665e5ba",
+        "line_count": 1479
+      },
+      {
+        "path": "src/web/middleware.rs",
+        "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+        "line_count": 6027
+      },
+      {
+        "path": "src/web/negotiate.rs",
+        "sha256": "a7182fe3982141f6e6ff39b38aa641b6d8b8f69ba265f2bf2996aee5befa1680",
+        "line_count": 916
+      }
+    ],
+    "poll_helper_projection": {
+      "path": "src/future.rs",
+      "start_marker": "/// Catches a panic raised while polling `future`.",
+      "end_marker": "/// Reason the owned blocking kernel refused to poll a future.",
+      "sha256": "4ddef2fd4ae50814a299d1d23160ee03a2cd82f2b55403e922b00033194af621"
+    },
+    "poll_helper_contract": {
+      "api": "crate::util::future::catch_unwind",
+      "input_bound": "Future + UnwindSafe; web call sites use AssertUnwindSafe around existing handler futures",
+      "poll_behavior": "forwards the caller Context and polls the pinned inner future once per wrapper poll inside std::panic::catch_unwind",
+      "completion_behavior": "Ready becomes Ok after contained terminal cleanup; a ready-path destructor panic becomes Err; a poll panic remains the primary original Box<dyn Any + Send> payload even if terminal cleanup also panics",
+      "post_terminal_behavior": "the inner Option is taken exactly once, prevents every later inner poll, and returns Pending",
+      "drop_behavior": "terminal cleanup is contained inside a second std::panic::catch_unwind; abandoning an unpolled or pending wrapper still performs ordinary Rust drop outside a poll",
+      "allocation_behavior": "the wrapper stores only an Option-wrapped inner future; panic payload allocation belongs to the panic runtime",
+      "drop_panic_contained": true
+    },
+    "production_boundary_matrix": [
+      {
+        "surface_id": "FUT-PROD-MIDDLEWARE-CATCH",
+        "path": "src/web/middleware.rs",
+        "construction_phase": "std::panic::catch_unwind around Handler::call",
+        "poll_phase": "owned crate::util::future::catch_unwind",
+        "payload_policy": "best-effort string extraction for server-side structured log; payload text is never returned to the client",
+        "operator_diagnostic": "[ASUP-E502] web handler panic recovered",
+        "client_response": "500 with [ASUP-E502] Internal Server Error",
+        "outcome_translation": "Response boundary only; no Outcome value is produced",
+        "source_status": "CURRENT_SOURCE_COMPILED_SHARED_HELPER_EXECUTED"
+      },
+      {
+        "surface_id": "FUT-PROD-NEGOTIATE-CATCH",
+        "path": "src/web/negotiate.rs",
+        "construction_phase": "new std::panic::catch_unwind around Handler::call",
+        "poll_phase": "owned crate::util::future::catch_unwind",
+        "payload_policy": "best-effort string extraction for server-side structured log; payload text is never returned to the client",
+        "operator_diagnostic": "[ASUP-E502] web handler panic recovered with method, path, trace_id, and panic_message fields",
+        "client_response": "negotiated 500 containing [ASUP-E502] while excluding the panic payload",
+        "outcome_translation": "Response boundary only; no Outcome value is produced",
+        "source_status": "HANDLER_BOUNDARY_TEST_PASSED"
+      }
+    ],
+    "authored_source_cases": [
+      "catch_unwind_forwards_pending_wake_and_ready",
+      "catch_unwind_preserves_payload_and_refuses_repoll",
+      "dropping_unpolled_catch_unwind_drops_inner",
+      "catch_unwind_preserves_poll_panic_when_terminal_drop_also_panics",
+      "catch_unwind_surfaces_terminal_drop_panic_after_ready_poll",
+      "catch_unwind_task_quiesces_and_resolves_orphaned_obligation_in_lab",
+      "error_handler_catches_construction_panic",
+      "error_handler_disabled_propagates_construction_panic",
+      "error_handler_boundary_contains_construction_and_poll_panics_with_redacted_diagnostics"
+    ],
+    "execution_receipts": [
+      {
+        "lane": "current-panic-boundary-source-check",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs -- env CARGO_INCREMENTAL=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo check -p asupersync --lib",
+        "result": "PASS: cargo check completed without warnings",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "exit_code": 0
+      },
+      {
+        "lane": "owned-catch-unwind-unit-and-lab",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo test -p asupersync --lib catch_unwind -- --nocapture",
+        "result": "PASS: 7 passed, 0 failed",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "exit_code": 0
+      },
+      {
+        "lane": "error-handler-boundary-construction-and-poll-panic",
+        "command": "RCH_WORKER=ovh-a RCH_REQUIRE_REMOTE=1 RCH_TEST_TIMEOUT_SEC=1800 rch exec --base HEAD --clean-overlay --overlay-path src/future.rs --overlay-path src/web/middleware.rs --overlay-path src/web/negotiate.rs --overlay-path tests/e2e_web.rs -- env CARGO_TARGET_DIR=/tmp/rch_target_release_043_handler_boundary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0 -C panic=unwind' cargo test -j 6 -p asupersync --test e2e_web --features tracing-integration error_handler_boundary_contains_construction_and_poll_panics_with_redacted_diagnostics --locked -- --nocapture",
+        "result": "PASS: 1 passed, 0 failed; direct ErrorHandlerMiddleware boundary contained construction and poll panics; no listener/router/transport claim",
+        "panic_strategy": "unwind",
+        "remote_worker": "ovh-a",
+        "clean_overlay_base": "f4d75e6a94d76aeba5d97992f51bef6fe446bf9e",
+        "clean_overlay_fingerprint": "8d69eba2e872b218396865f9f83972bae0f77ac0da5fb7ba37d97355ca3eb27c",
+        "exit_code": 0
+      }
+    ],
+    "dependency_token_delta": {
+      "production_poll_adapter_sites_before": 2,
+      "production_poll_adapter_sites_after": 0,
+      "current_census_token_delta": -2,
+      "manifest_changed": false,
+      "dependency_removal_authorized": false
+    },
+    "outcome_mapping_decision": "Both production sites terminate at a web Response boundary: recovered panics become sanitized 500 responses and the handler future completes normally; no Outcome value exists at this API layer and none is invented.",
+    "missing_terminal_evidence": [],
+    "cutover_authorized": false,
+    "closure_allowed": true
+  },
+  "post_baseline_current_snapshot": {
+    "captured_date_utc": "2026-09-09",
+    "historical_baseline_preserved": true,
+    "source_status": "STATIC_SOURCE_PROGRESS",
+    "evidence_state": "SOURCE_BASELINED",
+    "execution_status": "NOT_RUN_STATIC_ONLY",
+    "current_occurrence": {
+      "unit": "non-overlapping textual token occurrences in current tracked Rust source, excluding this contract",
+      "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
+      "file_count": 331,
+      "token_count": 1531,
+      "digest_sha256": "8578df034838ec7cdb13cca5190e7795f8092a4f5e1ea8c5171695aa8cd16cfa",
+      "scope_rows": [
+        {
+          "scope": "src",
+          "file_count": 160,
+          "token_count": 957,
+          "digest_sha256": "26a789ca19a6875200d038afa45c94fb9f5f0cb242c3b781d073474dd2a5a402"
+        },
+        {
+          "scope": "tests",
+          "file_count": 161,
+          "token_count": 562,
+          "digest_sha256": "98d03fa0ea0e23108ed5a72e5305c384e65293cb997352cb5f61fd9fea3fa9c2"
+        },
+        {
+          "scope": "benches",
+          "file_count": 4,
+          "token_count": 4,
+          "digest_sha256": "e0486d644e0a2806541a08f48881263d2c6a5eb6afc967a93783e625dc9b86f7"
+        },
+        {
+          "scope": "examples",
+          "file_count": 1,
+          "token_count": 1,
+          "digest_sha256": "ac6854be3e45bc271b3d3434510f18c0aa4d95bd637bc112219b48db906d5ad4"
+        },
+        {
+          "scope": "asupersync-tokio-compat",
+          "file_count": 3,
+          "token_count": 5,
+          "digest_sha256": "4b683da32edc8ec80b28d24e377bb7c715efaff7ca76469848005d5e0d24d7ce"
+        },
+        {
+          "scope": "fuzz",
+          "file_count": 2,
+          "token_count": 2,
+          "digest_sha256": "666119285e1ae804e6b859a2fb54aed4bd29c60fe4b92243d3b3cbab5964264d"
+        }
+      ]
+    },
+    "current_migration_reservation_groups": [
+      {
+        "group_id": "FUT-A6-CORE",
+        "file_count": 45,
+        "token_count": 278,
+        "digest_sha256": "b82ce38505c47586725abbcbdf753e70d90d0fe3b01d71d6d6a18c4319c970d8"
+      },
+      {
+        "group_id": "FUT-A7-IO",
+        "file_count": 35,
+        "token_count": 183,
+        "digest_sha256": "9a657d2db08642866f0ac332917260d50a5edfb5a6652807d01c60c9dffbbf3b"
+      },
+      {
+        "group_id": "FUT-A8-SERVICES",
+        "file_count": 34,
+        "token_count": 218,
+        "digest_sha256": "f71b4770042ebe6b72843edef07722a2e6ec41427609100f76c809fc0e4f0b0f"
+      },
+      {
+        "group_id": "FUT-A9-ATP-DEV",
+        "file_count": 217,
+        "token_count": 852,
+        "digest_sha256": "42e527ba3255b4b2c51b9d0c4d5a3c958052f6602344addb6b2f686bb62ee51a"
+      }
+    ],
+    "source_pin_reconciliations": [
+      {
+        "path": "Cargo.toml",
+        "baseline_sha256": "5eb3d7f25fb2584dcc7dd4dc3addb59573d08a7404b4ffca1356e53a93cfb2e0",
+        "current_sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+        "current_line_count": 1121,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "root futures-lite manifest requirement",
+        "projection_sha256": "81edacba422d047cd609290f9b0a95a8cda255ef326afe8d34afd7dfa7b80def"
+      },
+      {
+        "path": "Cargo.lock",
+        "baseline_sha256": "9fa12e8af1e6b15a3070d88d62b2b81b8ba49c0e9d8592c1d1682f1cd72a4461",
+        "current_sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+        "current_line_count": 4664,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "resolved futures-lite package block",
+        "projection_sha256": "9260990a318c00b457e53860e1d10774e380ff818c7d7579f2d922473ade1b4b"
+      },
+      {
+        "path": "src/sync/notify.rs",
+        "baseline_sha256": "11d85d8cc9bcd7ec6c21245dba5b58f381b3aa4c54dc3d8d17d01f68b213a3ef",
+        "current_sha256": "36ffe518335a43085d346f3cbf820903b4985f1240db7ffa2d27b8562c11d83e",
+        "current_line_count": 931,
+        "classification": "TOKEN_LINES_PRESERVED_ACROSS_TEST_SPLIT",
+        "projection": "sorted futures-lite token lines across notify.rs and notify_tests.rs; two public doctests stay in notify.rs",
+        "projection_sha256": "ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"
+      },
+      {
+        "path": "artifacts/dependency_capability_registry_v1.json",
+        "baseline_sha256": "4d91239e2f2e83069414ca36eafc4aaba283cd3f89576fbb5e75f3374bd41b11",
+        "current_sha256": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
+        "current_line_count": 7067,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "canonical CAP-FUTURES-STREAMS row",
+        "projection_sha256": "e4440233403e24db85a0b8719e0670b5af45ff6c0728f956a9f02c8a9dba5c12"
+      },
+      {
+        "path": "artifacts/dependency_marginal_ledger_v1.json",
+        "baseline_sha256": "832e8d68eefe9400a246ea619a250ea91bcf16a57d5fe728a6ce45e25bbdb4a6",
+        "current_sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+        "current_line_count": 187615,
+        "classification": "CAPABILITY_MEASUREMENTS_UNCHANGED_METADATA_REFRESHED",
+        "projection": "52 cells, 13 profiles, 4 targets, package-count histogram 0x4 3x21 4x13 5x14"
+      },
+      {
+        "path": "artifacts/api_surface_map_v1.json",
+        "baseline_sha256": "a00b61fe82326d766cde69e2392bc493a67d3c62f9d5cd83e3e02f8b5bf5535a",
+        "current_sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+        "current_line_count": 5446,
+        "classification": "CAPABILITY_PROJECTION_UNCHANGED",
+        "projection": "public API token count remains zero"
+      },
+      {
+        "path": "asupersync-tokio-compat/Cargo.toml",
+        "baseline_sha256": "e1e3a701a38ef8f7b2659bfa3e966746ad4a718a9d2447d127926765b21aa0a5",
+        "current_sha256": "b5e7df7d48ceab9a5ca82a3d130d64a309511e12d043a1ce7fce3d51011507f9",
+        "current_line_count": 68,
+        "classification": "RELEASE_VERSION_ONLY",
+        "projection": "package and asupersync versions advanced to 0.4.11; futures-lite remains a dev-only requirement of 2"
+      },
+      {
+        "path": "src/web/router.rs",
+        "baseline_sha256": "d31de4ab5694c39d45374577a549ff190a4bbd8539bfc0b646d6751bd32400f2",
+        "current_sha256": "62c2e4819927fcff36b4fd9efcd285bbb7a9fd3001a8d6eaa163211794c7437c",
+        "current_line_count": 6489,
+        "classification": "INCUMBENT_CALL_PRESERVED_WITH_ADDITIONAL_TESTS",
+        "projection": "Router::handle still blocks on handle_with_cx; three additional textual tokens are test-only"
+      }
+    ],
+    "current_production_token_count": 10,
+    "production_token_accounting": "Six historical A1 tokens minus two A5 poll-adapter migrations plus four new incumbent races and two native ATP helpers. The prior current snapshot omitted the existing ATP or call; efa5798d1 added poll_once and c4760a1b5 narrowed the or race to work versus cadence. Historical production_surfaces and A1 occurrence rows remain unchanged.",
+    "native_atp_helpers": [
+      {
+        "site_id": "FUT-PROD-ATP-KEEPALIVE-OR",
+        "path": "src/net/atp/transport_quic/native_link.rs",
+        "function": "keep_peer_alive_while",
+        "api": "future::or",
+        "cfg": "not wasm32",
+        "token_occurrences": 1,
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "The left-biased race borrows the pinned work future and races only its poll against the cadence sleep. A timer win ends that borrow without dropping the owned work; keep-alive emission runs outside the race and work is driven to completion before reporting a keep-alive failure. External cancellation of this whole owner is not proven safe by this inventory."
+      },
+      {
+        "site_id": "FUT-PROD-ATP-RECEIVE-POLL-ONCE",
+        "path": "src/net/atp/transport_quic/native_link.rs",
+        "function": "pump_inbound_for",
+        "api": "future::poll_once",
+        "cfg": "not wasm32",
+        "token_occurrences": 1,
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "A zero wait polls receive_batch exactly once, retaining ready packets or propagating its error; Pending returns the already-processed count and drops the borrowed receive future. This avoids an already-expired timeout skipping the inner poll. It does not establish rollback of receive-side effects."
+      }
+    ],
+    "new_production_races": [
+      {
+        "site_id": "FUT-PROD-REMOTE-SESSION-RACE",
+        "path": "src/remote.rs",
+        "function": "remote_session_race_io",
+        "cfg": "tls",
+        "token_occurrences": 1,
+        "loser_policy": "DROP_FUTURE_ONLY",
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "Session I/O races a Cx-aware oneshot wait. Context cancellation drops the owned framed connection; no separate loser task is spawned."
+      },
+      {
+        "site_id": "FUT-PROD-REMOTE-CLIENT-RACE",
+        "path": "src/remote.rs",
+        "function": "remote_client_race_cancellation",
+        "cfg": "tls and not wasm32",
+        "token_occurrences": 1,
+        "loser_policy": "DROP_FUTURE_ONLY",
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "Connection attempts and retry delays race a Cx-aware oneshot wait. Retry remains limited to proven pre-delivery failures."
+      },
+      {
+        "site_id": "FUT-PROD-REMOTE-DRIVER-RACE",
+        "path": "src/remote.rs",
+        "function": "drive_native_remote_session",
+        "cfg": "tls and not wasm32",
+        "token_occurrences": 1,
+        "loser_policy": "DROP_FUTURE_ONLY",
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "Session events race the coalesced control receiver. A control win releases the borrowed read before cancel or renewal on the same owned framed transport; terminal publication belongs to the driver guard."
+      },
+      {
+        "site_id": "FUT-PROD-MULTIPART-READ-RACE",
+        "path": "src/web/multipart.rs",
+        "function": "read_more",
+        "cfg": "not wasm32",
+        "token_occurrences": 1,
+        "loser_policy": "DROP_FUTURE_ONLY",
+        "structured_loser_drain_proven": false,
+        "owner_behavior": "A deadline-bounded borrowed body poll races caller cancellation. Cancellation returns a typed multipart error; dropping the pending read is not a rollback of body-side effects."
+      }
+    ],
+    "no_claim": "This static reconciliation is not executable proof, broad workspace health, replacement parity, migration authorization, performance evidence, or permission to remove the incumbent dependency."
+  },
+  "dependency_resolution": {
+    "root_manifest": {
+      "path": "Cargo.toml",
+      "table": "dependencies",
+      "requirement": "2.6",
+      "optional": false,
+      "target_condition": null,
+      "feature_gate": null,
+      "default_features": [
+        "race",
+        "std"
+      ],
+      "resolved_version": "2.6.1",
+      "edge_kind": "normal",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "tokio_compat_manifest": {
+      "path": "asupersync-tokio-compat/Cargo.toml",
+      "table": "dev-dependencies",
+      "requirement": "2",
+      "optional": false,
+      "target_condition": null,
+      "feature_gate": "cfg(test)",
+      "resolved_version": "2.6.1",
+      "edge_kind": "dev",
+      "normal_build_contains_edge": false,
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    "lockfiles": [
+      {
+        "path": "Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "root workspace normal edge plus compatibility-member dev edge"
+      },
+      {
+        "path": "fuzz/Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "excluded fuzz workspace depends on the root crate by path; fuzz targets have no direct futures-lite edge"
+      },
+      {
+        "path": "asupersync-wasm/Cargo.lock",
+        "resolved_version": "2.6.1",
+        "reason": "excluded wasm workspace depends on the root crate by path with no default root features; the unconditional normal edge remains"
+      }
+    ],
+    "manifest_comment_drift": {
+      "current_text": "Lightweight async helpers used by web handler adapter shims.",
+      "classification": "INCOMPLETE",
+      "omitted_surfaces": [
+        "public ATP ecosystem Stream impls",
+        "public synchronous Router::handle executor",
+        "reload and shutdown signal listener threads",
+        "repository-wide unit, integration, benchmark, example, and compatibility-test executor use"
+      ],
+      "gap_id": "FUT-GAP-06"
+    }
+  },
+  "cargo_built_profiles": [
+    {
+      "profile_id": "FUT-PROFILE-ROOT-NORMAL",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal",
+      "features": "all root feature selections, including --no-default-features",
+      "targets": "all targets on which the root crate is admitted",
+      "semantic_surface_ids": [
+        "FUT-PROD-ATP-STREAM",
+        "FUT-PROD-MIDDLEWARE-CATCH",
+        "FUT-PROD-NEGOTIATE-CATCH",
+        "FUT-PROD-ROUTER-BLOCK",
+        "FUT-PROD-RELOAD-BLOCK",
+        "FUT-PROD-SHUTDOWN-BLOCK"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-UNIT",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to cfg(test)",
+      "features": "each unit-test feature cell",
+      "targets": "host test targets",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR",
+        "FUT-TEST-COMBINATORS",
+        "FUT-PUBLIC-NOTIFY-DOCTEST"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-INTEGRATION",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to integration targets",
+      "features": "default, test-internals, and focused feature matrices",
+      "targets": "tests/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR",
+        "FUT-TEST-COMBINATORS"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-BENCH",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to benchmark targets",
+      "features": "benchmark-adapters and benchmark-specific selections",
+      "targets": "benches/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-ROOT-EXAMPLE",
+      "cargo_package": "asupersync",
+      "edge_kind": "normal dependency visible to example targets",
+      "features": "example-specific selections",
+      "targets": "examples/*.rs",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-TOKIO-COMPAT-NORMAL",
+      "cargo_package": "asupersync-tokio-compat",
+      "edge_kind": "none",
+      "features": "default or bridge features",
+      "targets": "library targets",
+      "semantic_surface_ids": [],
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-TOKIO-COMPAT-TEST",
+      "cargo_package": "asupersync-tokio-compat",
+      "edge_kind": "direct dev dependency",
+      "features": "test targets with any bridge feature",
+      "targets": "inline unit tests",
+      "semantic_surface_ids": [
+        "FUT-TEST-EXECUTOR"
+      ],
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "profile_id": "FUT-PROFILE-FUZZ",
+      "cargo_package": "asupersync-fuzz",
+      "edge_kind": "transitive through root path dependency",
+      "features": "fuzz quarantine all-feature root selection",
+      "targets": "fuzz/fuzz_targets/*.rs",
+      "semantic_surface_ids": [],
+      "note": "Two textual mentions are comments; no fuzz target directly calls futures-lite.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-WASM",
+      "cargo_package": "asupersync-wasm",
+      "edge_kind": "transitive through root path dependency",
+      "features": "root --no-default-features",
+      "targets": "wasm32 boundary workspace",
+      "semantic_surface_ids": [],
+      "note": "The root dependency is unconditional, so disabling root features does not remove it.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "profile_id": "FUT-PROFILE-CONFORMANCE",
+      "cargo_package": "asupersync-conformance",
+      "edge_kind": "transitive through root path dependency",
+      "features": "conformance-selected root features",
+      "targets": "conformance member",
+      "semantic_surface_ids": [],
+      "note": "No conformance source file directly names futures-lite.",
+      "inventory_state": "EXPLICIT_ADJACENT",
+      "evidence_state": "SOURCE_BASELINED"
+    }
+  ],
+  "occurrence_census": {
+    "token": "futures_lite",
+    "unit": "non-overlapping textual token occurrences in tracked Rust source at the baseline revision",
+    "ordering": "bytewise path order; digest input is path, tab, decimal count, newline",
+    "baseline_file_count": 310,
+    "baseline_token_count": 1362,
+    "baseline_digest_sha256": "899a9f62fd77ce8843c00a37902efa5ccc447ead46018a8fe14cdf2d0a241d9c",
+    "scope_rows": [
+      {
+        "scope": "src",
+        "file_count": 150,
+        "token_count": 817,
+        "digest_sha256": "dd32ff79caeb3180ae805ad183df80a6003f8ae84001958e3c93c545ffea1871",
+        "production_token_count": 6,
+        "public_doctest_token_count": 2,
+        "test_token_count": 809
+      },
+      {
+        "scope": "tests",
+        "file_count": 151,
+        "token_count": 534,
+        "digest_sha256": "c8f8463ca93dcd7ca649bf754bac8b39410a9df29fa16df7b298e5d8379286b4",
+        "classification": "integration-test-only"
+      },
+      {
+        "scope": "benches",
+        "file_count": 3,
+        "token_count": 3,
+        "digest_sha256": "f9e5a615b424aa8d46976e11588ade9a29db7efe282488451d35f254adad334a",
+        "classification": "benchmark-only"
+      },
+      {
+        "scope": "examples",
+        "file_count": 1,
+        "token_count": 1,
+        "digest_sha256": "ac6854be3e45bc271b3d3434510f18c0aa4d95bd637bc112219b48db906d5ad4",
+        "classification": "example-target"
+      },
+      {
+        "scope": "asupersync-tokio-compat",
+        "file_count": 3,
+        "token_count": 5,
+        "digest_sha256": "4b683da32edc8ec80b28d24e377bb7c715efaff7ca76469848005d5e0d24d7ce",
+        "dependency_api_token_count": 3,
+        "local_helper_name_token_count": 2,
+        "classification": "dev-test plus identifier-only"
+      },
+      {
+        "scope": "fuzz",
+        "file_count": 2,
+        "token_count": 2,
+        "digest_sha256": "666119285e1ae804e6b859a2fb54aed4bd29c60fe4b92243d3b3cbab5964264d",
+        "classification": "comment-only"
+      }
+    ],
+    "post_baseline_evidence_rows": [
+      {
+        "path": "tests/futures_lite_capability_inventory_contract.rs",
+        "expected_token_count": 1,
+        "classification": "temporary dev-oracle evidence owned by FUT A1 and excluded from the baseline census"
+      }
+    ],
+    "inventory_state": "FROZEN",
+    "evidence_state": "EXECUTED_CONTRACT"
+  },
+  "production_surfaces": [
+    {
+      "surface_id": "FUT-PROD-ATP-STREAM",
+      "path": "src/net/atp/sdk/stream.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 2,
+      "api": "futures_lite::Stream",
+      "owned_parallel_surface": {
+        "api": "asupersync::stream::Stream",
+        "behavioral_impl_count": 2,
+        "shared_poll_kernel": "poll_progress",
+        "implementation_state": "COMPILE_CONTRACT_EXECUTED_BEHAVIOR_UNVERIFIED",
+        "cutover_authorized": false
+      },
+      "public_symbols": [
+        "asupersync::net::atp::sdk::AtpWriter",
+        "asupersync::net::atp::sdk::AtpReader"
+      ],
+      "item_type": "TransferProgress",
+      "feature_gate": null,
+      "target_gate": null,
+      "poll_semantics": "poll_recv returns one progress item; Empty registers the latest task waker and returns Pending without self-waking; Disconnected or creation-context Cancelled returns Ready(None)",
+      "cancellation_drop_semantics": "dropping either SDK stream best-effort sends cancellation and resolves an outstanding graded obligation as Abort",
+      "send_lifetime_semantics": "the foreign Stream trait itself adds no Send, Sync, Unpin, or static bound",
+      "public_exposure": "foreign trait implementation is downstream-observable even though futures-lite is not re-exported",
+      "inventory_state": "FROZEN",
+      "evidence_state": "PARTIAL_EXECUTED"
+    },
+    {
+      "surface_id": "FUT-PROD-MIDDLEWARE-CATCH",
+      "path": "src/web/middleware.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "FutureExt::catch_unwind",
+      "public_symbols": [
+        "CatchPanicMiddleware::call"
+      ],
+      "poll_semantics": "a separate std catch_unwind contains construction panic; the futures-lite adapter contains every poll panic",
+      "cancellation_drop_semantics": "normal future drop remains cancellation; a poll panic becomes Err and the wrapper is dropped without repoll",
+      "send_lifetime_semantics": "the boxed Handler future remains Send and borrows self for its existing lifetime",
+      "public_exposure": "behavioral error boundary with stable ASUP-E502 response",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-NEGOTIATE-CATCH",
+      "path": "src/web/negotiate.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "FutureExt::catch_unwind",
+      "public_symbols": [
+        "ErrorHandlerMiddleware::call"
+      ],
+      "poll_semantics": "the adapter catches poll-phase panic only; handler construction occurs before the adapter is created",
+      "cancellation_drop_semantics": "normal future drop remains cancellation; a poll panic becomes Err and is formatted as an internal-server response",
+      "send_lifetime_semantics": "the boxed Handler future remains Send and borrows self for its existing lifetime",
+      "public_exposure": "behavioral error-formatting boundary",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-ROUTER-BLOCK",
+      "path": "src/web/router.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "Router::handle"
+      ],
+      "thread_context": "caller thread; no ambient runtime required",
+      "wake_source": "future wakers unpark the caller-thread Parker",
+      "nesting": "recursive block_on on the same thread receives a fresh Parker and Waker",
+      "send_lifetime_semantics": "no Send or static bound; the future may borrow the router and locally-created Cx",
+      "public_exposure": "public synchronous entry point",
+      "inventory_state": "FROZEN",
+      "evidence_state": "SOURCE_BASELINED"
+    },
+    {
+      "surface_id": "FUT-PROD-RELOAD-BLOCK",
+      "path": "src/signal/shutdown.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "ReloadController::listen_for_sighup"
+      ],
+      "thread_context": "dedicated asupersync-reload-sighup std thread",
+      "wake_source": "signal stream receive future",
+      "nesting": "outside the asupersync runtime",
+      "send_lifetime_semantics": "the moved listener state must satisfy std thread ownership; block_on itself adds no bound",
+      "public_exposure": "operator-visible reload behavior",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    },
+    {
+      "surface_id": "FUT-PROD-SHUTDOWN-BLOCK",
+      "path": "src/signal/shutdown.rs",
+      "token_occurrences": 1,
+      "behavioral_impl_count": 1,
+      "api": "future::block_on",
+      "public_symbols": [
+        "ShutdownController::listen_for_signals"
+      ],
+      "thread_context": "one dedicated named std thread per watched signal kind",
+      "wake_source": "signal stream receive future",
+      "nesting": "outside the asupersync runtime",
+      "send_lifetime_semantics": "the moved listener state must satisfy std thread ownership; block_on itself adds no bound",
+      "public_exposure": "operator-visible shutdown behavior",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "public_doctest_surfaces": [
+    {
+      "surface_id": "FUT-PUBLIC-NOTIFY-DOCTEST",
+      "path": "src/sync/notify.rs",
+      "token_occurrences": 2,
+      "public_symbols": [
+        "Notify::notify_one",
+        "Notify::notified"
+      ],
+      "classification": "public documentation compiled as doctests",
+      "inventory_state": "FROZEN",
+      "evidence_state": "EXISTING_TEST"
+    }
+  ],
+  "consumed_api_semantics": [
+    {
+      "api_id": "FUT-API-BLOCK-ON",
+      "api": "future::block_on",
+      "classification": "CONSUMED",
+      "poll_order": "poll once, then park the current thread after each Pending result",
+      "wake_behavior": "a cached thread-local Parker/Waker pair unparks the thread; recursive calls allocate a fresh pair",
+      "completion": "returns the future output and drops the pinned future",
+      "cancellation": "external cancellation is only by unwinding or abandoning the calling thread; no task is spawned",
+      "panic": "panic propagates to the caller",
+      "send_lifetime": "accepts any Future by value with no Send, Unpin, or static bound",
+      "replacement_owner": "asupersync-d24mms.6.3"
+    },
+    {
+      "api_id": "FUT-API-POLL-FN",
+      "api": "future::poll_fn",
+      "classification": "CONSUMED",
+      "poll_order": "calls the FnMut closure exactly once per wrapper poll",
+      "wake_behavior": "forwards the caller Context unchanged",
+      "completion": "returns the closure's Ready value",
+      "cancellation": "drop discards the closure and its captured state",
+      "panic": "panic propagates",
+      "send_lifetime": "inherits closure captures; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-POLL-ONCE",
+      "api": "future::poll_once",
+      "classification": "CONSUMED",
+      "poll_order": "polls the inner future once",
+      "wake_behavior": "forwards the caller Context but never waits for a wake",
+      "completion": "Ready(value) becomes Some(value); Pending becomes Ready(None)",
+      "cancellation": "the inner future is dropped after the one-shot wrapper completes",
+      "panic": "panic propagates",
+      "send_lifetime": "inherits the inner future; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-YIELD-NOW",
+      "api": "future::yield_now",
+      "classification": "CONSUMED",
+      "poll_order": "first poll self-wakes and returns Pending; second and later poll returns Ready",
+      "wake_behavior": "wake_by_ref exactly on the first poll",
+      "completion": "unit",
+      "cancellation": "drop before repoll abandons the yield",
+      "panic": "no intrinsic panic path",
+      "send_lifetime": "zero-capture future",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-ZIP",
+      "api": "future::zip",
+      "classification": "CONSUMED",
+      "poll_order": "polls left then right on every wrapper poll while each remains incomplete",
+      "wake_behavior": "both children receive the same caller Context",
+      "completion": "stores each completed output, drops each completed future, then returns the ordered pair",
+      "cancellation": "dropping zip drops any pending child plus stored outputs; it does not drain",
+      "panic": "panic from either child propagates",
+      "send_lifetime": "inherits both children; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-RACE",
+      "api": "future::race",
+      "classification": "CONSUMED",
+      "poll_order": "randomizes which child is polled first on every wrapper poll",
+      "wake_behavior": "both attempted children receive the same caller Context",
+      "completion": "returns the first Ready output",
+      "cancellation": "drops the losing future immediately when the race wrapper is dropped; no loser drain or quiescence proof exists",
+      "panic": "panic from a polled child propagates",
+      "send_lifetime": "inherits both children; std and race features are required",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-OR",
+      "api": "future::or",
+      "classification": "CONSUMED",
+      "poll_order": "always polls left before right and therefore prefers left when both are Ready",
+      "wake_behavior": "both attempted children receive the same caller Context",
+      "completion": "returns the first Ready output",
+      "cancellation": "drops the losing future immediately; no loser drain occurs",
+      "panic": "panic from a polled child propagates",
+      "send_lifetime": "inherits both children; adds no Send or static bound",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-PENDING",
+      "api": "future::pending",
+      "classification": "CONSUMED",
+      "poll_order": "always returns Pending",
+      "wake_behavior": "never schedules a wake",
+      "completion": "never completes",
+      "cancellation": "drop is the only termination",
+      "panic": "no intrinsic panic path",
+      "send_lifetime": "core::future re-export",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    },
+    {
+      "api_id": "FUT-API-CATCH-UNWIND",
+      "api": "FutureExt::catch_unwind",
+      "classification": "CONSUMED",
+      "poll_order": "polls the inner future once per wrapper poll inside std::panic::catch_unwind",
+      "wake_behavior": "forwards the caller Context unchanged",
+      "completion": "normal Ready becomes Ok; a poll panic becomes Err(Box<dyn Any + Send>)",
+      "cancellation": "drop discards the inner future; after panic the web wrappers consume Err and do not repoll",
+      "panic": "requires UnwindSafe at the adapter boundary and internally asserts unwind safety around each poll",
+      "send_lifetime": "inherits the inner future and preserves its borrow; no static bound",
+      "replacement_owner": "asupersync-d24mms.6.5"
+    },
+    {
+      "api_id": "FUT-API-STREAM",
+      "api": "futures_lite::Stream",
+      "classification": "CONSUMED",
+      "poll_order": "delegated to downstream poll_next calls",
+      "wake_behavior": "implementations own wake registration; the ATP impls register the latest task waker on Empty without self-waking",
+      "completion": "Ready(None) terminates; ATP maps disconnected and cancelled progress channels to termination",
+      "cancellation": "drop semantics belong to the stream implementation; ATP drop signals cancellation and aborts its obligation",
+      "panic": "trait supplies no panic containment",
+      "send_lifetime": "re-export of futures_core::Stream with no Send, Sync, Unpin, or static supertrait",
+      "replacement_owner": "asupersync-d24mms.6.2"
+    },
+    {
+      "api_id": "FUT-API-JOIN-ALL-MENTION",
+      "api": "future::join_all",
+      "classification": "COMMENT_ONLY",
+      "poll_order": "not applicable",
+      "wake_behavior": "not applicable",
+      "completion": "not applicable",
+      "cancellation": "not applicable",
+      "panic": "not applicable",
+      "send_lifetime": "not applicable",
+      "note": "The only repository match is a stale comment in src/sync/notify_metamorphic.rs; futures-lite 2.6.1 exports no future::join_all function.",
+      "replacement_owner": "asupersync-d24mms.6.4"
+    }
+  ],
+  "migration_reservation_groups": [
+    {
+      "group_id": "FUT-A6-CORE",
+      "owner_bead": "asupersync-d24mms.6.6",
+      "selection": "baseline src paths not selected by A7, A8, or A9",
+      "file_count": 42,
+      "token_count": 258,
+      "digest_sha256": "372833b61f3c143f47579b1df31954988027cc11a07543a7ee1bdbf77b654ecc",
+      "subsystems": [
+        "actor",
+        "cancel",
+        "channel",
+        "combinator",
+        "cx",
+        "epoch",
+        "gen_server",
+        "lab",
+        "obligation",
+        "runtime",
+        "service",
+        "session",
+        "stream",
+        "sync",
+        "test_utils",
+        "tracing_compat"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A7-IO",
+      "owner_bead": "asupersync-d24mms.6.7",
+      "selection": "src/fs, src/io, non-ATP src/net, src/process.rs, src/signal, src/time, and src/tls",
+      "file_count": 31,
+      "token_count": 145,
+      "digest_sha256": "c16da35f2d3bf8c20a4ed6f028d7e8cfbb67b998dfd8ce8830fe9348085ae8e9",
+      "subsystems": [
+        "filesystem",
+        "io",
+        "network",
+        "process",
+        "signal",
+        "time",
+        "tls"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A8-SERVICES",
+      "owner_bead": "asupersync-d24mms.6.8",
+      "selection": "src/web, src/http, src/grpc, src/database, src/messaging, and src/distributed",
+      "file_count": 33,
+      "token_count": 196,
+      "digest_sha256": "8db5f6c31bb7744c77b96f850574290db52245cdb8897a22e785911c57020a66",
+      "subsystems": [
+        "web",
+        "http",
+        "grpc",
+        "database",
+        "messaging",
+        "distributed"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    },
+    {
+      "group_id": "FUT-A9-ATP-DEV",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "selection": "src/atp, src/net/atp, src/transport, root src real/conformance test modules, tests, benches, examples, compatibility-member sources, and fuzz comments",
+      "file_count": 204,
+      "token_count": 763,
+      "digest_sha256": "2d80db732b2db49c3b3cc34d2e886c3a74c39fa7b8653d21416d1c91d1dc2219",
+      "subsystems": [
+        "atp",
+        "transport",
+        "root integration and conformance test modules",
+        "integration tests",
+        "benchmarks",
+        "examples",
+        "tokio compatibility tests",
+        "fuzz comments"
+      ],
+      "reservation_rule": "reserve every exact path in the digest projection before editing"
+    }
+  ],
+  "marginal_counterfactual": {
+    "edge_id": "normal:futures-lite",
+    "ledger_profile_count": 13,
+    "ledger_target_count": 4,
+    "cell_count": 52,
+    "marginal_count_histogram": {
+      "0": 4,
+      "3": 21,
+      "4": 13,
+      "5": 14
+    },
+    "zero_marginal_cells": [
+      "workspace-dev-build-audit@aarch64-apple-darwin",
+      "workspace-dev-build-audit@wasm32-unknown-unknown",
+      "workspace-dev-build-audit@x86_64-pc-windows-msvc",
+      "workspace-dev-build-audit@x86_64-unknown-linux-gnu"
+    ],
+    "possible_unique_packages": [
+      "futures-lite@2.6.1",
+      "futures-io@0.3.33",
+      "parking@2.2.1",
+      "futures-core@0.3.33",
+      "pin-project-lite@0.2.17"
+    ],
+    "native_code": "none",
+    "build_scripts": "none",
+    "proc_macros": "none",
+    "production_exit_interpretation": "Removing the root normal edge can remove three to five package versions in consumer-style cells, depending on target and sharing.",
+    "dev_oracle_retention_interpretation": "The four workspace-dev-build-audit cells remove zero package versions because workspace dev/test edges, including the compatibility-member dev dependency, retain the incumbent. Production exit and dev-oracle retirement are therefore separate gates.",
+    "inventory_state": "FROZEN",
+    "evidence_state": "SOURCE_BASELINED",
+    "no_claim": "Package-count marginals do not prove source parity, behavior, performance, security, release readiness, or that the root edge may be removed."
+  },
+  "downstream_and_e2e": [
+    {
+      "journey_id": "FUT-JOURNEY-OWNED-STREAM",
+      "surface": "downstream-authored asupersync::stream::Stream plus StreamExt",
+      "fixture": "tests/fixtures/dependency-capability-baseline-consumer",
+      "state": "EXECUTED_TEST",
+      "owned_atp_progress_compile_contract": {
+        "types": [
+          "AtpWriter",
+          "AtpReader"
+        ],
+        "trait": "asupersync::stream::Stream<Item = TransferProgress>",
+        "extension_method": "StreamExt::next",
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      "pinned_local_downstream_contract": {
+        "type": "DownstreamPinnedLocalStream<'_>",
+        "properties": [
+          "borrowed_non_static",
+          "rc_local_not_send_or_sync",
+          "phantom_pinned_not_unpin"
+        ],
+        "forwarding_adapter": "Pin<Box<S>> through impl Stream for Pin<P>",
+        "extension_method": "StreamExt::next on Pin<Box<S>>",
+        "observations": [
+          "forwarded size_hint",
+          "dropped unpolled Next preserves the item",
+          "one item then EOF"
+        ],
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      "fallible_terminal_compile_contract": {
+        "item": "Result<u32, &'static str>",
+        "adapter": "StreamExt::try_collect::<u32, &'static str, Vec<u32>>",
+        "implementation_state": "EXECUTED_DOWNSTREAM_FIXTURE"
+      },
+      "gap": "The fixture has no futures-lite edge and now executes owned ATP, pinned local, and fallible terminal Stream contracts, but it does not construct ATP progress streams or cover the foreign Stream journey."
+    },
+    {
+      "journey_id": "FUT-JOURNEY-ECOSYSTEM-STREAM",
+      "surface": "downstream generic function bounded on futures_lite::Stream consuming AtpWriter and AtpReader",
+      "scenario_id": "public_stream_consumer",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "compile-pass for both ATP SDK types",
+        "extension-method usability",
+        "Pending, wake, item, EOF, channel cancellation, and drop behavior",
+        "no task or obligation leak and region-close quiescence"
+      ]
+    },
+    {
+      "journey_id": "FUT-JOURNEY-STREAM-CANCEL",
+      "surface": "ATP progress stream backpressure and cancellation",
+      "scenario_id": "stream_cancel_backpressure",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "bounded progress queue",
+        "cancel signal on drop",
+        "obligation resolution",
+        "loser cleanup",
+        "region-close quiescence"
+      ]
+    },
+    {
+      "journey_id": "FUT-JOURNEY-TEST-BLOCK",
+      "surface": "blocking executor available to every unit, integration, benchmark, example, and compatibility test target without ambient runtime setup",
+      "scenario_id": "test_block_on",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "PLANNED",
+      "required_outcomes": [
+        "borrowed non-Send future",
+        "recursive block_on",
+        "wake-after-Pending",
+        "panic propagation",
+        "runtime and blocking-pool call contexts",
+        "no spin, deadlock, orphan task, or obligation leak"
+      ]
+    }
+  ],
+  "gaps": [
+    {
+      "gap_id": "FUT-GAP-01",
+      "summary": "Capability registry source owners omit every production futures-lite site.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-02",
+      "summary": "The public ecosystem Stream impls have no behavioral test.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-03",
+      "summary": "The downstream fixture now source-authors owned ATP Stream and next-method compile assertions, but has no executed proof or foreign Stream progress workflow.",
+      "owner_bead": "asupersync-d24mms.6.10",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-04",
+      "summary": "Capability registry features incorrectly imply the unconditional edge is feature-gated.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-05",
+      "summary": "Governance artifacts disagree about whether the baseline is planned or executable.",
+      "owner_bead": "asupersync-dep-p1-foundations-upksjk.5.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-06",
+      "summary": "The root manifest comment describes only the two web sites and omits the other production and test surfaces.",
+      "owner_bead": "asupersync-d24mms.6.1",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-GAP-07",
+      "summary": "ATP SDK types retain the foreign Stream implementations and now have source-authored owned Stream implementations, but compile, downstream ergonomics and behavioral parity evidence remain unexecuted.",
+      "owner_bead": "asupersync-d24mms.6.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-08",
+      "summary": "The ADR census drifted from roughly 796 references in 148 src files to 817 references in 150 src files at the A1 baseline.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-09",
+      "summary": "The ADR calls future::join_all consumed, but it is comment-only and absent from futures-lite 2.6.1; future::or is consumed but omitted.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-10",
+      "summary": "The ATP Stream impls now register the latest sender wake without self-waking and source-author focused wake/cancellation tests, but those inline behavior tests lack a terminal execution receipt.",
+      "owner_bead": "asupersync-d24mms.6.2",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-11",
+      "summary": "The ADR treats the root edge as the whole dependency story and omits the compatibility-member direct dev edge.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A1-GAP-12",
+      "summary": "fuzz targets contain two stale futures-lite comments but no direct futures-lite call or manifest edge.",
+      "owner_bead": "asupersync-d24mms.6.9",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-13",
+      "summary": "The safe blocking kernel's fourteen behavioral cases passed, including the deterministic bounded notification state model, real cross-thread wake and cancellation cases, and LabRuntime quiescence. The bead required loom or a state model where applicable, not both; no exhaustive CPU-interleaving claim is made.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "ACCEPTANCE_STATE_MODEL_AND_LAB_EXECUTION_PASSED"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-14",
+      "summary": "The policy conservatively refuses both Asupersync runtime drivers and scheduler workers, while admitting foreign executors only for self-contained futures that do not depend on the paused outer executor; the focused policy cases passed.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "POLICY_FOCUSED_EXECUTION_PASSED"
+    },
+    {
+      "gap_id": "FUT-A3-GAP-15",
+      "summary": "RCH build 29967986903220250 measured zero process CPU ticks for both implementations during separate 750 ms idle waits. Across seven alternating 50,000-call ready batches, owned median latency was 6,755,423 ns versus 1,941,878 ns incumbent; the result is recorded without a performance-parity claim.",
+      "owner_bead": "asupersync-d24mms.6.3",
+      "state": "MEASURED_NO_IDLE_SPIN_LATENCY_RECORDED"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-16",
+      "summary": "The nine source-authored helper cases, including the bounded readiness matrix and LabRuntime/DPOR scenario, have no terminal focused execution receipt or independent differential evidence.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-17",
+      "summary": "A raw generic Future exposes no cancellation acknowledgement, obligation ledger, or drain protocol, so a drop-only owned race cannot satisfy the project's structured loser-drain and quiescence requirement.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A4-GAP-18",
+      "summary": "No deterministic fairness and trace policy replaces the incumbent race's ambient per-poll random ordering, and no expiry-independent race corpus exists.",
+      "owner_bead": "asupersync-d24mms.6.4",
+      "state": "BLOCKED_GAP"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-19",
+      "summary": "Focused remote unit and LabRuntime execution passed for the owned poll-panic wrapper, including wake forwarding, terminal no-repoll, cleanup, and obligation quiescence.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "FOCUSED_UNIT_AND_LAB_EXECUTION_PASSED"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-20",
+      "summary": "Terminal cleanup is nested inside its own unwind boundary: a poll panic remains primary, a ready-path destructor panic becomes Err, and the inner future is removed exactly once.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "NESTED_PANIC_PRECEDENCE_AND_CLEANUP_PASSED"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-21",
+      "summary": "Both web boundaries retain panic text only in correlated ASUP-E502 server diagnostics and return sanitized 500 responses; their Response-only API boundary intentionally produces no Outcome value.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "STABLE_DIAGNOSTIC_AND_RESPONSE_BOUNDARY_DECIDED"
+    },
+    {
+      "gap_id": "FUT-A5-GAP-22",
+      "summary": "A direct ErrorHandlerMiddleware handler-boundary test under explicit panic=unwind admission passed for poll-panic containment, exact-once future drop, a redacted ASUP-E502 response, and correlated structured diagnostics; it does not exercise a listener, router, or transport.",
+      "owner_bead": "asupersync-d24mms.6.5",
+      "state": "HANDLER_BOUNDARY_TEST_PASSED"
+    }
+  ],
+  "source_pins": [
+    {
+      "path": "Cargo.toml",
+      "sha256": "5ecdbb5bc22b670bc0fde2872976bfe8398628f1b372d99385b11efaf307306e",
+      "line_count": 1121
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "8bd03de08fde5236ca60127825078534e3fb141193274d8884d2c97fd8bf35cb",
+      "line_count": 4664
+    },
+    {
+      "path": "asupersync-tokio-compat/Cargo.toml",
+      "sha256": "b5e7df7d48ceab9a5ca82a3d130d64a309511e12d043a1ce7fce3d51011507f9",
+      "line_count": 68
+    },
+    {
+      "path": "src/net/atp/sdk/stream.rs",
+      "sha256": "62a3d350095d89440ee2bbfc14f0a1aeb1aae9acae25db80157e6d7aaab38091",
+      "line_count": 853
+    },
+    {
+      "path": "src/web/middleware.rs",
+      "sha256": "1a34c4d8dc70dc65b6a2af11f447e86b388594752e43821e971ad22086f25ea2",
+      "line_count": 6027
+    },
+    {
+      "path": "src/web/negotiate.rs",
+      "sha256": "a7182fe3982141f6e6ff39b38aa641b6d8b8f69ba265f2bf2996aee5befa1680",
+      "line_count": 916
+    },
+    {
+      "path": "src/web/router.rs",
+      "sha256": "62c2e4819927fcff36b4fd9efcd285bbb7a9fd3001a8d6eaa163211794c7437c",
+      "line_count": 6489
+    },
+    {
+      "path": "src/signal/shutdown.rs",
+      "sha256": "6cefc1120b4113225008aa9e669b0877b3f691e73d7f177cc1067995aa729d14",
+      "line_count": 1150
+    },
+    {
+      "path": "src/sync/notify.rs",
+      "sha256": "36ffe518335a43085d346f3cbf820903b4985f1240db7ffa2d27b8562c11d83e",
+      "line_count": 931
+    },
+    {
+      "path": "src/sync/notify_tests.rs",
+      "sha256": "4262f3156e9caaaa5d17b0e9a3284d2c70ea1f06993e0eb5441b53a374b85b0f",
+      "line_count": 6136
+    },
+    {
+      "path": "src/remote.rs",
+      "sha256": "7093b77700a548a87a58775926f5a25a7030a5d5d41f390fe390b4d2dc68f1bd",
+      "line_count": 13516
+    },
+    {
+      "path": "src/web/multipart.rs",
+      "sha256": "5d64575cd8bdac7756487eadc67cc35c7868e724bbf1a2809bbe8db4d8e1c155",
+      "line_count": 4221
+    },
+    {
+      "path": "src/net/atp/transport_quic/native_link.rs",
+      "sha256": "f10b9fe6645f5aa87d35587d688311c55de807d9507f063ae152d60e23d92a95",
+      "line_count": 11568
+    },
+    {
+      "path": "docs/adr/dep_plan_adr_008_futures_streams.md",
+      "sha256": "2bbf81b3a69887eefc84ba456090757cd996f34b62e9e557560352df0b111422",
+      "line_count": 160
+    },
+    {
+      "path": "artifacts/dependency_capability_registry_v1.json",
+      "sha256": "660f439f8662382b7fd6cfbcec327604eca3b331d14d77b70ea0d3727db1a9aa",
+      "line_count": 7067
+    },
+    {
+      "path": "artifacts/dependency_marginal_ledger_v1.json",
+      "sha256": "d7102928fea1000bd05580f697b84dc9a9e29306494b245da6498c9a2b453ff3",
+      "line_count": 187615
+    },
+    {
+      "path": "artifacts/api_surface_map_v1.json",
+      "sha256": "3b63065b42c489cb38b872b35c6902a109848fd9d95120e21205a9fb88d708a4",
+      "line_count": 5446
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.toml",
+      "sha256": "51368bfe60c10a87532cf77155bb18103bd51db5dd26d7cb37be775ead44507a",
+      "line_count": 29
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/Cargo.lock",
+      "sha256": "494718f99308186e8f6e9bea112332a2bab30ee7193b3f46d31b53a2cfa5c4ab",
+      "line_count": 2021
+    },
+    {
+      "path": "tests/fixtures/dependency-capability-baseline-consumer/src/lib.rs",
+      "sha256": "30ff1e567a41f74b869f4b47ead951618331130f13ae7edd570a8a7013d57744",
+      "line_count": 1015
+    }
+  ],
+  "rollback_triggers": [
+    "AtpWriter or AtpReader no longer satisfies the ecosystem Stream trait before downstream evidence approves the break",
+    "Router::handle requires an ambient runtime or changes from a synchronous entry point",
+    "signal listeners cease using runtime-independent dedicated threads",
+    "construction-phase or poll-phase web panic escapes",
+    "a helper changes poll order, wake behavior, panic propagation, Send or lifetime acceptance, or drop semantics without explicit parity evidence",
+    "a test, benchmark, example, fuzz, wasm, conformance, or compatibility Cargo profile silently loses its executor",
+    "a race migration claims loser drain while merely dropping the loser",
+    "production graph exit is conflated with dev-oracle retirement"
+  ],
+  "no_claim_boundaries": [
+    "This inventory does not authorize changing or removing futures-lite.",
+    "Source pins and executable probes do not prove broad workspace health, release readiness, performance parity, or live RCH fleet availability.",
+    "The occurrence census classifies textual references and Cargo-built profiles; it does not claim every reference is behaviorally covered.",
+    "The incumbent future::race and future::or drop losers; this inventory does not treat drop as project-level loser drain or quiescence.",
+    "The downstream fixture's source-authored owned ATP compile assertions are unexecuted and do not prove the public ATP ecosystem Stream journey.",
+    "The owned Stream semantics documentation freezes a source contract only; it does not prove that every implementation obeys its wake, pinning, size-hint, cancellation, or drop obligations.",
+    "The pinned-local downstream case and direct-next compile-fail rustdoc are source-authored but unexecuted and do not prove compiler-diagnostic stability or runtime behavior.",
+    "The A2 acceptance matrix is a fail-closed status inventory, not a terminal receipt; closure remains forbidden while any required receipt is missing.",
+    "The A3 focused unit receipt proves the named util::future cases only; it does not prove exhaustive interleaving completeness, cancellation quiescence beyond the named cases, idle CPU, latency parity, broad workspace health, or cutover readiness.",
+    "The A4 helper receipt is partial and static-only: it does not implement race, treat comment-only join_all as live, convert generic Future drop into structured loser drain, prove deterministic fairness, or promote authored source cases to executed evidence.",
+    "The A5 panic-boundary receipt proves only the named owned-wrapper and direct handler-boundary lanes under panic=unwind; it does not prove listener/router/transport end-to-end behavior, abort-strategy containment, broad web or workspace health, performance, or dependency cutover readiness.",
+    "Marginal package counts do not prove behavioral replacement parity.",
+    "The source-authored owned ATP Stream implementations have not been compiled or behaviorally exercised and do not authorize cutover.",
+    "No local Cargo fallback is approved when a remote-required proof lane is blocked."
+  ]
+}

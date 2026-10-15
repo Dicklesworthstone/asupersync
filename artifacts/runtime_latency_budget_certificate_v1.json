@@ -1,0 +1,131 @@
+{
+  "contract_version": "runtime-latency-budget-certificate-v1",
+  "bead_id": "asupersync-d87ytw.2",
+  "tail_taxonomy_contract_version": "runtime-tail-latency-taxonomy-v1",
+  "compact_event_schema_version": "runtime-tail-causal-attribution-event-v1",
+  "source_symbol": "asupersync::observability::diagnostics::verify_tail_latency_budget_certificate",
+  "source_file": "src/observability/diagnostics.rs",
+  "doc_path": "docs/runtime_latency_budget_certificate_contract.md",
+  "test_path": "tests/runtime_latency_budget_certificate_contract.rs",
+  "runner_script": "scripts/run_latency_budget_certificate_smoke.sh",
+  "smoke_report_schema_version": "latency-budget-certificate-smoke-report-v1",
+  "runner_report_schema_version": "latency-budget-certificate-run-report-v1",
+  "verdicts": [
+    {
+      "verdict": "pass",
+      "meaning": "Evidence is valid, calibrated, directly attributed enough for certification, and p999 plus uncertainty stays within budget."
+    },
+    {
+      "verdict": "no_win",
+      "meaning": "Evidence is valid, but p999 budget, unknown-residual, or asymmetric regression gates prefer the conservative fallback."
+    },
+    {
+      "verdict": "fail_closed",
+      "meaning": "Evidence is incomplete, stale, contradictory, hidden, or proxy-only, so no runtime policy should rely on it."
+    }
+  ],
+  "required_inputs": [
+    "certificate_id",
+    "scenario_id",
+    "candidate_id",
+    "fallback_profile",
+    "replay_command",
+    "sample_count",
+    "evidence_epoch",
+    "p50_latency_ns",
+    "p95_latency_ns",
+    "p99_latency_ns",
+    "p999_latency_ns",
+    "uncertainty_lower_bound_ns",
+    "uncertainty_upper_bound_ns",
+    "baseline_p999_latency_ns",
+    "candidate_p999_latency_ns",
+    "budget_p999_latency_ns",
+    "min_sample_count",
+    "max_unknown_residual_ns",
+    "max_unknown_residual_basis_points",
+    "calibration_valid_until_epoch",
+    "allowed_p999_regression_ns",
+    "compact_tail_events"
+  ],
+  "required_report_fields": [
+    "certificate_id",
+    "certificate_hash",
+    "scenario_id",
+    "candidate_id",
+    "fallback_profile",
+    "taxonomy_version",
+    "verdict",
+    "p50_latency_ns",
+    "p95_latency_ns",
+    "p99_latency_ns",
+    "p999_latency_ns",
+    "budget_p999_latency_ns",
+    "term_breakdown",
+    "uncertainty_interval",
+    "sample_count",
+    "unknown_residual_ns",
+    "unknown_residual_basis_points",
+    "fallback_reason",
+    "reason_codes",
+    "replay_command"
+  ],
+  "term_breakdown_terms": [
+    "queueing",
+    "service",
+    "io_or_network",
+    "retries",
+    "synchronization",
+    "allocator_or_cache",
+    "unknown"
+  ],
+  "fail_closed_rules": [
+    "missing_tail_events",
+    "missing_required_field:<field>",
+    "missing_term:<term>",
+    "hidden_unknown_bucket",
+    "proxy_only_green_row",
+    "missing_quantiles_mean_only_evidence",
+    "missing_uncertainty_bounds",
+    "invalid_uncertainty_bounds",
+    "insufficient_sample_count",
+    "stale_calibration",
+    "wrong_tail_event_schema",
+    "wrong_tail_taxonomy_version",
+    "empty_certificate_id",
+    "empty_scenario_id",
+    "empty_candidate_id",
+    "empty_fallback_profile",
+    "missing_replay_command"
+  ],
+  "no_win_rules": [
+    "p999_budget_exceeded",
+    "unknown_residual_above_limit",
+    "unknown_fraction_above_limit",
+    "asymmetric_regression_gate"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "LATENCY-BUDGET-PASS",
+      "certificate_id": "latency-budget-cert-pass",
+      "expected_verdict": "pass",
+      "description": "Calibrated direct-duration tail evidence stays inside p999 budget with bounded unknown residual."
+    },
+    {
+      "scenario_id": "LATENCY-BUDGET-NO-WIN",
+      "certificate_id": "latency-budget-cert-no-win",
+      "expected_verdict": "no_win",
+      "description": "Evidence is valid, but p999 plus uncertainty and asymmetric regression checks keep the conservative fallback pinned."
+    },
+    {
+      "scenario_id": "LATENCY-BUDGET-FAIL-CLOSED",
+      "certificate_id": "latency-budget-cert-fail-closed",
+      "expected_verdict": "fail_closed",
+      "description": "Mean-only and stale evidence is refused before it can masquerade as a green latency certificate."
+    }
+  ],
+  "reproduction": {
+    "focused_test": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_latency_budget_certificate cargo test -p asupersync --test runtime_latency_budget_certificate_contract --features test-internals -- --nocapture",
+    "smoke_runner": "bash scripts/run_latency_budget_certificate_smoke.sh --execute --output-root target/latency-budget-certificate-smoke"
+  }
+}

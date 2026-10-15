@@ -1,0 +1,1991 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+//! PostgreSQL Logical Replication (pgoutput) Conformance Tests
+//!
+//! This module provides comprehensive conformance testing for PostgreSQL logical
+//! replication protocol per the pgoutput plugin specification.
+//!
+//! Scope: asupersync's PostgreSQL client implements no logical replication
+//! (`src/database/postgres.rs` sends no `START_REPLICATION` and has no pgoutput
+//! decoder). The tests below check this module's own reference decoder against
+//! the specification. They are not evidence about asupersync code. The tests
+//! validate:
+//!
+//! - BEGIN/COMMIT transaction boundary message parsing
+//! - INSERT/UPDATE/DELETE change data capture with tuple encoding
+//! - RELATION messages with column metadata and schema information
+//! - TYPE messages for custom type definitions
+//! - Logical snapshot consistency and transaction ordering
+//! - Binary tuple data format parsing
+//!
+//! # PostgreSQL Logical Replication Protocol
+//!
+//! **Message Flow:**
+//! 1. RELATION message defines table schema
+//! 2. TYPE messages define custom types (if used)
+//! 3. BEGIN message starts logical transaction
+//! 4. INSERT/UPDATE/DELETE messages contain change data
+//! 5. COMMIT message ends transaction with LSN
+//!
+//! **pgoutput Message Types:**
+//! - 'R' (RELATION): Table schema definition
+//! - 'Y' (TYPE): Custom type definition
+//! - 'B' (BEGIN): Transaction start with XID and LSN
+//! - 'C' (COMMIT): Transaction commit with LSN and timestamp
+//! - 'I' (INSERT): New row with tuple data
+//! - 'U' (UPDATE): Changed row with old/new tuple data
+//! - 'D' (DELETE): Removed row with tuple data
+//!
+//! **Tuple Format:**
+//! ```
+//! Tuple = number_of_columns || { column_data }*
+//! column_data = 'n' (null) | 't' text_length text_data | 'b' binary_length binary_data
+//! ```
+
+use serde::{Deserialize, Serialize};
+
+/// Test result for a single conformance requirement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct PgLogicalReplicationResult {
+    pub test_id: String,
+    pub description: String,
+    pub category: TestCategory,
+    pub requirement_level: RequirementLevel,
+    pub verdict: TestVerdict,
+    pub notes: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// Conformance test categories for PostgreSQL logical replication.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum TestCategory {
+    TransactionBoundaries,
+    TupleFormat,
+    RelationMessages,
+    TypeMessages,
+    ChangeDataCapture,
+    LogicalSnapshots,
+    ErrorHandling,
+}
+
+/// Protocol requirement level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum RequirementLevel {
+    Must,   // Protocol requirement
+    Should, // Recommended behavior
+    May,    // Optional feature
+}
+
+/// Test execution result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub enum TestVerdict {
+    Pass,
+    Fail,
+    Skipped,
+    ExpectedFailure,
+}
+
+/// PostgreSQL logical replication message types.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum PgLogicalMessageType {
+    Begin = b'B',
+    Commit = b'C',
+    Relation = b'R',
+    Type = b'Y',
+    Insert = b'I',
+    Update = b'U',
+    Delete = b'D',
+    Truncate = b'T',
+    Origin = b'O',
+}
+
+/// PostgreSQL relation replica identity settings.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum ReplicaIdentity {
+    Default = b'd',
+    Nothing = b'n',
+    Full = b'f',
+    Index = b'i',
+}
+
+/// Column data type flags in tuple format.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TupleDataType {
+    Null = b'n',
+    Text = b't',
+    Binary = b'b',
+}
+
+/// PostgreSQL logical replication conformance test harness.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct PgLogicalReplicationHarness {
+    /// Test results accumulator.
+    results: Vec<PgLogicalReplicationResult>,
+    /// Whether to run performance-sensitive tests.
+    run_performance_tests: bool,
+    /// Whether to run tests expected to fail.
+    run_expected_failures: bool,
+}
+
+impl Default for PgLogicalReplicationHarness {
+    #[allow(dead_code)]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[allow(dead_code)]
+
+impl PgLogicalReplicationHarness {
+    /// Create a new test harness with default settings.
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self {
+            results: Vec::new(),
+            run_performance_tests: true,
+            run_expected_failures: false,
+        }
+    }
+
+    /// Run all pgoutput logical replication conformance tests.
+    #[allow(dead_code)]
+    pub fn run_all_tests(&mut self) -> Vec<PgLogicalReplicationResult> {
+        self.results.clear();
+
+        // Transaction boundary message tests
+        self.test_begin_message_format();
+        self.test_commit_message_format();
+        self.test_transaction_xid_handling();
+        self.test_lsn_ordering();
+
+        // Tuple format tests
+        self.test_tuple_null_handling();
+        self.test_tuple_text_encoding();
+        self.test_tuple_binary_encoding();
+        self.test_tuple_column_count();
+        self.test_tuple_mixed_types();
+
+        // Relation message tests
+        self.test_relation_message_format();
+        self.test_relation_column_metadata();
+        self.test_relation_replica_identity();
+        self.test_relation_namespace_handling();
+
+        // Type message tests
+        self.test_type_message_format();
+        self.test_type_namespace_handling();
+
+        // Change data capture tests
+        self.test_insert_message_format();
+        self.test_update_message_old_new_tuples();
+        self.test_delete_message_format();
+        self.test_truncate_message_format();
+
+        // Logical snapshot tests
+        self.test_snapshot_consistency();
+        self.test_transaction_ordering();
+        self.test_concurrent_transaction_isolation();
+
+        // Error handling tests
+        self.test_malformed_message_rejection();
+        self.test_unknown_message_type_handling();
+        self.test_truncated_message_handling();
+
+        if self.run_performance_tests {
+            self.test_large_tuple_performance();
+            self.test_high_volume_transaction_parsing();
+        }
+
+        self.results.clone()
+    }
+
+    /// Test BEGIN message format per pgoutput specification.
+    #[allow(dead_code)]
+    fn test_begin_message_format(&mut self) {
+        let start = std::time::Instant::now();
+
+        // BEGIN message format: 'B' + LSN (8 bytes) + Timestamp (8 bytes) + XID (4 bytes)
+        let begin_message =
+            self.create_begin_message(0x1000_0000_0000_0000, 1640995200000000, 12345);
+
+        let result = match self.parse_begin_message(&begin_message) {
+            Ok((lsn, timestamp, xid)) => {
+                if lsn == 0x1000_0000_0000_0000 && timestamp == 1640995200000000 && xid == 12345 {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_001".to_string(),
+            description: "BEGIN message format parsing".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 20-byte BEGIN message: LSN + timestamp + XID".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test COMMIT message format per pgoutput specification.
+    #[allow(dead_code)]
+    fn test_commit_message_format(&mut self) {
+        let start = std::time::Instant::now();
+
+        // COMMIT message format: 'C' + Flags (1 byte) + LSN (8 bytes) + End LSN (8 bytes) + Timestamp (8 bytes)
+        let commit_message = self.create_commit_message(
+            0x01,
+            0x1000_0000_0000_0100,
+            0x1000_0000_0000_0200,
+            1640995260000000,
+        );
+
+        let result = match self.parse_commit_message(&commit_message) {
+            Ok((flags, lsn, end_lsn, timestamp)) => {
+                if flags == 0x01
+                    && lsn == 0x1000_0000_0000_0100
+                    && end_lsn == 0x1000_0000_0000_0200
+                    && timestamp == 1640995260000000
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_002".to_string(),
+            description: "COMMIT message format parsing".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests 25-byte COMMIT message: flags + LSN + end_LSN + timestamp".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test RELATION message format with column metadata.
+    #[allow(dead_code)]
+    fn test_relation_message_format(&mut self) {
+        let start = std::time::Instant::now();
+
+        let relation_message = self.create_relation_message(
+            16384,                    // relation OID
+            "public",                 // namespace
+            "users",                  // relation name
+            ReplicaIdentity::Default, // replica identity
+            &[
+                ("id", 23, 0),    // INT4 column
+                ("name", 25, 0),  // TEXT column
+                ("email", 25, 0), // TEXT column
+            ],
+        );
+
+        let result = match self.parse_relation_message(&relation_message) {
+            Ok((oid, namespace, name, replica_identity, columns)) => {
+                if oid == 16384
+                    && namespace == "public"
+                    && name == "users"
+                    && replica_identity == ReplicaIdentity::Default
+                    && columns.len() == 3
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_003".to_string(),
+            description: "RELATION message format with column metadata".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests RELATION message parsing with 3 columns and metadata".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test INSERT message with tuple data.
+    #[allow(dead_code)]
+    fn test_insert_message_format(&mut self) {
+        let start = std::time::Instant::now();
+
+        let insert_message = self.create_insert_message(
+            16384, // relation OID
+            &[
+                TupleData::Text("123".to_string()),
+                TupleData::Text("john_doe".to_string()),
+                TupleData::Text("john@example.com".to_string()),
+            ],
+        );
+
+        let result = match self.parse_insert_message(&insert_message) {
+            Ok((relation_oid, tuple)) => {
+                if relation_oid == 16384 && tuple.len() == 3 {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_004".to_string(),
+            description: "INSERT message format with tuple data".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests INSERT message parsing with 3-column tuple".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test UPDATE message with old and new tuples.
+    #[allow(dead_code)]
+    fn test_update_message_old_new_tuples(&mut self) {
+        let start = std::time::Instant::now();
+
+        let update_message = self.create_update_message(
+            16384, // relation OID
+            Some(&[
+                // old tuple
+                TupleData::Text("123".to_string()),
+                TupleData::Text("john_doe".to_string()),
+                TupleData::Text("john@example.com".to_string()),
+            ]),
+            &[
+                // new tuple
+                TupleData::Text("123".to_string()),
+                TupleData::Text("john_doe".to_string()),
+                TupleData::Text("john.doe@example.com".to_string()),
+            ],
+        );
+
+        let result = match self.parse_update_message(&update_message) {
+            Ok((relation_oid, old_tuple, new_tuple)) => {
+                if relation_oid == 16384 && old_tuple.is_some() && new_tuple.len() == 3 {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_005".to_string(),
+            description: "UPDATE message with old and new tuples".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests UPDATE message parsing with old/new tuple data".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test tuple NULL value handling.
+    #[allow(dead_code)]
+    fn test_tuple_null_handling(&mut self) {
+        let start = std::time::Instant::now();
+
+        let tuple_with_nulls = self.create_tuple_data(&[
+            TupleData::Text("123".to_string()),
+            TupleData::Null,
+            TupleData::Text("active".to_string()),
+        ]);
+
+        let result = match self.parse_tuple_data(&tuple_with_nulls) {
+            Ok(tuple) => {
+                if tuple.len() == 3 && matches!(tuple[1], TupleData::Null) {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_006".to_string(),
+            description: "Tuple NULL value handling".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 'n' flag for NULL values in tuple data".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test logical snapshot consistency.
+    #[allow(dead_code)]
+    fn test_snapshot_consistency(&mut self) {
+        let start = std::time::Instant::now();
+
+        // Simulate a snapshot with multiple transactions
+        let transactions = vec![
+            self.create_transaction_sequence(
+                1001,
+                &[
+                    ("INSERT", 16384, vec![TupleData::Text("1".to_string())]),
+                    ("INSERT", 16384, vec![TupleData::Text("2".to_string())]),
+                ],
+            ),
+            self.create_transaction_sequence(
+                1002,
+                &[("UPDATE", 16384, vec![TupleData::Text("1".to_string())])],
+            ),
+        ];
+
+        let result = if self.validate_transaction_consistency(&transactions) {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_007".to_string(),
+            description: "Logical snapshot consistency validation".to_string(),
+            category: TestCategory::LogicalSnapshots,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests transaction ordering and snapshot isolation".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    /// Test malformed message rejection.
+    #[allow(dead_code)]
+    fn test_malformed_message_rejection(&mut self) {
+        let start = std::time::Instant::now();
+
+        let malformed_messages = vec![
+            vec![b'B', 0x00, 0x01],             // Truncated BEGIN message
+            vec![b'I', 0xFF, 0xFF, 0xFF, 0xFF], // Invalid relation OID
+            vec![b'R'],                         // Empty RELATION message
+        ];
+
+        let mut all_rejected = true;
+        for message in &malformed_messages {
+            if self.parse_logical_message(message).is_ok() {
+                all_rejected = false;
+                break;
+            }
+        }
+
+        let result = if all_rejected {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_008".to_string(),
+            description: "Malformed message rejection".to_string(),
+            category: TestCategory::ErrorHandling,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests parser rejection of truncated and invalid messages".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    // Additional test methods for remaining test cases...
+    #[allow(dead_code)]
+    fn test_commit_message_timestamp_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let first_timestamp = 1_640_995_260_000_000;
+        let second_timestamp = first_timestamp + 30_000_000;
+        let first_commit = self.create_commit_message(
+            0x00,
+            0x1000_0000_0000_0100,
+            0x1000_0000_0000_0200,
+            first_timestamp,
+        );
+        let second_commit = self.create_commit_message(
+            0x01,
+            0x1000_0000_0000_0300,
+            0x1000_0000_0000_0400,
+            second_timestamp,
+        );
+
+        let result = match (
+            self.parse_commit_message(&first_commit),
+            self.parse_commit_message(&second_commit),
+        ) {
+            (Ok((_, _, _, first)), Ok((_, _, _, second)))
+                if first == first_timestamp && second == second_timestamp && second > first =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_013".to_string(),
+            description: "COMMIT timestamp preservation".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests 64-bit COMMIT timestamps are parsed exactly and preserve ordering"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_transaction_xid_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let min_xid = self.create_begin_message(0x1000_0000_0000_0000, 1, 1);
+        let max_xid = self.create_begin_message(0x1000_0000_0000_0100, 2, u32::MAX);
+
+        let result = match (
+            self.parse_begin_message(&min_xid),
+            self.parse_begin_message(&max_xid),
+        ) {
+            (Ok((_, _, low)), Ok((_, _, high))) if low == 1 && high == u32::MAX => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_014".to_string(),
+            description: "BEGIN transaction XID preservation".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests BEGIN preserves 32-bit transaction identifiers".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_lsn_ordering(&mut self) {
+        let start = std::time::Instant::now();
+        let begin = self.create_begin_message(0x1000_0000_0000_0000, 1, 42);
+        let commit =
+            self.create_commit_message(0x00, 0x1000_0000_0000_0100, 0x1000_0000_0000_0200, 2);
+        let reversed_commit =
+            self.create_commit_message(0x00, 0x0FFF_FFFF_FFFF_FF00, 0x0FFF_FFFF_FFFF_FF10, 3);
+
+        let result = match (
+            self.parse_begin_message(&begin),
+            self.parse_commit_message(&commit),
+            self.parse_commit_message(&reversed_commit),
+        ) {
+            (Ok((begin_lsn, _, _)), Ok((_, commit_lsn, end_lsn, _)), Ok((_, bad_lsn, _, _)))
+                if begin_lsn <= commit_lsn && commit_lsn <= end_lsn && bad_lsn < begin_lsn =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_015".to_string(),
+            description: "Logical sequence number ordering".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests BEGIN/COMMIT LSNs preserve monotonic transaction ordering".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_tuple_text_encoding(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple = self.create_tuple_data(&[
+            TupleData::Text("logical".to_string()),
+            TupleData::Text("replication".to_string()),
+        ]);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) => {
+                if parsed
+                    == vec![
+                        TupleData::Text("logical".to_string()),
+                        TupleData::Text("replication".to_string()),
+                    ]
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_009".to_string(),
+            description: "Tuple text column encoding".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 't' text fields with length-prefixed UTF-8 payloads".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_tuple_binary_encoding(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple = self.create_tuple_data(&[
+            TupleData::Binary(vec![0x00, 0x01, 0xFF]),
+            TupleData::Binary(vec![b'p', b'g']),
+        ]);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) => {
+                if parsed
+                    == vec![
+                        TupleData::Binary(vec![0x00, 0x01, 0xFF]),
+                        TupleData::Binary(vec![b'p', b'g']),
+                    ]
+                {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                }
+            }
+            Err(_) => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_010".to_string(),
+            description: "Tuple binary column encoding".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests 'b' binary fields with length-prefixed raw bytes".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_tuple_column_count(&mut self) {
+        let start = std::time::Instant::now();
+        let empty_tuple = self.create_tuple_data(&[]);
+        let mixed_tuple = self.create_tuple_data(&[
+            TupleData::Text("one".to_string()),
+            TupleData::Null,
+            TupleData::Binary(vec![0x02]),
+        ]);
+        let truncated_declared_count = vec![0x00, 0x02, b'n'];
+
+        let result = match (
+            self.parse_tuple_data(&empty_tuple),
+            self.parse_tuple_data(&mixed_tuple),
+            self.parse_tuple_data(&truncated_declared_count),
+        ) {
+            (Ok(empty), Ok(mixed), Err(_)) if empty.is_empty() && mixed.len() == 3 => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_011".to_string(),
+            description: "Tuple column-count enforcement".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests declared tuple column count, including truncated payload rejection"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_tuple_mixed_types(&mut self) {
+        let start = std::time::Instant::now();
+        let expected = vec![
+            TupleData::Text("id-7".to_string()),
+            TupleData::Null,
+            TupleData::Binary(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        ];
+        let tuple = self.create_tuple_data(&expected);
+
+        let result = match self.parse_tuple_data(&tuple) {
+            Ok(parsed) if parsed == expected => TestVerdict::Pass,
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_012".to_string(),
+            description: "Tuple mixed text/null/binary fields".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests mixed tuple payloads preserve field order and typed values".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_relation_column_metadata(&mut self) {
+        let start = std::time::Instant::now();
+        let columns = [
+            ("sku", 25, 0),
+            ("quantity", 23, 4),
+            ("metadata", 114, u32::MAX),
+        ];
+        let relation = self.create_relation_message(
+            24_576,
+            "inventory",
+            "products",
+            ReplicaIdentity::Full,
+            &columns,
+        );
+
+        let result = match self.parse_relation_message(&relation) {
+            Ok((oid, _, _, _, parsed_columns))
+                if oid == 24_576
+                    && parsed_columns.len() == columns.len()
+                    && parsed_columns[0] == ("sku".to_string(), 25, 0)
+                    && parsed_columns[1] == ("quantity".to_string(), 23, 4)
+                    && parsed_columns[2] == ("metadata".to_string(), 114, u32::MAX) =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_016".to_string(),
+            description: "RELATION column metadata preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests RELATION column names, type OIDs, and type modifiers are parsed from bytes"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_relation_replica_identity(&mut self) {
+        let start = std::time::Instant::now();
+        let identities = [
+            ReplicaIdentity::Default,
+            ReplicaIdentity::Nothing,
+            ReplicaIdentity::Full,
+            ReplicaIdentity::Index,
+        ];
+
+        let result = if identities.iter().copied().all(|identity| {
+            let relation = self.create_relation_message(
+                24_576,
+                "public",
+                "replica_identity_cases",
+                identity,
+                &[("id", 23, 0)],
+            );
+            matches!(
+                self.parse_relation_message(&relation),
+                Ok((_, _, _, parsed, _)) if parsed == identity
+            )
+        }) {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_017".to_string(),
+            description: "RELATION replica identity preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests all RELATION replica identity markers are decoded without hardcoding"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_relation_namespace_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let relation = self.create_relation_message(
+            24_577,
+            "tenant_42_reporting",
+            "orders_2026_q2",
+            ReplicaIdentity::Default,
+            &[("order_id", 20, 8)],
+        );
+
+        let result = match self.parse_relation_message(&relation) {
+            Ok((oid, namespace, name, _, columns))
+                if oid == 24_577
+                    && namespace == "tenant_42_reporting"
+                    && name == "orders_2026_q2"
+                    && columns == vec![("order_id".to_string(), 20, 8)] =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_018".to_string(),
+            description: "RELATION namespace and name preservation".to_string(),
+            category: TestCategory::RelationMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests RELATION namespace and relation C strings are parsed from message bytes"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_type_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let type_message = self.create_type_message(3_802, "pg_catalog", "jsonb");
+
+        let result = match self.parse_type_message(&type_message) {
+            Ok((type_oid, namespace, name))
+                if type_oid == 3_802 && namespace == "pg_catalog" && name == "jsonb" =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_021".to_string(),
+            description: "TYPE message format parsing".to_string(),
+            category: TestCategory::TypeMessages,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests TYPE OID, namespace, and data type name decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_type_namespace_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let catalog_type = self.create_type_message(23, "", "int4");
+        let custom_type = self.create_type_message(42_000, "tenant_42_types", "sku_code");
+
+        let result = match (
+            self.parse_type_message(&catalog_type),
+            self.parse_type_message(&custom_type),
+        ) {
+            (
+                Ok((23, catalog_namespace, catalog_name)),
+                Ok((42_000, custom_namespace, custom_name)),
+            ) if catalog_namespace.is_empty()
+                && catalog_name == "int4"
+                && custom_namespace == "tenant_42_types"
+                && custom_name == "sku_code" =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_022".to_string(),
+            description: "TYPE namespace preservation".to_string(),
+            category: TestCategory::TypeMessages,
+            requirement_level: RequirementLevel::Should,
+            verdict: result,
+            notes: Some(
+                "Tests TYPE namespace C strings, including empty namespace for pg_catalog"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_delete_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let expected_tuple = vec![
+            TupleData::Text("123".to_string()),
+            TupleData::Text("deleted@example.com".to_string()),
+        ];
+        let delete_message = self.create_delete_message(16_384, &expected_tuple);
+
+        let result = match self.parse_delete_message(&delete_message) {
+            Ok((relation_oid, old_tuple))
+                if relation_oid == 16_384 && old_tuple == expected_tuple =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_019".to_string(),
+            description: "DELETE message format with old tuple data".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests DELETE relation OID and old tuple payload decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_truncate_message_format(&mut self) {
+        let start = std::time::Instant::now();
+        let relation_oids = vec![16_384, 16_385, 16_386];
+        let truncate_message = self.create_truncate_message(&relation_oids, 0x01);
+
+        let result = match self.parse_truncate_message(&truncate_message) {
+            Ok((parsed_oids, options)) if parsed_oids == relation_oids && options == 0x01 => {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_020".to_string(),
+            description: "TRUNCATE message format with relation list".to_string(),
+            category: TestCategory::ChangeDataCapture,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some("Tests TRUNCATE options byte and relation OID list decoding".to_string()),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_transaction_ordering(&mut self) {
+        let start = std::time::Instant::now();
+        let first = self.create_transaction_sequence(
+            2_001,
+            &[("INSERT", 16_384, vec![TupleData::Text("first".to_string())])],
+        );
+        let second = self.create_transaction_sequence(
+            2_002,
+            &[(
+                "UPDATE",
+                16_384,
+                vec![TupleData::Text("second".to_string())],
+            )],
+        );
+        let third = self.create_transaction_sequence(
+            2_003,
+            &[("INSERT", 16_384, vec![TupleData::Text("third".to_string())])],
+        );
+
+        let ordered = vec![first.clone(), second.clone(), third.clone()];
+        let reversed = vec![second, first, third];
+        let result = if self.validate_transaction_consistency(&ordered)
+            && !self.validate_transaction_consistency(&reversed)
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_027".to_string(),
+            description: "Transaction LSN ordering validation".to_string(),
+            category: TestCategory::LogicalSnapshots,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests transaction byte streams must be in increasing BEGIN/COMMIT LSN order"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_concurrent_transaction_isolation(&mut self) {
+        let start = std::time::Instant::now();
+        let first = self.create_transaction_sequence(
+            3_001,
+            &[
+                (
+                    "INSERT",
+                    16_384,
+                    vec![TupleData::Text("shared-key".to_string())],
+                ),
+                (
+                    "UPDATE",
+                    16_384,
+                    vec![TupleData::Text("first-value".to_string())],
+                ),
+            ],
+        );
+        let second = self.create_transaction_sequence(
+            3_002,
+            &[
+                (
+                    "INSERT",
+                    16_384,
+                    vec![TupleData::Text("shared-key".to_string())],
+                ),
+                (
+                    "UPDATE",
+                    16_384,
+                    vec![TupleData::Text("second-value".to_string())],
+                ),
+            ],
+        );
+        let duplicate_xid = self.create_transaction_sequence(
+            3_001,
+            &[(
+                "INSERT",
+                16_385,
+                vec![TupleData::Text("duplicate".to_string())],
+            )],
+        );
+
+        let isolated = vec![first.clone(), second];
+        let duplicated = vec![first, duplicate_xid];
+        let result = if self.validate_transaction_consistency(&isolated)
+            && !self.validate_transaction_consistency(&duplicated)
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_028".to_string(),
+            description: "Concurrent transaction XID isolation validation".to_string(),
+            category: TestCategory::LogicalSnapshots,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests transactions touching the same relation remain isolated by unique XIDs"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_unknown_message_type_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let unknown_messages = [vec![b'X'], vec![0xFF, 0x00], vec![b'S', 0x00, 0x00]];
+
+        let result = if unknown_messages.iter().all(|message| {
+            matches!(
+                self.parse_logical_message(message),
+                Err(error) if error == "Unknown message type"
+            )
+        }) {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_023".to_string(),
+            description: "Unknown logical replication message rejection".to_string(),
+            category: TestCategory::ErrorHandling,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests non-empty messages with unsupported type bytes are rejected".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_truncated_message_handling(&mut self) {
+        let start = std::time::Instant::now();
+        let truncated_messages = [
+            vec![b'B', 0x00],
+            vec![b'C', 0x00],
+            vec![b'R', 0x00, 0x00, 0x00, 0x01, b'p'],
+            vec![b'Y', 0x00, 0x00, 0x00, 23, b'n'],
+            vec![b'I', 0x00, 0x00, 0x00, 0x01, b'N', 0x00],
+            vec![b'U', 0x00, 0x00, 0x00, 0x01, b'N', 0x00],
+            vec![b'D', 0x00, 0x00, 0x00, 0x01, b'O', 0x00],
+            vec![b'T', 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01],
+        ];
+
+        let result = if truncated_messages
+            .iter()
+            .all(|message| self.parse_logical_message(message).is_err())
+        {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_024".to_string(),
+            description: "Truncated logical replication message rejection".to_string(),
+            category: TestCategory::ErrorHandling,
+            requirement_level: RequirementLevel::Must,
+            verdict: result,
+            notes: Some(
+                "Tests truncated known pgoutput messages are rejected by parser dispatch"
+                    .to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_large_tuple_performance(&mut self) {
+        let start = std::time::Instant::now();
+        let tuple: Vec<_> = (0..512)
+            .map(|column| match column % 3 {
+                0 => TupleData::Text(format!("value-{column:03}")),
+                1 => TupleData::Null,
+                _ => TupleData::Binary(vec![(column & 0xFF) as u8, ((column >> 8) & 0xFF) as u8]),
+            })
+            .collect();
+        let encoded = self.create_tuple_data(&tuple);
+
+        let result = match self.parse_tuple_data(&encoded) {
+            Ok(parsed)
+                if parsed.len() == 512
+                    && parsed.first() == Some(&TupleData::Text("value-000".to_string()))
+                    && parsed[1] == TupleData::Null
+                    && parsed[511] == TupleData::Binary(vec![0xFF, 0x01])
+                    && parsed == tuple =>
+            {
+                TestVerdict::Pass
+            }
+            _ => TestVerdict::Fail,
+        };
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_025".to_string(),
+            description: "Large tuple parser stress check".to_string(),
+            category: TestCategory::TupleFormat,
+            requirement_level: RequirementLevel::Should,
+            verdict: result,
+            notes: Some(
+                "Tests a 512-column mixed tuple without relying on timing thresholds".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+    #[allow(dead_code)]
+    fn test_high_volume_transaction_parsing(&mut self) {
+        let start = std::time::Instant::now();
+        let transaction_count = 256_u32;
+        let base_lsn = 0x1000_0000_0000_0000_u64;
+        let base_timestamp = 1_640_995_260_000_000_u64;
+
+        let parsed_all = (0..transaction_count).all(|index| {
+            let xid = 10_000 + index;
+            let begin_lsn = base_lsn + u64::from(index) * 0x1_000;
+            let commit_lsn = begin_lsn + 0x100;
+            let end_lsn = begin_lsn + 0x200;
+            let begin = self.create_begin_message(begin_lsn, base_timestamp + u64::from(index), xid);
+            let commit =
+                self.create_commit_message(0, commit_lsn, end_lsn, base_timestamp + u64::from(index) + 1);
+
+            matches!(
+                (self.parse_begin_message(&begin), self.parse_commit_message(&commit)),
+                (Ok((parsed_begin_lsn, _, parsed_xid)), Ok((0, parsed_commit_lsn, parsed_end_lsn, _)))
+                    if parsed_xid == xid
+                        && parsed_begin_lsn == begin_lsn
+                        && parsed_begin_lsn < parsed_commit_lsn
+                        && parsed_commit_lsn < parsed_end_lsn
+            )
+        });
+
+        self.results.push(PgLogicalReplicationResult {
+            test_id: "pglogical_026".to_string(),
+            description: "High-volume transaction parser stress check".to_string(),
+            category: TestCategory::TransactionBoundaries,
+            requirement_level: RequirementLevel::Should,
+            verdict: if parsed_all {
+                TestVerdict::Pass
+            } else {
+                TestVerdict::Fail
+            },
+            notes: Some(
+                "Tests 256 deterministic BEGIN/COMMIT pairs without a timing threshold".to_string(),
+            ),
+            elapsed_ms: start.elapsed().as_millis() as u64,
+        });
+    }
+
+    // Helper methods for creating test message data
+
+    /// Create a BEGIN message with specified LSN, timestamp, and XID.
+    #[allow(dead_code)]
+    fn create_begin_message(&self, lsn: u64, timestamp: u64, xid: u32) -> Vec<u8> {
+        let mut msg = vec![b'B'];
+        msg.extend_from_slice(&lsn.to_be_bytes());
+        msg.extend_from_slice(&timestamp.to_be_bytes());
+        msg.extend_from_slice(&xid.to_be_bytes());
+        msg
+    }
+
+    /// Create a COMMIT message with flags, LSN, end LSN, and timestamp.
+    #[allow(dead_code)]
+    fn create_commit_message(&self, flags: u8, lsn: u64, end_lsn: u64, timestamp: u64) -> Vec<u8> {
+        let mut msg = vec![b'C'];
+        msg.push(flags);
+        msg.extend_from_slice(&lsn.to_be_bytes());
+        msg.extend_from_slice(&end_lsn.to_be_bytes());
+        msg.extend_from_slice(&timestamp.to_be_bytes());
+        msg
+    }
+
+    /// Create a RELATION message with schema metadata.
+    #[allow(dead_code)]
+    fn create_relation_message(
+        &self,
+        oid: u32,
+        namespace: &str,
+        name: &str,
+        replica_identity: ReplicaIdentity,
+        columns: &[(&str, u32, u32)],
+    ) -> Vec<u8> {
+        let mut msg = vec![b'R'];
+        msg.extend_from_slice(&oid.to_be_bytes());
+        msg.extend_from_slice(namespace.as_bytes());
+        msg.push(0); // null terminator
+        msg.extend_from_slice(name.as_bytes());
+        msg.push(0); // null terminator
+        msg.push(replica_identity as u8);
+        msg.extend_from_slice(&(columns.len() as u16).to_be_bytes());
+
+        for &(col_name, type_oid, attr_num) in columns {
+            msg.push(1); // flags
+            msg.extend_from_slice(col_name.as_bytes());
+            msg.push(0); // null terminator
+            msg.extend_from_slice(&type_oid.to_be_bytes());
+            msg.extend_from_slice(&attr_num.to_be_bytes());
+        }
+        msg
+    }
+
+    /// Create a TYPE message with type metadata.
+    #[allow(dead_code)]
+    fn create_type_message(&self, type_oid: u32, namespace: &str, name: &str) -> Vec<u8> {
+        let mut msg = vec![b'Y'];
+        msg.extend_from_slice(&type_oid.to_be_bytes());
+        msg.extend_from_slice(namespace.as_bytes());
+        msg.push(0); // null terminator
+        msg.extend_from_slice(name.as_bytes());
+        msg.push(0); // null terminator
+        msg
+    }
+
+    /// Create an INSERT message with tuple data.
+    #[allow(dead_code)]
+    fn create_insert_message(&self, relation_oid: u32, tuple: &[TupleData]) -> Vec<u8> {
+        let mut msg = vec![b'I'];
+        msg.extend_from_slice(&relation_oid.to_be_bytes());
+        msg.push(b'N'); // new tuple
+        msg.extend_from_slice(&self.create_tuple_data(tuple));
+        msg
+    }
+
+    /// Create an UPDATE message with old and new tuple data.
+    #[allow(dead_code)]
+    fn create_update_message(
+        &self,
+        relation_oid: u32,
+        old_tuple: Option<&[TupleData]>,
+        new_tuple: &[TupleData],
+    ) -> Vec<u8> {
+        let mut msg = vec![b'U'];
+        msg.extend_from_slice(&relation_oid.to_be_bytes());
+
+        if let Some(old) = old_tuple {
+            msg.push(b'O'); // old tuple
+            msg.extend_from_slice(&self.create_tuple_data(old));
+        }
+
+        msg.push(b'N'); // new tuple
+        msg.extend_from_slice(&self.create_tuple_data(new_tuple));
+        msg
+    }
+
+    /// Create a DELETE message with old tuple data.
+    #[allow(dead_code)]
+    fn create_delete_message(&self, relation_oid: u32, old_tuple: &[TupleData]) -> Vec<u8> {
+        let mut msg = vec![b'D'];
+        msg.extend_from_slice(&relation_oid.to_be_bytes());
+        msg.push(b'O'); // old tuple
+        msg.extend_from_slice(&self.create_tuple_data(old_tuple));
+        msg
+    }
+
+    /// Create a TRUNCATE message with affected relation OIDs.
+    #[allow(dead_code)]
+    fn create_truncate_message(&self, relation_oids: &[u32], options: u8) -> Vec<u8> {
+        let mut msg = vec![b'T'];
+        msg.extend_from_slice(&(relation_oids.len() as u32).to_be_bytes());
+        msg.push(options);
+        for oid in relation_oids {
+            msg.extend_from_slice(&oid.to_be_bytes());
+        }
+        msg
+    }
+
+    /// Create tuple data from TupleData array.
+    #[allow(dead_code)]
+    fn create_tuple_data(&self, data: &[TupleData]) -> Vec<u8> {
+        let mut result = vec![];
+        result.extend_from_slice(&(data.len() as u16).to_be_bytes());
+
+        for item in data {
+            match item {
+                TupleData::Null => result.push(b'n'),
+                TupleData::Text(text) => {
+                    result.push(b't');
+                    result.extend_from_slice(&(text.len() as u32).to_be_bytes());
+                    result.extend_from_slice(text.as_bytes());
+                }
+                TupleData::Binary(bytes) => {
+                    result.push(b'b');
+                    result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+                    result.extend_from_slice(bytes);
+                }
+            }
+        }
+        result
+    }
+
+    /// Create a transaction sequence for testing.
+    #[allow(dead_code)]
+    fn create_transaction_sequence(
+        &self,
+        xid: u32,
+        operations: &[(&str, u32, Vec<TupleData>)],
+    ) -> Vec<u8> {
+        let mut result = vec![];
+        let begin_lsn = 0x1000_0000_0000_0000 + u64::from(xid) * 0x1000;
+        let commit_lsn = begin_lsn + 0x100;
+        let end_lsn = begin_lsn + 0x200;
+        let timestamp = 1_640_995_200_000_000 + u64::from(xid);
+
+        // BEGIN
+        result.extend_from_slice(&self.create_begin_message(begin_lsn, timestamp, xid));
+
+        // Operations
+        for (op_type, relation_oid, tuple) in operations {
+            match *op_type {
+                "INSERT" => {
+                    result.extend_from_slice(&self.create_insert_message(*relation_oid, tuple))
+                }
+                "UPDATE" => result.extend_from_slice(&self.create_update_message(
+                    *relation_oid,
+                    None,
+                    tuple,
+                )),
+                _ => {} // DELETE, etc.
+            }
+        }
+
+        // COMMIT
+        result.extend_from_slice(&self.create_commit_message(
+            0x01,
+            commit_lsn,
+            end_lsn,
+            timestamp + 1,
+        ));
+        result
+    }
+
+    // Parser methods for the local conformance harness message bytes.
+
+    /// Parse a BEGIN message and return (LSN, timestamp, XID).
+    #[allow(dead_code)]
+    fn parse_begin_message(&self, data: &[u8]) -> Result<(u64, u64, u32), String> {
+        if data.len() != 21 || data[0] != b'B' {
+            return Err("Invalid BEGIN message format".to_string());
+        }
+
+        let lsn = u64::from_be_bytes([
+            data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
+        ]);
+        let timestamp = u64::from_be_bytes([
+            data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16],
+        ]);
+        let xid = u32::from_be_bytes([data[17], data[18], data[19], data[20]]);
+
+        Ok((lsn, timestamp, xid))
+    }
+
+    /// Parse a COMMIT message and return (flags, LSN, end_LSN, timestamp).
+    #[allow(dead_code)]
+    fn parse_commit_message(&self, data: &[u8]) -> Result<(u8, u64, u64, u64), String> {
+        if data.len() != 26 || data[0] != b'C' {
+            return Err("Invalid COMMIT message format".to_string());
+        }
+
+        let flags = data[1];
+        let lsn = u64::from_be_bytes([
+            data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
+        ]);
+        let end_lsn = u64::from_be_bytes([
+            data[10], data[11], data[12], data[13], data[14], data[15], data[16], data[17],
+        ]);
+        let timestamp = u64::from_be_bytes([
+            data[18], data[19], data[20], data[21], data[22], data[23], data[24], data[25],
+        ]);
+
+        Ok((flags, lsn, end_lsn, timestamp))
+    }
+
+    /// Parse a RELATION message and return metadata.
+    #[allow(dead_code)]
+    fn parse_relation_message(
+        &self,
+        data: &[u8],
+    ) -> Result<
+        (
+            u32,
+            String,
+            String,
+            ReplicaIdentity,
+            Vec<(String, u32, u32)>,
+        ),
+        String,
+    > {
+        if data.len() < 7 || data[0] != b'R' {
+            return Err("Invalid RELATION message format".to_string());
+        }
+
+        let mut pos = 1;
+        let oid = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        let namespace = Self::read_cstring(data, &mut pos, "RELATION namespace")?;
+        let name = Self::read_cstring(data, &mut pos, "RELATION relation name")?;
+
+        let Some(identity_byte) = data.get(pos).copied() else {
+            return Err("RELATION missing replica identity".to_string());
+        };
+        pos += 1;
+        let replica_identity = match identity_byte {
+            b'd' => ReplicaIdentity::Default,
+            b'n' => ReplicaIdentity::Nothing,
+            b'f' => ReplicaIdentity::Full,
+            b'i' => ReplicaIdentity::Index,
+            other => {
+                return Err(format!(
+                    "RELATION has unknown replica identity 0x{other:02X}"
+                ));
+            }
+        };
+
+        if data.len().saturating_sub(pos) < 2 {
+            return Err("RELATION missing column count".to_string());
+        }
+        let column_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        let mut columns = Vec::with_capacity(column_count);
+
+        for column_index in 0..column_count {
+            let Some(_flags) = data.get(pos).copied() else {
+                return Err(format!("RELATION column {column_index} missing flags"));
+            };
+            pos += 1;
+
+            let column_name = Self::read_cstring(data, &mut pos, "RELATION column name")?;
+
+            if data.len().saturating_sub(pos) < 8 {
+                return Err(format!(
+                    "RELATION column {column_index} missing type metadata"
+                ));
+            }
+            let type_oid =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            let type_modifier =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+            pos += 4;
+            columns.push((column_name, type_oid, type_modifier));
+        }
+
+        if pos != data.len() {
+            return Err("RELATION message has trailing bytes".to_string());
+        }
+
+        Ok((oid, namespace, name, replica_identity, columns))
+    }
+
+    /// Parse a TYPE message and return (type_oid, namespace, type_name).
+    #[allow(dead_code)]
+    fn parse_type_message(&self, data: &[u8]) -> Result<(u32, String, String), String> {
+        if data.len() < 7 || data[0] != b'Y' {
+            return Err("Invalid TYPE message format".to_string());
+        }
+
+        let mut pos = 1;
+        let type_oid = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        pos += 4;
+
+        let namespace = Self::read_cstring(data, &mut pos, "TYPE namespace")?;
+        let name = Self::read_cstring(data, &mut pos, "TYPE name")?;
+        if pos != data.len() {
+            return Err("TYPE message has trailing bytes".to_string());
+        }
+
+        Ok((type_oid, namespace, name))
+    }
+
+    /// Parse an INSERT message and return (relation_oid, tuple).
+    #[allow(dead_code)]
+    fn parse_insert_message(&self, data: &[u8]) -> Result<(u32, Vec<TupleData>), String> {
+        let (relation_oid, tuple, consumed) = self.parse_insert_message_prefix(data)?;
+        if consumed != data.len() {
+            return Err("INSERT message has trailing bytes".to_string());
+        }
+        Ok((relation_oid, tuple))
+    }
+
+    /// Parse an INSERT message at the start of a larger transaction sequence.
+    #[allow(dead_code)]
+    fn parse_insert_message_prefix(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, Vec<TupleData>, usize), String> {
+        if data.len() < 6 || data[0] != b'I' {
+            return Err("Invalid INSERT message format".to_string());
+        }
+
+        let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        if data[5] != b'N' {
+            return Err("INSERT message missing new tuple marker".to_string());
+        }
+        let (tuple, tuple_bytes) = self.parse_tuple_data_prefix(&data[6..])?;
+
+        Ok((relation_oid, tuple, 6 + tuple_bytes))
+    }
+
+    /// Parse an UPDATE message and return (relation_oid, old_tuple, new_tuple).
+    #[allow(dead_code)]
+    fn parse_update_message(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, Option<Vec<TupleData>>, Vec<TupleData>), String> {
+        let (relation_oid, old_tuple, new_tuple, consumed) =
+            self.parse_update_message_prefix(data)?;
+        if consumed != data.len() {
+            return Err("UPDATE message has trailing bytes".to_string());
+        }
+        Ok((relation_oid, old_tuple, new_tuple))
+    }
+
+    /// Parse an UPDATE message at the start of a larger transaction sequence.
+    #[allow(dead_code)]
+    fn parse_update_message_prefix(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, Option<Vec<TupleData>>, Vec<TupleData>, usize), String> {
+        if data.len() < 6 || data[0] != b'U' {
+            return Err("Invalid UPDATE message format".to_string());
+        }
+
+        let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        let mut pos = 5;
+        let old_tuple = match data.get(pos).copied() {
+            Some(b'O' | b'K') => {
+                let (tuple, consumed) = self.parse_tuple_data_prefix(&data[pos + 1..])?;
+                pos += 1 + consumed;
+                Some(tuple)
+            }
+            Some(b'N') => None,
+            Some(other) => {
+                return Err(format!(
+                    "UPDATE message has unknown tuple marker 0x{other:02X}"
+                ));
+            }
+            None => return Err("UPDATE message missing tuple marker".to_string()),
+        };
+
+        let Some(b'N') = data.get(pos).copied() else {
+            return Err("UPDATE message missing new tuple marker".to_string());
+        };
+        pos += 1;
+        let (new_tuple, consumed) = self.parse_tuple_data_prefix(&data[pos..])?;
+        pos += consumed;
+
+        Ok((relation_oid, old_tuple, new_tuple, pos))
+    }
+
+    /// Parse a DELETE message and return (relation_oid, old_tuple).
+    #[allow(dead_code)]
+    fn parse_delete_message(&self, data: &[u8]) -> Result<(u32, Vec<TupleData>), String> {
+        if data.len() < 6 || data[0] != b'D' {
+            return Err("Invalid DELETE message format".to_string());
+        }
+
+        let relation_oid = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+        match data[5] {
+            b'O' | b'K' => Ok((relation_oid, self.parse_tuple_data(&data[6..])?)),
+            other => Err(format!(
+                "DELETE message has unknown old tuple marker 0x{other:02X}"
+            )),
+        }
+    }
+
+    /// Parse a TRUNCATE message and return (relation_oids, options).
+    #[allow(dead_code)]
+    fn parse_truncate_message(&self, data: &[u8]) -> Result<(Vec<u32>, u8), String> {
+        if data.len() < 6 || data[0] != b'T' {
+            return Err("Invalid TRUNCATE message format".to_string());
+        }
+
+        let relation_count = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
+        let options = data[5];
+        let expected_len = relation_count
+            .checked_mul(4)
+            .and_then(|oid_bytes| oid_bytes.checked_add(6))
+            .ok_or_else(|| "TRUNCATE message relation count overflows length".to_string())?;
+        if data.len() != expected_len {
+            return Err("TRUNCATE message relation OID list length mismatch".to_string());
+        }
+
+        let mut pos = 6;
+        let mut relation_oids = Vec::with_capacity(relation_count);
+        for _ in 0..relation_count {
+            relation_oids.push(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
+            pos += 4;
+        }
+
+        Ok((relation_oids, options))
+    }
+
+    /// Parse tuple data from binary format.
+    #[allow(dead_code)]
+    fn parse_tuple_data(&self, data: &[u8]) -> Result<Vec<TupleData>, String> {
+        let (tuple, consumed) = self.parse_tuple_data_prefix(data)?;
+
+        if consumed != data.len() {
+            return Err("Tuple data has trailing bytes after declared columns".to_string());
+        }
+
+        Ok(tuple)
+    }
+
+    /// Parse tuple data from the start of a larger message and return consumed bytes.
+    #[allow(dead_code)]
+    fn parse_tuple_data_prefix(&self, data: &[u8]) -> Result<(Vec<TupleData>, usize), String> {
+        if data.len() < 2 {
+            return Err("Tuple data missing column count".to_string());
+        }
+
+        let column_count = u16::from_be_bytes([data[0], data[1]]) as usize;
+        let mut pos = 2;
+        let mut tuple = Vec::with_capacity(column_count);
+
+        for column_index in 0..column_count {
+            let Some(kind) = data.get(pos).copied() else {
+                return Err(format!("Tuple column {column_index} missing data kind"));
+            };
+            pos += 1;
+
+            match kind {
+                b'n' => tuple.push(TupleData::Null),
+                b't' | b'b' => {
+                    if data.len().saturating_sub(pos) < 4 {
+                        return Err(format!("Tuple column {column_index} missing value length"));
+                    }
+                    let len = u32::from_be_bytes([
+                        data[pos],
+                        data[pos + 1],
+                        data[pos + 2],
+                        data[pos + 3],
+                    ]) as usize;
+                    pos += 4;
+                    if data.len().saturating_sub(pos) < len {
+                        return Err(format!("Tuple column {column_index} payload truncated"));
+                    }
+                    let payload = &data[pos..pos + len];
+                    pos += len;
+
+                    if kind == b't' {
+                        let text = String::from_utf8(payload.to_vec()).map_err(|err| {
+                            format!("Tuple column {column_index} text is not UTF-8: {err}")
+                        })?;
+                        tuple.push(TupleData::Text(text));
+                    } else {
+                        tuple.push(TupleData::Binary(payload.to_vec()));
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "Tuple column {column_index} has unknown data kind 0x{other:02X}"
+                    ));
+                }
+            }
+        }
+
+        Ok((tuple, pos))
+    }
+
+    /// Read one null-terminated UTF-8 string from a logical replication message.
+    #[allow(dead_code)]
+    fn read_cstring(data: &[u8], pos: &mut usize, field: &str) -> Result<String, String> {
+        let start = *pos;
+        if start > data.len() {
+            return Err(format!("{field} starts past end of message"));
+        }
+
+        let Some(relative_end) = data[start..].iter().position(|byte| *byte == 0) else {
+            return Err(format!("{field} missing null terminator"));
+        };
+        let end = start + relative_end;
+        let value = std::str::from_utf8(&data[start..end])
+            .map_err(|err| format!("{field} is not UTF-8: {err}"))?
+            .to_string();
+        *pos = end + 1;
+        Ok(value)
+    }
+
+    /// Parse any logical replication message.
+    #[allow(dead_code)]
+    fn parse_logical_message(&self, data: &[u8]) -> Result<(), String> {
+        if data.is_empty() {
+            return Err("Empty message".to_string());
+        }
+
+        // Dispatch to the message-specific parser.
+        match data[0] {
+            b'B' => self.parse_begin_message(data).map(|_| ()),
+            b'C' => self.parse_commit_message(data).map(|_| ()),
+            b'R' => self.parse_relation_message(data).map(|_| ()),
+            b'Y' => self.parse_type_message(data).map(|_| ()),
+            b'I' => self.parse_insert_message(data).map(|_| ()),
+            b'U' => self.parse_update_message(data).map(|_| ()),
+            b'D' => self.parse_delete_message(data).map(|_| ()),
+            b'T' => self.parse_truncate_message(data).map(|_| ()),
+            _ => Err("Unknown message type".to_string()),
+        }
+    }
+
+    /// Validate transaction consistency across multiple transactions.
+    #[allow(dead_code)]
+    fn validate_transaction_consistency(&self, transactions: &[Vec<u8>]) -> bool {
+        let mut seen_xids = std::collections::HashSet::new();
+        let mut last_end_lsn = None;
+
+        for transaction in transactions {
+            let Ok((xid, begin_lsn, commit_lsn, end_lsn, operation_count)) =
+                self.parse_transaction_sequence(transaction)
+            else {
+                return false;
+            };
+
+            if operation_count == 0
+                || !seen_xids.insert(xid)
+                || begin_lsn > commit_lsn
+                || commit_lsn > end_lsn
+            {
+                return false;
+            }
+
+            if let Some(previous_end_lsn) = last_end_lsn
+                && begin_lsn <= previous_end_lsn
+            {
+                return false;
+            }
+            last_end_lsn = Some(end_lsn);
+        }
+
+        !transactions.is_empty()
+    }
+
+    /// Parse a transaction sequence and return (xid, begin_lsn, commit_lsn, end_lsn, op_count).
+    #[allow(dead_code)]
+    fn parse_transaction_sequence(
+        &self,
+        data: &[u8],
+    ) -> Result<(u32, u64, u64, u64, usize), String> {
+        if data.len() < 47 {
+            return Err("Transaction sequence is too short".to_string());
+        }
+
+        let (begin_lsn, _, xid) = self.parse_begin_message(&data[..21])?;
+        let mut pos = 21;
+        let mut operation_count = 0;
+
+        while pos < data.len() {
+            match data[pos] {
+                b'I' => {
+                    let (_, _, consumed) = self.parse_insert_message_prefix(&data[pos..])?;
+                    pos += consumed;
+                    operation_count += 1;
+                }
+                b'U' => {
+                    let (_, _, _, consumed) = self.parse_update_message_prefix(&data[pos..])?;
+                    pos += consumed;
+                    operation_count += 1;
+                }
+                b'C' => {
+                    if data.len() - pos != 26 {
+                        return Err("COMMIT must terminate the transaction sequence".to_string());
+                    }
+                    let (_, commit_lsn, end_lsn, _) = self.parse_commit_message(&data[pos..])?;
+                    return Ok((xid, begin_lsn, commit_lsn, end_lsn, operation_count));
+                }
+                other => {
+                    return Err(format!(
+                        "Transaction sequence has unsupported operation 0x{other:02X}"
+                    ));
+                }
+            }
+        }
+
+        Err("Transaction sequence missing COMMIT message".to_string())
+    }
+}
+
+/// Tuple data types for logical replication.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum TupleData {
+    Null,
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_pgoutput_harness_creation() {
+        let harness = PgLogicalReplicationHarness::new();
+        assert!(harness.results.is_empty());
+        assert!(harness.run_performance_tests);
+        assert!(!harness.run_expected_failures);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_message_type_enum_values() {
+        assert_eq!(PgLogicalMessageType::Begin as u8, b'B');
+        assert_eq!(PgLogicalMessageType::Commit as u8, b'C');
+        assert_eq!(PgLogicalMessageType::Relation as u8, b'R');
+        assert_eq!(PgLogicalMessageType::Insert as u8, b'I');
+        assert_eq!(PgLogicalMessageType::Update as u8, b'U');
+        assert_eq!(PgLogicalMessageType::Delete as u8, b'D');
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_replica_identity_enum_values() {
+        assert_eq!(ReplicaIdentity::Default as u8, b'd');
+        assert_eq!(ReplicaIdentity::Nothing as u8, b'n');
+        assert_eq!(ReplicaIdentity::Full as u8, b'f');
+        assert_eq!(ReplicaIdentity::Index as u8, b'i');
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_tuple_data_type_enum_values() {
+        assert_eq!(TupleDataType::Null as u8, b'n');
+        assert_eq!(TupleDataType::Text as u8, b't');
+        assert_eq!(TupleDataType::Binary as u8, b'b');
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_begin_message_creation() {
+        let harness = PgLogicalReplicationHarness::new();
+        let msg = harness.create_begin_message(0x1000_0000_0000_0000, 1640995200000000, 12345);
+
+        assert_eq!(msg[0], b'B');
+        assert_eq!(msg.len(), 21); // 1 + 8 + 8 + 4
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_commit_message_creation() {
+        let harness = PgLogicalReplicationHarness::new();
+        let msg = harness.create_commit_message(
+            0x01,
+            0x1000_0000_0000_0100,
+            0x1000_0000_0000_0200,
+            1640995260000000,
+        );
+
+        assert_eq!(msg[0], b'C');
+        assert_eq!(msg.len(), 26); // 1 + 1 + 8 + 8 + 8
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_tuple_data_null_creation() {
+        let harness = PgLogicalReplicationHarness::new();
+        let tuple_data = vec![TupleData::Null, TupleData::Text("test".to_string())];
+        let bytes = harness.create_tuple_data(&tuple_data);
+
+        assert_eq!(bytes[0], 0); // column count high byte
+        assert_eq!(bytes[1], 2); // column count low byte (2 columns)
+        assert_eq!(bytes[2], b'n'); // NULL marker
+        assert_eq!(bytes[3], b't'); // text marker
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_pgoutput_conformance_integration() {
+        let mut harness = PgLogicalReplicationHarness::new();
+        let results = harness.run_all_tests();
+
+        // Should have some test results
+        assert!(!results.is_empty(), "Should have conformance test results");
+
+        // Verify all tests have required fields
+        for result in &results {
+            assert!(!result.test_id.is_empty(), "Test ID must not be empty");
+            assert!(
+                !result.description.is_empty(),
+                "Description must not be empty"
+            );
+        }
+
+        // Check for expected test categories
+        let categories: std::collections::HashSet<_> =
+            results.iter().map(|r| &r.category).collect();
+
+        assert!(
+            categories.contains(&TestCategory::TransactionBoundaries),
+            "Should test transaction boundaries"
+        );
+        assert!(
+            categories.contains(&TestCategory::TupleFormat),
+            "Should test tuple format"
+        );
+        assert!(
+            categories.contains(&TestCategory::RelationMessages),
+            "Should test relation messages"
+        );
+        assert!(
+            categories.contains(&TestCategory::ChangeDataCapture),
+            "Should test change data capture"
+        );
+    }
+}

@@ -1,0 +1,496 @@
+# ATP-N7: Cross-Platform CI and Release Proof Lane Matrix
+#
+# Comprehensive CI/CD pipeline for ATP testing covering all proof lanes:
+# - Fast smoke tests for quick feedback
+# - Full deterministic lab tests for comprehensive validation
+# - Fuzz/conformance tests for protocol correctness
+# - E2E script tests for real-world scenarios
+# - Benchmark tests for performance validation
+# - Dependency audit for regression prevention
+# - Platform capability tests for cross-platform support
+
+name: ATP Proof Lane Matrix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Full proof lane run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      proof_mode:
+        description: 'Proof mode'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+        - smoke
+        - full
+        - release
+      target_platforms:
+        description: 'Target platforms (comma-separated)'
+        required: false
+        default: 'linux,macos,windows'
+
+# Newest pending run per ref wins; in-progress runs on `main` finish (see ci.yml).
+concurrency:
+  group: atp-proof-lanes-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  ATP_LOG_LEVEL: info
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  # Proof lane matrix configuration
+  setup:
+    name: Setup Proof Lane Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.generate-matrix.outputs.matrix }}
+      proof-mode: ${{ steps.determine-mode.outputs.mode }}
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+    - name: Determine proof mode
+      id: determine-mode
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          echo "mode=${{ github.event.inputs.proof_mode }}" >> "$GITHUB_OUTPUT"
+        elif [ "${{ github.event_name }}" = "schedule" ]; then
+          echo "mode=full" >> "$GITHUB_OUTPUT"
+        elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+          echo "mode=full" >> "$GITHUB_OUTPUT"
+        else
+          echo "mode=smoke" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Generate lane matrix
+      id: generate-matrix
+      run: |
+        python3 scripts/ci/generate_matrix.py \
+          --mode "${{ steps.determine-mode.outputs.mode }}" \
+          --platforms "${{ github.event.inputs.target_platforms || 'linux,macos,windows' }}" \
+          --output matrix.json
+        {
+          echo "matrix<<ATP_MATRIX_JSON"
+          cat matrix.json
+          printf '\n'
+          echo "ATP_MATRIX_JSON"
+        } >> "$GITHUB_OUTPUT"
+
+  # Produce a clean-checkout executable for privileged matrix runners that
+  # cannot admit a peer-dirty shared-main workspace. The artifact name and
+  # manifest bind the binary to the exact push SHA; the tar archive preserves
+  # its executable bit across GitHub artifact download/extraction.
+  commit-bound-atp-binary:
+    name: Build Commit-Bound ATP Binary (linux-x86_64)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      CARGO_INCREMENTAL: 0
+      ATP_BUILD_TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+    - name: Checkout exact source revision
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      with:
+        persist-credentials: false
+
+    - name: Setup pinned Rust toolchain
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+      with:
+        toolchain: nightly-2026-07-05
+        targets: x86_64-unknown-linux-gnu
+
+    - name: Verify clean commit-bound checkout
+      run: |
+        test "$RUNNER_OS" = "Linux"
+        test "$RUNNER_ARCH" = "X64"
+        test "$(uname -m)" = "x86_64"
+        test -n "${ImageOS:-}"
+        test -n "${ImageVersion:-}"
+        test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+        test -z "$(git status --porcelain --untracked-files=all)"
+        test "$(rustc -vV | sed -n 's/^host: //p')" = "$ATP_BUILD_TARGET"
+
+    - name: Build ATP matrix binary
+      run: |
+        cargo build --locked --release \
+          --target "$ATP_BUILD_TARGET" \
+          --bin atp \
+          --features atp-cli
+        test -z "$(git status --porcelain --untracked-files=all)"
+
+    - name: Package binary and provenance
+      id: package
+      env:
+        ARTIFACT_ROOT: artifacts/commit-bound-atp
+      run: |
+        payload_dir="$ARTIFACT_ROOT/payload"
+        archive_name="atp-linux-x86_64-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar.gz"
+        attestation_bundle_name="attestation-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl"
+        export ATP_ARCHIVE_NAME="$archive_name"
+        export ATP_ATTESTATION_BUNDLE_NAME="$attestation_bundle_name"
+        mkdir -p "$payload_dir"
+        install -m 0755 "target/$ATP_BUILD_TARGET/release/atp" "$payload_dir/atp-linux-x86_64"
+        file_output="$(file -b "$payload_dir/atp-linux-x86_64")"
+        [[ "$file_output" == *"ELF 64-bit LSB"* && "$file_output" == *"x86-64"* ]]
+        "$payload_dir/atp-linux-x86_64" --version
+        git diff --quiet --exit-code
+        git diff --cached --quiet --exit-code
+
+        python3 - <<'PY'
+        import hashlib
+        import json
+        import os
+        import pathlib
+        import subprocess
+
+        artifact_root = pathlib.Path(os.environ["ARTIFACT_ROOT"])
+        binary = artifact_root / "payload" / "atp-linux-x86_64"
+        lockfile = pathlib.Path("Cargo.lock")
+        manifest = {
+            "schema": "asupersync-commit-bound-atp-binary-v1",
+            "source": {
+                "repository": os.environ["GITHUB_REPOSITORY"],
+                "git_sha": os.environ["GITHUB_SHA"],
+                "git_tree": subprocess.check_output(
+                    ["git", "rev-parse", "HEAD^{tree}"], text=True
+                ).strip(),
+                "clean_checkout_verified": True,
+                "git_ref": os.environ["GITHUB_REF"],
+            },
+            "build": {
+                "command": (
+                    "cargo build --locked --release --target "
+                    "x86_64-unknown-linux-gnu --bin atp --features atp-cli"
+                ),
+                "target": os.environ["ATP_BUILD_TARGET"],
+                "rustc": subprocess.check_output(["rustc", "-Vv"], text=True).strip(),
+                "cargo": subprocess.check_output(["cargo", "-V"], text=True).strip(),
+                "cargo_lock_sha256": hashlib.sha256(lockfile.read_bytes()).hexdigest(),
+                "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+                "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+                "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
+                "runner_os": os.environ["RUNNER_OS"],
+                "runner_arch": os.environ["RUNNER_ARCH"],
+                "runner_image_os": os.environ["ImageOS"],
+                "runner_image_version": os.environ["ImageVersion"],
+            },
+            "abi": {
+                "build_host_glibc": subprocess.check_output(
+                    ["getconf", "GNU_LIBC_VERSION"], text=True
+                ).strip(),
+                "file_description": subprocess.check_output(
+                    ["file", "-b", str(binary)], text=True
+                ).strip(),
+                "machine": os.uname().machine,
+            },
+            "artifact": {
+                "archive_attestation_required": True,
+                "archive_name": os.environ["ATP_ARCHIVE_NAME"],
+            },
+            "binary": {
+                "name": binary.name,
+                "size_bytes": binary.stat().st_size,
+                "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "version_output": subprocess.check_output(
+                    [str(binary), "--version"], text=True
+                ).strip(),
+            },
+            "verification": {
+                "archive_attestation_required": True,
+                "attestation_bundle": os.environ["ATP_ATTESTATION_BUNDLE_NAME"],
+                "attestation_predicate_type": "https://slsa.dev/provenance/v1",
+                "embedded_provenance_authoritative": True,
+                "required_signer_workflow": (
+                    "Dicklesworthstone/asupersync/.github/workflows/atp-proof-lanes.yml"
+                ),
+                "required_source_ref": "refs/heads/main",
+            },
+            "claims": {
+                "performance": False,
+                "matrix_execution": False,
+                "broad_workspace_health": False,
+                "consumer_verification": False,
+                "privileged_execution_safety": False,
+                "release_readiness": False,
+                "reproducible_build": False,
+                "runtime_correctness": False,
+            },
+        }
+        rendered = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+        (artifact_root / "payload" / "provenance.json").write_text(rendered)
+        (artifact_root / "provenance.json").write_text(rendered)
+        PY
+
+        (
+          cd "$payload_dir"
+          sha256sum atp-linux-x86_64 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+        )
+        archive="$ARTIFACT_ROOT/$archive_name"
+        tar -C "$payload_dir" -czf "$archive" \
+          atp-linux-x86_64 provenance.json SHA256SUMS
+        (
+          cd "$ARTIFACT_ROOT"
+          sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256"
+        )
+        printf 'archive=%s\n' "$archive" >> "$GITHUB_OUTPUT"
+
+    - name: Attest commit-bound archive provenance
+      id: attest-archive
+      uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+      with:
+        subject-path: ${{ steps.package.outputs.archive }}
+
+    - name: Retain offline attestation bundle
+      env:
+        ATTESTATION_BUNDLE_PATH: ${{ steps.attest-archive.outputs.bundle-path }}
+      run: |
+        test -s "$ATTESTATION_BUNDLE_PATH"
+        install -m 0644 "$ATTESTATION_BUNDLE_PATH" \
+          "artifacts/commit-bound-atp/attestation-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.jsonl"
+
+    - name: Upload commit-bound ATP binary
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: atp-linux-x86_64-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: |
+          artifacts/commit-bound-atp/*.tar.gz
+          artifacts/commit-bound-atp/*.sha256
+          artifacts/commit-bound-atp/attestation-bundle-*.jsonl
+          artifacts/commit-bound-atp/provenance.json
+        if-no-files-found: error
+        retention-days: 30
+        compression-level: 0
+
+  # Fast smoke lanes (< 10 minutes total)
+  smoke-lanes:
+    name: "Smoke: ${{ matrix.lane.name }} (${{ matrix.platform }})"
+    runs-on: ${{ matrix.platform }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix).smoke }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+      with:
+        toolchain: nightly
+        components: rustfmt, clippy
+
+    - name: Setup platform dependencies
+      run: scripts/ci/platforms/setup_${{ matrix.platform_script }}.sh
+
+    - name: Run smoke lane
+      run: |
+        scripts/ci/lanes/run_lane.sh \
+          --lane "${{ matrix.lane.id }}" \
+          --mode smoke \
+          --platform "${{ matrix.platform }}" \
+          --timeout "${{ matrix.lane.timeout }}" \
+          --artifacts-dir "artifacts/smoke"
+
+    - name: Upload smoke artifacts
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: always()
+      with:
+        name: smoke-${{ matrix.lane.id }}-${{ matrix.platform }}
+        path: |
+          artifacts/smoke/${{ matrix.lane.id }}/
+          test-results/
+        retention-days: 7
+
+  # Full proof lanes (comprehensive testing)
+  full-lanes:
+    name: "Full: ${{ matrix.lane.name }} (${{ matrix.platform }})"
+    runs-on: ${{ matrix.platform }}
+    needs: [setup, smoke-lanes]
+    if: |
+      always() &&
+      (needs.setup.outputs.proof-mode == 'full' || needs.setup.outputs.proof-mode == 'release')
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix).full }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+      with:
+        toolchain: nightly
+        components: rustfmt, clippy
+
+    - name: Setup platform dependencies
+      run: scripts/ci/platforms/setup_${{ matrix.platform_script }}.sh
+
+    - name: Setup ATP test environment
+      run: |
+        scripts/ci/setup_atp_env.sh
+        # Download test vectors and conformance data
+        scripts/ci/download_test_vectors.sh
+
+    - name: Run full lane
+      run: |
+        scripts/ci/lanes/run_lane.sh \
+          --lane "${{ matrix.lane.id }}" \
+          --mode full \
+          --platform "${{ matrix.platform }}" \
+          --timeout "${{ matrix.lane.timeout }}" \
+          --artifacts-dir "artifacts/full"
+
+    - name: Validate lane artifacts
+      run: |
+        scripts/ci/validate_artifacts.sh \
+          --lane "${{ matrix.lane.id }}" \
+          --artifacts-dir "artifacts/full"
+
+    - name: Upload full artifacts
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: always()
+      with:
+        name: full-${{ matrix.lane.id }}-${{ matrix.platform }}
+        path: |
+          artifacts/full/${{ matrix.lane.id }}/
+          test-results/
+          logs/
+        retention-days: 30
+
+  # Release proof lanes (extended testing)
+  release-lanes:
+    name: "Release: ${{ matrix.lane.name }} (${{ matrix.platform }})"
+    runs-on: ${{ matrix.platform }}
+    needs: [setup, full-lanes]
+    if: |
+      always() &&
+      needs.setup.outputs.proof-mode == 'release'
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.matrix).release }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+    - name: Setup Rust toolchain
+      uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+      with:
+        toolchain: nightly
+        components: rustfmt, clippy
+
+    - name: Setup platform dependencies
+      run: scripts/ci/platforms/setup_${{ matrix.platform_script }}.sh
+
+    - name: Setup ATP release environment
+      run: |
+        scripts/ci/setup_atp_env.sh
+        scripts/ci/setup_release_env.sh
+
+    - name: Run release lane
+      run: |
+        scripts/ci/lanes/run_lane.sh \
+          --lane "${{ matrix.lane.id }}" \
+          --mode release \
+          --platform "${{ matrix.platform }}" \
+          --timeout "${{ matrix.lane.timeout }}" \
+          --artifacts-dir "artifacts/release" \
+          --enable-extended-logging
+
+    - name: Generate release proof
+      run: |
+        scripts/ci/generate_proof.sh \
+          --lane "${{ matrix.lane.id }}" \
+          --artifacts-dir "artifacts/release" \
+          --output "proof/${{ matrix.lane.id }}-proof.json"
+
+    - name: Upload release artifacts
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      if: always()
+      with:
+        name: release-${{ matrix.lane.id }}-${{ matrix.platform }}
+        path: |
+          artifacts/release/${{ matrix.lane.id }}/
+          proof/
+          test-results/
+          logs/
+        retention-days: 90
+
+  # Aggregate results and generate proof summary
+  proof-summary:
+    name: Generate Proof Summary
+    runs-on: ubuntu-latest
+    needs: [setup, smoke-lanes, full-lanes, release-lanes]
+    if: always()
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      with:
+        path: all-artifacts/
+
+    - name: Generate comprehensive proof report
+      run: |
+        python3 scripts/ci/generate_proof_report.py \
+          --artifacts-dir all-artifacts/ \
+          --mode "${{ needs.setup.outputs.proof-mode }}" \
+          --output proof-report.json \
+          --summary proof-summary.md
+
+    - name: Upload proof summary
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: proof-summary-${{ needs.setup.outputs.proof-mode }}
+        path: |
+          proof-report.json
+          proof-summary.md
+        retention-days: 365
+
+    - name: Post proof summary to PR
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+      with:
+        script: |
+          const fs = require('fs');
+          const summary = fs.readFileSync('proof-summary.md', 'utf8');
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: `## ATP Proof Lane Summary\n\n${summary}`
+          });
+
+    - name: Check proof gates for release
+      if: needs.setup.outputs.proof-mode == 'release'
+      run: |
+        python3 scripts/ci/check_release_gates.py \
+          --proof-report proof-report.json \
+          --gate-config scripts/ci/release_gates.yml

@@ -1,0 +1,34 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "async_method",
+    request: HealthCheckRequest {
+        service: "async.test.Service",
+    },
+    response: Ok(
+        HealthCheckResponse {
+            status: Serving,
+        },
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                Serving,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 1,
+            not_serving: 0,
+            service_unknown: 0,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "async_method",
+        description: "Health check using async method path (same response format)",
+        async_method: true,
+    },
+}

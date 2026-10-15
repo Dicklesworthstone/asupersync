@@ -1,0 +1,25 @@
+{
+  "schema_version": "fuzz-manifest-lease-queue-input-v1",
+  "manifest_path": "fuzz/Cargo.toml",
+  "current_manifest_targets": [],
+  "proposals": [
+    {
+      "proposal_id": "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+      "agent": "MaroonBear",
+      "bead_id": "asupersync-fuzz-a",
+      "target_name": "http_header_map_invariants",
+      "target_path": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+      "priority": 1,
+      "created_ts": "2026-05-08T06:02:00Z"
+    }
+  ],
+  "reservations": [
+    {
+      "path_pattern": "fuzz/Cargo.toml",
+      "holder": "VioletLark",
+      "exclusive": true,
+      "expires_ts": "2026-05-08T07:00:00Z",
+      "reason": "active fuzz manifest edit"
+    }
+  ]
+}

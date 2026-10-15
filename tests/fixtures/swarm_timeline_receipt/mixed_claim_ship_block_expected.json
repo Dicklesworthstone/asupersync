@@ -1,0 +1,145 @@
+{
+  "agent": "CopperSpring",
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:30:00Z",
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/data/projects/asupersync",
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "non_mutating": true
+  },
+  "safety_notes": [
+    "fixture mode reads JSON only",
+    "no Agent Mail acknowledgements, sends, reservations, or Beads updates are performed",
+    "cargo/rch commands are not executed by this helper"
+  ],
+  "schema_version": "swarm-timeline-receipt-v1",
+  "source_counts": {
+    "agent_mail_messages": 4,
+    "duplicates_coalesced": 0,
+    "events_before_coalescing": 5,
+    "git_commits": 1,
+    "timeline_events": 5
+  },
+  "timeline": [
+    {
+      "agent": "CopperSpring",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "created_ts": "2026-05-08T05:20:56Z",
+      "event_id": "b2df8333a09f",
+      "kind": "claim",
+      "source": "agent-mail",
+      "source_refs": [
+        "10"
+      ],
+      "subject": "[asupersync-aj7lx3.11] Starting redacted timeline receipt",
+      "summary": "Claimed asupersync-aj7lx3.11 and reserved scripts/swarm_timeline_receipt.py plus tests/swarm_timeline_receipt_contract.rs.",
+      "thread_id": "asupersync-aj7lx3.11",
+      "validation": []
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_ids": [
+        "asupersync-aj7lx3.12"
+      ],
+      "created_ts": "2026-05-08T05:21:30Z",
+      "event_id": "1bba4fa25ffa",
+      "kind": "claim",
+      "source": "agent-mail",
+      "source_refs": [
+        "11"
+      ],
+      "subject": "[asupersync-aj7lx3.12] Claiming touched-surface proof selector",
+      "summary": "Starting asupersync-aj7lx3.12. Validation will use rch exec -- cargo test -p asupersync --test touched_surface_contract.",
+      "thread_id": "asupersync-aj7lx3.12",
+      "validation": [
+        "Starting asupersync-aj7lx3.12. Validation will use rch exec -- cargo test -p asupersync --test touched_surface_contract."
+      ]
+    },
+    {
+      "agent": "MossyJaguar",
+      "bead_ids": [
+        "asupersync-vddieh"
+      ],
+      "created_ts": "2026-05-08T05:22:00Z",
+      "event_id": "83493117f7a0",
+      "kind": "block",
+      "source": "agent-mail",
+      "source_refs": [
+        "12"
+      ],
+      "subject": "Blocker: Compilation failed due to another agent's syntax error",
+      "summary": "asupersync-vddieh is blocked by an unrelated syntax error in src/trace/distributed/context.rs. Validation failed before the intended snapshot assertion.",
+      "thread_id": "asupersync-vddieh",
+      "validation": [
+        "asupersync-vddieh is blocked by an unrelated syntax error in src/trace/distributed/context.rs. Validation failed before the intended snapshot assertion."
+      ]
+    },
+    {
+      "agent": "TopazGoose",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "created_ts": "2026-05-08T05:23:00Z",
+      "event_id": "6e14901731e7",
+      "kind": "reservation",
+      "source": "agent-mail",
+      "source_refs": [
+        "13"
+      ],
+      "subject": "[asupersync-aj7lx3.11] Reservation refreshed",
+      "summary": "Reservation refreshed for tests/fixtures/swarm_timeline_receipt/*.json.",
+      "thread_id": "asupersync-aj7lx3.11",
+      "validation": []
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_ids": [
+        "asupersync-aj7lx3.11"
+      ],
+      "commit": "230604c1b8d0",
+      "created_ts": "2026-05-08T05:40:00Z",
+      "event_id": "a33338c4eb62",
+      "kind": "ship",
+      "source": "git",
+      "source_refs": [
+        "230604c1b8d0"
+      ],
+      "subject": "[br-asupersync-aj7lx3.11] ship redacted timeline receipt",
+      "summary": "Validation: python3 -m py_compile scripts/swarm_timeline_receipt.py passed. rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract -- --nocapture passed 6 tests.",
+      "thread_id": "",
+      "validation": [
+        "Validation: python3 -m py_compile scripts/swarm_timeline_receipt.py passed. rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract -- --nocapture passed 6 tests."
+      ]
+    }
+  ],
+  "unresolved_cues": [
+    {
+      "agent": "CopperSpring",
+      "bead_id": "asupersync-aj7lx3.12",
+      "event_id": "1bba4fa25ffa",
+      "kind": "active-claim-without-ship",
+      "reason": "claim has no later ship event in this receipt"
+    },
+    {
+      "agent": "MossyJaguar",
+      "bead_id": "asupersync-vddieh",
+      "event_id": "83493117f7a0",
+      "kind": "unresolved-blocker",
+      "reason": "blocker has no later ship event in this receipt"
+    }
+  ]
+}

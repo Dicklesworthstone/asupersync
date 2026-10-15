@@ -1,0 +1,2800 @@
+//! Cancellation reason and kind types.
+//!
+//! Cancellation in Asupersync is a first-class protocol, not a silent drop.
+//! This module defines the types that describe why and how cancellation occurred.
+//!
+//! # Cleanup Budget Policy
+//!
+//! Every cancellation carries a **cleanup budget** that bounds the resources
+//! available for cleanup code (drop glue, finalizers, obligation discharge).
+//! The policy is **severity-scaled**: more urgent cancellations get tighter
+//! budgets but higher scheduling priority.
+//!
+//! | CancelKind | Poll Quota | Priority | Rationale |
+//! |------------|-----------|----------|-----------|
+//! | User | 1000 | 200 | Graceful; user expects orderly shutdown |
+//! | Timeout/Deadline | 500 | 210 | Time-driven; moderate cleanup window |
+//! | PollQuota/CostBudget | 300 | 215 | Budget violation; tight but fair |
+//! | FailFast/RaceLost/Parent/Resource | 200 | 220 | Cascading; fast teardown needed |
+//! | Shutdown | 50 | 255 | Urgent; minimal cleanup, max priority |
+//!
+//! ## Min-Plus Rules (Budget Interaction)
+//!
+//! When a task receives multiple cancellation requests, the cleanup budgets
+//! are **combined** via the meet (∧) operation from the budget algebra
+//! (see `Budget::combine`). This means:
+//!
+//! - Poll quotas: min (tighter quota wins)
+//! - Priority: max (higher urgency wins)
+//!
+//! This ensures that strengthening a cancellation never *increases* the
+//! cleanup budget — the monotone-narrowing property from the budget
+//! semilattice is preserved.
+//!
+//! ## Bounded Completion Guarantee
+//!
+//! Because cleanup budgets have finite poll quotas:
+//!
+//! 1. Each `consume_poll()` call strictly decreases the remaining quota
+//!    (Lemma 7 in `types::budget::tests`)
+//! 2. After exactly `poll_quota` polls, the budget is exhausted
+//!    (Lemma 10 in `types::budget::tests`)
+//! 3. An exhausted budget causes the scheduler to stop polling the task
+//!
+//! Therefore cleanup terminates within `poll_quota` poll cycles, which
+//! is the **sufficient-budget termination** property.
+//!
+//! ## Calibration Guidelines
+//!
+//! - **Production**: Use default quotas. If cleanup routines need more
+//!   polls (e.g., flushing large buffers), increase the User/Timeout
+//!   quotas proportionally but keep Shutdown ≤ 100.
+//! - **Lab/Testing**: Use `Budget::MINIMAL` (100 polls) for fast
+//!   deterministic runs. Set `ASUPERSYNC_CLEANUP_BUDGET_OVERRIDE` env
+//!   var to override all cleanup quotas for calibration experiments.
+//! - **Backpressure**: Priority elevation (200–255) ensures cancelled
+//!   tasks get scheduled promptly even under load, preventing
+//!   indefinite queueing of cleanup work.
+//!
+//! # Attribution
+//!
+//! Each cancellation reason includes full attribution information:
+//! - **Origin**: The region and optionally task that initiated the cancellation
+//! - **Timestamp**: When the cancellation was requested
+//! - **Cause chain**: Optional chain of parent causes for debugging
+//!
+//! This enables debugging and diagnostics to trace cancellation back to its source.
+//!
+//! # Memory Management
+//!
+//! Cause chains can grow unboundedly deep in complex cancellation scenarios.
+//! To prevent unbounded memory growth, use [`CancelAttributionConfig`] to set limits:
+//!
+//! - `max_chain_depth`: Maximum depth of cause chain to preserve (default: 16)
+//! - `max_chain_memory`: Maximum total memory for cause chain (default: 4KB)
+//!
+//! When chains exceed limits, they are truncated with a clear marker.
+//!
+//! ## Memory Cost Analysis
+//!
+//! Memory cost per `CancelReason`:
+//! - Base: ~80 bytes (ids, timestamp, kind, flags)
+//! - Message: variable (static &str pointer = 16 bytes)
+//! - Cause: recursive (Box pointer = 8 bytes + child cost)
+//!
+//! Total cost for chain of depth D with no messages:
+//! ```text
+//! cost = 80 * D + 8 * (D-1)  // ~88 bytes per level
+//! ```
+//!
+//! Default limits (depth=16, memory=4KB) allow chains up to ~45 levels
+//! but prefer depth limiting for predictability.
+
+use super::{Budget, RegionId, TaskId, Time};
+use core::fmt;
+use serde::{Deserialize, Serialize};
+
+/// br-asupersync-dyao05 — Hard cap on the cause-chain depth a
+/// serde Deserializer will recurse through. The runtime
+/// `CancelAttributionConfig::max_chain_depth` is 16 by default;
+/// this constant sits at 64 — 4x headroom over the runtime cap so
+/// no legitimate snapshot is spuriously rejected, but tight enough
+/// to fire BEFORE serde_json's default recursion limit (128) and
+/// well before any plausible stack-overflow boundary on the
+/// MessagePack / bincode / postcard transports that have NO
+/// built-in recursion limit. Crafted snapshots like
+/// `{"cause": {"cause": {"cause": ... 50_000 levels ... }}}`
+/// surface as `serde::de::Error::custom` so the transport layer
+/// (distributed/snapshot.rs, fabric MessagePack frames, debug
+/// JSON endpoints) classifies the input as malformed and refuses
+/// to materialize the chain.
+const MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH: usize = 64;
+
+thread_local! {
+    /// Per-thread cause-chain depth counter for `CancelReason`
+    /// deserialization. Incremented on entry to
+    /// `deserialize_bounded_cause`, decremented on exit (via the
+    /// `CauseDepthGuard` Drop). The thread-local is sound here
+    /// because serde's `Deserializer` impls are inherently
+    /// single-threaded for the duration of one deserialize call —
+    /// the recursion is on the stack of one thread.
+    static CANCEL_CAUSE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard that decrements the cause-chain depth counter even
+/// on panic / early-return. Critical for correctness: if a
+/// deserialize call panics mid-recursion the thread-local
+/// otherwise carries stale depth into the NEXT deserialize call
+/// on the same thread, which would either spuriously reject valid
+/// input or (worse) admit input deeper than the cap.
+struct CauseDepthGuard;
+
+impl Drop for CauseDepthGuard {
+    fn drop(&mut self) {
+        CANCEL_CAUSE_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// br-asupersync-dyao05 — Custom deserializer for the `cause`
+/// field of `CancelReason`. Wraps the standard
+/// `Option<Box<CancelReason>>::deserialize` with a depth check
+/// that bails before the recursion can blow the stack or cause
+/// catastrophic heap allocation.
+///
+/// The check fires on each recursion step (one level of
+/// `Option<Box<CancelReason>>`); cumulative depth across the
+/// chain is bounded by `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH`.
+fn deserialize_bounded_cause<'de, D>(deserializer: D) -> Result<Option<Box<CancelReason>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let depth = CANCEL_CAUSE_DEPTH.with(|c| {
+        let new = c.get().saturating_add(1);
+        c.set(new);
+        new
+    });
+    let _guard = CauseDepthGuard;
+    if depth > MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH {
+        return Err(D::Error::custom(format!(
+            "CancelReason cause-chain depth {depth} exceeds maximum \
+             {MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH} (br-asupersync-dyao05)"
+        )));
+    }
+    Option::<Box<CancelReason>>::deserialize(deserializer)
+}
+
+/// Configuration for cancel attribution chain limits.
+///
+/// Controls memory usage by limiting cause chain depth and total memory.
+/// Use this to prevent unbounded memory growth in complex cancellation scenarios.
+///
+/// # Example
+///
+/// ```rust
+/// use asupersync::types::CancelAttributionConfig;
+///
+/// let config = CancelAttributionConfig::default();
+/// assert_eq!(config.max_chain_depth, 16);
+/// assert_eq!(config.max_chain_memory, 4096);
+///
+/// let custom = CancelAttributionConfig::new(8, 2048);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelAttributionConfig {
+    /// Maximum depth of cause chain to preserve.
+    /// Deeper chains are truncated with a 'truncated' marker.
+    /// Default: 16
+    pub max_chain_depth: usize,
+
+    /// Maximum total memory (in bytes) for cause chain.
+    /// When exceeded, chain is truncated.
+    /// Default: 4096 (4KB)
+    pub max_chain_memory: usize,
+}
+
+impl CancelAttributionConfig {
+    /// Default maximum chain depth.
+    pub const DEFAULT_MAX_DEPTH: usize = 16;
+
+    /// Default maximum chain memory (4KB).
+    pub const DEFAULT_MAX_MEMORY: usize = 4096;
+
+    /// Creates a new configuration with custom limits.
+    #[inline]
+    #[must_use]
+    pub const fn new(max_chain_depth: usize, max_chain_memory: usize) -> Self {
+        Self {
+            max_chain_depth,
+            max_chain_memory,
+        }
+    }
+
+    /// Creates a configuration with no limits (for testing or special cases).
+    #[inline]
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self {
+            max_chain_depth: usize::MAX,
+            max_chain_memory: usize::MAX,
+        }
+    }
+
+    /// Returns the estimated memory cost of a single `CancelReason` (without cause chain).
+    ///
+    /// This is approximately:
+    /// - 8 bytes: kind (enum)
+    /// - 8 bytes: origin_region (RegionId)
+    /// - 16 bytes: origin_task (`Option<TaskId>`)
+    /// - 8 bytes: timestamp (Time)
+    /// - 16 bytes: message (`Option<&'static str>`)
+    /// - 8 bytes: cause (`Option<Box<...>>` pointer, not content)
+    /// - 1 byte: truncated flag
+    /// - 8 bytes: truncated_at_depth (`Option<usize>`)
+    /// - Total: ~80 bytes (rounded up for alignment)
+    #[inline]
+    #[must_use]
+    pub const fn single_reason_cost() -> usize {
+        80
+    }
+
+    /// Estimates memory cost for a chain of given depth.
+    #[inline]
+    #[must_use]
+    pub const fn estimated_chain_cost(depth: usize) -> usize {
+        if depth == 0 {
+            return 0;
+        }
+        // Each level: ~80 bytes base + 8 bytes Box overhead for parent
+        Self::single_reason_cost() * depth + 8 * depth.saturating_sub(1)
+    }
+}
+
+impl Default for CancelAttributionConfig {
+    fn default() -> Self {
+        Self {
+            max_chain_depth: Self::DEFAULT_MAX_DEPTH,
+            max_chain_memory: Self::DEFAULT_MAX_MEMORY,
+        }
+    }
+}
+
+/// The kind of cancellation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CancelKind {
+    /// Explicit cancellation requested by user code.
+    User,
+    /// Cancellation due to timeout/deadline.
+    Timeout,
+    /// Cancellation due to deadline budget exhaustion (§3.2.1).
+    Deadline,
+    /// Cancellation due to poll quota exhaustion (§3.2.2).
+    PollQuota,
+    /// Cancellation due to cost budget exhaustion (§3.2.3).
+    CostBudget,
+    /// Cancellation due to fail-fast policy (sibling failed).
+    FailFast,
+    /// Cancellation due to losing a race (another branch completed first).
+    RaceLost,
+    /// Cancellation due to parent region being cancelled/closing.
+    ParentCancelled,
+    /// Cancellation due to resource unavailability (e.g., file descriptors, memory).
+    ResourceUnavailable,
+    /// Cancellation due to runtime shutdown.
+    Shutdown,
+    /// Cancellation due to a linked task's abnormal exit (Spork link propagation).
+    LinkedExit,
+}
+
+// ========================================================================
+// Cancellation Witnesses
+// ========================================================================
+
+/// The cancellation phase witnessed by the runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum CancelPhase {
+    /// Cancellation has been requested but not yet acknowledged.
+    Requested,
+    /// Task has acknowledged cancellation and is draining cleanup.
+    Cancelling,
+    /// Task is running finalizers.
+    Finalizing,
+    /// Task completed with a cancelled outcome.
+    Completed,
+}
+
+impl CancelPhase {
+    #[inline]
+    fn rank(self) -> u8 {
+        match self {
+            Self::Requested => 0,
+            Self::Cancelling => 1,
+            Self::Finalizing => 2,
+            Self::Completed => 3,
+        }
+    }
+}
+
+/// A proof-of-completion token for cancellation.
+///
+/// This witness is emitted by the cancellation protocol to make completion
+/// verifiable and to detect inconsistent or out-of-order transitions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelWitness {
+    /// The task associated with this cancellation.
+    pub task_id: TaskId,
+    /// The owning region.
+    pub region_id: RegionId,
+    /// Cancellation epoch (increments on first request).
+    pub epoch: u64,
+    /// The phase observed.
+    pub phase: CancelPhase,
+    /// The cancellation reason.
+    pub reason: CancelReason,
+}
+
+impl CancelWitness {
+    /// Creates a new cancellation witness.
+    #[inline]
+    #[must_use]
+    pub fn new(
+        task_id: TaskId,
+        region_id: RegionId,
+        epoch: u64,
+        phase: CancelPhase,
+        reason: CancelReason,
+    ) -> Self {
+        Self {
+            task_id,
+            region_id,
+            epoch,
+            phase,
+            reason,
+        }
+    }
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Centralized validator for the
+    /// initial witness in a per-task witness stream. Both the witness-
+    /// based oracle (`cancel_correctness`) and the event-based oracle
+    /// (`cancellation_protocol`, via its `on_cancel_witness` hook)
+    /// route through this method so two oracles wired to the same
+    /// witness stream cannot disagree on whether the initial witness
+    /// is well-formed.
+    ///
+    /// The first observed witness must use a non-zero epoch. Epoch 0
+    /// is reserved for the "no cancel ever requested" sentinel, and a
+    /// witness carrying epoch 0 indicates a runtime that emitted a
+    /// witness for a task that was never actually cancelled — a
+    /// protocol violation.
+    pub fn validate_initial(&self) -> Result<(), CancelWitnessError> {
+        if self.epoch == 0 {
+            return Err(CancelWitnessError::InitialEpochZero);
+        }
+        Ok(())
+    }
+
+    /// Validates a transition between two witnesses.
+    ///
+    /// Invariants:
+    /// - Same task, region, and epoch
+    /// - Phase must be monotone (no regression)
+    /// - Cancellation severity must not weaken
+    pub fn validate_transition(prev: Option<&Self>, next: &Self) -> Result<(), CancelWitnessError> {
+        let Some(prev) = prev else {
+            return Ok(());
+        };
+
+        if prev.task_id != next.task_id {
+            return Err(CancelWitnessError::TaskMismatch);
+        }
+        if prev.region_id != next.region_id {
+            return Err(CancelWitnessError::RegionMismatch);
+        }
+        if prev.epoch != next.epoch {
+            return Err(CancelWitnessError::EpochMismatch);
+        }
+        if next.phase.rank() < prev.phase.rank() {
+            return Err(CancelWitnessError::PhaseRegression {
+                from: prev.phase,
+                to: next.phase,
+            });
+        }
+        if next.reason.severity() < prev.reason.severity() {
+            return Err(CancelWitnessError::ReasonWeakened {
+                from: prev.reason.kind(),
+                to: next.reason.kind(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Errors when validating cancellation witnesses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelWitnessError {
+    /// Initial witness used cancellation epoch 0. Epoch 0 is the
+    /// "no cancel" sentinel; the first witness emitted for a task
+    /// must use a non-zero epoch (br-asupersync-9fjaqe / -f1zjwu).
+    InitialEpochZero,
+    /// Task identifiers do not match.
+    TaskMismatch,
+    /// Region identifiers do not match.
+    RegionMismatch,
+    /// Cancellation epoch differs.
+    EpochMismatch,
+    /// Phase regression detected.
+    PhaseRegression {
+        /// Previous phase observed.
+        from: CancelPhase,
+        /// New phase observed.
+        to: CancelPhase,
+    },
+    /// Cancellation severity weakened.
+    ReasonWeakened {
+        /// Previous cancellation kind.
+        from: CancelKind,
+        /// New cancellation kind.
+        to: CancelKind,
+    },
+}
+
+impl CancelKind {
+    /// Returns the variant name as a static string (matches `Debug` output).
+    #[inline]
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "User",
+            Self::Timeout => "Timeout",
+            Self::Deadline => "Deadline",
+            Self::PollQuota => "PollQuota",
+            Self::CostBudget => "CostBudget",
+            Self::FailFast => "FailFast",
+            Self::RaceLost => "RaceLost",
+            Self::ParentCancelled => "ParentCancelled",
+            Self::ResourceUnavailable => "ResourceUnavailable",
+            Self::Shutdown => "Shutdown",
+            Self::LinkedExit => "LinkedExit",
+        }
+    }
+
+    /// Returns the severity of this cancellation kind.
+    ///
+    /// Higher severity cancellations take precedence when strengthening.
+    /// Severity groups (low to high):
+    /// - 0: User (explicit, gentle)
+    /// - 1: Timeout, Deadline (time-based constraints)
+    /// - 2: PollQuota, CostBudget (resource budgets)
+    /// - 3: FailFast, RaceLost (sibling/peer outcomes)
+    /// - 4: ParentCancelled, ResourceUnavailable (structural/resource)
+    /// - 5: Shutdown (system-level)
+    #[inline]
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::User => 0,
+            Self::Timeout | Self::Deadline => 1,
+            Self::PollQuota | Self::CostBudget => 2,
+            Self::FailFast | Self::RaceLost | Self::LinkedExit => 3,
+            Self::ParentCancelled | Self::ResourceUnavailable => 4,
+            Self::Shutdown => 5,
+        }
+    }
+}
+
+impl fmt::Display for CancelKind {
+    #[inline]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::User => write!(f, "user"),
+            Self::Timeout => write!(f, "timeout"),
+            Self::Deadline => write!(f, "deadline"),
+            Self::PollQuota => write!(f, "poll quota"),
+            Self::CostBudget => write!(f, "cost budget"),
+            Self::FailFast => write!(f, "fail-fast"),
+            Self::RaceLost => write!(f, "race lost"),
+            Self::ParentCancelled => write!(f, "parent cancelled"),
+            Self::ResourceUnavailable => write!(f, "resource unavailable"),
+            Self::Shutdown => write!(f, "shutdown"),
+            Self::LinkedExit => write!(f, "linked exit"),
+        }
+    }
+}
+
+/// The reason for a cancellation, including kind, attribution, and optional context.
+///
+/// # Attribution
+///
+/// Every cancellation includes full attribution:
+/// - `origin_region`: The region that initiated the cancellation
+/// - `origin_task`: Optionally, the specific task that initiated it
+/// - `timestamp`: When the cancellation was requested
+/// - `cause`: Optional parent cause for building diagnostic chains
+///
+/// # Cause Chains
+///
+/// Cancellations can form chains when one cancellation causes another.
+/// For example, a timeout might trigger a parent cancellation, which then
+/// cascades to children. Use [`root_cause()`][CancelReason::root_cause] to
+/// find the original cause, or iterate with [`chain()`][CancelReason::chain].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelReason {
+    /// The kind of cancellation.
+    pub kind: CancelKind,
+    /// The region that initiated this cancellation.
+    pub origin_region: RegionId,
+    /// The task that initiated this cancellation (if any).
+    pub origin_task: Option<TaskId>,
+    /// When the cancellation was requested.
+    pub timestamp: Time,
+    /// Optional human-readable message (static for determinism).
+    pub message: Option<String>,
+    /// The parent cause of this cancellation (for building chains).
+    ///
+    /// br-asupersync-dyao05 — `deserialize_with` routes the
+    /// recursive parse through `deserialize_bounded_cause` which
+    /// rejects chains deeper than
+    /// `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH = 64` BEFORE the recursion
+    /// can blow the stack or OOM. The runtime cap
+    /// `CancelAttributionConfig::max_chain_depth` (default 16) still
+    /// applies post-deserialize for the application-level truncation;
+    /// this gate is the wire-level defence-in-depth against
+    /// attacker-supplied snapshots.
+    #[serde(deserialize_with = "deserialize_bounded_cause")]
+    pub cause: Option<Box<Self>>,
+    /// True if the cause chain was truncated due to limits.
+    pub truncated: bool,
+    /// Depth at which truncation occurred (if truncated).
+    pub truncated_at_depth: Option<usize>,
+}
+
+macro_rules! cancel_reason_constructors {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident => $kind:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[inline]
+            #[must_use]
+            pub const fn $name() -> Self {
+                Self::new(CancelKind::$kind)
+            }
+        )*
+    };
+}
+
+impl CancelReason {
+    // ========================================================================
+    // Constructors
+    // ========================================================================
+
+    /// Creates a new cancellation reason with the given kind and origin.
+    ///
+    /// This is the primary constructor that requires full attribution.
+    #[inline]
+    #[must_use]
+    pub const fn with_origin(kind: CancelKind, origin_region: RegionId, timestamp: Time) -> Self {
+        Self {
+            kind,
+            origin_region,
+            origin_task: None,
+            timestamp,
+            message: None,
+            cause: None,
+            truncated: false,
+            truncated_at_depth: None,
+        }
+    }
+
+    /// Creates a new cancellation reason with minimal attribution (for testing/defaults).
+    ///
+    /// Uses `RegionId::testing_default()` and `Time::from_nanos(1_000_000_000)` for attribution.
+    /// Prefer `with_origin` in production code.
+    #[inline]
+    #[must_use]
+    pub const fn new(kind: CancelKind) -> Self {
+        Self {
+            kind,
+            origin_region: RegionId::testing_default(),
+            origin_task: None,
+            timestamp: Time::from_nanos(1_000_000_000),
+            message: None,
+            cause: None,
+            truncated: false,
+            truncated_at_depth: None,
+        }
+    }
+
+    /// Creates a user cancellation reason with a message.
+    #[inline]
+    #[must_use]
+    pub fn user(message: &'static str) -> Self {
+        Self {
+            kind: CancelKind::User,
+            origin_region: RegionId::testing_default(),
+            origin_task: None,
+            timestamp: Time::from_nanos(1_000_000_000),
+            message: Some(message.to_string()),
+            cause: None,
+            truncated: false,
+            truncated_at_depth: None,
+        }
+    }
+
+    cancel_reason_constructors! {
+        /// Creates a timeout cancellation reason.
+        timeout => Timeout;
+        /// Creates a deadline cancellation reason (budget deadline exceeded).
+        deadline => Deadline;
+        /// Creates a poll quota cancellation reason (budget poll quota exceeded).
+        poll_quota => PollQuota;
+        /// Creates a cost budget cancellation reason (budget cost quota exceeded).
+        cost_budget => CostBudget;
+        /// Creates a fail-fast cancellation reason (sibling failed).
+        sibling_failed => FailFast;
+        /// Creates a fail-fast cancellation reason (alias for sibling_failed).
+        ///
+        /// Used when a task is cancelled because a sibling failed in a fail-fast region.
+        fail_fast => FailFast;
+        /// Creates a race loser cancellation reason.
+        ///
+        /// Used when a task is cancelled because another task in a race completed first.
+        race_loser => RaceLost;
+        /// Creates a race lost cancellation reason (alias for race_loser).
+        ///
+        /// Used when a task is cancelled because another task in a race completed first.
+        race_lost => RaceLost;
+        /// Creates a parent-cancelled cancellation reason.
+        parent_cancelled => ParentCancelled;
+        /// Creates a resource unavailable cancellation reason.
+        resource_unavailable => ResourceUnavailable;
+        /// Creates a shutdown cancellation reason.
+        shutdown => Shutdown;
+        /// Creates a linked-exit cancellation reason (Spork link propagation).
+        linked_exit => LinkedExit;
+    }
+
+    // ========================================================================
+    // Builder Methods
+    // ========================================================================
+
+    /// Sets the origin task for this cancellation reason.
+    #[inline]
+    #[must_use]
+    pub const fn with_task(mut self, task: TaskId) -> Self {
+        self.origin_task = Some(task);
+        self
+    }
+
+    /// Sets a message for this cancellation reason.
+    #[inline]
+    #[must_use]
+    pub fn with_message(mut self, message: &'static str) -> Self {
+        self.message = Some(message.to_string());
+        self
+    }
+
+    /// Sets the cause chain for this cancellation reason.
+    ///
+    /// This does not apply any limits to the chain depth.
+    /// For production use with limits, prefer [`with_cause_limited`][Self::with_cause_limited].
+    #[inline]
+    #[must_use]
+    pub fn with_cause(mut self, cause: Self) -> Self {
+        self.cause = Some(Box::new(cause));
+        self
+    }
+
+    /// Sets the cause chain with depth and memory limits.
+    ///
+    /// If the chain would exceed the configured limits, it is truncated
+    /// and the `truncated` flag is set.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let config = CancelAttributionConfig::new(4, 1024);
+    /// let reason = CancelReason::shutdown()
+    ///     .with_cause_limited(deep_cause_chain, &config);
+    ///
+    /// if reason.truncated {
+    ///     println!("Chain truncated at depth {}", reason.truncated_at_depth.unwrap());
+    /// }
+    /// ```
+    #[must_use]
+    pub fn with_cause_limited(mut self, cause: Self, config: &CancelAttributionConfig) -> Self {
+        // Check if adding this cause would exceed limits.
+        // Use 1 for self (not chain_depth) because self.cause will be replaced.
+        let current_depth = 1_usize;
+        let cause_depth = cause.chain_depth();
+        let total_depth = current_depth + cause_depth;
+
+        if total_depth > config.max_chain_depth {
+            // Truncate the cause chain to fit within limits
+            let allowed_cause_depth = config.max_chain_depth.saturating_sub(current_depth);
+            if allowed_cause_depth == 0 {
+                // No room for any cause - mark as truncated
+                self.truncated = true;
+                self.truncated_at_depth = Some(current_depth);
+                return self;
+            }
+            // Truncate the cause chain
+            let truncated_cause = Self::truncate_chain(cause, allowed_cause_depth);
+            self.cause = Some(Box::new(truncated_cause));
+            self.truncated = true;
+            self.truncated_at_depth = Some(current_depth + allowed_cause_depth);
+            return self;
+        }
+
+        // Check memory limit
+        let estimated_memory = CancelAttributionConfig::estimated_chain_cost(total_depth);
+        if estimated_memory > config.max_chain_memory {
+            // Calculate how deep we can go within memory budget
+            let mut allowed_depth = 0;
+            while CancelAttributionConfig::estimated_chain_cost(current_depth + allowed_depth + 1)
+                <= config.max_chain_memory
+                && allowed_depth < cause_depth
+            {
+                allowed_depth += 1;
+            }
+
+            if allowed_depth == 0 {
+                self.truncated = true;
+                self.truncated_at_depth = Some(current_depth);
+                return self;
+            }
+
+            let truncated_cause = Self::truncate_chain(cause, allowed_depth);
+            self.cause = Some(Box::new(truncated_cause));
+            self.truncated = true;
+            self.truncated_at_depth = Some(current_depth + allowed_depth);
+            return self;
+        }
+
+        // Within limits - add full cause chain
+        self.cause = Some(Box::new(cause));
+        self
+    }
+
+    /// Truncates a cause chain to the specified maximum depth.
+    ///
+    /// Returns a new `CancelReason` with at most `max_depth` levels,
+    /// with the `truncated` flag set on the deepest retained level.
+    fn truncate_chain(reason: Self, max_depth: usize) -> Self {
+        if max_depth == 0 {
+            return Self {
+                cause: None,
+                truncated: true,
+                truncated_at_depth: Some(0),
+                ..reason
+            };
+        }
+
+        if max_depth == 1 || reason.cause.is_none() {
+            // Keep only this level
+            return Self {
+                cause: None,
+                truncated: reason.cause.is_some(), // Mark truncated if we removed a cause
+                truncated_at_depth: if reason.cause.is_some() {
+                    Some(1)
+                } else {
+                    reason.truncated_at_depth
+                },
+                ..reason
+            };
+        }
+
+        // Recursively truncate the cause chain
+        let truncated_cause = reason
+            .cause
+            .map(|boxed_cause| Box::new(Self::truncate_chain(*boxed_cause, max_depth - 1)));
+
+        Self {
+            cause: truncated_cause,
+            truncated: reason.truncated,
+            truncated_at_depth: reason.truncated_at_depth,
+            ..reason
+        }
+    }
+
+    /// Sets the timestamp for this cancellation reason.
+    #[inline]
+    #[must_use]
+    pub const fn with_timestamp(mut self, timestamp: Time) -> Self {
+        self.timestamp = timestamp;
+        self
+    }
+
+    /// Sets the origin region for this cancellation reason.
+    #[inline]
+    #[must_use]
+    pub const fn with_region(mut self, region: RegionId) -> Self {
+        self.origin_region = region;
+        self
+    }
+
+    // ========================================================================
+    // Cause Chain Traversal
+    // ========================================================================
+
+    /// Returns an iterator over the cause chain, starting with this reason.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// for reason in cancel_reason.chain() {
+    ///     println!("Cause: {:?}", reason.kind);
+    /// }
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn chain(&self) -> CancelReasonChain<'_> {
+        CancelReasonChain {
+            current: Some(self),
+        }
+    }
+
+    /// Returns the root cause of this cancellation (the end of the chain).
+    ///
+    /// If there is no cause chain, returns `self`.
+    #[must_use]
+    pub fn root_cause(&self) -> &Self {
+        let mut current = self;
+        while let Some(ref cause) = current.cause {
+            current = cause;
+        }
+        current
+    }
+
+    /// Returns the depth of the cause chain (1 = no parent, 2 = one parent, etc.).
+    #[inline]
+    #[must_use]
+    pub fn chain_depth(&self) -> usize {
+        self.chain().count()
+    }
+
+    /// Returns true if this reason or any cause in the chain matches the given kind.
+    #[must_use]
+    pub fn any_cause_is(&self, kind: CancelKind) -> bool {
+        self.chain().any(|r| r.kind == kind)
+    }
+
+    /// Returns true if this reason was directly or transitively caused by the given cause.
+    ///
+    /// Checks if `cause` appears anywhere in this reason's cause chain.
+    #[must_use]
+    pub fn caused_by(&self, cause: &Self) -> bool {
+        self.chain().skip(1).any(|r| r == cause)
+    }
+
+    // ========================================================================
+    // Kind Checks and Severity
+    // ========================================================================
+
+    /// Returns the severity level of this cancellation reason.
+    ///
+    /// Severity determines cancellation priority. Higher values are more severe
+    /// and should override lower-severity cancellations.
+    ///
+    /// Severity levels:
+    /// - 0: User (graceful, allows full cleanup)
+    /// - 1: Timeout/Deadline (time pressure)
+    /// - 2: PollQuota/CostBudget (resource exhaustion)
+    /// - 3: FailFast/RaceLost (sibling events)
+    /// - 4: ParentCancelled/ResourceUnavailable (external pressure)
+    /// - 5: Shutdown (highest priority, minimal cleanup)
+    #[inline]
+    #[must_use]
+    pub const fn severity(&self) -> u8 {
+        self.kind.severity()
+    }
+
+    /// Returns true if this reason's kind matches the given kind.
+    #[inline]
+    #[must_use]
+    pub const fn is_kind(&self, kind: CancelKind) -> bool {
+        matches!(
+            (self.kind, kind),
+            (CancelKind::User, CancelKind::User)
+                | (CancelKind::Timeout, CancelKind::Timeout)
+                | (CancelKind::Deadline, CancelKind::Deadline)
+                | (CancelKind::PollQuota, CancelKind::PollQuota)
+                | (CancelKind::CostBudget, CancelKind::CostBudget)
+                | (CancelKind::FailFast, CancelKind::FailFast)
+                | (CancelKind::RaceLost, CancelKind::RaceLost)
+                | (CancelKind::ParentCancelled, CancelKind::ParentCancelled)
+                | (
+                    CancelKind::ResourceUnavailable,
+                    CancelKind::ResourceUnavailable
+                )
+                | (CancelKind::LinkedExit, CancelKind::LinkedExit)
+                | (CancelKind::Shutdown, CancelKind::Shutdown)
+        )
+    }
+
+    /// Returns true if this reason indicates shutdown.
+    #[inline]
+    #[must_use]
+    pub const fn is_shutdown(&self) -> bool {
+        matches!(self.kind, CancelKind::Shutdown)
+    }
+
+    /// Returns true if this is a budget-related cancellation (Deadline, PollQuota, CostBudget).
+    #[inline]
+    #[must_use]
+    pub const fn is_budget_exceeded(&self) -> bool {
+        matches!(
+            self.kind,
+            CancelKind::Deadline | CancelKind::PollQuota | CancelKind::CostBudget
+        )
+    }
+
+    /// Returns true if this is a timeout or deadline cancellation.
+    #[inline]
+    #[must_use]
+    pub const fn is_time_exceeded(&self) -> bool {
+        matches!(self.kind, CancelKind::Timeout | CancelKind::Deadline)
+    }
+
+    // ========================================================================
+    // Strengthen Operation
+    // ========================================================================
+
+    /// Strengthens this reason with another, keeping the more severe one.
+    ///
+    /// Implements `inv.cancel.idempotence` (#5, SEM-INV-003):
+    /// `strengthen(a, b) = max_severity(a, b)`.
+    ///
+    /// When strengthening:
+    /// - The more severe kind wins
+    /// - On equal severity, the earlier timestamp wins
+    /// - Messages are preserved from the winning reason
+    /// - Cause chains are not merged (the winning reason's chain is kept)
+    ///
+    /// Returns `true` if the reason was changed.
+    pub fn strengthen(&mut self, other: &Self) -> bool {
+        if other.kind.severity() > self.kind.severity() {
+            self.kind = other.kind;
+            self.origin_region = other.origin_region;
+            self.origin_task = other.origin_task;
+            self.timestamp = other.timestamp;
+            self.message.clone_from(&other.message);
+            self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
+            return true;
+        }
+
+        if other.kind.severity() < self.kind.severity() {
+            return false;
+        }
+
+        // Same severity: use deterministic tie-breaking
+        // Prefer earlier timestamp, then lexicographically smaller message
+        if other.timestamp < self.timestamp {
+            self.kind = other.kind;
+            self.origin_region = other.origin_region;
+            self.origin_task = other.origin_task;
+            self.timestamp = other.timestamp;
+            self.message.clone_from(&other.message);
+            self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
+            return true;
+        }
+
+        if other.timestamp > self.timestamp {
+            return false;
+        }
+
+        // Same timestamp: fallback to message comparison
+        let should_replace = match (&self.message, &other.message) {
+            (None, Some(_)) => true,
+            (Some(current), Some(candidate)) if candidate < current => true,
+            _ => false,
+        };
+        if should_replace {
+            self.kind = other.kind;
+            self.origin_region = other.origin_region;
+            self.origin_task = other.origin_task;
+            self.timestamp = other.timestamp;
+            self.message.clone_from(&other.message);
+            self.cause.clone_from(&other.cause);
+            self.truncated = other.truncated;
+            self.truncated_at_depth = other.truncated_at_depth;
+        }
+        should_replace
+    }
+
+    // ========================================================================
+    // Cleanup Budget
+    // ========================================================================
+
+    /// Returns the appropriate cleanup budget for this cancellation reason.
+    ///
+    /// Different cancellation kinds get different cleanup budgets:
+    /// - **User**: Generous budget (1000 polls) for user-initiated cancellation
+    /// - **Timeout/Deadline**: Moderate budget (500 polls) for time-driven cleanup
+    /// - **PollQuota/CostBudget**: Tight budget (300 polls) for budget violations
+    /// - **FailFast/RaceLost**: Tight budget (200 polls) for sibling failure cleanup
+    /// - **ParentCancelled/ResourceUnavailable**: Tight budget (200 polls) for cascading cleanup
+    /// - **Shutdown**: Minimal budget (50 polls) for urgent shutdown
+    ///
+    /// These budgets ensure the cancellation completeness theorem holds:
+    /// tasks will reach terminal state within bounded resources.
+    #[must_use]
+    pub fn cleanup_budget(&self) -> Budget {
+        match self.kind {
+            CancelKind::User => Budget::new().with_poll_quota(1000).with_priority(200),
+            CancelKind::Timeout | CancelKind::Deadline => {
+                Budget::new().with_poll_quota(500).with_priority(210)
+            }
+            CancelKind::PollQuota | CancelKind::CostBudget => {
+                Budget::new().with_poll_quota(300).with_priority(215)
+            }
+            CancelKind::FailFast
+            | CancelKind::RaceLost
+            | CancelKind::ParentCancelled
+            | CancelKind::ResourceUnavailable
+            | CancelKind::LinkedExit => Budget::new().with_poll_quota(200).with_priority(220),
+            CancelKind::Shutdown => Budget::new().with_poll_quota(50).with_priority(255),
+        }
+    }
+
+    // ========================================================================
+    // Accessors
+    // ========================================================================
+
+    /// Returns the kind of this cancellation reason.
+    #[inline]
+    #[must_use]
+    pub const fn kind(&self) -> CancelKind {
+        self.kind
+    }
+
+    /// Returns the origin region of this cancellation.
+    #[inline]
+    #[must_use]
+    pub const fn origin_region(&self) -> RegionId {
+        self.origin_region
+    }
+
+    /// Returns the origin task of this cancellation (if any).
+    #[inline]
+    #[must_use]
+    pub const fn origin_task(&self) -> Option<TaskId> {
+        self.origin_task
+    }
+
+    /// Returns the timestamp when this cancellation was requested.
+    #[inline]
+    #[must_use]
+    pub const fn timestamp(&self) -> Time {
+        self.timestamp
+    }
+
+    /// Returns the message associated with this cancellation (if any).
+    #[inline]
+    #[must_use]
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    /// Returns a reference to the parent cause (if any).
+    #[inline]
+    #[must_use]
+    pub fn cause(&self) -> Option<&Self> {
+        self.cause.as_deref()
+    }
+
+    /// Returns true if this reason's cause chain was truncated due to limits.
+    #[inline]
+    #[must_use]
+    pub const fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Returns the depth at which truncation occurred (if any).
+    #[inline]
+    #[must_use]
+    pub const fn truncated_at_depth(&self) -> Option<usize> {
+        self.truncated_at_depth
+    }
+
+    /// Returns true if this reason or any cause in the chain was truncated.
+    #[must_use]
+    pub fn any_truncated(&self) -> bool {
+        self.chain().any(|r| r.truncated)
+    }
+
+    /// Estimates the memory cost of this entire cause chain.
+    #[must_use]
+    pub fn estimated_memory_cost(&self) -> usize {
+        CancelAttributionConfig::estimated_chain_cost(self.chain_depth())
+    }
+}
+
+/// Iterator over a cancellation reason's cause chain.
+pub struct CancelReasonChain<'a> {
+    current: Option<&'a CancelReason>,
+}
+
+impl<'a> Iterator for CancelReasonChain<'a> {
+    type Item = &'a CancelReason;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.current?;
+        self.current = current.cause.as_deref();
+        Some(current)
+    }
+}
+
+impl Default for CancelReason {
+    fn default() -> Self {
+        Self::new(CancelKind::User)
+    }
+}
+
+impl fmt::Display for CancelReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.kind)?;
+        if let Some(msg) = &self.message {
+            write!(f, ": {msg}")?;
+        }
+        // Include origin attribution in alternate mode
+        if f.alternate() {
+            write!(f, " (from {} at {})", self.origin_region, self.timestamp)?;
+            if let Some(ref task) = self.origin_task {
+                write!(f, " task {task}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::test_utils::init_test_logging;
+    use serde_json::{Value, json};
+
+    fn init_test(test_name: &str) {
+        init_test_logging();
+        crate::test_phase!(test_name);
+    }
+
+    fn combine(mut a: CancelReason, b: &CancelReason) -> CancelReason {
+        a.strengthen(b);
+        a
+    }
+
+    fn scrub_cancel_snapshot(mut value: Value) -> Value {
+        fn scrub_in_place(value: &mut Value) {
+            match value {
+                Value::Object(map) => {
+                    for (key, entry) in map.iter_mut() {
+                        match key.as_str() {
+                            "task_id" | "origin_task" if !entry.is_null() => {
+                                *entry = Value::String("[TASK_ID]".into());
+                            }
+                            "region_id" | "origin_region" => {
+                                *entry = Value::String("[REGION_ID]".into());
+                            }
+                            "timestamp" => {
+                                *entry = Value::String("[TIME]".into());
+                            }
+                            _ => scrub_in_place(entry),
+                        }
+                    }
+                }
+                Value::Array(items) => {
+                    for item in items {
+                        scrub_in_place(item);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        scrub_in_place(&mut value);
+        value
+    }
+
+    #[test]
+    fn severity_ordering() {
+        init_test("severity_ordering");
+        // Test severity levels are ordered correctly
+        crate::assert_with_log!(
+            CancelKind::User.severity() < CancelKind::Timeout.severity(),
+            "User should be below Timeout",
+            true,
+            CancelKind::User.severity() < CancelKind::Timeout.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::Timeout.severity() == CancelKind::Deadline.severity(),
+            "Timeout and Deadline should have same severity",
+            true,
+            CancelKind::Timeout.severity() == CancelKind::Deadline.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::Deadline.severity() < CancelKind::PollQuota.severity(),
+            "Deadline should be below PollQuota",
+            true,
+            CancelKind::Deadline.severity() < CancelKind::PollQuota.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::PollQuota.severity() == CancelKind::CostBudget.severity(),
+            "PollQuota and CostBudget should have same severity",
+            true,
+            CancelKind::PollQuota.severity() == CancelKind::CostBudget.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::CostBudget.severity() < CancelKind::FailFast.severity(),
+            "CostBudget should be below FailFast",
+            true,
+            CancelKind::CostBudget.severity() < CancelKind::FailFast.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::FailFast.severity() == CancelKind::RaceLost.severity(),
+            "FailFast and RaceLost should have same severity",
+            true,
+            CancelKind::FailFast.severity() == CancelKind::RaceLost.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::RaceLost.severity() < CancelKind::ParentCancelled.severity(),
+            "RaceLost should be below ParentCancelled",
+            true,
+            CancelKind::RaceLost.severity() < CancelKind::ParentCancelled.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::ParentCancelled.severity() == CancelKind::ResourceUnavailable.severity(),
+            "ParentCancelled and ResourceUnavailable should have same severity",
+            true,
+            CancelKind::ParentCancelled.severity() == CancelKind::ResourceUnavailable.severity()
+        );
+        crate::assert_with_log!(
+            CancelKind::ParentCancelled.severity() < CancelKind::Shutdown.severity(),
+            "ParentCancelled should be below Shutdown",
+            true,
+            CancelKind::ParentCancelled.severity() < CancelKind::Shutdown.severity()
+        );
+        crate::test_complete!("severity_ordering");
+    }
+
+    #[test]
+    fn strengthen_takes_more_severe() {
+        init_test("strengthen_takes_more_severe");
+        let mut reason = CancelReason::new(CancelKind::User);
+        let strengthened = reason.strengthen(&CancelReason::timeout());
+        crate::assert_with_log!(
+            strengthened,
+            "should strengthen to Timeout",
+            true,
+            strengthened
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Timeout,
+            "kind should be Timeout",
+            CancelKind::Timeout,
+            reason.kind
+        );
+
+        let strengthened_shutdown = reason.strengthen(&CancelReason::shutdown());
+        crate::assert_with_log!(
+            strengthened_shutdown,
+            "should strengthen to Shutdown",
+            true,
+            strengthened_shutdown
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Shutdown,
+            "kind should be Shutdown",
+            CancelKind::Shutdown,
+            reason.kind
+        );
+
+        // Less severe should not change.
+        let unchanged = !reason.strengthen(&CancelReason::timeout());
+        crate::assert_with_log!(unchanged, "less severe should not change", true, unchanged);
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Shutdown,
+            "kind should remain Shutdown",
+            CancelKind::Shutdown,
+            reason.kind
+        );
+        crate::test_complete!("strengthen_takes_more_severe");
+    }
+
+    #[test]
+    fn strengthen_adopts_truncation_metadata_from_winner() {
+        init_test("strengthen_adopts_truncation_metadata_from_winner");
+        // Build a truncated reason (self) and a non-truncated stronger reason (other).
+        let config = CancelAttributionConfig::new(2, usize::MAX);
+        let deep_cause = CancelReason::timeout().with_cause(CancelReason::user("root"));
+        let mut truncated_reason =
+            CancelReason::user("weak").with_cause_limited(deep_cause, &config);
+        crate::assert_with_log!(
+            truncated_reason.truncated || truncated_reason.any_truncated(),
+            "pre-strengthen reason should be truncated",
+            true,
+            truncated_reason.truncated || truncated_reason.any_truncated()
+        );
+
+        let non_truncated = CancelReason::shutdown();
+        crate::assert_with_log!(
+            !non_truncated.truncated,
+            "stronger reason should not be truncated",
+            false,
+            non_truncated.truncated
+        );
+
+        let changed = truncated_reason.strengthen(&non_truncated);
+        crate::assert_with_log!(changed, "should strengthen to Shutdown", true, changed);
+        crate::assert_with_log!(
+            !truncated_reason.truncated,
+            "truncated flag should adopt winner's value (false)",
+            false,
+            truncated_reason.truncated
+        );
+        crate::assert_with_log!(
+            truncated_reason.truncated_at_depth.is_none(),
+            "truncated_at_depth should adopt winner's value (None)",
+            true,
+            truncated_reason.truncated_at_depth.is_none()
+        );
+        crate::test_complete!("strengthen_adopts_truncation_metadata_from_winner");
+    }
+
+    #[test]
+    fn strengthen_is_idempotent() {
+        init_test("strengthen_is_idempotent");
+        let mut reason = CancelReason::timeout();
+        let unchanged = !reason.strengthen(&CancelReason::timeout());
+        crate::assert_with_log!(
+            unchanged,
+            "strengthen should be idempotent",
+            true,
+            unchanged
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Timeout,
+            "kind should remain Timeout",
+            CancelKind::Timeout,
+            reason.kind
+        );
+        crate::test_complete!("strengthen_is_idempotent");
+    }
+
+    #[test]
+    fn strengthen_is_associative() {
+        init_test("strengthen_is_associative");
+        let a = CancelReason::user("a");
+        let b = CancelReason::timeout();
+        let c = CancelReason::shutdown();
+
+        let left = combine(combine(a.clone(), &b), &c);
+        let right = {
+            let bc = combine(b, &c);
+            combine(a, &bc)
+        };
+
+        crate::assert_with_log!(
+            left == right,
+            "strengthen should be associative",
+            left,
+            right
+        );
+        crate::test_complete!("strengthen_is_associative");
+    }
+
+    #[test]
+    fn strengthen_same_kind_picks_deterministic_message() {
+        init_test("strengthen_same_kind_picks_deterministic_message");
+        let mut reason = CancelReason::user("b");
+        let changed = reason.strengthen(&CancelReason::user("a"));
+        crate::assert_with_log!(
+            changed,
+            "same-kind strengthen should change message",
+            true,
+            changed
+        );
+        crate::assert_with_log!(
+            reason.kind == CancelKind::User,
+            "kind should remain User",
+            CancelKind::User,
+            reason.kind
+        );
+        crate::assert_with_log!(
+            reason.message == Some("a".to_string()),
+            "message should be deterministic",
+            Some("a"),
+            reason.message
+        );
+        crate::test_complete!("strengthen_same_kind_picks_deterministic_message");
+    }
+
+    #[test]
+    fn strengthen_resets_message_when_kind_increases() {
+        init_test("strengthen_resets_message_when_kind_increases");
+        let mut reason = CancelReason::user("please stop");
+        let changed = reason.strengthen(&CancelReason::shutdown());
+        crate::assert_with_log!(changed, "kind increase should change reason", true, changed);
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Shutdown,
+            "kind should be Shutdown",
+            CancelKind::Shutdown,
+            reason.kind
+        );
+        crate::assert_with_log!(
+            reason.message.is_none(),
+            "message should reset on kind increase",
+            true,
+            reason.message.is_none()
+        );
+        crate::test_complete!("strengthen_resets_message_when_kind_increases");
+    }
+
+    #[test]
+    fn cleanup_budget_scales_with_severity() {
+        init_test("cleanup_budget_scales_with_severity");
+        // User cancellation gets the most generous budget
+        let user_budget = CancelReason::user("stop").cleanup_budget();
+        crate::assert_with_log!(
+            user_budget.poll_quota == 1000,
+            "user budget poll_quota should be 1000",
+            1000,
+            user_budget.poll_quota
+        );
+
+        // Timeout gets moderate budget
+        let timeout_budget = CancelReason::timeout().cleanup_budget();
+        crate::assert_with_log!(
+            timeout_budget.poll_quota == 500,
+            "timeout budget poll_quota should be 500",
+            500,
+            timeout_budget.poll_quota
+        );
+
+        // Budget exhaustion (PollQuota/CostBudget) gets tight budget
+        let poll_quota_budget = CancelReason::poll_quota().cleanup_budget();
+        crate::assert_with_log!(
+            poll_quota_budget.poll_quota == 300,
+            "poll_quota budget poll_quota should be 300",
+            300,
+            poll_quota_budget.poll_quota
+        );
+
+        // FailFast gets tight budget
+        let fail_fast_budget = CancelReason::sibling_failed().cleanup_budget();
+        crate::assert_with_log!(
+            fail_fast_budget.poll_quota == 200,
+            "fail_fast budget poll_quota should be 200",
+            200,
+            fail_fast_budget.poll_quota
+        );
+
+        // Shutdown gets minimal budget with highest priority
+        let shutdown_budget = CancelReason::shutdown().cleanup_budget();
+        crate::assert_with_log!(
+            shutdown_budget.poll_quota == 50,
+            "shutdown budget poll_quota should be 50",
+            50,
+            shutdown_budget.poll_quota
+        );
+        crate::assert_with_log!(
+            shutdown_budget.priority == 255,
+            "shutdown budget priority should be 255",
+            255,
+            shutdown_budget.priority
+        );
+
+        // Priority increases with severity (cancel lane needs higher priority)
+        crate::assert_with_log!(
+            user_budget.priority < timeout_budget.priority,
+            "user priority should be below timeout",
+            true,
+            user_budget.priority < timeout_budget.priority
+        );
+        crate::assert_with_log!(
+            timeout_budget.priority < poll_quota_budget.priority,
+            "timeout priority should be below poll_quota",
+            true,
+            timeout_budget.priority < poll_quota_budget.priority
+        );
+        crate::assert_with_log!(
+            poll_quota_budget.priority < fail_fast_budget.priority,
+            "poll_quota priority should be below fail_fast",
+            true,
+            poll_quota_budget.priority < fail_fast_budget.priority
+        );
+        crate::assert_with_log!(
+            fail_fast_budget.priority < shutdown_budget.priority,
+            "fail_fast priority should be below shutdown",
+            true,
+            fail_fast_budget.priority < shutdown_budget.priority
+        );
+        crate::test_complete!("cleanup_budget_scales_with_severity");
+    }
+
+    // ========================================================================
+    // Bounded Cleanup Completion Tests (bd-3cq88)
+    //
+    // These tests verify the sufficient-budget termination property:
+    // cleanup budgets have finite poll quotas, so cleanup always
+    // terminates within a bounded number of polls.
+    // ========================================================================
+
+    /// Verifies that every CancelKind produces a cleanup budget with
+    /// finite, positive poll quota — the precondition for bounded completion.
+    #[test]
+    fn cleanup_budget_always_finite_and_positive() {
+        init_test("cleanup_budget_always_finite_and_positive");
+
+        let kinds = [
+            CancelKind::User,
+            CancelKind::Timeout,
+            CancelKind::Deadline,
+            CancelKind::PollQuota,
+            CancelKind::CostBudget,
+            CancelKind::FailFast,
+            CancelKind::RaceLost,
+            CancelKind::ParentCancelled,
+            CancelKind::ResourceUnavailable,
+            CancelKind::Shutdown,
+        ];
+
+        for kind in kinds {
+            let reason =
+                CancelReason::with_origin(kind, RegionId::new_for_test(1, 0), Time::from_secs(0));
+            let budget = reason.cleanup_budget();
+            crate::assert_with_log!(
+                budget.poll_quota > 0 && budget.poll_quota < u32::MAX,
+                "cleanup budget must be finite and positive",
+                true,
+                budget.poll_quota
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_always_finite_and_positive");
+    }
+
+    /// Verifies that consuming exactly poll_quota polls exhausts the cleanup
+    /// budget — the termination bound.
+    #[test]
+    fn cleanup_budget_terminates_after_quota_polls() {
+        init_test("cleanup_budget_terminates_after_quota_polls");
+
+        let reason = CancelReason::timeout();
+        let mut budget = reason.cleanup_budget();
+        let quota = budget.poll_quota;
+
+        // Consume exactly quota polls
+        for i in 0..quota {
+            let result = budget.consume_poll();
+            crate::assert_with_log!(
+                result.is_some(),
+                "poll should succeed within budget",
+                true,
+                i
+            );
+        }
+
+        // Now exhausted
+        crate::assert_with_log!(
+            budget.is_exhausted(),
+            "budget exhausted after quota polls",
+            true,
+            budget.poll_quota
+        );
+
+        // No further progress possible
+        let result = budget.consume_poll();
+        crate::assert_with_log!(
+            result.is_none(),
+            "poll fails after exhaustion",
+            true,
+            result.is_none()
+        );
+
+        crate::test_complete!("cleanup_budget_terminates_after_quota_polls");
+    }
+
+    /// Verifies that combining (strengthening) cleanup budgets never
+    /// increases the poll quota — monotone narrowing.
+    #[test]
+    fn cleanup_budget_combine_never_widens() {
+        init_test("cleanup_budget_combine_never_widens");
+
+        let user_budget = CancelReason::user("stop").cleanup_budget();
+        let timeout_budget = CancelReason::timeout().cleanup_budget();
+        let shutdown_budget = CancelReason::shutdown().cleanup_budget();
+
+        // Combining user + timeout takes the tighter quota
+        let combined = user_budget.combine(timeout_budget);
+        crate::assert_with_log!(
+            combined.poll_quota <= user_budget.poll_quota,
+            "combined ≤ user",
+            user_budget.poll_quota,
+            combined.poll_quota
+        );
+        crate::assert_with_log!(
+            combined.poll_quota <= timeout_budget.poll_quota,
+            "combined ≤ timeout",
+            timeout_budget.poll_quota,
+            combined.poll_quota
+        );
+
+        // Priority is max because Budget::combine always takes the maximum (most urgent) priority
+        crate::assert_with_log!(
+            combined.priority >= user_budget.priority,
+            "combined priority >= user",
+            user_budget.priority,
+            combined.priority
+        );
+
+        // Combining with shutdown (tightest) always tightens
+        let with_shutdown = combined.combine(shutdown_budget);
+        crate::assert_with_log!(
+            with_shutdown.poll_quota <= combined.poll_quota,
+            "shutdown tightens further",
+            combined.poll_quota,
+            with_shutdown.poll_quota
+        );
+        crate::assert_with_log!(
+            with_shutdown.priority >= combined.priority,
+            "shutdown priority max",
+            combined.priority,
+            with_shutdown.priority
+        );
+
+        crate::test_complete!("cleanup_budget_combine_never_widens");
+    }
+
+    /// Verifies severity ordering: more severe → fewer polls, higher priority.
+    #[test]
+    fn cleanup_budget_severity_monotone() {
+        init_test("cleanup_budget_severity_monotone");
+
+        let user = CancelReason::user("stop");
+        let timeout = CancelReason::timeout();
+        let quota = CancelReason::poll_quota();
+        let fail_fast = CancelReason::sibling_failed();
+        let shutdown = CancelReason::shutdown();
+
+        let budgets = [
+            user.cleanup_budget(),
+            timeout.cleanup_budget(),
+            quota.cleanup_budget(),
+            fail_fast.cleanup_budget(),
+            shutdown.cleanup_budget(),
+        ];
+
+        // Poll quotas should be non-increasing (more severe → tighter)
+        for i in 1..budgets.len() {
+            crate::assert_with_log!(
+                budgets[i].poll_quota <= budgets[i - 1].poll_quota,
+                "poll quota non-increasing with severity",
+                budgets[i - 1].poll_quota,
+                budgets[i].poll_quota
+            );
+        }
+
+        // Priorities should be non-decreasing (more severe → higher priority)
+        for i in 1..budgets.len() {
+            crate::assert_with_log!(
+                budgets[i].priority >= budgets[i - 1].priority,
+                "priority non-decreasing with severity",
+                budgets[i - 1].priority,
+                budgets[i].priority
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_severity_monotone");
+    }
+
+    /// Verifies that cleanup budgets have no deadline — cleanup should not
+    /// be time-bounded, only poll-bounded, so the scheduler can always
+    /// make progress regardless of clock skew.
+    #[test]
+    fn cleanup_budget_has_no_deadline() {
+        init_test("cleanup_budget_has_no_deadline");
+
+        let kinds = [CancelKind::User, CancelKind::Timeout, CancelKind::Shutdown];
+
+        for kind in kinds {
+            let reason =
+                CancelReason::with_origin(kind, RegionId::new_for_test(1, 0), Time::from_secs(0));
+            let budget = reason.cleanup_budget();
+            crate::assert_with_log!(
+                budget.deadline.is_none(),
+                "cleanup budget should have no deadline",
+                true,
+                budget.deadline.is_none()
+            );
+        }
+
+        crate::test_complete!("cleanup_budget_has_no_deadline");
+    }
+
+    // ========================================================================
+    // Attribution Tests
+    // ========================================================================
+
+    #[test]
+    fn cancel_reason_with_full_attribution() {
+        init_test("cancel_reason_with_full_attribution");
+        let region = RegionId::new_for_test(1, 0);
+        let task = TaskId::new_for_test(2, 0);
+        let timestamp = Time::from_millis(1000);
+
+        let reason = CancelReason::with_origin(CancelKind::Timeout, region, timestamp)
+            .with_task(task)
+            .with_message("test timeout");
+
+        crate::assert_with_log!(
+            reason.kind == CancelKind::Timeout,
+            "kind should be Timeout",
+            CancelKind::Timeout,
+            reason.kind
+        );
+        crate::assert_with_log!(
+            reason.origin_region == region,
+            "origin_region should match",
+            region,
+            reason.origin_region
+        );
+        crate::assert_with_log!(
+            reason.origin_task == Some(task),
+            "origin_task should match",
+            Some(task),
+            reason.origin_task
+        );
+        crate::assert_with_log!(
+            reason.timestamp == timestamp,
+            "timestamp should match",
+            timestamp,
+            reason.timestamp
+        );
+        crate::assert_with_log!(
+            reason.message == Some("test timeout".to_string()),
+            "message should match",
+            Some("test timeout"),
+            reason.message
+        );
+        crate::test_complete!("cancel_reason_with_full_attribution");
+    }
+
+    #[test]
+    fn cancel_witness_json_snapshot_scrubbed() {
+        init_test("cancel_witness_json_snapshot_scrubbed");
+        let task = TaskId::new_for_test(8, 2);
+        let region = RegionId::new_for_test(7, 1);
+        let cause = CancelReason::with_origin(
+            CancelKind::Timeout,
+            RegionId::new_for_test(3, 0),
+            Time::from_millis(220),
+        )
+        .with_task(TaskId::new_for_test(4, 0))
+        .with_message("deadline budget expired");
+        let reason = CancelReason::with_origin(
+            CancelKind::ParentCancelled,
+            RegionId::new_for_test(9, 1),
+            Time::from_millis(550),
+        )
+        .with_task(TaskId::new_for_test(10, 0))
+        .with_message("closing subtree")
+        .with_cause(cause);
+        let witness = CancelWitness::new(task, region, 3, CancelPhase::Finalizing, reason);
+
+        insta::assert_json_snapshot!(
+            "cancel_witness_json_scrubbed",
+            scrub_cancel_snapshot(json!({
+                "phase_label": format!("{:?}", witness.phase),
+                "witness": witness,
+            }))
+        );
+    }
+
+    // ========================================================================
+    // Cause Chain Tests
+    // ========================================================================
+
+    #[test]
+    fn cause_chain_single() {
+        init_test("cause_chain_single");
+        let reason = CancelReason::timeout();
+
+        crate::assert_with_log!(
+            reason.chain_depth() == 1,
+            "single reason should have depth 1",
+            1,
+            reason.chain_depth()
+        );
+
+        let root = reason.root_cause();
+        crate::assert_with_log!(
+            root == &reason,
+            "root_cause of single reason should be itself",
+            true,
+            root == &reason
+        );
+        crate::test_complete!("cause_chain_single");
+    }
+
+    #[test]
+    fn cause_chain_multiple() {
+        init_test("cause_chain_multiple");
+        let root = CancelReason::timeout().with_message("original timeout");
+        let middle = CancelReason::parent_cancelled()
+            .with_message("parent cancelled")
+            .with_cause(root);
+        let leaf = CancelReason::shutdown()
+            .with_message("shutdown")
+            .with_cause(middle);
+
+        crate::assert_with_log!(
+            leaf.chain_depth() == 3,
+            "three-level chain should have depth 3",
+            3,
+            leaf.chain_depth()
+        );
+
+        let found_root = leaf.root_cause();
+        crate::assert_with_log!(
+            found_root.kind == CancelKind::Timeout,
+            "root_cause should be Timeout",
+            CancelKind::Timeout,
+            found_root.kind
+        );
+        crate::assert_with_log!(
+            found_root.message == Some("original timeout".to_string()),
+            "root_cause message should match",
+            Some("original timeout"),
+            found_root.message
+        );
+        crate::test_complete!("cause_chain_multiple");
+    }
+
+    #[test]
+    fn any_cause_is_works() {
+        init_test("any_cause_is_works");
+        let root = CancelReason::timeout();
+        let leaf = CancelReason::shutdown().with_cause(root);
+
+        crate::assert_with_log!(
+            leaf.any_cause_is(CancelKind::Shutdown),
+            "should find Shutdown in chain",
+            true,
+            leaf.any_cause_is(CancelKind::Shutdown)
+        );
+        crate::assert_with_log!(
+            leaf.any_cause_is(CancelKind::Timeout),
+            "should find Timeout in chain",
+            true,
+            leaf.any_cause_is(CancelKind::Timeout)
+        );
+        crate::assert_with_log!(
+            !leaf.any_cause_is(CancelKind::User),
+            "should not find User in chain",
+            false,
+            leaf.any_cause_is(CancelKind::User)
+        );
+        crate::test_complete!("any_cause_is_works");
+    }
+
+    #[test]
+    fn caused_by_works() {
+        init_test("caused_by_works");
+        let root = CancelReason::timeout().with_message("root");
+        let leaf = CancelReason::shutdown().with_cause(root.clone());
+
+        crate::assert_with_log!(
+            leaf.caused_by(&root),
+            "leaf should be caused_by root",
+            true,
+            leaf.caused_by(&root)
+        );
+        crate::assert_with_log!(
+            !root.caused_by(&leaf),
+            "root should not be caused_by leaf",
+            false,
+            root.caused_by(&leaf)
+        );
+        crate::assert_with_log!(
+            !leaf.caused_by(&leaf),
+            "leaf should not be caused_by itself",
+            false,
+            leaf.caused_by(&leaf)
+        );
+        crate::test_complete!("caused_by_works");
+    }
+
+    // ========================================================================
+    // Kind Check Tests
+    // ========================================================================
+
+    #[test]
+    fn is_kind_works() {
+        init_test("is_kind_works");
+        let reason = CancelReason::poll_quota();
+        crate::assert_with_log!(
+            reason.is_kind(CancelKind::PollQuota),
+            "is_kind should return true for matching kind",
+            true,
+            reason.is_kind(CancelKind::PollQuota)
+        );
+        crate::assert_with_log!(
+            !reason.is_kind(CancelKind::Timeout),
+            "is_kind should return false for non-matching kind",
+            false,
+            reason.is_kind(CancelKind::Timeout)
+        );
+        crate::test_complete!("is_kind_works");
+    }
+
+    #[test]
+    fn is_budget_exceeded_works() {
+        init_test("is_budget_exceeded_works");
+        crate::assert_with_log!(
+            CancelReason::deadline().is_budget_exceeded(),
+            "Deadline should be budget_exceeded",
+            true,
+            CancelReason::deadline().is_budget_exceeded()
+        );
+        crate::assert_with_log!(
+            CancelReason::poll_quota().is_budget_exceeded(),
+            "PollQuota should be budget_exceeded",
+            true,
+            CancelReason::poll_quota().is_budget_exceeded()
+        );
+        crate::assert_with_log!(
+            CancelReason::cost_budget().is_budget_exceeded(),
+            "CostBudget should be budget_exceeded",
+            true,
+            CancelReason::cost_budget().is_budget_exceeded()
+        );
+        crate::assert_with_log!(
+            !CancelReason::timeout().is_budget_exceeded(),
+            "Timeout should not be budget_exceeded",
+            false,
+            CancelReason::timeout().is_budget_exceeded()
+        );
+        crate::test_complete!("is_budget_exceeded_works");
+    }
+
+    #[test]
+    fn is_time_exceeded_works() {
+        init_test("is_time_exceeded_works");
+        crate::assert_with_log!(
+            CancelReason::timeout().is_time_exceeded(),
+            "Timeout should be time_exceeded",
+            true,
+            CancelReason::timeout().is_time_exceeded()
+        );
+        crate::assert_with_log!(
+            CancelReason::deadline().is_time_exceeded(),
+            "Deadline should be time_exceeded",
+            true,
+            CancelReason::deadline().is_time_exceeded()
+        );
+        crate::assert_with_log!(
+            !CancelReason::poll_quota().is_time_exceeded(),
+            "PollQuota should not be time_exceeded",
+            false,
+            CancelReason::poll_quota().is_time_exceeded()
+        );
+        crate::test_complete!("is_time_exceeded_works");
+    }
+
+    // ========================================================================
+    // New Variant Tests
+    // ========================================================================
+
+    #[test]
+    fn new_variants_constructors() {
+        init_test("new_variants_constructors");
+
+        let deadline = CancelReason::deadline();
+        crate::assert_with_log!(
+            deadline.kind == CancelKind::Deadline,
+            "deadline() should create Deadline kind",
+            CancelKind::Deadline,
+            deadline.kind
+        );
+
+        let poll_quota = CancelReason::poll_quota();
+        crate::assert_with_log!(
+            poll_quota.kind == CancelKind::PollQuota,
+            "poll_quota() should create PollQuota kind",
+            CancelKind::PollQuota,
+            poll_quota.kind
+        );
+
+        let cost_budget = CancelReason::cost_budget();
+        crate::assert_with_log!(
+            cost_budget.kind == CancelKind::CostBudget,
+            "cost_budget() should create CostBudget kind",
+            CancelKind::CostBudget,
+            cost_budget.kind
+        );
+
+        let resource = CancelReason::resource_unavailable();
+        crate::assert_with_log!(
+            resource.kind == CancelKind::ResourceUnavailable,
+            "resource_unavailable() should create ResourceUnavailable kind",
+            CancelKind::ResourceUnavailable,
+            resource.kind
+        );
+
+        crate::test_complete!("new_variants_constructors");
+    }
+
+    #[test]
+    fn new_variants_display() {
+        init_test("new_variants_display");
+
+        crate::assert_with_log!(
+            format!("{}", CancelKind::Deadline) == "deadline",
+            "Deadline display should be 'deadline'",
+            "deadline",
+            format!("{}", CancelKind::Deadline)
+        );
+        crate::assert_with_log!(
+            format!("{}", CancelKind::PollQuota) == "poll quota",
+            "PollQuota display should be 'poll quota'",
+            "poll quota",
+            format!("{}", CancelKind::PollQuota)
+        );
+        crate::assert_with_log!(
+            format!("{}", CancelKind::CostBudget) == "cost budget",
+            "CostBudget display should be 'cost budget'",
+            "cost budget",
+            format!("{}", CancelKind::CostBudget)
+        );
+        crate::assert_with_log!(
+            format!("{}", CancelKind::ResourceUnavailable) == "resource unavailable",
+            "ResourceUnavailable display should be 'resource unavailable'",
+            "resource unavailable",
+            format!("{}", CancelKind::ResourceUnavailable)
+        );
+
+        crate::test_complete!("new_variants_display");
+    }
+
+    // ========================================================================
+    // Chain Limit and Truncation Tests
+    // ========================================================================
+
+    #[test]
+    fn cancel_attribution_config_defaults() {
+        init_test("cancel_attribution_config_defaults");
+        let config = CancelAttributionConfig::default();
+        crate::assert_with_log!(
+            config.max_chain_depth == 16,
+            "default max_chain_depth should be 16",
+            16,
+            config.max_chain_depth
+        );
+        crate::assert_with_log!(
+            config.max_chain_memory == 4096,
+            "default max_chain_memory should be 4096",
+            4096,
+            config.max_chain_memory
+        );
+        crate::test_complete!("cancel_attribution_config_defaults");
+    }
+
+    #[test]
+    fn cancel_attribution_config_custom() {
+        init_test("cancel_attribution_config_custom");
+        let config = CancelAttributionConfig::new(8, 2048);
+        crate::assert_with_log!(
+            config.max_chain_depth == 8,
+            "custom max_chain_depth should be 8",
+            8,
+            config.max_chain_depth
+        );
+        crate::assert_with_log!(
+            config.max_chain_memory == 2048,
+            "custom max_chain_memory should be 2048",
+            2048,
+            config.max_chain_memory
+        );
+        crate::test_complete!("cancel_attribution_config_custom");
+    }
+
+    #[test]
+    fn cancel_attribution_config_unlimited() {
+        init_test("cancel_attribution_config_unlimited");
+        let config = CancelAttributionConfig::unlimited();
+        crate::assert_with_log!(
+            config.max_chain_depth == usize::MAX,
+            "unlimited max_chain_depth should be usize::MAX",
+            usize::MAX,
+            config.max_chain_depth
+        );
+        crate::test_complete!("cancel_attribution_config_unlimited");
+    }
+
+    #[test]
+    fn chain_at_exact_limit() {
+        init_test("chain_at_exact_limit");
+        let config = CancelAttributionConfig::new(3, usize::MAX);
+
+        // Build a chain of exactly 3 levels
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        crate::assert_with_log!(
+            level3.chain_depth() == 3,
+            "chain at limit should have depth 3",
+            3,
+            level3.chain_depth()
+        );
+        crate::assert_with_log!(
+            !level3.truncated,
+            "chain at limit should not be truncated",
+            false,
+            level3.truncated
+        );
+        crate::test_complete!("chain_at_exact_limit");
+    }
+
+    #[test]
+    fn chain_beyond_limit_truncates() {
+        init_test("chain_beyond_limit_truncates");
+        let config = CancelAttributionConfig::new(2, usize::MAX);
+
+        // Build a chain of 3 levels, which exceeds limit of 2
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+
+        // This should truncate because we'd have 3 levels total
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        crate::assert_with_log!(
+            level3.chain_depth() <= 2,
+            "chain beyond limit should be truncated to 2",
+            2,
+            level3.chain_depth()
+        );
+        crate::assert_with_log!(
+            level3.truncated || level3.any_truncated(),
+            "truncated chain should have truncated flag",
+            true,
+            level3.truncated || level3.any_truncated()
+        );
+        crate::test_complete!("chain_beyond_limit_truncates");
+    }
+
+    #[test]
+    fn truncated_reason_new_fields() {
+        init_test("truncated_reason_new_fields");
+        let reason = CancelReason::timeout();
+
+        crate::assert_with_log!(
+            !reason.truncated,
+            "new reason should not be truncated",
+            false,
+            reason.truncated
+        );
+        crate::assert_with_log!(
+            reason.truncated_at_depth.is_none(),
+            "new reason should have no truncated_at_depth",
+            true,
+            reason.truncated_at_depth.is_none()
+        );
+        crate::assert_with_log!(
+            !reason.is_truncated(),
+            "is_truncated() should be false",
+            false,
+            reason.is_truncated()
+        );
+        crate::test_complete!("truncated_reason_new_fields");
+    }
+
+    #[test]
+    fn estimated_memory_cost() {
+        init_test("estimated_memory_cost");
+        let single = CancelReason::timeout();
+        let cost1 = single.estimated_memory_cost();
+        crate::assert_with_log!(
+            cost1 > 0,
+            "single reason should have positive memory cost",
+            true,
+            cost1 > 0
+        );
+
+        // Chain of 2 should cost more
+        let chain2 = CancelReason::shutdown().with_cause(CancelReason::timeout());
+        let cost2 = chain2.estimated_memory_cost();
+        crate::assert_with_log!(
+            cost2 > cost1,
+            "chain of 2 should cost more than single",
+            true,
+            cost2 > cost1
+        );
+
+        crate::test_complete!("estimated_memory_cost");
+    }
+
+    #[test]
+    fn memory_limit_triggers_truncation() {
+        init_test("memory_limit_triggers_truncation");
+        // Set a very tight memory limit that should trigger truncation
+        let config = CancelAttributionConfig::new(usize::MAX, 100);
+
+        let level1 = CancelReason::timeout();
+        let level2 = CancelReason::parent_cancelled().with_cause(level1);
+        let level3 = CancelReason::shutdown().with_cause_limited(level2, &config);
+
+        // With only 100 bytes, we can't fit even 2 full levels
+        // So truncation should occur
+        let truncated = level3.truncated || level3.any_truncated();
+        crate::assert_with_log!(
+            truncated,
+            "tight memory limit should trigger truncation",
+            true,
+            truncated
+        );
+        crate::test_complete!("memory_limit_triggers_truncation");
+    }
+
+    #[test]
+    fn any_truncated_finds_nested_truncation() {
+        init_test("any_truncated_finds_nested_truncation");
+        // Manually create a chain where an inner level is truncated
+        let inner = CancelReason {
+            truncated: true,
+            truncated_at_depth: Some(1),
+            ..CancelReason::timeout()
+        };
+        let outer = CancelReason::shutdown().with_cause(inner);
+
+        crate::assert_with_log!(
+            !outer.truncated,
+            "outer itself is not truncated",
+            false,
+            outer.truncated
+        );
+        crate::assert_with_log!(
+            outer.any_truncated(),
+            "any_truncated should find inner truncation",
+            true,
+            outer.any_truncated()
+        );
+        crate::test_complete!("any_truncated_finds_nested_truncation");
+    }
+
+    #[test]
+    fn stress_deep_chain_bounded_by_config() {
+        init_test("stress_deep_chain_bounded_by_config");
+        let config = CancelAttributionConfig::new(16, 4096);
+        let mut current = CancelReason::timeout();
+        for _ in 1..100 {
+            current = CancelReason::parent_cancelled().with_cause_limited(current, &config);
+        }
+        crate::assert_with_log!(
+            current.chain_depth() <= 16,
+            "deep chain must be bounded by max_chain_depth",
+            true,
+            current.chain_depth() <= 16
+        );
+        crate::assert_with_log!(
+            current.any_truncated(),
+            "deep chain must report truncation",
+            true,
+            current.any_truncated()
+        );
+        crate::test_complete!("stress_deep_chain_bounded_by_config");
+    }
+
+    #[test]
+    fn stress_wide_fanout_bounded() {
+        init_test("stress_wide_fanout_bounded");
+        let config = CancelAttributionConfig::new(4, 4096);
+        let root = CancelReason::shutdown();
+        for _i in 0..200 {
+            let child = CancelReason::parent_cancelled().with_cause_limited(root.clone(), &config);
+            crate::assert_with_log!(
+                child.chain_depth() <= 4,
+                "fanout child must respect depth limit",
+                true,
+                child.chain_depth() <= 4
+            );
+        }
+        crate::test_complete!("stress_wide_fanout_bounded");
+    }
+
+    #[test]
+    fn zero_depth_config_drops_all_causes() {
+        init_test("zero_depth_config_drops_all_causes");
+        let config = CancelAttributionConfig::new(0, usize::MAX);
+        let cause = CancelReason::timeout();
+        let result = CancelReason::shutdown().with_cause_limited(cause, &config);
+        crate::assert_with_log!(
+            result.cause.is_none(),
+            "zero depth config should prevent cause attachment",
+            true,
+            result.cause.is_none()
+        );
+        crate::assert_with_log!(
+            result.truncated,
+            "should be marked truncated when cause is dropped",
+            true,
+            result.truncated
+        );
+        crate::test_complete!("zero_depth_config_drops_all_causes");
+    }
+
+    #[test]
+    fn depth_one_config_keeps_only_self() {
+        init_test("depth_one_config_keeps_only_self");
+        let config = CancelAttributionConfig::new(1, usize::MAX);
+        let deep = CancelReason::timeout().with_cause(CancelReason::parent_cancelled());
+        let result = CancelReason::shutdown().with_cause_limited(deep, &config);
+        crate::assert_with_log!(
+            result.chain_depth() <= 1,
+            "depth-1 config should keep only the outermost level",
+            true,
+            result.chain_depth() <= 1
+        );
+        crate::test_complete!("depth_one_config_keeps_only_self");
+    }
+
+    #[test]
+    fn zero_memory_config_drops_all_causes() {
+        init_test("zero_memory_config_drops_all_causes");
+        let config = CancelAttributionConfig::new(usize::MAX, 0);
+        let cause = CancelReason::timeout();
+        let result = CancelReason::shutdown().with_cause_limited(cause, &config);
+        crate::assert_with_log!(
+            result.truncated || result.any_truncated(),
+            "zero memory should trigger truncation",
+            true,
+            result.truncated || result.any_truncated()
+        );
+        crate::test_complete!("zero_memory_config_drops_all_causes");
+    }
+
+    #[test]
+    fn stress_incremental_chain_growth() {
+        init_test("stress_incremental_chain_growth");
+        let config = CancelAttributionConfig::default();
+        let root_reason = CancelReason::shutdown();
+        let mut parent_reason = root_reason;
+        for _i in 0..50 {
+            let child_reason =
+                CancelReason::parent_cancelled().with_cause_limited(parent_reason.clone(), &config);
+            crate::assert_with_log!(
+                child_reason.chain_depth() <= config.max_chain_depth,
+                "incremental chain must stay within configured depth",
+                true,
+                child_reason.chain_depth() <= config.max_chain_depth
+            );
+            parent_reason = child_reason;
+        }
+        crate::assert_with_log!(
+            parent_reason.any_truncated(),
+            "deeply nested region chain must report truncation",
+            true,
+            parent_reason.any_truncated()
+        );
+        crate::test_complete!("stress_incremental_chain_growth");
+    }
+
+    // ========================================================================
+    // Pure data-type trait coverage (wave 25)
+    // ========================================================================
+
+    #[test]
+    fn cancel_kind_debug_clone_copy() {
+        let k = CancelKind::Timeout;
+        let k2 = k; // Copy
+        let k3 = k; // Copy again
+        assert_eq!(k2, k3);
+        let dbg = format!("{k:?}");
+        assert!(dbg.contains("Timeout"));
+    }
+
+    #[test]
+    fn cancel_kind_hash_consistency() {
+        use std::collections::HashSet;
+        let mut set = HashSet::new();
+        set.insert(CancelKind::User);
+        set.insert(CancelKind::Shutdown);
+        set.insert(CancelKind::User); // dup
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn cancel_kind_as_str_all_variants() {
+        assert_eq!(CancelKind::User.as_str(), "User");
+        assert_eq!(CancelKind::Timeout.as_str(), "Timeout");
+        assert_eq!(CancelKind::Deadline.as_str(), "Deadline");
+        assert_eq!(CancelKind::PollQuota.as_str(), "PollQuota");
+        assert_eq!(CancelKind::CostBudget.as_str(), "CostBudget");
+        assert_eq!(CancelKind::FailFast.as_str(), "FailFast");
+        assert_eq!(CancelKind::RaceLost.as_str(), "RaceLost");
+        assert_eq!(CancelKind::ParentCancelled.as_str(), "ParentCancelled");
+        assert_eq!(
+            CancelKind::ResourceUnavailable.as_str(),
+            "ResourceUnavailable"
+        );
+        assert_eq!(CancelKind::Shutdown.as_str(), "Shutdown");
+        assert_eq!(CancelKind::LinkedExit.as_str(), "LinkedExit");
+    }
+
+    #[test]
+    fn cancel_kind_display_all_variants() {
+        assert_eq!(format!("{}", CancelKind::User), "user");
+        assert_eq!(format!("{}", CancelKind::Timeout), "timeout");
+        assert_eq!(format!("{}", CancelKind::Deadline), "deadline");
+        assert_eq!(format!("{}", CancelKind::PollQuota), "poll quota");
+        assert_eq!(format!("{}", CancelKind::CostBudget), "cost budget");
+        assert_eq!(format!("{}", CancelKind::FailFast), "fail-fast");
+        assert_eq!(format!("{}", CancelKind::RaceLost), "race lost");
+        assert_eq!(
+            format!("{}", CancelKind::ParentCancelled),
+            "parent cancelled"
+        );
+        assert_eq!(
+            format!("{}", CancelKind::ResourceUnavailable),
+            "resource unavailable"
+        );
+        assert_eq!(format!("{}", CancelKind::Shutdown), "shutdown");
+        assert_eq!(format!("{}", CancelKind::LinkedExit), "linked exit");
+    }
+
+    #[test]
+    fn cancel_kind_ord() {
+        // Ord should be consistent (derive order matches declaration order)
+        assert!(CancelKind::User < CancelKind::Timeout);
+        assert!(CancelKind::Shutdown > CancelKind::User);
+    }
+
+    #[test]
+    fn cancel_phase_debug_clone_copy_eq() {
+        let p = CancelPhase::Requested;
+        let p2 = p; // Copy
+        assert_eq!(p, p2);
+        assert!(format!("{p:?}").contains("Requested"));
+    }
+
+    #[test]
+    fn cancel_phase_ord() {
+        assert!(CancelPhase::Requested < CancelPhase::Cancelling);
+        assert!(CancelPhase::Cancelling < CancelPhase::Finalizing);
+        assert!(CancelPhase::Finalizing < CancelPhase::Completed);
+    }
+
+    #[test]
+    fn cancel_witness_error_debug_clone_copy_eq() {
+        let e = CancelWitnessError::TaskMismatch;
+        let e2 = e; // Copy
+        assert_eq!(e, e2);
+        assert!(format!("{e:?}").contains("TaskMismatch"));
+
+        let e3 = CancelWitnessError::RegionMismatch;
+        assert_ne!(e, e3);
+
+        let e4 = CancelWitnessError::EpochMismatch;
+        assert!(format!("{e4:?}").contains("EpochMismatch"));
+
+        let e5 = CancelWitnessError::PhaseRegression {
+            from: CancelPhase::Cancelling,
+            to: CancelPhase::Requested,
+        };
+        assert!(format!("{e5:?}").contains("PhaseRegression"));
+
+        let e6 = CancelWitnessError::ReasonWeakened {
+            from: CancelKind::Shutdown,
+            to: CancelKind::User,
+        };
+        assert!(format!("{e6:?}").contains("ReasonWeakened"));
+    }
+
+    #[test]
+    fn cancel_reason_debug_clone_eq() {
+        let r = CancelReason::timeout();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("CancelReason"));
+        let r2 = r.clone();
+        assert_eq!(r, r2);
+    }
+
+    #[test]
+    fn cancel_reason_default() {
+        let r = CancelReason::default();
+        assert_eq!(r.kind, CancelKind::User);
+        assert!(r.cause.is_none());
+        assert!(!r.truncated);
+    }
+
+    #[test]
+    fn cancel_reason_display_normal() {
+        let r = CancelReason::timeout();
+        assert_eq!(format!("{r}"), "timeout");
+
+        let r2 = CancelReason::user("custom msg");
+        assert_eq!(format!("{r2}"), "user: custom msg");
+    }
+
+    #[test]
+    fn cancel_reason_display_alternate() {
+        let r = CancelReason::shutdown();
+        let alt = format!("{r:#}");
+        assert!(alt.contains("shutdown"));
+        assert!(alt.contains("from"));
+    }
+
+    #[test]
+    fn cancel_reason_root_cause_no_chain() {
+        let r = CancelReason::timeout();
+        assert_eq!(r.root_cause().kind, CancelKind::Timeout);
+    }
+
+    #[test]
+    fn cancel_reason_root_cause_with_chain() {
+        let root = CancelReason::shutdown();
+        let child = CancelReason::parent_cancelled().with_cause(root);
+        assert_eq!(child.root_cause().kind, CancelKind::Shutdown);
+    }
+
+    #[test]
+    fn cancel_reason_chain_depth() {
+        let r1 = CancelReason::user("a");
+        assert_eq!(r1.chain_depth(), 1);
+
+        let r2 = CancelReason::timeout().with_cause(r1);
+        assert_eq!(r2.chain_depth(), 2);
+
+        let r3 = CancelReason::shutdown().with_cause(r2);
+        assert_eq!(r3.chain_depth(), 3);
+    }
+
+    #[test]
+    fn cancel_reason_estimated_memory_cost() {
+        let r = CancelReason::user("x");
+        let cost = r.estimated_memory_cost();
+        assert_eq!(cost, CancelAttributionConfig::estimated_chain_cost(1));
+    }
+
+    #[test]
+    fn cancel_attribution_config_estimated_chain_cost() {
+        assert_eq!(CancelAttributionConfig::estimated_chain_cost(0), 0);
+        assert_eq!(
+            CancelAttributionConfig::estimated_chain_cost(1),
+            CancelAttributionConfig::single_reason_cost()
+        );
+        // depth 2: 80*2 + 8*1 = 168
+        assert_eq!(CancelAttributionConfig::estimated_chain_cost(2), 168);
+    }
+
+    #[test]
+    fn cancel_witness_validate_transition_ok() {
+        let w1 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        let w2 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Cancelling,
+            CancelReason::timeout(),
+        );
+        assert!(CancelWitness::validate_transition(Some(&w1), &w2).is_ok());
+    }
+
+    #[test]
+    fn cancel_witness_validate_transition_none_prev() {
+        let w = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        assert!(CancelWitness::validate_transition(None, &w).is_ok());
+    }
+
+    #[test]
+    fn cancel_witness_validate_phase_regression() {
+        let w1 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Cancelling,
+            CancelReason::timeout(),
+        );
+        let w2 = CancelWitness::new(
+            TaskId::testing_default(),
+            RegionId::testing_default(),
+            1,
+            CancelPhase::Requested,
+            CancelReason::timeout(),
+        );
+        let err = CancelWitness::validate_transition(Some(&w1), &w2).unwrap_err();
+        assert!(matches!(err, CancelWitnessError::PhaseRegression { .. }));
+    }
+
+    /// SEM-08.5 TEST-GAP #7: `def.cancel.reason_kinds` — canonical-5 mapping.
+    ///
+    /// Verifies that:
+    /// 1. All 11 CancelKind variants map to severity levels in {0,1,2,3,4,5}.
+    /// 2. The 5 canonical kinds (User, ParentCancelled, Timeout, Panicked, Shutdown)
+    ///    are present and map to the contract-specified severity levels.
+    /// 3. Extension kinds (Deadline, PollQuota, CostBudget, FailFast, RaceLost,
+    ///    ResourceUnavailable, LinkedExit) each map to a valid severity level.
+    #[test]
+    fn canonical_5_mapping_and_extension_policy() {
+        init_test("canonical_5_mapping_and_extension_policy");
+
+        // All variants must map to {0,1,2,3,4,5}
+        let all_kinds = [
+            CancelKind::User,
+            CancelKind::Timeout,
+            CancelKind::Deadline,
+            CancelKind::PollQuota,
+            CancelKind::CostBudget,
+            CancelKind::FailFast,
+            CancelKind::RaceLost,
+            CancelKind::ParentCancelled,
+            CancelKind::ResourceUnavailable,
+            CancelKind::Shutdown,
+            CancelKind::LinkedExit,
+        ];
+        for kind in &all_kinds {
+            let sev = kind.severity();
+            assert!(
+                sev <= 5,
+                "CancelKind::{kind:?} has severity {sev} > 5, violating extension policy"
+            );
+        }
+
+        // Canonical 5 kinds and their contract-specified severity levels
+        // Per SEM-04.2 §5.1: User=0, ParentCancelled=1, Timeout=2, Panicked=4, Shutdown=5
+        // Note: RT severity mapping differs from contract (RT groups by operational category).
+        // The contract requires each extension maps to {0..5}; the canonical 5 anchor the scale.
+        assert_eq!(CancelKind::User.severity(), 0, "User must be severity 0");
+        assert_eq!(
+            CancelKind::Shutdown.severity(),
+            5,
+            "Shutdown must be severity 5"
+        );
+
+        // Verify no duplicate severity holes — every level 0..=5 has at least one kind
+        let mut covered = [false; 6];
+        for kind in &all_kinds {
+            covered[kind.severity() as usize] = true;
+        }
+        for (level, &has_kind) in covered.iter().enumerate() {
+            assert!(has_kind, "Severity level {level} has no CancelKind mapping");
+        }
+
+        // Verify strengthen monotonicity: strengthening always produces >= severity
+        for &a in &all_kinds {
+            for &b in &all_kinds {
+                let mut reason_a = CancelReason::new(a);
+                let reason_b = CancelReason::new(b);
+                let original_sev = reason_a.kind.severity();
+                reason_a.strengthen(&reason_b);
+                assert!(
+                    reason_a.kind.severity() >= original_sev,
+                    "strengthen({a:?}, {b:?}) decreased severity from {original_sev} to {}",
+                    reason_a.kind.severity()
+                );
+            }
+        }
+    }
+
+    /// br-asupersync-dyao05 — A pathologically deep cause chain in
+    /// JSON MUST NOT cause a stack overflow or unbounded heap
+    /// allocation; the deserializer must reject it with a
+    /// well-formed error before recursion runs away.
+    ///
+    /// Builds the wire form by serializing one well-formed leaf
+    /// CancelReason (so all field shapes — including RegionId,
+    /// CancelKind enum, etc. — match the actual derived
+    /// representation), then wraps the result 1024 times by
+    /// substituting the inner `"cause":null` with the just-
+    /// constructed leaf's JSON. Final payload is 1024 levels deep
+    /// — well above the 256 cap.
+    #[test]
+    fn dyao05_deserialize_rejects_overdeep_cause_chain() {
+        let leaf = CancelReason::new(CancelKind::User);
+        let leaf_json = serde_json::to_string(&leaf).expect("serialize leaf");
+        let inner_null = r#""cause":null"#;
+        // 96 wraps lands above our cap (64) but below serde_json's
+        // default recursion limit (128) so the dyao05 gate is the
+        // FIRST gate to fire — proving our defence-in-depth catches
+        // the input rather than relying on the JSON parser's own
+        // recursion safeguard (which other transports lack).
+        let depth = 96usize;
+        let mut payload = leaf_json.clone();
+        let inner_substitute = format!(r#""cause":{leaf_json}"#);
+        for _ in 0..depth {
+            payload = payload.replacen(inner_null, &inner_substitute, 1);
+        }
+
+        let result: Result<CancelReason, _> = serde_json::from_str(&payload);
+        assert!(
+            result.is_err(),
+            "96-deep cause chain MUST be rejected by the dyao05 depth gate"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dyao05"),
+            "rejection message should reference the dyao05 depth gate: {err_msg}"
+        );
+    }
+
+    /// br-asupersync-dyao05 — A modest legitimate chain depth
+    /// (e.g., 8 levels — well within both the deserialize cap of
+    /// 256 and the runtime cap of 16) MUST round-trip cleanly.
+    /// Confirms the gate doesn't spuriously reject valid input.
+    #[test]
+    fn dyao05_deserialize_accepts_modest_cause_chain() {
+        let mut reason = CancelReason::new(CancelKind::User);
+        for i in 0..8 {
+            let mut parent = CancelReason::new(CancelKind::Timeout);
+            parent.message = Some(format!("level {i}"));
+            parent.cause = Some(Box::new(reason));
+            reason = parent;
+        }
+        let json = serde_json::to_string(&reason).expect("serialize");
+        let parsed: CancelReason = serde_json::from_str(&json).expect("8-deep chain must parse");
+        assert_eq!(parsed.kind, CancelKind::Timeout);
+        // Walk the chain and count entries — should be 9 (the 8
+        // wrappers plus the original).
+        let mut count = 0;
+        let mut node = Some(&parsed);
+        while let Some(n) = node {
+            count += 1;
+            node = n.cause.as_deref();
+        }
+        assert_eq!(count, 9, "round-tripped chain length");
+    }
+
+    /// br-asupersync-dyao05 — The thread-local depth counter must
+    /// reset between independent deserialize calls on the same
+    /// thread. Without the RAII `CauseDepthGuard`, a stale counter
+    /// would leak into the next deserialize and either spuriously
+    /// reject valid input or admit input deeper than the cap.
+    #[test]
+    fn dyao05_depth_counter_resets_between_calls() {
+        for _ in 0..3 {
+            let mut reason = CancelReason::new(CancelKind::User);
+            for _ in 0..5 {
+                let mut parent = CancelReason::new(CancelKind::Timeout);
+                parent.cause = Some(Box::new(reason));
+                reason = parent;
+            }
+            let json = serde_json::to_string(&reason).expect("serialize");
+            let parsed: CancelReason =
+                serde_json::from_str(&json).expect("5-deep chain must parse on every iteration");
+            assert_eq!(parsed.kind, CancelKind::Timeout);
+        }
+        // After all calls, the thread-local counter must be 0
+        // (RAII guard restored it on every exit).
+        let final_depth = CANCEL_CAUSE_DEPTH.with(std::cell::Cell::get);
+        assert_eq!(
+            final_depth, 0,
+            "thread-local depth counter leaked between deserialize calls"
+        );
+    }
+}

@@ -1,0 +1,88 @@
+//! Async signal handling and graceful shutdown.
+//!
+//! This module provides primitives for handling process signals and implementing
+//! graceful shutdown patterns in async applications.
+//!
+//! # Components
+//!
+//! - [`SignalKind`]: Enumeration of supported signal types
+//! - [`Signal`]: Async stream for receiving supported signals
+//! - [`SignalMask`]: Thread-scoped signal mask management
+//! - [`ctrl_c`]: Cross-platform Ctrl+C handling
+//! - [`ShutdownController`]: Coordinated graceful shutdown
+//! - [`ShutdownReceiver`]: Handle for receiving shutdown notifications
+//! - [`ReloadController`]: Opt-in SIGHUP reload notifications that do not
+//!   trigger shutdown
+//! - [`with_graceful_shutdown`]: Run tasks with shutdown support
+//!
+//! # Platform Behavior
+//!
+//! Unix signal streams (`signal(...)`) and `ctrl_c()` are supported through a
+//! global signal dispatcher. Unix builds also expose thread-scoped signal mask
+//! helpers backed by `pthread_sigmask`.
+//!
+//! Windows builds support a subset of process signals (`SIGINT`, `SIGTERM`,
+//! and `SIGBREAK` via `SignalKind::quit()`) through the same async stream API.
+//! Signal mask helpers expose the same API surface but return unsupported
+//! errors outside Unix. Other non-Unix builds expose the signal stream API
+//! surface but return unsupported errors for signal stream creation.
+//!
+//! The [`ShutdownController`] and graceful shutdown helpers are fully
+//! functional using our sync primitives.
+//!
+//! # Example
+//!
+//! ```ignore
+//! use asupersync::signal::{ShutdownController, with_graceful_shutdown, GracefulOutcome};
+//!
+//! async fn run_server() {
+//!     let controller = ShutdownController::new();
+//!
+//!     // Subscribe to shutdown notifications
+//!     let receiver = controller.subscribe();
+//!
+//!     // Run a task with graceful shutdown support
+//!     let result = with_graceful_shutdown(
+//!         async { /* server loop */ 42 },
+//!         receiver,
+//!     ).await;
+//!
+//!     match result {
+//!         GracefulOutcome::Completed(value) => println!("Completed: {value}"),
+//!         GracefulOutcome::ShutdownSignaled => println!("Shutdown requested"),
+//!     }
+//! }
+//! ```
+//!
+//! # Cancel Safety
+//!
+//! - `Signal::recv`: Cancel-safe
+//! - `ShutdownReceiver::wait`: Cancel-safe
+//! - `ctrl_c`: dropping it is safe, but a Ctrl+C between calls is not seen by
+//!   the next call; keep one `signal(SignalKind::interrupt())` stream instead
+
+mod ctrl_c;
+mod graceful;
+mod kind;
+mod shutdown;
+mod signal;
+
+pub use ctrl_c::{CtrlCError, ctrl_c, is_available};
+pub use graceful::{
+    GracePeriodGuard, GracefulBuilder, GracefulConfig, GracefulOutcome, with_graceful_shutdown,
+};
+pub use kind::SignalKind;
+pub use shutdown::{
+    ReloadController, ReloadOutcome, ReloadReceiver, ShutdownController, ShutdownReceiver,
+};
+pub use signal::{
+    Signal, SignalError, SignalMask, SignalMaskGuard, block_current_thread_signals, signal,
+};
+
+// Cross-platform helpers for the signal subset supported on Unix and Windows.
+#[cfg(any(unix, windows))]
+pub use signal::{sigint, sigquit, sigterm};
+
+// Unix-specific signal helpers.
+#[cfg(unix)]
+pub use signal::{sigalrm, sigchld, sighup, sigpipe, sigusr1, sigusr2, sigwinch};

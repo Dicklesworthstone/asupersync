@@ -1,0 +1,40 @@
+{
+  "schema_version": "fuzz-manifest-lease-queue-input-v1",
+  "manifest_path": "fuzz/Cargo.toml",
+  "current_manifest_targets": [
+    {
+      "name": "http_header_map_invariants",
+      "path": "fuzz/fuzz_targets/http_header_map_invariants.rs"
+    }
+  ],
+  "proposals": [
+    {
+      "proposal_id": "asupersync-fuzz-a:MaroonBear:http_header_map_invariants",
+      "agent": "MaroonBear",
+      "bead_id": "asupersync-fuzz-a",
+      "target_name": "http_header_map_invariants",
+      "target_path": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+      "priority": 1,
+      "created_ts": "2026-05-08T06:02:00Z"
+    },
+    {
+      "proposal_id": "asupersync-fuzz-c:CoralGorge:postgres_row_description_state",
+      "agent": "CoralGorge",
+      "bead_id": "asupersync-fuzz-c",
+      "target_name": "postgres_row_description_state",
+      "target_path": "fuzz/fuzz_targets/postgres_row_description_state.rs",
+      "priority": 2,
+      "created_ts": "2026-05-08T06:03:00Z"
+    },
+    {
+      "proposal_id": "asupersync-fuzz-d:TopazGoose:postgres_row_description_state",
+      "agent": "TopazGoose",
+      "bead_id": "asupersync-fuzz-d",
+      "target_name": "postgres_row_description_state",
+      "target_path": "fuzz/fuzz_targets/postgres_row_description_state.rs",
+      "priority": 2,
+      "created_ts": "2026-05-08T06:04:00Z"
+    }
+  ],
+  "reservations": []
+}

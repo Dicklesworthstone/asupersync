@@ -1,0 +1,35 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [
+      {
+        "id": "asupersync-lhx6m4",
+        "issue_type": "epic",
+        "title": "[idea-wizard] Swarm responsiveness and proof-lane autopilot"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  }
+}

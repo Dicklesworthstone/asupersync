@@ -1,0 +1,30 @@
+{
+  "fixture_id": "golden-t5-web-e2e-success",
+  "schema_version": "1.0",
+  "track_id": "T5",
+  "description": "Representative success trace for web/gRPC e2e service scripts",
+  "entry": {
+    "schema_version": "1.0",
+    "scenario_id": "t5_rest_middleware_chain",
+    "correlation_id": "t5-web-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "REST middleware chain with compression and path normalization verified",
+    "replay_pointer": "cargo test --test web_grpc_e2e_service_scripts -- t5_rest_middleware --nocapture"
+  },
+  "required_fields": [
+    "schema_version",
+    "scenario_id",
+    "correlation_id",
+    "phase",
+    "outcome",
+    "detail",
+    "replay_pointer"
+  ],
+  "invariants": [
+    "All 7 schema fields present",
+    "schema_version is 1.0 for T5 service scripts",
+    "correlation_id matches slug format",
+    "outcome is one of: pass, fail, skip, error"
+  ]
+}

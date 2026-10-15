@@ -1,0 +1,6 @@
+error: protobuf tag 19000 is reserved; tags 19000..=19999 cannot be used
+ --> tests/compile_fail/proto_reserved_tag.rs:5:5
+  |
+5 | /     #[proto(string, tag = 19000)]
+6 | |     value: String,
+  | |_________________^

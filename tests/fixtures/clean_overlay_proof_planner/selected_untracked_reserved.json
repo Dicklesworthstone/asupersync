@@ -1,0 +1,23 @@
+{
+  "schema_version": "clean-overlay-proof-planner-input-v1",
+  "agent_name": "SapphireHill",
+  "head": "3333333333333333333333333333333333333333",
+  "selected_paths": ["tests/clean_overlay_proof_planner_contract.rs"],
+  "dirty_entries": [
+    {"path": "tests/clean_overlay_proof_planner_contract.rs", "status": "??"}
+  ],
+  "reservations": [
+    {
+      "id": 38591,
+      "agent_name": "SapphireHill",
+      "path_pattern": "tests/clean_overlay_proof_planner_contract.rs",
+      "exclusive": true,
+      "expires_ts": "2026-06-15T00:00:00Z"
+    }
+  ],
+  "command_intent": {
+    "description": "focused planner contract proof",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_clean_overlay_planner cargo test -p asupersync --test clean_overlay_proof_planner_contract -- --nocapture",
+    "remote_required": true
+  }
+}

@@ -1,0 +1,47 @@
+---
+source: src/cli/completion.rs
+expression: comprehensive_report.trim_end()
+---
+=== CLI Completion Scripts Comprehensive Report ===
+
+[bash]
+line_count: 36
+char_count: 1088
+has_subcommands: false
+has_options: false
+has_complete_function: true
+has_compgen: true
+has_completion_function: true
+
+[zsh]
+line_count: 74
+char_count: 2446
+has_subcommands: false
+has_options: false
+has_compdef: true
+has_zsh_function: true
+has_arguments: true
+
+[fish]
+line_count: 19
+char_count: 1582
+has_subcommands: false
+has_options: false
+has_complete_command: false
+has_fish_conditions: true
+
+[powershell]
+line_count: 58
+char_count: 2872
+has_subcommands: false
+has_options: false
+has_register_completer: true
+has_scriptblock: false
+
+[elvish]
+line_count: 54
+char_count: 1615
+has_subcommands: false
+has_options: false
+has_edit_completion: true
+has_arg_completer: true

@@ -1,0 +1,22 @@
+{
+  "config": {
+    "channel_capacity": 16,
+    "reorder_probability": 80,
+    "duplication_probability": 20,
+    "reorder_buffer_size": 8,
+    "chaos_seed": 12345,
+    "message_count": 10,
+    "reserve_drop_probability": 30,
+    "early_close_probability": 0,
+    "cancel_probability": 0,
+    "concurrent_receivers": 2,
+    "max_data_size": 32
+  },
+  "messages": [
+    { "id": 1, "data": [1, 2, 3, 4] },
+    { "id": 2, "data": [5, 6, 7, 8] },
+    { "id": 3, "data": [9, 10, 11, 12] },
+    { "id": 4, "data": [13, 14, 15, 16] },
+    { "id": 5, "data": [17, 18, 19, 20] }
+  ]
+}

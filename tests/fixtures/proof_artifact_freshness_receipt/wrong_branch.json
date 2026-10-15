@@ -1,0 +1,22 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/wrong-branch.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "agent-proof-spike",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_wrong_branch cargo test --test proof_runner_contract -- --nocapture",
+      "touched_files": [
+        "scripts/proof_runner.py"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:19:00Z"
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

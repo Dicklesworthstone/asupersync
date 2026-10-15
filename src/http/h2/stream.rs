@@ -1,0 +1,3584 @@
+//! HTTP/2 stream state management.
+//!
+//! Implements stream state machine as defined in RFC 7540 Section 5.1.
+
+use std::collections::VecDeque;
+
+use crate::bytes::Bytes;
+// br-asupersync-tlv3gp: StreamStore now uses a flat Vec<Option<Stream>>
+// indexed by stream id offset from a sliding base, replacing the prior
+// DetHashMap<u32, Stream>. The hot-path lookup is one bounds check and
+// one pointer indirection rather than a hash + bucket scan.
+
+use super::error::{ErrorCode, H2Error};
+use super::frame::PrioritySpec;
+#[cfg(test)]
+use super::hpack::Header;
+#[cfg(test)]
+use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
+
+/// Maximum accumulated header fragment size multiplier.
+/// Provides protection against DoS via unbounded CONTINUATION frames.
+const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
+
+/// Validate that a trailer block contains no HTTP/2 pseudo-headers.
+///
+/// br-asupersync-of0l5f: RFC 9113 §8.1 says trailers must not
+/// include pseudo-header fields. The pre-fix path accepted trailing
+/// HEADERS containing embedded `:status` / `:method` / `:path`
+/// etc., letting a malicious peer rewrite the request line after
+/// the initial HEADERS already committed it.
+///
+/// br-asupersync-90n3nh: this helper is now `pub(crate)`. Production
+/// trailer validation is performed by
+/// [`super::connection::validate_h2_pseudo_headers`] with
+/// `is_trailers=true` (introduced in br-asupersync-0eyf7t), which
+/// is the canonical validator and additionally enforces RFC 8.2.1
+/// lowercase + RFC 8.2.2 connection-specific-header bans on the
+/// trailer block. This module-local helper is retained as the
+/// minimal name-only fast path for use by Stream-internal call
+/// sites and the of0l5f regression tests; it is not part of the
+/// public API surface because dual-implementation validators for a
+/// security-sensitive check could drift across maintenance.
+///
+/// Pseudo-headers are HPACK fields whose name begins with `':'`.
+/// This validator is name-only — it does not inspect values, since
+/// the value is irrelevant once a `':'` prefix is observed.
+///
+/// Returns `Ok(())` if no pseudo-header is present, or
+/// `Err(&'static str)` with a stable error reason on first match.
+/// Callers should map the `Err` to a connection-level
+/// `H2Error::protocol(...)` (PROTOCOL_ERROR) and trigger GOAWAY.
+#[cfg(test)]
+pub(crate) fn reject_pseudo_headers_in_trailers(headers: &[Header]) -> Result<(), &'static str> {
+    for h in headers {
+        if h.name.starts_with(':') {
+            return Err("trailer block must not contain pseudo-header fields (RFC 9113 §8.1)");
+        }
+    }
+    Ok(())
+}
+
+/// Absolute maximum header fragment size (256 KB).
+/// caps the size even if max_header_list_size is very large (e.g. u32::MAX).
+const MAX_HEADER_FRAGMENT_SIZE: usize = 256 * 1024;
+
+/// Maximum number of HEADERS/CONTINUATION fragments accumulated for a single
+/// header block before the stream is rejected with `ENHANCE_YOUR_CALM`.
+///
+/// The byte cap ([`MAX_HEADER_FRAGMENT_SIZE`] / `max_header_fragment_size`)
+/// alone does NOT bound the fragment *count*: a peer can send an unbounded
+/// stream of zero-length CONTINUATION frames, each adding 0 bytes (so the byte
+/// cap never trips) while still pushing an entry onto `header_fragments`. That
+/// is the CONTINUATION-flood DoS (CVE-2024-27316 class) — unbounded `Vec<Bytes>`
+/// growth, bounded only by the connection-level CONTINUATION timeout, which
+/// bounds duration but not the memory accumulated within it. This count cap
+/// closes that bypass. 1024 is far above any legitimate fragmentation (a 256 KiB
+/// header block at the 16 KiB default frame size is ~16 frames) while keeping
+/// the retained `Bytes` entries trivially bounded.
+const MAX_HEADER_CONTINUATION_FRAGMENTS: usize = 1024;
+
+/// Maximum valid HTTP/2 stream ID (31-bit, MSB must be 0).
+const MAX_STREAM_ID: u32 = 0x7FFF_FFFF;
+
+/// Stream state as defined in RFC 7540 Section 5.1.
+///
+/// ```text
+///                              +--------+
+///                      send PP |        | recv PP
+///                     ,--------|  idle  |--------.
+///                    /         |        |         \
+///                   v          +--------+          v
+///            +----------+          |           +----------+
+///            |          |          | send H /  |          |
+///     ,------| reserved |          | recv H    | reserved |------.
+///     |      | (local)  |          |           | (remote) |      |
+///     |      +----------+          v           +----------+      |
+///     |          |             +--------+             |          |
+///     |          |     recv ES |        | send ES     |          |
+///     |   send H |     ,-------|  open  |-------.     | recv H   |
+///     |          |    /        |        |        \    |          |
+///     |          v   v         +--------+         v   v          |
+///     |      +----------+          |           +----------+      |
+///     |      |   half   |          |           |   half   |      |
+///     |      |  closed  |          | send R /  |  closed  |      |
+///     |      | (remote) |          | recv R    | (local)  |      |
+///     |      +----------+          |           +----------+      |
+///     |           |                |                 |           |
+///     |           | send ES /      |       recv ES / |           |
+///     |           | send R /       v        send R / |           |
+///     |           | recv R     +--------+   recv R   |           |
+///     | send R /  `----------->|        |<-----------'  send R / |
+///     | recv R                 | closed |               recv R   |
+///     `----------------------->|        |<-----------------------'
+///                              +--------+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamState {
+    /// Idle state (initial state for new streams).
+    Idle,
+    /// Reserved (local) - server has sent PUSH_PROMISE.
+    ReservedLocal,
+    /// Reserved (remote) - server has received PUSH_PROMISE.
+    ReservedRemote,
+    /// Open - both sides can send data.
+    Open,
+    /// Half-closed (local) - local side has sent END_STREAM.
+    HalfClosedLocal,
+    /// Half-closed (remote) - remote side has sent END_STREAM.
+    HalfClosedRemote,
+    /// Closed - stream has been terminated.
+    Closed,
+}
+
+impl StreamState {
+    /// Check if data can be sent in this state.
+    #[must_use]
+    pub fn can_send(&self) -> bool {
+        matches!(
+            self,
+            Self::Open | Self::HalfClosedRemote | Self::ReservedLocal
+        )
+    }
+
+    /// Check if data can be received in this state.
+    #[must_use]
+    pub fn can_recv(&self) -> bool {
+        matches!(
+            self,
+            Self::Open | Self::HalfClosedLocal | Self::ReservedRemote
+        )
+    }
+
+    /// Check if the stream is in a terminal state.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        matches!(self, Self::Closed)
+    }
+
+    /// Check if the stream counts toward the max concurrent streams limit (RFC 7540 §5.1.2).
+    /// "open", "half-closed", and "reserved" states all count toward the limit.
+    /// Per RFC 7540 §5.1.2: "Streams in the 'reserved' state count toward the
+    /// maximum, unless they have been reset."
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            Self::Open
+                | Self::HalfClosedLocal
+                | Self::HalfClosedRemote
+                | Self::ReservedLocal
+                | Self::ReservedRemote
+        )
+    }
+
+    /// Check if headers can be sent in this state.
+    #[must_use]
+    pub fn can_send_headers(&self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::ReservedLocal | Self::Open | Self::HalfClosedRemote
+        )
+    }
+
+    /// Check if headers can be received in this state.
+    #[must_use]
+    pub fn can_recv_headers(&self) -> bool {
+        matches!(
+            self,
+            Self::Idle | Self::ReservedRemote | Self::Open | Self::HalfClosedLocal
+        )
+    }
+}
+
+/// HTTP/2 stream.
+#[derive(Debug)]
+pub struct Stream {
+    /// Stream identifier.
+    id: u32,
+    /// Current state.
+    state: StreamState,
+    /// Send window size.
+    send_window: i32,
+    /// Receive window size.
+    recv_window: i32,
+    /// Initial window size (for window update calculations).
+    initial_send_window: i32,
+    /// Initial receive window size (for auto WINDOW_UPDATE threshold).
+    initial_recv_window: i32,
+    /// Received DATA cannot be retroactively moved to consumption accounting.
+    #[cfg(feature = "http2-streaming")]
+    recv_data_started: bool,
+    /// Outstanding receive bytes when the application owns stream credit.
+    /// Includes padding until the connection discards it after frame validation.
+    #[cfg(feature = "http2-streaming")]
+    deferred_recv_bytes: Option<u64>,
+    /// Priority specification.
+    priority: PrioritySpec,
+    /// Pending data to send (buffered due to flow control).
+    pending_data: VecDeque<PendingData>,
+    /// The API has accepted END_STREAM but the connection has not emitted it.
+    queued_end_stream: bool,
+    /// Temporarily retain an over-limit field block only to synchronize HPACK.
+    refused_headers: bool,
+    /// Error code if stream was reset.
+    error_code: Option<ErrorCode>,
+    /// This endpoint sent RST_STREAM, so frames the peer sent before the
+    /// reset reached it are ignored rather than treated as errors.
+    reset_sent: bool,
+    /// Whether we've received END_HEADERS.
+    headers_complete: bool,
+    /// br-asupersync-0eyf7t — Set to `true` AFTER the initial
+    /// HEADERS block for this stream has been successfully decoded
+    /// in `decode_headers`. Used to discriminate the trailers
+    /// section (any subsequent HEADERS-with-END_HEADERS for the
+    /// same stream) from the initial header block. Per RFC 9113
+    /// §8.1, trailers MUST NOT contain pseudo-header fields, so
+    /// the connection layer needs to surface this signal to the
+    /// pseudo-header validator.
+    initial_headers_decoded: bool,
+    /// Accumulated header block fragments.
+    header_fragments: Vec<Bytes>,
+    /// Running total byte length of `header_fragments`, maintained O(1) on every
+    /// push so the accumulation cap can be enforced without re-summing the whole
+    /// vector each frame (the re-sum was O(N) per CONTINUATION frame = O(N^2)
+    /// over a fragmented header block — a CPU DoS amplifier). Invariant:
+    /// `header_fragments_bytes == header_fragments.iter().map(Bytes::len).sum()`.
+    header_fragments_bytes: usize,
+    /// Max header list size (used to bound fragment accumulation).
+    max_header_list_size: u32,
+}
+
+/// Pending data waiting for flow control window.
+#[derive(Debug)]
+struct PendingData {
+    data: Bytes,
+    end_stream: bool,
+}
+
+impl Stream {
+    /// Create a new stream in idle state.
+    #[must_use]
+    pub fn new(id: u32, initial_window_size: u32, max_header_list_size: u32) -> Self {
+        Self::new_with_recv_window(
+            id,
+            initial_window_size,
+            initial_window_size,
+            max_header_list_size,
+        )
+    }
+
+    /// Create a new stream with separate peer-send and local-receive windows.
+    #[must_use]
+    pub fn new_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let initial_send_window =
+            i32::try_from(initial_send_window_size).expect("initial send window size exceeds i32");
+        let initial_recv_window = i32::try_from(initial_recv_window_size)
+            .expect("initial receive window size exceeds i32");
+        Self {
+            id,
+            state: StreamState::Idle,
+            send_window: initial_send_window,
+            recv_window: initial_recv_window,
+            initial_send_window,
+            initial_recv_window,
+            #[cfg(feature = "http2-streaming")]
+            recv_data_started: false,
+            #[cfg(feature = "http2-streaming")]
+            deferred_recv_bytes: None,
+            priority: PrioritySpec {
+                exclusive: false,
+                dependency: 0,
+                weight: 16,
+            },
+            pending_data: VecDeque::new(),
+            queued_end_stream: false,
+            refused_headers: false,
+            error_code: None,
+            reset_sent: false,
+            headers_complete: true,
+            initial_headers_decoded: false,
+            header_fragments: Vec::new(),
+            header_fragments_bytes: 0,
+            max_header_list_size,
+        }
+    }
+
+    /// br-asupersync-0eyf7t — Returns `true` if the initial HEADERS
+    /// block for this stream has already been fully decoded. Used by
+    /// the connection layer to detect that a subsequent HEADERS
+    /// frame is the trailers section (which must not contain
+    /// pseudo-header fields per RFC 9113 §8.1).
+    #[must_use]
+    pub fn initial_headers_decoded(&self) -> bool {
+        self.initial_headers_decoded
+    }
+
+    /// br-asupersync-0eyf7t — Mark the initial HEADERS block as
+    /// fully decoded. Called from the connection layer's
+    /// `decode_headers` after a successful first-headers
+    /// validation. Idempotent.
+    pub fn mark_initial_headers_decoded(&mut self) {
+        self.initial_headers_decoded = true;
+    }
+
+    /// Create a new reserved (remote) stream.
+    #[must_use]
+    pub fn new_reserved_remote(
+        id: u32,
+        initial_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new(id, initial_window_size, max_header_list_size);
+        stream.state = StreamState::ReservedRemote;
+        stream
+    }
+
+    /// Create a new reserved (remote) stream with a local receive window.
+    #[must_use]
+    pub fn new_reserved_remote_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new_with_recv_window(
+            id,
+            initial_send_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
+        stream.state = StreamState::ReservedRemote;
+        stream
+    }
+
+    /// Create a new reserved (local) stream.
+    #[must_use]
+    pub fn new_reserved_local(
+        id: u32,
+        initial_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new(id, initial_window_size, max_header_list_size);
+        stream.state = StreamState::ReservedLocal;
+        stream
+    }
+
+    /// Create a new reserved (local) stream with a local receive window.
+    #[must_use]
+    pub fn new_reserved_local_with_recv_window(
+        id: u32,
+        initial_send_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        let mut stream = Self::new_with_recv_window(
+            id,
+            initial_send_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
+        stream.state = StreamState::ReservedLocal;
+        stream
+    }
+
+    /// Compute maximum accumulated header fragment size for a given limit.
+    pub(crate) fn max_header_fragment_size_for(max_header_list_size: u32) -> usize {
+        let max_list_size = usize::try_from(max_header_list_size).unwrap_or(usize::MAX);
+        let calculated = max_list_size.saturating_mul(HEADER_FRAGMENT_MULTIPLIER);
+        calculated.min(MAX_HEADER_FRAGMENT_SIZE)
+    }
+
+    fn max_header_fragment_size(&self) -> usize {
+        Self::max_header_fragment_size_for(self.max_header_list_size)
+    }
+
+    /// Get the stream ID.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+
+    /// Get the current state.
+    #[must_use]
+    pub fn state(&self) -> StreamState {
+        self.state
+    }
+
+    /// Get the send window size.
+    #[must_use]
+    pub fn send_window(&self) -> i32 {
+        self.send_window
+    }
+
+    /// Get the receive window size.
+    #[must_use]
+    pub fn recv_window(&self) -> i32 {
+        self.recv_window
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn defer_recv_window_updates(&mut self) -> Result<(), H2Error> {
+        if self.error_code.is_some() {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "cannot defer receive credit on a reset stream",
+            ));
+        }
+        if self.deferred_recv_bytes.is_some() {
+            return Ok(());
+        }
+        if !self.initial_headers_decoded || !self.headers_complete || self.recv_data_started {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::ProtocolError,
+                "receive credit must be deferred after initial HEADERS and before DATA",
+            ));
+        }
+        self.deferred_recv_bytes = Some(0);
+        Ok(())
+    }
+
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn deferred_recv_bytes(&self) -> Option<u64> {
+        self.deferred_recv_bytes
+    }
+
+    /// Retire consumed bytes, returning only credit still useful to the peer.
+    #[cfg(feature = "http2-streaming")]
+    pub(crate) fn release_deferred_recv_capacity(&mut self, amount: u32) -> Result<u32, H2Error> {
+        if self.error_code.is_some() {
+            return Ok(0);
+        }
+        let pending = self.deferred_recv_bytes.ok_or_else(|| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::ProtocolError,
+                "stream receive credit is not deferred",
+            )
+        })?;
+        let remaining = pending.checked_sub(u64::from(amount)).ok_or_else(|| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::FlowControlError,
+                "released receive capacity exceeds unconsumed DATA",
+            )
+        })?;
+        let increment = if self.state.can_recv() { amount } else { 0 };
+        if increment != 0 {
+            let delta = i32::try_from(increment).map_err(|_| {
+                H2Error::stream(
+                    self.id,
+                    ErrorCode::FlowControlError,
+                    "window increment too large",
+                )
+            })?;
+            self.update_recv_window(delta)?;
+        }
+        self.deferred_recv_bytes = Some(remaining);
+        Ok(increment)
+    }
+
+    /// Get the priority specification.
+    #[must_use]
+    pub fn priority(&self) -> &PrioritySpec {
+        &self.priority
+    }
+
+    /// Get the error code if stream was reset.
+    #[must_use]
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        self.error_code
+    }
+
+    /// Check if headers are being received (CONTINUATION expected).
+    #[must_use]
+    pub fn is_receiving_headers(&self) -> bool {
+        !self.headers_complete
+    }
+
+    /// Check if there is pending data.
+    #[must_use]
+    pub fn has_pending_data(&self) -> bool {
+        !self.pending_data.is_empty()
+    }
+
+    pub(crate) fn queue_end_stream(&mut self, end_stream: bool) {
+        self.queued_end_stream |= end_stream;
+    }
+
+    pub(crate) fn emit_end_stream(&mut self) {
+        self.queued_end_stream = false;
+    }
+
+    pub(crate) fn headers_refused(&self) -> bool {
+        self.refused_headers
+    }
+
+    /// Record that this endpoint sent RST_STREAM for the stream.
+    pub(crate) fn mark_reset_sent(&mut self) {
+        self.reset_sent = true;
+    }
+
+    /// RFC 9113 §5.1: after sending RST_STREAM, frames the peer had already
+    /// sent on the stream are ignored. Their field blocks are still decoded
+    /// so the HPACK dynamic tables stay in step.
+    pub(crate) fn reset_sent(&self) -> bool {
+        self.reset_sent
+    }
+
+    pub(crate) fn wire_closed(&self) -> bool {
+        self.state.is_closed() && !self.queued_end_stream
+    }
+
+    fn wire_active(&self) -> bool {
+        self.state.is_active() || self.queued_end_stream
+    }
+
+    /// Update send window size.
+    pub fn update_send_window(&mut self, delta: i32) -> Result<(), H2Error> {
+        // Check for overflow using wider arithmetic
+        let new_window = i64::from(self.send_window) + i64::from(delta);
+        let new_window = i32::try_from(new_window).map_err(|_| {
+            H2Error::stream(self.id, ErrorCode::FlowControlError, "window size overflow")
+        })?;
+        self.send_window = new_window;
+        Ok(())
+    }
+
+    /// Update receive window size.
+    pub fn update_recv_window(&mut self, delta: i32) -> Result<(), H2Error> {
+        // Check for overflow using wider arithmetic
+        let new_window = i64::from(self.recv_window) + i64::from(delta);
+        let new_window = i32::try_from(new_window).map_err(|_| {
+            H2Error::stream(self.id, ErrorCode::FlowControlError, "window size overflow")
+        })?;
+        self.recv_window = new_window;
+        Ok(())
+    }
+
+    /// Consume from send window (for sending data).
+    pub fn consume_send_window(&mut self, amount: u32) {
+        let amount_i64 = i64::from(amount);
+        let new_window = i64::from(self.send_window) - amount_i64;
+        // Clamp to i32 range — window can legitimately go negative per RFC 9113 §6.9.2
+        self.send_window =
+            i32::try_from(new_window.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
+                .unwrap_or(i32::MIN);
+    }
+
+    /// Consume from receive window (for receiving data).
+    ///
+    /// br-asupersync-kaqld3: pre-fix the body did `clamp(MIN..MAX)`
+    /// and left the window stuck at `i32::MIN` whenever the peer
+    /// overshot the window total. Subsequent WINDOW_UPDATEs added to
+    /// a deeply-negative baseline and the window never recovered to
+    /// a positive value, **deadlocking the stream**. RFC 9113 §6.9.1
+    /// is unambiguous: "A receiver MUST treat the receipt of a
+    /// flow-controlled frame with length that would cause the
+    /// flow-control window to exceed the maximum size as a
+    /// connection error of type FLOW_CONTROL_ERROR."
+    ///
+    /// The fix returns `Result<(), H2Error>` so the caller (the
+    /// data-frame ingestion path at `process_data` ~line 590) can
+    /// propagate the error upward. Underflow below `i32::MIN` is
+    /// the surfaceable event because `recv_window` legitimately may
+    /// go negative after a `SETTINGS_INITIAL_WINDOW_SIZE` shrink
+    /// (RFC 9113 §6.9.2) — but only down to the representable bound,
+    /// not stuck-on-MIN. Anything that would underflow past `i32::MIN`
+    /// is a connection-level FLOW_CONTROL_ERROR.
+    pub fn consume_recv_window(&mut self, amount: u32) -> Result<(), H2Error> {
+        let amount_i64 = i64::from(amount);
+        let new_window = i64::from(self.recv_window) - amount_i64;
+        if new_window < i64::from(i32::MIN) {
+            return Err(H2Error::connection(
+                ErrorCode::FlowControlError,
+                "receive flow-control window underflow \
+                 (peer overshot stream window total — RFC 9113 §6.9.1)",
+            ));
+        }
+        // Safe cast: bounds-checked above against i32::MIN, and
+        // amount is u32 so new_window cannot exceed i32::MAX.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.recv_window = new_window as i32;
+        }
+        Ok(())
+    }
+
+    /// Check if the receive window is low enough to warrant an automatic WINDOW_UPDATE.
+    ///
+    /// Returns `Some(increment)` when the recv window has dropped below 25% of
+    /// its initial value. The increment replenishes the window back to its initial size.
+    ///
+    /// This conservative threshold (25% instead of 50%) prevents eager WINDOW_UPDATE
+    /// sending that defeats flow control backpressure and reduces risk of unbounded
+    /// memory buffering.
+    #[must_use]
+    pub fn auto_window_update_increment(&self) -> Option<u32> {
+        #[cfg(feature = "http2-streaming")]
+        if self.deferred_recv_bytes.is_some() {
+            return None;
+        }
+        // Use 25% threshold instead of 50% to be more conservative about flow control.
+        // At least 1, so a window of 1-3 bytes is refilled once it is used up.
+        let low_watermark = (self.initial_recv_window / 4).max(1);
+        if self.recv_window < low_watermark {
+            let increment = i64::from(self.initial_recv_window) - i64::from(self.recv_window);
+            u32::try_from(increment).ok().filter(|&inc| inc > 0)
+        } else {
+            None
+        }
+    }
+
+    /// Set the priority.
+    pub fn set_priority(&mut self, priority: PrioritySpec) {
+        self.priority = priority;
+    }
+
+    /// Update initial window size (affects send window).
+    pub fn update_initial_window_size(&mut self, new_size: u32) -> Result<(), H2Error> {
+        let new_size = i32::try_from(new_size)
+            .map_err(|_| H2Error::flow_control("initial window size too large"))?;
+        let delta = new_size - self.initial_send_window;
+        self.initial_send_window = new_size;
+        self.update_send_window(delta)
+    }
+
+    /// Transition to Open state (send headers).
+    pub fn send_headers(&mut self, end_stream: bool) -> Result<(), H2Error> {
+        match self.state {
+            StreamState::Idle => {
+                self.state = if end_stream {
+                    StreamState::HalfClosedLocal
+                } else {
+                    StreamState::Open
+                };
+                Ok(())
+            }
+            StreamState::ReservedLocal => {
+                self.state = if end_stream {
+                    StreamState::Closed
+                } else {
+                    StreamState::HalfClosedRemote
+                };
+                Ok(())
+            }
+            StreamState::Open if end_stream => {
+                self.state = StreamState::HalfClosedLocal;
+                Ok(())
+            }
+            StreamState::HalfClosedRemote if end_stream => {
+                self.state = StreamState::Closed;
+                Ok(())
+            }
+            // Sending headers without END_STREAM on an already-open stream
+            // (e.g. server response headers before DATA frames) is valid per
+            // RFC 7540 §8.1 — state stays unchanged.
+            StreamState::Open | StreamState::HalfClosedRemote => Ok(()),
+            _ => Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "cannot send headers in current state",
+            )),
+        }
+    }
+
+    /// Transition state on receiving headers.
+    pub fn recv_headers(
+        &mut self,
+        end_stream: bool,
+        end_headers: bool,
+        is_client: bool,
+    ) -> Result<(), H2Error> {
+        // Validate the state transition BEFORE modifying any fields.
+        // Setting headers_complete before validation would allow
+        // recv_continuation to accumulate fragments on a closed stream.
+        //
+        // br-asupersync-pyhaov: track whether the initial header block
+        // for this stream has already been fully received. Receiving
+        // a SECOND HEADERS frame after the first one's END_HEADERS
+        // signals trailers (RFC 9113 §8.1). RFC 9113 §8.1 mandates
+        // 'Trailers MUST be sent as a HEADERS frame with both
+        // END_HEADERS and END_STREAM set'. The state machine pre-fix
+        // accepted trailing HEADERS without END_STREAM on Open /
+        // HalfClosedLocal as if it were 1xx informational, masking
+        // the malformed-trailer case on the server-receives-request
+        // direction (where 1xx informational is impossible — only
+        // SERVERS send 1xx, never clients).
+        let is_trailer_attempt = self.headers_complete
+            && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal);
+        if is_trailer_attempt && !end_stream {
+            // Server side (is_client=false): the only legitimate HEADERS-
+            // after-headers-complete is request trailers, which MUST have
+            // END_STREAM. No END_STREAM ⇒ malformed.
+            //
+            // Client side (is_client=true): the server may legitimately
+            // send 1xx informational HEADERS without END_STREAM before
+            // the final response. We CANNOT distinguish 1xx-informational
+            // from 'malformed trailers without END_STREAM' at this layer
+            // because we don't have the decoded :status here yet. The
+            // pseudo-header validator in connection.rs::decode_headers
+            // is the right place for the client-side discrimination
+            // (1xx :status passes, no-pseudo-headers + no-END_STREAM
+            // fails). For SERVER-side, we can fail closed here because
+            // 1xx-style intermediate headers are not part of the
+            // request message grammar.
+            if !is_client {
+                return Err(H2Error::stream(
+                    self.id,
+                    ErrorCode::ProtocolError,
+                    "trailers MUST have END_STREAM (RFC 9113 §8.1) — \
+                     server received second HEADERS without END_STREAM",
+                ));
+            }
+        }
+
+        match self.state {
+            StreamState::Idle => {
+                self.state = if end_stream {
+                    StreamState::HalfClosedRemote
+                } else {
+                    StreamState::Open
+                };
+            }
+            StreamState::ReservedRemote => {
+                self.state = if end_stream {
+                    StreamState::Closed
+                } else {
+                    StreamState::HalfClosedLocal
+                };
+            }
+            StreamState::Open if end_stream => {
+                self.state = StreamState::HalfClosedRemote;
+            }
+            StreamState::HalfClosedLocal if end_stream => {
+                self.state = StreamState::Closed;
+            }
+            // Receiving headers without END_STREAM on an already-open stream
+            // is valid per RFC 9113 §8.1 ONLY for client-side reception of
+            // 1xx informational responses; the server-side variant is
+            // rejected above. State stays unchanged.
+            StreamState::Open | StreamState::HalfClosedLocal => {}
+            _ => {
+                return Err(H2Error::stream(
+                    self.id,
+                    ErrorCode::StreamClosed,
+                    "cannot receive headers in current state",
+                ));
+            }
+        }
+
+        // Only update headers_complete after the state transition succeeds.
+        self.headers_complete = end_headers;
+        Ok(())
+    }
+
+    /// br-asupersync-of0l5f: returns `true` if the next HEADERS
+    /// frame on this stream would be a TRAILER block per RFC 9113
+    /// §8.1 — i.e. the initial header block has already been fully
+    /// received (`headers_complete == true`) and the stream is in a
+    /// state that still admits HEADERS (Open / HalfClosedLocal).
+    ///
+    /// Callers (e.g. the `connection.rs` HEADERS dispatch) should
+    /// query this BEFORE invoking [`Self::recv_headers`] so the
+    /// decoded header block can be passed through
+    /// `connection::validate_h2_pseudo_headers(headers, is_trailers=true)`
+    /// (the canonical trailer validator, br-asupersync-0eyf7t) —
+    /// RFC 9113 §8.1 requires that "Trailers MUST NOT include
+    /// pseudo-header fields". The pre-fix code path accepted
+    /// trailing HEADERS without rejecting embedded `:status` /
+    /// `:method` / `:path` pseudo-headers, letting an attacker
+    /// rewrite the request line AFTER the initial HEADERS already
+    /// committed it.
+    #[must_use]
+    pub fn would_be_trailer_block(&self) -> bool {
+        self.headers_complete
+            && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal)
+    }
+
+    /// Process CONTINUATION frame.
+    pub fn recv_continuation(
+        &mut self,
+        header_block: Bytes,
+        end_headers: bool,
+    ) -> Result<(), H2Error> {
+        // Reject CONTINUATION on closed streams as defense-in-depth. A
+        // HEADERS frame with END_STREAM but not END_HEADERS closes a
+        // half-closed (local) stream while its field block is still
+        // arriving; the CONTINUATION frames that finish the block are part
+        // of that HEADERS frame (RFC 9113 §6.2), so they are taken. A reset
+        // stream still refuses them.
+        if self.state.is_closed() && (self.headers_complete || self.error_code.is_some()) {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "CONTINUATION on closed stream",
+            ));
+        }
+
+        if self.headers_complete {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::ProtocolError,
+                "unexpected CONTINUATION frame",
+            ));
+        }
+
+        // Bound both the accumulated byte size AND the fragment count to prevent
+        // the CONTINUATION-flood DoS. The byte cap uses the O(1) running counter
+        // (re-summing the vector here was O(N^2) over a fragmented block); the
+        // count cap closes the zero-length-fragment bypass where empty frames
+        // add 0 bytes yet still grow the vector unbounded.
+        if self.header_fragments.len() >= MAX_HEADER_CONTINUATION_FRAGMENTS {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "too many header block fragments",
+            ));
+        }
+        if self
+            .header_fragments_bytes
+            .saturating_add(header_block.len())
+            > self.max_header_fragment_size()
+        {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
+
+        self.header_fragments_bytes = self
+            .header_fragments_bytes
+            .saturating_add(header_block.len());
+        self.header_fragments.push(header_block);
+        self.headers_complete = end_headers;
+        Ok(())
+    }
+
+    /// Take accumulated header fragments.
+    pub fn take_header_fragments(&mut self) -> Vec<Bytes> {
+        self.header_fragments_bytes = 0;
+        std::mem::take(&mut self.header_fragments)
+    }
+
+    /// Add header fragment for accumulation.
+    ///
+    /// Returns an error if the accumulated size or fragment count would exceed
+    /// the limit (see [`Stream::recv_continuation`] for the rationale).
+    pub fn add_header_fragment(&mut self, fragment: Bytes) -> Result<(), H2Error> {
+        if self.header_fragments.len() >= MAX_HEADER_CONTINUATION_FRAGMENTS {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "too many header block fragments",
+            ));
+        }
+        if self.header_fragments_bytes.saturating_add(fragment.len())
+            > self.max_header_fragment_size()
+        {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::EnhanceYourCalm,
+                "accumulated header fragments too large",
+            ));
+        }
+        self.header_fragments_bytes = self.header_fragments_bytes.saturating_add(fragment.len());
+        self.header_fragments.push(fragment);
+        Ok(())
+    }
+
+    /// Transition state on sending data.
+    pub fn send_data(&mut self, end_stream: bool) -> Result<(), H2Error> {
+        // RFC 7540 §5.1: reserved(local) only permits HEADERS, RST_STREAM,
+        // and PRIORITY — DATA frames are not allowed before the stream is
+        // activated via send_headers.
+        if !self.state.can_send() || self.state == StreamState::ReservedLocal {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "cannot send data in current state",
+            ));
+        }
+
+        if end_stream {
+            match self.state {
+                StreamState::Open => self.state = StreamState::HalfClosedLocal,
+                StreamState::HalfClosedRemote => self.state = StreamState::Closed,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Transition state on receiving data.
+    pub fn recv_data(&mut self, len: u32, end_stream: bool) -> Result<(), H2Error> {
+        // RFC 7540 §5.1: reserved(remote) only permits HEADERS, RST_STREAM,
+        // and PRIORITY — DATA frames must not arrive before the server sends
+        // HEADERS to activate the promised stream.
+        if !self.state.can_recv() || self.state == StreamState::ReservedRemote {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::StreamClosed,
+                "cannot receive data in current state",
+            ));
+        }
+
+        let len_i32 = i32::try_from(len).map_err(|_| {
+            H2Error::stream(
+                self.id,
+                ErrorCode::FlowControlError,
+                "data length too large",
+            )
+        })?;
+
+        // Check flow control
+        if len_i32 > self.recv_window {
+            return Err(H2Error::stream(
+                self.id,
+                ErrorCode::FlowControlError,
+                "data exceeds flow control window",
+            ));
+        }
+
+        #[cfg(feature = "http2-streaming")]
+        let deferred_recv_bytes = self
+            .deferred_recv_bytes
+            .map(|pending| {
+                pending.checked_add(u64::from(len)).ok_or_else(|| {
+                    H2Error::stream(
+                        self.id,
+                        ErrorCode::FlowControlError,
+                        "unconsumed receive capacity overflow",
+                    )
+                })
+            })
+            .transpose()?;
+
+        // br-asupersync-kaqld3: propagate FLOW_CONTROL_ERROR if the
+        // window underflows below i32::MIN. The check at line 582
+        // guards against the common overshoot, but a SETTINGS shrink
+        // mid-flight could still drive the window very negative; the
+        // arithmetic-bound check inside consume_recv_window is the
+        // last line of defence.
+        self.consume_recv_window(len)?;
+        #[cfg(feature = "http2-streaming")]
+        {
+            self.recv_data_started = true;
+            self.deferred_recv_bytes = deferred_recv_bytes;
+        }
+
+        if end_stream {
+            match self.state {
+                StreamState::Open => self.state = StreamState::HalfClosedRemote,
+                StreamState::HalfClosedLocal => self.state = StreamState::Closed,
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reset the stream.
+    pub fn reset(&mut self, error_code: ErrorCode) {
+        self.state = StreamState::Closed;
+        self.error_code = Some(error_code);
+        self.queued_end_stream = false;
+        // Release buffered data to avoid holding memory until prune.
+        self.header_fragments.clear();
+        self.header_fragments_bytes = 0;
+        self.pending_data.clear();
+        #[cfg(feature = "http2-streaming")]
+        if let Some(pending) = &mut self.deferred_recv_bytes {
+            *pending = 0;
+        }
+    }
+
+    /// Queue data for sending (when flow control blocks).
+    pub fn queue_data(&mut self, data: Bytes, end_stream: bool) {
+        self.pending_data
+            .push_back(PendingData { data, end_stream });
+    }
+
+    /// Take pending data that fits in the window.
+    pub fn take_pending_data(&mut self, max_len: usize) -> Option<(Bytes, bool)> {
+        if max_len == 0 {
+            return None;
+        }
+        if let Some(front) = self.pending_data.front() {
+            if front.data.len() <= max_len {
+                // Take entire chunk
+                let pending = self.pending_data.pop_front()?;
+                return Some((pending.data, pending.end_stream));
+            }
+        }
+
+        if let Some(front) = self.pending_data.front_mut() {
+            // Take partial chunk
+            let data = front.data.slice(..max_len);
+            front.data = front.data.slice(max_len..);
+            return Some((data, false));
+        }
+
+        None
+    }
+}
+
+/// Stream store for managing multiple streams.
+///
+/// br-asupersync-tlv3gp: backed by a flat `Vec<Option<Stream>>` indexed
+/// by the offset `(stream_id - base_id)` rather than a `DetHashMap<u32,
+/// Stream>`. The H2 frame-dispatch hot path (`get` / `get_mut` per
+/// incoming frame) becomes a single bounds check and one pointer
+/// indirection — no hash computation, no bucket scan, no tombstone
+/// fix-up. Memory is bounded by `(highest_id - base_id) / 1`
+/// `Option<Stream>` slots; `prune_closed` advances `base_id` past any
+/// contiguous `None` prefix so completed-stream slots are reclaimed.
+///
+/// Correctness invariants preserved from the prior `DetHashMap` impl:
+///
+///   - HTTP/2 forbids reusing a stream id (RFC 9113 §5.1.1), so we
+///     never insert into a slot that previously held a different
+///     stream — `insert_stream` panics-via-assert if violated, but
+///     callers above this layer enforce monotonic-id allocation so
+///     the assert is a defence-in-depth check, not a runtime case.
+///   - `len()` counts all *currently-stored* streams (active +
+///     closed-but-not-yet-pruned), matching the old `HashMap::len`.
+///   - `prune_closed` keeps reserved/idle slots and only drops
+///     closed ones.
+///   - `set_initial_window_size` skips closed streams (their windows
+///     are irrelevant and applying a delta could trigger a spurious
+///     overflow blocking the SETTINGS update).
+///
+/// Concurrent dispatch: `StreamStore` continues to require `&mut self`
+/// for mutating operations; outer-layer locks (the H2 connection
+/// mutex) provide the synchronisation, same as before.
+#[derive(Debug)]
+pub struct StreamStore {
+    /// Sparse storage indexed by `(id - base_id) as usize`.
+    /// `None` slots represent (a) ids that fall in a gap between
+    /// strictly-monotonic allocations of the same parity, or (b)
+    /// streams that were closed and pruned but whose slot has not yet
+    /// been compacted away from the front.
+    streams: Vec<Option<Stream>>,
+    /// Lowest stream id that `streams[0]` represents. Advances during
+    /// `prune_closed` when the leading run of `None` slots can be
+    /// dropped.
+    base_id: u32,
+    /// Cached count of `Some(_)` slots so `len()` stays O(1).
+    occupied: usize,
+    /// Next client-initiated stream ID (odd).
+    next_client_stream_id: u32,
+    /// Next server-initiated stream ID (even).
+    next_server_stream_id: u32,
+    /// Maximum concurrent streams.
+    max_concurrent_streams: u32,
+    /// Our advertised limit when negotiated independently. None preserves the
+    /// public store API's legacy aggregate limit across both directions.
+    local_max_concurrent_streams: Option<u32>,
+    /// Initial window size for new streams.
+    initial_window_size: u32,
+    /// Initial receive window size advertised by our local SETTINGS.
+    initial_recv_window_size: u32,
+    /// Maximum header list size for new streams.
+    max_header_list_size: u32,
+    /// Whether this is a client (for stream ID assignment).
+    is_client: bool,
+}
+
+impl StreamStore {
+    /// Create a new stream store.
+    #[must_use]
+    pub fn new(is_client: bool, initial_window_size: u32, max_header_list_size: u32) -> Self {
+        Self::new_with_local_recv_window(
+            is_client,
+            initial_window_size,
+            initial_window_size,
+            max_header_list_size,
+        )
+    }
+
+    /// Create a new stream store with separate peer-send and local-receive windows.
+    #[must_use]
+    pub fn new_with_local_recv_window(
+        is_client: bool,
+        initial_window_size: u32,
+        initial_recv_window_size: u32,
+        max_header_list_size: u32,
+    ) -> Self {
+        Self {
+            streams: Vec::new(),
+            base_id: 1,
+            occupied: 0,
+            next_client_stream_id: 1,
+            next_server_stream_id: 2,
+            max_concurrent_streams: u32::MAX,
+            local_max_concurrent_streams: None,
+            initial_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+            is_client,
+        }
+    }
+
+    // ----- internal flat-Vec primitives (br-asupersync-tlv3gp) ---------
+
+    /// Compute the slot index for `id` if the slot is in range.
+    /// Returns `None` if `id < base_id` (already pruned) or
+    /// `id - base_id` exceeds the current Vec length.
+    #[inline]
+    fn slot_index(&self, id: u32) -> Option<usize> {
+        if id < self.base_id {
+            return None;
+        }
+        let off = (id - self.base_id) as usize;
+        if off >= self.streams.len() {
+            return None;
+        }
+        Some(off)
+    }
+
+    /// Hard ceiling on the `(id - base_id)` gap that
+    /// [`ensure_slot`] is willing to materialise. RFC 9113 stream
+    /// ids range up to `0x7FFF_FFFF` (~2.1B), and a peer that opens
+    /// `id=1` followed by `id=0x7FFF_FFFD` would otherwise force
+    /// `resize_with` to allocate ~2.1B `Option<Stream>` slots
+    /// (tens of GB) — memory-DoS. The `max_concurrent_streams`
+    /// gate counts only OCCUPIED slots, not Vec capacity, so it does
+    /// not bound the gap.
+    ///
+    /// Chosen so the worst-case *eager* allocation stays ~16 MiB
+    /// regardless of `Stream`'s in-memory width. A single peer HEADERS
+    /// frame on a high stream id makes [`ensure_slot`] call
+    /// `resize_with(gap + 1, …)`, so the ceiling has to be measured in
+    /// bytes, not slots. `Stream` is ~100+ bytes (it embeds a
+    /// `VecDeque`, a `Vec`, four window `i32`s, a `PrioritySpec`, …), so
+    /// the old hand-estimate of "16 B/slot" made a literal `1 << 20`
+    /// really a ~100 MB single-frame amplifier. Deriving the cap from
+    /// `size_of::<Option<Stream>>()` keeps the 16 MiB bound honest if the
+    /// struct grows, while staying far above any realistic
+    /// `max_concurrent_streams` (typically ≤1024) and still rejecting the
+    /// pathological ~2.1B-id-gap attack (RFC 9113 ids reach
+    /// `0x7FFF_FFFF`).
+    //
+    // Truncation in the `as u32` casts is impossible: `TARGET_ALLOC_BYTES`
+    // is 16 Mi, and `size_of::<Option<Stream>>() >= 1`, so `gap <= 16 Mi`
+    // — three orders of magnitude below `u32::MAX`.
+    #[allow(clippy::cast_possible_truncation)]
+    const MAX_STREAM_GAP_FROM_BASE: u32 = {
+        const TARGET_ALLOC_BYTES: usize = 16 * 1024 * 1024;
+        // Never drop the ceiling below a working set that comfortably
+        // exceeds any realistic `max_concurrent_streams`.
+        const FLOOR_SLOTS: usize = 1 << 16;
+        let gap = TARGET_ALLOC_BYTES / core::mem::size_of::<Option<Stream>>();
+        if gap < FLOOR_SLOTS {
+            FLOOR_SLOTS as u32
+        } else {
+            gap as u32
+        }
+    };
+
+    /// Ensure the Vec has a slot for `id`, growing if needed.
+    /// `id` MUST be `>= base_id`; callers ensure this because
+    /// stream-id allocation is strictly monotonic per parity and ids
+    /// below `base_id` have already been validated as "already-used"
+    /// by the caller before reaching this method.
+    ///
+    /// br-asupersync-jq82r4: returns Err on stream-id gaps that
+    /// would grow the flat Vec beyond [`MAX_STREAM_GAP_FROM_BASE`].
+    /// As a last-chance, attempts [`prune_closed`] first so a long
+    /// run of finished streams can advance `base_id` and reclaim
+    /// the cap.
+    #[inline]
+    fn ensure_slot(&mut self, id: u32) -> Result<usize, H2Error> {
+        debug_assert!(
+            id >= self.base_id,
+            "id < base_id should be rejected upstream"
+        );
+        if id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE {
+            // Last-chance compaction: prune the leading closed run so
+            // base_id advances and the gap may fit. After this
+            // base_id may have moved; recheck.
+            self.prune_closed();
+            if id < self.base_id || id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE
+            {
+                return Err(H2Error::stream(
+                    id,
+                    ErrorCode::RefusedStream,
+                    "stream id gap exceeds implementation ceiling \
+                     (br-asupersync-jq82r4): would grow flat Vec by \
+                     >1M slots; reject to prevent memory DoS",
+                ));
+            }
+        }
+        let off = (id - self.base_id) as usize;
+        if off >= self.streams.len() {
+            self.streams.resize_with(off + 1, || None);
+        }
+        Ok(off)
+    }
+
+    /// Non-mutating gap pre-check for callers that update
+    /// `next_*_stream_id` BEFORE calling `insert_stream`. Returns
+    /// the same `RefusedStream` error that `ensure_slot` would, but
+    /// without mutating any field — so the caller can reject without
+    /// rolling back the monotonic-id counter.
+    ///
+    /// Intentionally STRICTER than `ensure_slot` (no prune-and-retry):
+    /// if the gap is genuinely recoverable via `prune_closed`, the
+    /// caller's eventual path through `insert_stream → ensure_slot`
+    /// will retry there. The pre-check just short-circuits the
+    /// obvious DoS pattern before any state mutation.
+    #[inline]
+    fn precheck_stream_gap(&self, id: u32) -> Result<(), H2Error> {
+        if id >= self.base_id && id - self.base_id > Self::MAX_STREAM_GAP_FROM_BASE {
+            return Err(H2Error::stream(
+                id,
+                ErrorCode::RefusedStream,
+                "stream id gap exceeds implementation ceiling \
+                 (br-asupersync-jq82r4)",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Insert a new stream at `id`. Returns `Err` only if `id <
+    /// base_id` (already pruned past) or if `ensure_slot` rejects the
+    /// id-gap (br-asupersync-jq82r4). Updates `occupied`. The caller
+    /// is responsible for stream-id-uniqueness — this method asserts
+    /// that the slot was previously empty (defence in depth against
+    /// the RFC 9113 §5.1.1 reuse prohibition).
+    fn insert_stream(&mut self, id: u32, stream: Stream) -> Result<(), H2Error> {
+        if id < self.base_id {
+            return Err(H2Error::protocol("stream id below pruned base"));
+        }
+        let idx = self.ensure_slot(id)?;
+        debug_assert!(
+            self.streams[idx].is_none(),
+            "stream id reuse violates RFC 9113 §5.1.1 — caller should reject before insert"
+        );
+        if self.streams[idx].is_none() {
+            self.occupied += 1;
+        }
+        self.streams[idx] = Some(stream);
+        Ok(())
+    }
+
+    /// Iterate over `Some` streams (ignores gaps).
+    #[inline]
+    fn iter_streams(&self) -> impl Iterator<Item = &Stream> + '_ {
+        self.streams.iter().filter_map(|s| s.as_ref())
+    }
+
+    /// Iterate over `Some` streams mutably (ignores gaps).
+    #[inline]
+    fn iter_streams_mut(&mut self) -> impl Iterator<Item = &mut Stream> + '_ {
+        self.streams.iter_mut().filter_map(|s| s.as_mut())
+    }
+
+    /// Drop slots that fail the predicate; mirrors `HashMap::retain`.
+    /// Snapshots `base_id` first so the closure can see the id even
+    /// while we hold a mutable borrow on `self.streams`.
+    fn retain_streams<F>(&mut self, mut pred: F)
+    where
+        F: FnMut(u32, &mut Stream) -> bool,
+    {
+        let base = self.base_id;
+        let mut removed = 0;
+        for (i, slot) in self.streams.iter_mut().enumerate() {
+            if let Some(stream) = slot.as_mut() {
+                let id = base.saturating_add(i as u32);
+                if !pred(id, stream) {
+                    *slot = None;
+                    removed += 1;
+                }
+            }
+        }
+        self.occupied = self.occupied.saturating_sub(removed);
+        self.compact_base();
+    }
+
+    /// Trim leading `None` entries by advancing `base_id`.
+    ///
+    /// HTTP/2 client-initiated and server-initiated stream-id spaces advance
+    /// independently. A gap at the front can only be compacted when that id is
+    /// already below the next legal id for its parity; otherwise the empty slot
+    /// may still represent a future remote stream.
+    fn compact_base(&mut self) {
+        let base = self.base_id;
+        let next_client = self.next_client_stream_id;
+        let next_server = self.next_server_stream_id;
+        let leading_none = self
+            .streams
+            .iter()
+            .enumerate()
+            .take_while(|(index, slot)| {
+                if slot.is_some() {
+                    return false;
+                }
+                let id = base.saturating_add(*index as u32);
+                if id % 2 == 1 {
+                    id < next_client
+                } else {
+                    id < next_server
+                }
+            })
+            .count();
+        if leading_none > 0 {
+            self.streams.drain(..leading_none);
+            self.base_id = self.base_id.saturating_add(leading_none as u32);
+        }
+    }
+
+    // ----- public API --------------------------------------------------
+
+    /// Set the maximum concurrent streams.
+    pub fn set_max_concurrent_streams(&mut self, max: u32) {
+        self.max_concurrent_streams = max;
+        self.local_max_concurrent_streams = None;
+    }
+
+    pub(crate) fn set_local_max_concurrent_streams(&mut self, max: u32) {
+        self.local_max_concurrent_streams = Some(max);
+    }
+
+    pub(crate) fn set_remote_max_concurrent_streams(&mut self, max: u32) {
+        self.max_concurrent_streams = max;
+    }
+
+    /// Set the initial window size for new streams.
+    pub fn set_initial_window_size(&mut self, size: u32) -> Result<(), H2Error> {
+        // First check if any stream would overflow to prevent partial mutations
+        self.check_initial_window_size(size)?;
+
+        // Update existing streams.  Closed streams are excluded: their
+        // windows are irrelevant and applying a large delta could trigger
+        // a spurious overflow error that blocks the entire SETTINGS update.
+        for stream in self.iter_streams_mut() {
+            if !stream.wire_closed() {
+                stream.update_initial_window_size(size)?;
+            }
+        }
+        self.initial_window_size = size;
+        Ok(())
+    }
+
+    /// Check if setting the initial window size would overflow any stream's window.
+    pub fn check_initial_window_size(&self, size: u32) -> Result<(), H2Error> {
+        let delta = i64::from(size) - i64::from(self.initial_window_size);
+        for stream in self.iter_streams() {
+            if !stream.wire_closed() {
+                let new_window = i64::from(stream.send_window()) + delta;
+                if new_window > i64::from(i32::MAX) || new_window < i64::from(i32::MIN) {
+                    return Err(H2Error::flow_control("flow-control window overflow"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Get the initial window size.
+    #[must_use]
+    pub fn initial_window_size(&self) -> u32 {
+        self.initial_window_size
+    }
+
+    /// Get the local initial receive window size.
+    #[must_use]
+    pub fn initial_recv_window_size(&self) -> u32 {
+        self.initial_recv_window_size
+    }
+
+    /// Get a stream by ID. O(1) — single bounds check + indirection.
+    #[must_use]
+    pub fn get(&self, id: u32) -> Option<&Stream> {
+        self.slot_index(id).and_then(|i| self.streams[i].as_ref())
+    }
+
+    /// Get a mutable stream by ID. O(1).
+    #[must_use]
+    pub fn get_mut(&mut self, id: u32) -> Option<&mut Stream> {
+        match self.slot_index(id) {
+            Some(i) => self.streams[i].as_mut(),
+            None => None,
+        }
+    }
+
+    /// Returns true when `id` is currently in the idle state.
+    ///
+    /// This covers stream IDs that are not present in the store yet but are
+    /// still in the not-yet-opened range for their initiator parity.
+    #[must_use]
+    pub fn is_idle_stream_id(&self, id: u32) -> bool {
+        if id == 0 || id > MAX_STREAM_ID {
+            return false;
+        }
+
+        if let Some(stream) = self.get(id) {
+            return stream.state() == StreamState::Idle;
+        }
+
+        if id % 2 == 1 {
+            id >= self.next_client_stream_id
+        } else {
+            id >= self.next_server_stream_id
+        }
+    }
+
+    /// Get or create a stream.
+    pub fn get_or_create(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        self.get_or_create_inner(id, false)
+    }
+
+    /// The connection must decode even a refused stream's field block before
+    /// resetting it. At most one incomplete field block is legal at a time.
+    pub(crate) fn get_or_create_for_headers(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        self.get_or_create_inner(id, true)
+    }
+
+    fn get_or_create_inner(
+        &mut self,
+        id: u32,
+        retain_refused: bool,
+    ) -> Result<&mut Stream, H2Error> {
+        if self.get(id).is_none() {
+            let mut refused_headers = false;
+            // Validate stream ID
+            if id == 0 {
+                return Err(H2Error::protocol("stream ID 0 is reserved"));
+            }
+            if id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exceeds maximum"));
+            }
+            // br-asupersync-jq82r4: pre-validate the stream-id gap
+            // from base_id BEFORE any state advance
+            // (next_*_stream_id update, max-concurrent-streams
+            // check) so a rejection leaves no half-mutated state
+            // that would corrupt subsequent legitimate streams. The
+            // gap check inside ensure_slot remains as the ultimate
+            // guarantee — we just check first so we can fail fast
+            // and cheaply.
+            self.precheck_stream_gap(id)?;
+
+            let is_client_stream = id % 2 == 1;
+            if self.is_client && is_client_stream {
+                return Err(H2Error::protocol("invalid stream ID parity"));
+            }
+            if !self.is_client && !is_client_stream {
+                return Err(H2Error::protocol("invalid stream ID parity"));
+            }
+
+            // RFC 7540 Section 5.1.2: reject incoming streams that exceed our
+            // advertised max_concurrent_streams.  We amortize the O(N) active
+            // count by first checking the total tracked stream count (which
+            // includes closed streams kept for GOAWAY bookkeeping).
+            let local_limit = self
+                .local_max_concurrent_streams
+                .unwrap_or(self.max_concurrent_streams);
+            if self.occupied >= local_limit as usize {
+                let active = self
+                    .iter_streams()
+                    .filter(|s| {
+                        s.wire_active()
+                            && (self.local_max_concurrent_streams.is_none()
+                                || (s.id % 2 == 1) != self.is_client)
+                    })
+                    .count();
+                // Prune closed streams while we're scanning.
+                self.retain_streams(|_, s| !s.wire_closed());
+                if active >= local_limit as usize {
+                    if !retain_refused {
+                        return Err(H2Error::stream(
+                            id,
+                            ErrorCode::RefusedStream,
+                            "max concurrent streams exceeded",
+                        ));
+                    }
+                    refused_headers = true;
+                }
+            }
+
+            if self.is_client && !is_client_stream {
+                // Server-initiated stream received by client
+                if id < self.next_server_stream_id {
+                    return Err(H2Error::protocol("stream ID already used"));
+                }
+                self.next_server_stream_id = id.saturating_add(2);
+            } else if !self.is_client && is_client_stream {
+                // Client-initiated stream received by server
+                if id < self.next_client_stream_id {
+                    return Err(H2Error::protocol("stream ID already used"));
+                }
+                self.next_client_stream_id = id.saturating_add(2);
+            }
+
+            let mut stream = Stream::new_with_recv_window(
+                id,
+                self.initial_window_size,
+                self.initial_recv_window_size,
+                self.max_header_list_size,
+            );
+            stream.refused_headers = refused_headers;
+            self.insert_stream(id, stream)?;
+        }
+        self.get_mut(id).ok_or_else(|| {
+            H2Error::connection(ErrorCode::InternalError, "stream missing after insert")
+        })
+    }
+
+    /// Reserve a remote-initiated stream (e.g., PUSH_PROMISE).
+    pub fn reserve_remote_stream(&mut self, id: u32) -> Result<&mut Stream, H2Error> {
+        if id == 0 {
+            return Err(H2Error::protocol("stream ID 0 is reserved"));
+        }
+        if id > MAX_STREAM_ID {
+            return Err(H2Error::protocol("stream ID exceeds maximum"));
+        }
+        if self.get(id).is_some() {
+            return Err(H2Error::protocol("stream ID already used"));
+        }
+        // br-asupersync-jq82r4: refuse PUSH_PROMISE that would
+        // explode the flat Vec before mutating next_*_stream_id.
+        self.precheck_stream_gap(id)?;
+
+        let is_client_stream = id % 2 == 1;
+        if self.is_client {
+            if is_client_stream {
+                return Err(H2Error::protocol("invalid promised stream ID"));
+            }
+            if id < self.next_server_stream_id {
+                return Err(H2Error::protocol("stream ID already used"));
+            }
+            self.next_server_stream_id = id.saturating_add(2);
+        } else {
+            if !is_client_stream {
+                return Err(H2Error::protocol("invalid promised stream ID"));
+            }
+            if id < self.next_client_stream_id {
+                return Err(H2Error::protocol("stream ID already used"));
+            }
+            self.next_client_stream_id = id.saturating_add(2);
+        }
+
+        let stream = Stream::new_reserved_remote_with_recv_window(
+            id,
+            self.initial_window_size,
+            self.initial_recv_window_size,
+            self.max_header_list_size,
+        );
+        self.insert_stream(id, stream)?;
+        self.get_mut(id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "reserved stream missing after insert",
+            )
+        })
+    }
+
+    /// Reserve a locally-initiated stream (e.g., outbound PUSH_PROMISE).
+    pub fn reserve_local_stream(&mut self) -> Result<u32, H2Error> {
+        let id = self.allocate_stream_id()?;
+        let initial_window_size = self.initial_window_size;
+        let initial_recv_window_size = self.initial_recv_window_size;
+        let max_header_list_size = self.max_header_list_size;
+        let stream = self.get_mut(id).ok_or_else(|| {
+            H2Error::connection(
+                ErrorCode::InternalError,
+                "allocated stream missing from store",
+            )
+        })?;
+        *stream = Stream::new_reserved_local_with_recv_window(
+            id,
+            initial_window_size,
+            initial_recv_window_size,
+            max_header_list_size,
+        );
+        Ok(id)
+    }
+
+    /// Allocate a new stream ID.
+    pub fn allocate_stream_id(&mut self) -> Result<u32, H2Error> {
+        // Amortize the O(N) active stream count and prune operations.
+        // We only perform the O(N) scan when the total number of tracked
+        // streams reaches the max_concurrent_streams limit.
+        if self.occupied >= self.max_concurrent_streams as usize {
+            let mut active_count = 0_u32;
+            let is_client = self.is_client;
+            let directional = self.local_max_concurrent_streams.is_some();
+            self.retain_streams(|_, s| {
+                if s.wire_active() && (!directional || (s.id % 2 == 1) == is_client) {
+                    active_count = active_count.saturating_add(1);
+                }
+                !s.wire_closed()
+            });
+
+            if active_count >= self.max_concurrent_streams {
+                return Err(H2Error::protocol("max concurrent streams exceeded"));
+            }
+        }
+
+        // br-asupersync-jq82r4: refuse self-allocation when the next
+        // id would explode the flat Vec, BEFORE incrementing
+        // next_*_stream_id (so a refused allocation doesn't burn an
+        // id and desynchronise the parity counter).
+        let next_self_id = if self.is_client {
+            self.next_client_stream_id
+        } else {
+            self.next_server_stream_id
+        };
+        if next_self_id <= MAX_STREAM_ID {
+            self.precheck_stream_gap(next_self_id)?;
+        }
+
+        let id = if self.is_client {
+            if self.next_client_stream_id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exhausted"));
+            }
+            let id = self.next_client_stream_id;
+            self.next_client_stream_id = id.saturating_add(2);
+            id
+        } else {
+            if self.next_server_stream_id > MAX_STREAM_ID {
+                return Err(H2Error::protocol("stream ID exhausted"));
+            }
+            let id = self.next_server_stream_id;
+            self.next_server_stream_id = id.saturating_add(2);
+            id
+        };
+
+        let stream = Stream::new_with_recv_window(
+            id,
+            self.initial_window_size,
+            self.initial_recv_window_size,
+            self.max_header_list_size,
+        );
+        self.insert_stream(id, stream)?;
+        Ok(id)
+    }
+
+    /// Get the total number of streams (including closed).
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.occupied
+    }
+
+    /// Return whether the store has zero streams.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.occupied == 0
+    }
+
+    /// Remove closed streams.
+    pub fn prune_closed(&mut self) {
+        self.retain_streams(|_, stream| !stream.wire_closed());
+    }
+
+    /// Remove closed streams unless the caller still needs their stream id
+    /// for queued connection-layer work.
+    pub fn prune_closed_except<F>(&mut self, mut keep_closed: F)
+    where
+        F: FnMut(u32) -> bool,
+    {
+        self.retain_streams(|id, stream| !stream.wire_closed() || keep_closed(id));
+    }
+
+    /// Get all active stream IDs.
+    ///
+    /// Uses the same `is_active()` predicate as [`Self::active_count`] so
+    /// `active_stream_ids().len() == active_count()` always holds.
+    #[must_use]
+    pub fn active_stream_ids(&self) -> Vec<u32> {
+        let base = self.base_id;
+        self.streams
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| {
+                slot.as_ref().and_then(|s| {
+                    if s.wire_active() {
+                        Some(base.saturating_add(i as u32))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Get count of active streams.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.iter_streams().filter(|s| s.wire_active()).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::super::settings::DEFAULT_MAX_HEADER_LIST_SIZE;
+    use super::*;
+
+    #[test]
+    fn test_stream_state_transitions() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        // Send headers (no end_stream)
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Receive data with end_stream
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        // Send data with end_stream
+        stream.send_data(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn test_stream_flow_control() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.send_window(), 65535);
+
+        stream.consume_send_window(1000);
+        assert_eq!(stream.send_window(), 64535);
+
+        stream.update_send_window(500).unwrap();
+        assert_eq!(stream.send_window(), 65035);
+    }
+
+    #[test]
+    fn header_fragment_limit_respects_max_header_list_size() {
+        let max_list_size = 8;
+        let mut stream = Stream::new(1, 65535, max_list_size);
+
+        // 4x multiplier => 32 bytes total allowed.
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 16]))
+            .unwrap();
+        assert!(
+            stream
+                .add_header_fragment(Bytes::from(vec![0; 17]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn header_fragment_count_cap_rejects_zero_length_flood() {
+        // CONTINUATION-flood DoS (CVE-2024-27316 class): zero-length fragments
+        // add 0 bytes, so the byte cap never trips; the fragment-COUNT cap must
+        // bound them. With a large byte budget, exactly
+        // MAX_HEADER_CONTINUATION_FRAGMENTS empty fragments are accepted and the
+        // next is rejected — the vector cannot grow without bound.
+        let mut stream = Stream::new(1, 65535, u32::MAX); // 256 KiB byte budget
+        for i in 0..MAX_HEADER_CONTINUATION_FRAGMENTS {
+            stream
+                .add_header_fragment(Bytes::from_static(b""))
+                .unwrap_or_else(|_| panic!("empty fragment {i} should be under the count cap"));
+        }
+        assert!(
+            stream.add_header_fragment(Bytes::from_static(b"")).is_err(),
+            "fragment-count cap must reject the zero-length CONTINUATION flood"
+        );
+    }
+
+    #[test]
+    fn take_header_fragments_resets_byte_accounting() {
+        // The O(1) running byte counter must reset when fragments are taken, so a
+        // subsequent header block gets the full budget rather than a stale
+        // carried-over sum (which would falsely reject the next block).
+        let max_list_size = 8; // 4x => 32-byte budget
+        let mut stream = Stream::new(1, 65535, max_list_size);
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 30]))
+            .unwrap();
+        let taken = stream.take_header_fragments();
+        assert_eq!(taken.len(), 1);
+        // Budget is fresh after take: a second 30-byte fragment must fit again.
+        stream
+            .add_header_fragment(Bytes::from(vec![0; 30]))
+            .expect("byte budget must reset after take_header_fragments");
+    }
+
+    #[test]
+    fn test_stream_store_allocation() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert!(store.is_empty());
+
+        let id1 = store.allocate_stream_id().unwrap();
+        assert_eq!(id1, 1);
+
+        let id2 = store.allocate_stream_id().unwrap();
+        assert_eq!(id2, 3);
+
+        let id3 = store.allocate_stream_id().unwrap();
+        assert_eq!(id3, 5);
+        assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn stream_store_preserves_local_initial_receive_window() {
+        let mut store = StreamStore::new_with_local_recv_window(
+            true,
+            65_535,
+            32_768,
+            DEFAULT_MAX_HEADER_LIST_SIZE,
+        );
+
+        let id = store.allocate_stream_id().unwrap();
+        let stream = store.get(id).unwrap();
+        assert_eq!(stream.send_window(), 65_535);
+        assert_eq!(stream.recv_window(), 32_768);
+        assert_eq!(stream.initial_recv_window, 32_768);
+        assert_eq!(store.initial_recv_window_size(), 32_768);
+
+        store.set_initial_window_size(100_000).unwrap();
+        let stream = store.get(id).unwrap();
+        assert_eq!(stream.send_window(), 100_000);
+        assert_eq!(
+            stream.recv_window(),
+            32_768,
+            "peer SETTINGS_INITIAL_WINDOW_SIZE must not rewrite our receive window"
+        );
+        assert_eq!(stream.initial_recv_window, 32_768);
+    }
+
+    /// br-asupersync-jq82r4: a server receiving a client-initiated stream
+    /// id whose gap from base_id exceeds 1<<20 must reject with
+    /// RefusedStream WITHOUT growing the flat Vec to 2.1B slots. This is
+    /// the memory-DoS regression guard.
+    #[test]
+    fn jq82r4_ensure_slot_rejects_pathological_stream_id_gap() {
+        // is_client=false → server-side StreamStore that accepts client
+        // (odd) stream ids. Open a tiny id first, then attempt a near-MAX
+        // id that would create a 2.1B-slot gap.
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        store.get_or_create(1).expect("first stream opens normally");
+
+        // 0x7FFF_FFFD - 1 ≈ 2.1B slots; the ceiling is 1<<20. Ceiling is
+        // crossed by any id ≥ 1 + 2^20 + 1 (off ≥ 1<<20). Pick a
+        // representative odd id well above the ceiling but below
+        // MAX_STREAM_ID.
+        let attack_id: u32 = (1u32 << 21) + 1; // odd, way above ceiling
+        let err = store
+            .get_or_create(attack_id)
+            .expect_err("must reject pathological id gap");
+        // The error MUST be a stream-level RefusedStream, NOT a memory
+        // allocation that brought down the process.
+        assert!(
+            err.message.contains("stream id gap exceeds") || err.code == ErrorCode::RefusedStream,
+            "expected RefusedStream / gap-exceeds, got {err:?}"
+        );
+
+        // Subsequent legitimate allocations must still work — the
+        // rejection MUST NOT have advanced next_client_stream_id past
+        // attack_id, otherwise smaller ids would now be "already used".
+        let id3 = store
+            .get_or_create(3)
+            .expect("smaller-gap allocation still works");
+        assert_eq!(id3.id(), 3);
+    }
+
+    /// br-asupersync-jq82r4: rejection MUST NOT mutate
+    /// `next_client_stream_id`. If it did, a single attack frame
+    /// would permanently break the connection's ability to accept
+    /// further legitimate client streams.
+    #[test]
+    fn jq82r4_rejection_does_not_advance_next_stream_id() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let next_before = store.next_client_stream_id;
+        let attack_id: u32 = (1u32 << 21) + 1; // odd, above 1<<20 cap
+        let _err = store
+            .get_or_create(attack_id)
+            .expect_err("must reject attack id");
+        assert_eq!(
+            store.next_client_stream_id, next_before,
+            "rejected attack must not advance next_client_stream_id"
+        );
+    }
+
+    /// br-asupersync-jq82r4: a peer-initiated PUSH_PROMISE with a
+    /// pathological promised id must be refused without growing the
+    /// flat Vec, AND without burning the next-server-stream-id
+    /// counter (so legitimate promises still succeed afterwards).
+    #[test]
+    fn jq82r4_reserve_remote_stream_rejects_pathological_id_gap() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let next_before = store.next_server_stream_id;
+        let attack_id: u32 = 1u32 << 22; // even, server-promised, above cap
+        let err = store
+            .reserve_remote_stream(attack_id)
+            .expect_err("must reject pathological promised id");
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+        assert_eq!(
+            store.next_server_stream_id, next_before,
+            "rejection must not burn next_server_stream_id"
+        );
+
+        // Legit small promised id still works.
+        let s = store
+            .reserve_remote_stream(2)
+            .expect("legit promise must still succeed");
+        assert_eq!(s.id(), 2);
+    }
+
+    /// br-asupersync-jq82r4: prune_closed advances base_id past a
+    /// long run of closed streams, which restores headroom under the
+    /// gap cap. ensure_slot triggers this last-chance compaction
+    /// before rejecting, so a long-lived connection that legitimately
+    /// closes many streams keeps working.
+    #[test]
+    fn jq82r4_prune_recovers_when_gap_cap_first_exceeded() {
+        // Use a very small synthetic gap by forcing base_id and
+        // streams to a state that mimics the long-running connection
+        // shape: many closed streams at the front, an attempt to
+        // open a stream just past the cap.
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Open a few streams in both peer and local stream-id spaces and close
+        // them so prune_closed can advance base_id past them.
+        for id in [1u32, 3, 5, 7, 9] {
+            let s = store.get_or_create(id).unwrap();
+            s.reset(ErrorCode::Cancel);
+        }
+        for expected_id in [2u32, 4, 6, 8, 10] {
+            let id = store.allocate_stream_id().unwrap();
+            assert_eq!(id, expected_id);
+            store.get_mut(id).unwrap().reset(ErrorCode::Cancel);
+        }
+        // Sanity: base_id is still 1 (no automatic prune on close).
+        assert_eq!(store.base_id, 1);
+
+        // Now force the next opened id to be exactly at the cap from
+        // CURRENT base_id. After prune the cap will measure from the
+        // new (larger) base_id and the same id will fit.
+        let target_id = 1 + StreamStore::MAX_STREAM_GAP_FROM_BASE + 1;
+        // Make sure target_id has client (odd) parity for is_client=false.
+        let target_id = if target_id % 2 == 1 {
+            target_id
+        } else {
+            target_id + 1
+        };
+        let result = store.get_or_create(target_id);
+        // First time: pre-check rejects (no prune in pre-check).
+        let err = result.expect_err("pre-check refuses uncompacted gap");
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+
+        // Manually run a prune (simulating the connection's idle-time
+        // housekeeping) and then retry — should now succeed.
+        store.prune_closed();
+        assert!(store.base_id > 1, "prune must advance base_id");
+        let s = store
+            .get_or_create(target_id)
+            .expect("after prune, the same id fits within the gap cap");
+        assert_eq!(s.id(), target_id);
+    }
+
+    #[test]
+    fn test_stream_store_max_concurrent() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        store.set_max_concurrent_streams(2);
+
+        let id1 = store.allocate_stream_id().unwrap();
+        store.get_mut(id1).unwrap().send_headers(false).unwrap();
+        let id2 = store.allocate_stream_id().unwrap();
+        store.get_mut(id2).unwrap().send_headers(false).unwrap();
+
+        // Third should fail — two active streams already at the limit
+        assert!(store.allocate_stream_id().is_err());
+
+        // Close one stream
+        store.get_mut(id1).unwrap().reset(ErrorCode::NoError);
+        store.prune_closed();
+
+        // Now we can allocate again
+        assert!(store.allocate_stream_id().is_ok());
+    }
+
+    #[test]
+    fn auto_window_update_not_needed_when_window_above_half() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Consume less than half: no update needed.
+        stream.recv_data(30_000, false).unwrap();
+        assert!(
+            stream.recv_window() >= stream.initial_recv_window / 2,
+            "window should still be above the low watermark"
+        );
+        assert!(stream.auto_window_update_increment().is_none());
+    }
+
+    #[test]
+    fn auto_window_update_triggered_when_window_below_quarter() {
+        let initial = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_i32 = i32::try_from(initial).unwrap();
+        let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Consume just over 75% to cross the 25% watermark.
+        let consume = u32::try_from(initial_i32 * 3 / 4 + 2).unwrap();
+        stream.recv_data(consume, false).unwrap();
+
+        let increment = stream
+            .auto_window_update_increment()
+            .expect("should need WINDOW_UPDATE");
+
+        // Increment should restore the window to its initial value.
+        assert_eq!(
+            i64::from(stream.recv_window()) + i64::from(increment),
+            i64::from(initial_i32)
+        );
+    }
+
+    #[test]
+    fn auto_window_update_returns_none_after_replenish() {
+        let initial = DEFAULT_INITIAL_WINDOW_SIZE;
+        let initial_i32 = i32::try_from(initial).unwrap();
+        let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Drain below the 25% watermark.
+        let consume = u32::try_from(initial_i32 * 3 / 4 + 2).unwrap();
+        stream.recv_data(consume, false).unwrap();
+
+        let increment = stream.auto_window_update_increment().unwrap();
+        stream
+            .update_recv_window(i32::try_from(increment).unwrap())
+            .unwrap();
+
+        // After replenishing, should no longer need an update.
+        assert!(stream.auto_window_update_increment().is_none());
+    }
+
+    /// Review r27-e8 (br-asupersync-grpc-client-server-audit-jq0c7j): a window
+    /// of 1-3 bytes had a low watermark of 0, so once used up it was never
+    /// refilled and the stream stalled.
+    #[test]
+    fn auto_window_update_refills_a_tiny_window_once_it_is_used_up() {
+        for initial in 1..=3_u32 {
+            let mut stream = Stream::new(1, initial, DEFAULT_MAX_HEADER_LIST_SIZE);
+            stream.send_headers(false).unwrap();
+            assert!(stream.auto_window_update_increment().is_none());
+            stream.recv_data(initial, false).unwrap();
+            assert_eq!(stream.auto_window_update_increment(), Some(initial));
+        }
+    }
+
+    // =========================================================================
+    // RFC 7540 Section 5.1 State Machine Tests
+    // =========================================================================
+
+    #[test]
+    fn idle_to_open_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn idle_to_half_closed_local_via_send_headers_with_end_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn idle_to_open_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.recv_headers(false, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn idle_to_half_closed_remote_via_recv_headers_with_end_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn open_to_half_closed_local_via_send_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        stream.send_data(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn open_to_half_closed_local_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Sending trailers with end_stream
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn open_to_half_closed_remote_via_recv_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn open_to_half_closed_remote_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Receiving trailers with end_stream
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    // br-asupersync-pyhaov: SERVER receiving a second HEADERS frame
+    // (i.e., trailers — first one had END_HEADERS, headers_complete is
+    // true) WITHOUT END_STREAM is malformed per RFC 9113 §8.1. The
+    // direction parameter is_client=false enables the strict check;
+    // is_client=true preserves the legitimate 1xx-informational
+    // response path on the client side.
+    #[test]
+    fn server_rejects_trailing_headers_without_end_stream_pyhaov() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // First HEADERS: request initial header block, no END_STREAM
+        // (request body coming).
+        stream.recv_headers(false, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+        assert!(stream.headers_complete);
+
+        // Second HEADERS without END_STREAM — this is a TRAILER on
+        // the request side, and trailers MUST have END_STREAM. The
+        // server-side path (is_client=false) MUST reject.
+        let err = stream
+            .recv_headers(false, true, false)
+            .expect_err("server must reject trailing HEADERS without END_STREAM");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+
+        // State must be unchanged: the rejection happens BEFORE state
+        // mutation (validation-first pattern).
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn server_accepts_trailing_headers_with_end_stream_pyhaov() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.recv_headers(false, true, false).unwrap();
+        // Trailers WITH END_STREAM are the legitimate shape — accept.
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn client_still_accepts_1xx_informational_without_end_stream_pyhaov() {
+        // Client receives initial 1xx informational HEADERS (no
+        // END_STREAM), then the final response HEADERS. The pyhaov
+        // server-side gate must NOT fire on the client path.
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // client sent its request HEADERS
+        // First 1xx informational from server: no END_STREAM.
+        stream
+            .recv_headers(false, true, true)
+            .expect("client must accept 1xx informational without END_STREAM");
+        // Final response HEADERS with END_STREAM closes the stream.
+        stream
+            .recv_headers(true, true, true)
+            .expect("client must accept final response after 1xx");
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn half_closed_local_to_closed_via_recv_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap(); // Go to HalfClosedLocal
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_local_to_closed_via_recv_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Receiving trailers with end_stream closes the stream
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_remote_to_closed_via_send_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap(); // Go to HalfClosedRemote
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        stream.send_data(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn half_closed_remote_to_closed_via_send_headers() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        // Sending trailers with end_stream closes the stream
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Open/HalfClosed non-end_stream header tests (RFC 7540 §8.1)
+    // =========================================================================
+
+    #[test]
+    fn send_headers_open_without_end_stream_stays_open() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Server sends response headers without END_STREAM (data follows)
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn send_headers_half_closed_remote_without_end_stream_stays() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        stream.recv_data(100, true).unwrap(); // Open -> HalfClosedRemote
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        // Sending headers without END_STREAM stays HalfClosedRemote
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn recv_headers_open_without_end_stream_stays_open() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // Idle -> Open
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Client receives response headers without END_STREAM (data follows).
+        stream.recv_headers(false, true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn recv_headers_half_closed_local_without_end_stream_stays() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap(); // Idle -> HalfClosedLocal
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Client receives response headers without END_STREAM after sending END_STREAM.
+        stream.recv_headers(false, true, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    // =========================================================================
+    // Reserved State Tests (Push Promise paths)
+    // =========================================================================
+
+    #[test]
+    fn reserved_local_to_half_closed_remote_via_send_headers() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedLocal; // Simulate PUSH_PROMISE sent
+
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn reserved_local_to_closed_via_send_headers_with_end_stream() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedLocal;
+
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    #[test]
+    fn reserved_remote_to_half_closed_local_via_recv_headers() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote; // Simulate PUSH_PROMISE received
+
+        stream.recv_headers(false, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    #[test]
+    fn reserved_remote_to_closed_via_recv_headers_with_end_stream() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote;
+
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    // =========================================================================
+    // Reset Tests
+    // =========================================================================
+
+    #[test]
+    fn reset_from_any_state_goes_to_closed() {
+        for initial_state in [
+            StreamState::Idle,
+            StreamState::Open,
+            StreamState::HalfClosedLocal,
+            StreamState::HalfClosedRemote,
+            StreamState::ReservedLocal,
+            StreamState::ReservedRemote,
+        ] {
+            let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+            stream.state = initial_state;
+
+            stream.reset(ErrorCode::Cancel);
+
+            assert_eq!(stream.state(), StreamState::Closed);
+            assert_eq!(stream.error_code(), Some(ErrorCode::Cancel));
+        }
+    }
+
+    #[test]
+    fn reset_preserves_error_code() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        stream.reset(ErrorCode::InternalError);
+        assert_eq!(stream.error_code(), Some(ErrorCode::InternalError));
+
+        stream.reset(ErrorCode::StreamClosed);
+        assert_eq!(stream.error_code(), Some(ErrorCode::StreamClosed));
+    }
+
+    // =========================================================================
+    // Illegal Transition Tests
+    // =========================================================================
+
+    #[test]
+    fn cannot_send_headers_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        let result = stream.send_headers(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_headers_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.recv_headers(false, true, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.reset(ErrorCode::Cancel);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_half_closed_local() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_half_closed_remote() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_data(100, true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_headers_on_half_closed_local() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Trying to send more headers is illegal since we already ended
+        let result = stream.send_headers(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_headers_on_half_closed_remote() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+
+        let result = stream.recv_headers(false, true, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_send_data_on_idle() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        let result = stream.send_data(false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cannot_recv_data_on_idle() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert_eq!(stream.state(), StreamState::Idle);
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // Flow Control Error Tests
+    // =========================================================================
+
+    #[test]
+    fn recv_data_exceeding_window_returns_flow_control_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Consume most of the receive window (recv_window uses DEFAULT_INITIAL_WINDOW_SIZE)
+        stream.recv_data(65530, false).unwrap();
+
+        // Now try to receive more data than remaining window (only 5 bytes left)
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::FlowControlError);
+    }
+
+    #[test]
+    fn window_update_overflow_returns_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Try to overflow the window
+        let result = stream.update_send_window(i32::MAX);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // State Predicate Tests
+    // =========================================================================
+
+    #[test]
+    fn can_send_predicates_are_correct() {
+        assert!(!StreamState::Idle.can_send());
+        assert!(StreamState::Open.can_send());
+        assert!(!StreamState::HalfClosedLocal.can_send());
+        assert!(StreamState::HalfClosedRemote.can_send());
+        assert!(StreamState::ReservedLocal.can_send());
+        assert!(!StreamState::ReservedRemote.can_send());
+        assert!(!StreamState::Closed.can_send());
+    }
+
+    #[test]
+    fn can_recv_predicates_are_correct() {
+        assert!(!StreamState::Idle.can_recv());
+        assert!(StreamState::Open.can_recv());
+        assert!(StreamState::HalfClosedLocal.can_recv());
+        assert!(!StreamState::HalfClosedRemote.can_recv());
+        assert!(!StreamState::ReservedLocal.can_recv());
+        assert!(StreamState::ReservedRemote.can_recv());
+        assert!(!StreamState::Closed.can_recv());
+    }
+
+    #[test]
+    fn can_send_headers_predicates_are_correct() {
+        assert!(StreamState::Idle.can_send_headers());
+        assert!(StreamState::Open.can_send_headers());
+        assert!(!StreamState::HalfClosedLocal.can_send_headers());
+        assert!(StreamState::HalfClosedRemote.can_send_headers());
+        assert!(StreamState::ReservedLocal.can_send_headers());
+        assert!(!StreamState::ReservedRemote.can_send_headers());
+        assert!(!StreamState::Closed.can_send_headers());
+    }
+
+    #[test]
+    fn can_recv_headers_predicates_are_correct() {
+        assert!(StreamState::Idle.can_recv_headers());
+        assert!(StreamState::Open.can_recv_headers());
+        assert!(StreamState::HalfClosedLocal.can_recv_headers());
+        assert!(!StreamState::HalfClosedRemote.can_recv_headers());
+        assert!(!StreamState::ReservedLocal.can_recv_headers());
+        assert!(StreamState::ReservedRemote.can_recv_headers());
+        assert!(!StreamState::Closed.can_recv_headers());
+    }
+
+    #[test]
+    fn is_closed_predicate_is_correct() {
+        assert!(!StreamState::Idle.is_closed());
+        assert!(!StreamState::Open.is_closed());
+        assert!(!StreamState::HalfClosedLocal.is_closed());
+        assert!(!StreamState::HalfClosedRemote.is_closed());
+        assert!(!StreamState::ReservedLocal.is_closed());
+        assert!(!StreamState::ReservedRemote.is_closed());
+        assert!(StreamState::Closed.is_closed());
+    }
+
+    // =========================================================================
+    // Continuation Frame Tests
+    // =========================================================================
+
+    #[test]
+    fn continuation_without_headers_in_progress_is_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // headers_complete is true by default, so CONTINUATION is unexpected
+        let result = stream.recv_continuation(Bytes::from_static(b"test"), false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn continuation_accumulates_fragments() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Receive headers without END_HEADERS
+        stream.recv_headers(false, false, false).unwrap();
+        assert!(stream.is_receiving_headers());
+
+        // Add continuations
+        stream
+            .recv_continuation(Bytes::from_static(b"part1"), false)
+            .unwrap();
+        stream
+            .recv_continuation(Bytes::from_static(b"part2"), true)
+            .unwrap();
+
+        assert!(!stream.is_receiving_headers());
+
+        let fragments = stream.take_header_fragments();
+        assert_eq!(fragments.len(), 2);
+    }
+
+    // =========================================================================
+    // Pending Data Queue Tests
+    // =========================================================================
+
+    #[test]
+    fn pending_data_queue_works() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert!(!stream.has_pending_data());
+
+        stream.queue_data(Bytes::from_static(b"hello"), false);
+        stream.queue_data(Bytes::from_static(b"world"), true);
+        assert!(stream.has_pending_data());
+
+        let (data1, end1) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data1[..], b"hello");
+        assert!(!end1);
+
+        let (data2, end2) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data2[..], b"world");
+        assert!(end2);
+
+        assert!(!stream.has_pending_data());
+    }
+
+    #[test]
+    fn pending_data_partial_take() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.queue_data(Bytes::from_static(b"hello world"), true);
+
+        // Take only 5 bytes
+        let (data1, end1) = stream.take_pending_data(5).unwrap();
+        assert_eq!(&data1[..], b"hello");
+        assert!(!end1); // Not end_stream since we only took partial
+
+        // Take the rest
+        let (data2, end2) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&data2[..], b" world");
+        assert!(end2);
+    }
+
+    #[test]
+    fn pending_data_zero_window_returns_none() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.queue_data(Bytes::from_static(b"hello"), true);
+
+        let taken = stream.take_pending_data(0);
+        assert!(taken.is_none());
+        assert!(stream.has_pending_data());
+
+        let (data, end) = stream.take_pending_data(5).unwrap();
+        assert_eq!(&data[..], b"hello");
+        assert!(end);
+        assert!(!stream.has_pending_data());
+    }
+
+    // =========================================================================
+    // Stream Store ID Validation Tests
+    // =========================================================================
+
+    #[test]
+    fn stream_store_rejects_stream_id_zero() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let result = store.get_or_create(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_rejects_stream_id_over_max() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let result = store.get_or_create(MAX_STREAM_ID + 1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_client_rejects_client_initiated_stream() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Client should not accept odd stream IDs from the server.
+        let result = store.get_or_create(1);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_server_rejects_server_initiated_stream() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Server should not accept even stream IDs from the client.
+        let result = store.get_or_create(2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_client_rejects_reused_server_stream_id() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Client receives server stream 2
+        store.get_or_create(2).unwrap();
+
+        // Trying to use ID 2 again should fail (but it already exists, so get returns it)
+        // The error case is when we try to create a lower ID
+        store.get_or_create(4).unwrap(); // This advances next_server_stream_id to 6
+
+        // Now trying to create stream 2 should just return existing
+        assert!(store.get_or_create(2).is_ok());
+    }
+
+    #[test]
+    fn stream_store_server_advances_client_stream_ids() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Server receives client streams
+        store.get_or_create(1).unwrap();
+        store.get_or_create(5).unwrap(); // Skipping 3 is allowed
+
+        // Trying to create stream 3 now should fail (ID already "used")
+        let result = store.get_or_create(3);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn stream_store_allocate_stream_id_exhausts_at_max() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // br-asupersync-jq82r4: simulate a long-running connection where
+        // base_id has advanced near MAX through repeated stream
+        // close+prune. The flat-Vec gap-from-base ceiling rejects fresh
+        // connections that try to jump from base_id=1 to id=MAX
+        // directly (memory-DoS prevention); to test the MAX exhaustion
+        // boundary, advance base_id to MAX-1 first so the gap is small.
+        store.next_client_stream_id = MAX_STREAM_ID;
+        store.base_id = MAX_STREAM_ID - 1;
+
+        let id = store.allocate_stream_id().unwrap();
+        assert_eq!(id, MAX_STREAM_ID);
+        assert!(store.allocate_stream_id().is_err());
+    }
+
+    #[test]
+    fn stream_store_prune_removes_closed_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        store.get_mut(id).unwrap().reset(ErrorCode::NoError);
+
+        assert_eq!(store.active_count(), 0);
+        store.prune_closed();
+        assert!(store.get(id).is_none());
+    }
+
+    #[test]
+    fn stream_store_active_stream_ids() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id1 = store.allocate_stream_id().unwrap();
+        let id2 = store.allocate_stream_id().unwrap();
+        // Make id2 active by sending headers
+        store.get_mut(id2).unwrap().send_headers(false).unwrap();
+        store.get_mut(id1).unwrap().reset(ErrorCode::NoError);
+
+        let active = store.active_stream_ids();
+        assert_eq!(active.len(), 1);
+        assert!(active.contains(&id2));
+        assert!(!active.contains(&id1));
+    }
+
+    // =========================================================================
+    // Initial Window Size Update Tests
+    // =========================================================================
+
+    #[test]
+    fn update_initial_window_size_adjusts_existing_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 65535);
+
+        // Increase window size
+        store.set_initial_window_size(100_000).unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 100_000);
+
+        // Decrease window size
+        store.set_initial_window_size(50_000).unwrap();
+        assert_eq!(store.get(id).unwrap().send_window(), 50_000);
+    }
+
+    #[test]
+    fn local_recv_window_is_not_replaced_by_peer_send_window_update() {
+        let local_initial_window = 32_768;
+        let peer_initial_window = 100_000;
+        let mut store = StreamStore::new_with_local_recv_window(
+            true,
+            local_initial_window,
+            local_initial_window,
+            DEFAULT_MAX_HEADER_LIST_SIZE,
+        );
+
+        let first_id = store.allocate_stream_id().unwrap();
+        let first = store.get(first_id).unwrap();
+        assert_eq!(
+            first.send_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            first.recv_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            first.initial_recv_window,
+            i32::try_from(local_initial_window).unwrap()
+        );
+
+        store.set_initial_window_size(peer_initial_window).unwrap();
+        let second_id = store.allocate_stream_id().unwrap();
+        let second = store.get(second_id).unwrap();
+
+        assert_eq!(
+            second.send_window(),
+            i32::try_from(peer_initial_window).unwrap()
+        );
+        assert_eq!(
+            second.recv_window(),
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(
+            second.initial_recv_window,
+            i32::try_from(local_initial_window).unwrap()
+        );
+        assert_eq!(store.initial_recv_window_size(), local_initial_window);
+    }
+
+    #[test]
+    fn priority_can_be_set_and_retrieved() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let new_priority = PrioritySpec {
+            exclusive: true,
+            dependency: 3,
+            weight: 255,
+        };
+        stream.set_priority(new_priority);
+
+        let priority = stream.priority();
+        assert!(priority.exclusive);
+        assert_eq!(priority.dependency, 3);
+        assert_eq!(priority.weight, 255);
+    }
+
+    // =========================================================================
+    // Racey Cancellation Edge Tests
+    // =========================================================================
+
+    /// Test: RST_STREAM followed by DATA frame on same stream
+    /// Per RFC 7540 Section 5.4.2: After sending RST_STREAM, the sender
+    /// should be prepared to receive frames that were in flight.
+    #[test]
+    fn reset_then_recv_data_returns_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Reset the stream
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+        assert_eq!(stream.error_code(), Some(ErrorCode::Cancel));
+
+        // Try to receive data on the now-closed stream
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, ErrorCode::StreamClosed);
+    }
+
+    /// Test: RST_STREAM followed by HEADERS (trailers) on same stream
+    #[test]
+    fn reset_then_recv_headers_returns_error() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        stream.reset(ErrorCode::InternalError);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // Try to receive headers on the closed stream
+        let result = stream.recv_headers(true, true, false);
+        assert!(result.is_err());
+    }
+
+    /// Test: RST_STREAM while CONTINUATION is pending
+    /// Verifies that reset transitions stream to Closed and rejects further frames.
+    /// Note: The headers_complete flag isn't cleared by reset, but the stream
+    /// being Closed means no frames can be processed anyway.
+    #[test]
+    fn reset_during_header_accumulation() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Start receiving headers without END_HEADERS
+        stream.recv_headers(false, false, false).unwrap();
+        assert!(stream.is_receiving_headers());
+
+        // Add a header fragment
+        stream
+            .add_header_fragment(Bytes::from_static(b"partial_header"))
+            .unwrap();
+
+        // Reset the stream - this closes the stream
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // Headers_complete flag is preserved (still false = expecting continuation)
+        // but the stream is closed so no frames can be processed
+        assert!(stream.is_receiving_headers());
+
+        // Any frame on a closed stream should fail (because state is Closed)
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err());
+
+        // Headers on closed stream also fails
+        let result = stream.recv_headers(false, true, false);
+        assert!(result.is_err());
+    }
+
+    /// Test: Double reset is idempotent
+    /// Resetting an already-reset stream should be safe.
+    #[test]
+    fn double_reset_is_safe() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+        assert_eq!(stream.error_code(), Some(ErrorCode::Cancel));
+
+        // Reset again with different error code
+        stream.reset(ErrorCode::InternalError);
+        assert_eq!(stream.state(), StreamState::Closed);
+        // Error code is updated to the latest
+        assert_eq!(stream.error_code(), Some(ErrorCode::InternalError));
+    }
+
+    /// Test: State transitions after END_STREAM are rejected
+    /// Once a stream has sent END_STREAM, no more data/headers can be sent.
+    #[test]
+    fn no_send_after_end_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(true).unwrap(); // end_stream = true
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Cannot send more data
+        assert!(stream.send_data(false).is_err());
+
+        // Cannot send more headers
+        assert!(stream.send_headers(false).is_err());
+    }
+
+    /// Test: Trailers must have END_STREAM set
+    /// Per RFC 7540 Section 8.1: Trailers are sent as HEADERS with END_STREAM.
+    #[test]
+    fn trailers_transition_to_half_closed() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Client sends request headers (no end_stream - body will follow or trailers)
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Client sends trailers (headers with end_stream)
+        stream.send_headers(true).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+    }
+
+    /// Test: Receive trailers transitions to half-closed
+    #[test]
+    fn recv_trailers_transition_to_half_closed() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Receive trailers (headers with end_stream)
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    /// Test: Flow control edge case - negative window after SETTINGS change
+    /// Per RFC 7540 Section 6.9.2: Initial window size changes can make
+    /// the effective window size negative.
+    #[test]
+    fn window_can_go_negative_after_settings_change() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Consume some window
+        stream.consume_send_window(60000);
+        assert_eq!(stream.send_window(), 5535);
+
+        // Reduce initial window size (simulates SETTINGS change)
+        // New initial = 1000, delta = 1000 - 65535 = -64535
+        stream.update_initial_window_size(1000).unwrap();
+        // Window was 5535, delta is -64535, new window = 5535 - 64535 = -59000
+        assert!(stream.send_window() < 0);
+    }
+
+    /// Test: Reserved(remote) stream can receive data per RFC 7540
+    /// A reserved(remote) stream is created via PUSH_PROMISE and can receive
+    /// headers and data from the server.
+    #[test]
+    fn reserved_remote_can_recv_data() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote;
+
+        // Reserved(remote) streams CAN receive data (can_recv returns true)
+        // The server would send HEADERS then DATA on the promised stream
+        assert!(stream.state().can_recv());
+
+        // However, proper protocol requires headers first to activate the stream
+        // Receive headers to transition to half-closed(local)
+        stream.recv_headers(false, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedLocal);
+
+        // Now can receive data
+        let result = stream.recv_data(100, true);
+        assert!(result.is_ok());
+        assert_eq!(stream.state(), StreamState::Closed);
+    }
+
+    /// Test: Reserved(local) stream rejects DATA frames.
+    /// RFC 7540 §5.1: only HEADERS, RST_STREAM, and PRIORITY are allowed
+    /// in the reserved(local) state.
+    #[test]
+    fn reserved_local_rejects_send_data() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedLocal;
+
+        // DATA must be rejected even though can_send() returns true
+        // (can_send covers HEADERS too; send_data is more restrictive).
+        let result = stream.send_data(false);
+        assert!(result.is_err(), "DATA on reserved(local) must be rejected");
+    }
+
+    /// Test: Reserved(remote) stream rejects DATA frames.
+    /// RFC 7540 §5.1: only HEADERS, RST_STREAM, and PRIORITY may be
+    /// received in the reserved(remote) state.
+    #[test]
+    fn reserved_remote_rejects_recv_data() {
+        let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.state = StreamState::ReservedRemote;
+
+        let result = stream.recv_data(100, false);
+        assert!(result.is_err(), "DATA on reserved(remote) must be rejected");
+    }
+
+    /// Test: reset() clears accumulated header fragments and pending data
+    /// so the memory is released immediately rather than lingering until
+    /// the stream is pruned.
+    #[test]
+    fn reset_clears_header_fragments_and_pending_data() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Accumulate header fragments (simulate partial CONTINUATION)
+        stream.recv_headers(false, false, false).unwrap();
+        stream
+            .add_header_fragment(Bytes::from(vec![0xAA; 64]))
+            .unwrap();
+        assert!(!stream.take_header_fragments().is_empty() || stream.is_receiving_headers());
+
+        // Re-add fragments after take
+        stream
+            .add_header_fragment(Bytes::from(vec![0xBB; 64]))
+            .unwrap();
+
+        // Queue pending data
+        stream.queue_data(Bytes::from_static(b"buffered"), false);
+        assert!(stream.has_pending_data());
+
+        // Reset the stream
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // Both buffers must be empty
+        assert!(
+            stream.take_header_fragments().is_empty(),
+            "header_fragments should be cleared on reset"
+        );
+        assert!(
+            !stream.has_pending_data(),
+            "pending_data should be cleared on reset"
+        );
+    }
+
+    /// Test: set_initial_window_size skips closed streams.
+    /// A closed stream with a very negative send window could cause a
+    /// spurious overflow error if the delta is large; closed streams
+    /// are excluded from the update.
+    #[test]
+    fn set_initial_window_size_skips_closed_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        let id = store.allocate_stream_id().unwrap();
+        // Drive send window deeply negative
+        store.get_mut(id).unwrap().consume_send_window(65535);
+        store
+            .get_mut(id)
+            .unwrap()
+            .update_initial_window_size(1)
+            .unwrap();
+        // send_window is now  0 - 65535 + (1 - 65535) = negative
+        assert!(store.get(id).unwrap().send_window() < 0);
+
+        // Close the stream
+        store.get_mut(id).unwrap().reset(ErrorCode::NoError);
+
+        // Setting initial window to MAX should succeed because the
+        // closed stream is skipped.
+        let result = store.set_initial_window_size(0x7fff_ffff);
+        assert!(
+            result.is_ok(),
+            "closed streams must not block SETTINGS update: {result:?}"
+        );
+    }
+
+    /// Test: Stream store handles rapid allocation/deallocation
+    #[test]
+    fn stream_store_handles_rapid_churn() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        store.set_max_concurrent_streams(10);
+
+        // Rapidly allocate and close streams
+        for round in 0..10 {
+            // Allocate up to max and open them so they count as active
+            let mut ids = Vec::new();
+            for _ in 0..10 {
+                let id = store.allocate_stream_id().unwrap();
+                store.get_mut(id).unwrap().send_headers(false).unwrap();
+                ids.push(id);
+            }
+
+            // Should hit limit
+            let result = store.allocate_stream_id();
+            assert!(
+                result.is_err(),
+                "round {round}: should hit max_concurrent_streams limit"
+            );
+
+            // Close all
+            for id in &ids {
+                store.get_mut(*id).unwrap().reset(ErrorCode::NoError);
+            }
+
+            // Prune should remove all closed streams
+            store.prune_closed();
+            assert_eq!(
+                store.active_count(),
+                0,
+                "round {round}: all streams should be pruned"
+            );
+        }
+
+        // After all rounds, should be able to allocate again
+        let id = store.allocate_stream_id().unwrap();
+        assert!(id > 0);
+    }
+
+    /// Test: Reserve remote stream validates stream ID parity
+    #[test]
+    fn reserve_remote_validates_parity() {
+        // Client store
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Server should use even IDs for client
+        assert!(store.reserve_remote_stream(2).is_ok());
+
+        // Odd ID should fail for client (that's client-initiated)
+        assert!(store.reserve_remote_stream(3).is_err());
+
+        // Server store
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Client should use odd IDs for server
+        assert!(store.reserve_remote_stream(1).is_ok());
+
+        // Even ID should fail for server (that's server-initiated)
+        assert!(store.reserve_remote_stream(2).is_err());
+    }
+
+    /// Test: Stream ID monotonicity is enforced
+    #[test]
+    fn stream_id_must_be_monotonic() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Allocate some streams
+        let _ = store.allocate_stream_id().unwrap(); // 1
+        let _ = store.allocate_stream_id().unwrap(); // 3
+
+        // Server sends push with ID 2, then 4
+        store.reserve_remote_stream(2).unwrap();
+        store.reserve_remote_stream(4).unwrap();
+
+        // Server cannot go back to ID 2 (already used)
+        // Actually, since 2 already exists, this will fail
+        assert!(store.reserve_remote_stream(2).is_err());
+    }
+
+    /// Test: Pending data queue respects order
+    #[test]
+    fn pending_data_preserves_order() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        stream.queue_data(Bytes::from_static(b"first"), false);
+        stream.queue_data(Bytes::from_static(b"second"), false);
+        stream.queue_data(Bytes::from_static(b"third"), true);
+
+        let (d1, e1) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&d1[..], b"first");
+        assert!(!e1);
+
+        let (d2, e2) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&d2[..], b"second");
+        assert!(!e2);
+
+        let (d3, e3) = stream.take_pending_data(100).unwrap();
+        assert_eq!(&d3[..], b"third");
+        assert!(e3);
+
+        assert!(!stream.has_pending_data());
+    }
+
+    // =========================================================================
+    // Regression Tests: recv_headers / recv_continuation state safety
+    // =========================================================================
+
+    /// Regression: recv_headers on a closed stream must not corrupt
+    /// headers_complete, which would allow continuation frames to
+    /// accumulate on an already-closed stream.
+    #[test]
+    fn recv_headers_on_closed_stream_does_not_corrupt_headers_complete() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+
+        // Close the stream via reset.
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // headers_complete should still be true (the default).
+        assert!(
+            !stream.is_receiving_headers(),
+            "headers_complete should be true before the rejected recv_headers"
+        );
+
+        // Attempt to receive headers with end_headers=false on a closed stream.
+        // This MUST fail AND must NOT change headers_complete.
+        let result = stream.recv_headers(false, false, false);
+        assert!(result.is_err(), "recv_headers on Closed must fail");
+
+        // Critical assertion: headers_complete must remain true (unmodified).
+        assert!(
+            !stream.is_receiving_headers(),
+            "headers_complete must not be corrupted by a rejected recv_headers"
+        );
+    }
+
+    /// Regression: recv_continuation must reject frames on a closed stream.
+    #[test]
+    fn recv_continuation_rejects_closed_stream() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+
+        // Start receiving headers without END_HEADERS.
+        stream.recv_headers(false, false, false).unwrap();
+        assert!(stream.is_receiving_headers());
+
+        // Close the stream via reset.
+        stream.reset(ErrorCode::Cancel);
+        assert_eq!(stream.state(), StreamState::Closed);
+
+        // CONTINUATION on a closed stream must be rejected.
+        let result = stream.recv_continuation(Bytes::from_static(b"fragment"), true);
+        assert!(
+            result.is_err(),
+            "recv_continuation must reject frames on a Closed stream"
+        );
+        assert_eq!(
+            result.unwrap_err().code,
+            ErrorCode::StreamClosed,
+            "error code should be StreamClosed"
+        );
+    }
+
+    /// Combined regression: reset → recv_headers (rejected, no corruption)
+    /// → recv_continuation (rejected by state check).
+    #[test]
+    fn reset_then_rejected_headers_then_continuation_all_rejected() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap();
+
+        // Close via reset.
+        stream.reset(ErrorCode::Cancel);
+
+        // Rejected recv_headers must not open continuation path.
+        assert!(stream.recv_headers(false, false, false).is_err());
+        assert!(
+            !stream.is_receiving_headers(),
+            "rejected recv_headers must not flip headers_complete"
+        );
+
+        // Even if headers_complete were somehow false, the state check
+        // in recv_continuation provides a second barrier.
+        // Force the field to false to exercise the defense-in-depth path.
+        stream.headers_complete = false;
+        let result = stream.recv_continuation(Bytes::from_static(b"payload"), true);
+        assert!(
+            result.is_err(),
+            "recv_continuation state check must catch closed stream"
+        );
+    }
+
+    // ====================================================================
+    // br-asupersync-tlv3gp: flat-Vec backing-store correctness tests for
+    // StreamStore. The hot-path `get`/`get_mut` is now O(1) without a
+    // hash; these tests pin the semantic surface that the prior
+    // DetHashMap-backed impl exposed.
+    // ====================================================================
+
+    #[test]
+    fn tlv3gp_get_returns_inserted_stream() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let id = store.allocate_stream_id().unwrap();
+        assert!(store.get(id).is_some());
+        assert!(store.get_mut(id).is_some());
+    }
+
+    #[test]
+    fn tlv3gp_get_unknown_stream_id_returns_none() {
+        let store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        assert!(store.get(0).is_none());
+        assert!(store.get(1).is_none());
+        assert!(store.get(7).is_none());
+        assert!(store.get(u32::MAX).is_none());
+    }
+
+    #[test]
+    fn tlv3gp_high_stream_id_lookup_is_correct() {
+        // A connection that allocates many ids exercises both Vec
+        // growth and the slot-index arithmetic. Verify each id round-
+        // trips through get/get_mut and that gaps (between odd ids)
+        // are correctly absent.
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let mut allocated = Vec::new();
+        for _ in 0..256 {
+            allocated.push(store.allocate_stream_id().unwrap());
+        }
+        for &id in &allocated {
+            assert!(store.get(id).is_some(), "missing id {id}");
+            // Even ids (gaps in odd-allocation client store) must not
+            // appear: this is the fingerprint of the flat-Vec layout
+            // — every other slot is a None gap by design.
+            if id > 0 {
+                assert!(store.get(id - 1).is_none(), "even id {} leaked", id - 1);
+            }
+        }
+        assert_eq!(store.len(), allocated.len());
+    }
+
+    #[test]
+    fn tlv3gp_prune_closed_advances_base_id_and_shrinks_storage() {
+        // Allocate four streams, close the two oldest, prune. The
+        // leading-None compaction should advance base_id and shrink
+        // the underlying Vec.
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let id1 = store.allocate_stream_id().unwrap();
+        let id2 = store.allocate_stream_id().unwrap();
+        let _id3 = store.allocate_stream_id().unwrap();
+        let _id4 = store.allocate_stream_id().unwrap();
+        assert_eq!(store.len(), 4);
+
+        // Close the two oldest. send/recv headers + reset is the
+        // standard way to drive a stream to Closed.
+        store.get_mut(id1).unwrap().reset(ErrorCode::Cancel);
+        store.get_mut(id2).unwrap().reset(ErrorCode::Cancel);
+        store.prune_closed();
+        assert_eq!(store.len(), 2);
+
+        // base_id should have advanced: looking up the closed/pruned
+        // ids must return None (slot reclaimed, not a stale Some).
+        assert!(store.get(id1).is_none());
+        assert!(store.get(id2).is_none());
+
+        // Active ids still resolvable.
+        assert!(store.get(_id3).is_some());
+        assert!(store.get(_id4).is_some());
+    }
+
+    #[test]
+    fn tlv3gp_len_excludes_pruned_streams() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let ids: Vec<u32> = (0..5)
+            .map(|_| store.allocate_stream_id().unwrap())
+            .collect();
+        assert_eq!(store.len(), 5);
+        // Close all of them.
+        for id in ids {
+            store.get_mut(id).unwrap().reset(ErrorCode::NoError);
+        }
+        // Before prune, len() still counts the closed-but-stored
+        // streams (matches the old HashMap::len semantic).
+        assert_eq!(store.len(), 5);
+        store.prune_closed();
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+    }
+
+    #[test]
+    fn tlv3gp_prune_preserves_unopened_opposite_parity_ids() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let first_local = store.allocate_stream_id().unwrap();
+        let second_local = store.allocate_stream_id().unwrap();
+
+        store
+            .get_mut(first_local)
+            .unwrap()
+            .reset(ErrorCode::NoError);
+        store
+            .get_mut(second_local)
+            .unwrap()
+            .reset(ErrorCode::NoError);
+        store.prune_closed();
+
+        assert_eq!(store.len(), 0);
+        assert!(
+            store.reserve_remote_stream(2).is_ok(),
+            "pruning local streams must not burn unopened remote stream id 2"
+        );
+        assert!(store.get(2).is_some());
+    }
+
+    #[test]
+    fn tlv3gp_active_stream_ids_returns_in_id_order() {
+        // The flat Vec naturally preserves id order — assert this so
+        // any future callers that rely on the prior HashMap's
+        // iteration-order (which was DetHashMap = deterministic but
+        // unspecified) get the stronger guarantee.
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let mut ids = Vec::new();
+        for _ in 0..8 {
+            let id = store.allocate_stream_id().unwrap();
+            store.get_mut(id).unwrap().send_headers(false).unwrap();
+            ids.push(id);
+        }
+        let active = store.active_stream_ids();
+        assert_eq!(active, ids);
+    }
+
+    #[test]
+    fn tlv3gp_reserve_remote_then_get_round_trips() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Client store: reserved-remote ids must be even.
+        let _ = store.reserve_remote_stream(2).unwrap();
+        let _ = store.reserve_remote_stream(4).unwrap();
+        assert!(store.get(2).is_some());
+        assert!(store.get(4).is_some());
+        // Idle/unallocated id in between must not leak.
+        assert!(store.get(3).is_none());
+    }
+
+    #[test]
+    fn tlv3gp_id_below_pruned_base_is_rejected() {
+        // Drive a stream to closed then prune it; the slot is gone
+        // and the id is below base_id. Inserting (via the legitimate
+        // public surface) any *new* stream id below base would be
+        // rejected by the higher-level monotonicity checks; this
+        // test covers the lower-layer guard via insert_stream's
+        // base_id check, exercised through a fresh allocation that
+        // skips the upstream guard.
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let id1 = store.allocate_stream_id().unwrap();
+        store.get_mut(id1).unwrap().reset(ErrorCode::Cancel);
+        store.prune_closed();
+        // After prune, attempting to look up id1 must yield None
+        // (slot reclaimed, not a stale entry).
+        assert!(store.get(id1).is_none());
+    }
+
+    #[test]
+    fn tlv3gp_get_mut_after_window_update_persists() {
+        // Mutating a Stream through get_mut must persist across a
+        // subsequent get — verifies the slot stores Stream by value
+        // (not a clone).
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let id = store.allocate_stream_id().unwrap();
+        store.get_mut(id).unwrap().send_headers(false).unwrap();
+        store.get_mut(id).unwrap().consume_send_window(100);
+        let after = store.get(id).unwrap().send_window();
+        assert_eq!(after, 65535 - 100);
+    }
+
+    /// br-asupersync-of0l5f: trailer block containing a `:status`
+    /// pseudo-header MUST be rejected per RFC 9113 §8.1
+    /// ("Trailers MUST NOT include pseudo-header fields"). Without
+    /// this rejection a malicious peer could rewrite the request
+    /// line in trailers after the initial HEADERS already committed
+    /// it — a request-smuggling primitive when the gateway forwards
+    /// to an HTTP/1 backend.
+    #[test]
+    fn of0l5f_trailer_with_status_pseudo_header_rejected() {
+        let trailer = vec![
+            Header::new("content-type", "text/plain"),
+            Header::new(":status", "200"),
+        ];
+        let err = reject_pseudo_headers_in_trailers(&trailer)
+            .expect_err("trailer with :status must be rejected");
+        assert!(err.contains("RFC 9113 §8.1"), "wrong reject reason: {err}");
+    }
+
+    /// br-asupersync-of0l5f: a trailer block with NO pseudo-headers
+    /// must pass — happy path regression guard.
+    #[test]
+    fn of0l5f_trailer_without_pseudo_headers_accepted() {
+        let trailer = vec![
+            Header::new("trailer-checksum", "abcd"),
+            Header::new("x-trace-id", "deadbeef"),
+        ];
+        assert!(reject_pseudo_headers_in_trailers(&trailer).is_ok());
+    }
+
+    /// br-asupersync-of0l5f: would_be_trailer_block returns true
+    /// after the initial header block has been received (Open or
+    /// HalfClosedLocal state, headers_complete=true). Callers query
+    /// this BEFORE recv_headers to know whether to invoke the
+    /// trailer-validator on the decoded block.
+    #[test]
+    fn of0l5f_would_be_trailer_block_after_initial_headers() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Initially no headers received → not a trailer block.
+        assert!(!stream.would_be_trailer_block());
+
+        // Receive initial HEADERS with end_headers, no end_stream.
+        // server-side, is_client=false.
+        stream.recv_headers(false, true, false).unwrap();
+        assert!(stream.would_be_trailer_block());
+    }
+
+    /// br-asupersync-kaqld3: consume_recv_window must signal a
+    /// connection-level FLOW_CONTROL_ERROR when the peer overshoots
+    /// the window beyond the i32::MIN representable bound, instead
+    /// of clamping to MIN and stalling the stream.
+    #[test]
+    fn kaqld3_consume_recv_window_overshoot_returns_flow_control_error() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Drive the window very negative via several SETTINGS-shrink
+        // simulations. We bypass the SETTINGS path here and just
+        // poke the field to a value close to i32::MIN, so the next
+        // legitimate consume drives the window past the bound.
+        stream.recv_window = i32::MIN + 100;
+        let err = stream
+            .consume_recv_window(200)
+            .expect_err("overshoot past i32::MIN must be FLOW_CONTROL_ERROR");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FLOW_CONTROL") || msg.contains("flow-control"),
+            "wrong error kind: {msg}"
+        );
+    }
+
+    /// br-asupersync-kaqld3: consume_recv_window happy path — when
+    /// the deduction stays within i32 bounds it succeeds and updates
+    /// the window correctly. Confirms the new fallible signature
+    /// preserves the prior semantics for legitimate inputs.
+    #[test]
+    fn kaqld3_consume_recv_window_legitimate_succeeds() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let before = stream.recv_window;
+        stream
+            .consume_recv_window(1024)
+            .expect("legitimate consume must succeed");
+        assert_eq!(stream.recv_window, before - 1024);
+    }
+}

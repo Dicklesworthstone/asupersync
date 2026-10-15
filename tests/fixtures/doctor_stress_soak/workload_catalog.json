@@ -1,0 +1,182 @@
+{
+  "schema_version": "doctor-stress-soak-v1",
+  "description": "Deterministic soak/stress workload catalog for doctor_asupersync diagnostics",
+  "bead_id": "asupersync-2b4jj.6.8",
+  "contract_version": "doctor-stress-soak-v1",
+  "e2e_harness_contract_version": "doctor-e2e-harness-v1",
+  "logging_contract_version": "doctor-logging-v1",
+  "profile_modes": ["fast", "soak"],
+  "required_scenario_fields": [
+    "scenario_id",
+    "description",
+    "pressure_class",
+    "duration_steps",
+    "checkpoint_interval_steps",
+    "seed",
+    "concurrency_level",
+    "cancellation_rate_pct",
+    "finding_volume_per_step"
+  ],
+  "required_run_fields": [
+    "run_id",
+    "scenario_id",
+    "seed",
+    "status",
+    "checkpoint_count",
+    "checkpoint_metrics",
+    "sustained_budget_pass",
+    "artifact_index",
+    "repro_command"
+  ],
+  "required_metric_fields": [
+    "checkpoint_index",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "latency_p99_ms",
+    "memory_peak_mb",
+    "error_rate_bps",
+    "drift_basis_points"
+  ],
+  "sustained_budget_policy": [
+    {
+      "policy_id": "SBP-01",
+      "description": "All post-warmup checkpoints must pass latency p99 budget",
+      "metric": "latency_p99_ms",
+      "warmup_checkpoints": 1,
+      "threshold_source": "budget_envelope",
+      "violation_action": "budget_failed"
+    },
+    {
+      "policy_id": "SBP-02",
+      "description": "Memory peak must remain within ceiling across all checkpoints",
+      "metric": "memory_peak_mb",
+      "warmup_checkpoints": 0,
+      "threshold_source": "budget_envelope",
+      "violation_action": "budget_failed"
+    },
+    {
+      "policy_id": "SBP-03",
+      "description": "Error rate drift must stay below 500 basis points across sustained run",
+      "metric": "error_rate_bps",
+      "warmup_checkpoints": 1,
+      "threshold_source": "fixed",
+      "threshold_value": 500,
+      "violation_action": "budget_failed"
+    },
+    {
+      "policy_id": "SBP-04",
+      "description": "Latency drift must not exceed 2000 basis points from baseline checkpoint",
+      "metric": "drift_basis_points",
+      "warmup_checkpoints": 1,
+      "threshold_source": "fixed",
+      "threshold_value": 2000,
+      "violation_action": "budget_failed"
+    }
+  ],
+  "scenario_catalog": [
+    {
+      "scenario_id": "stress-high-volume",
+      "description": "Sustained high finding volume with constant operator pressure",
+      "pressure_class": "high_volume",
+      "duration_steps": 100,
+      "checkpoint_interval_steps": 10,
+      "seed": 4242,
+      "concurrency_level": 8,
+      "cancellation_rate_pct": 0,
+      "finding_volume_per_step": 500,
+      "budget_envelope_id": "scan-large"
+    },
+    {
+      "scenario_id": "stress-concurrent-ops",
+      "description": "Concurrent operator actions with moderate finding load",
+      "pressure_class": "concurrent_ops",
+      "duration_steps": 80,
+      "checkpoint_interval_steps": 10,
+      "seed": 4242,
+      "concurrency_level": 16,
+      "cancellation_rate_pct": 5,
+      "finding_volume_per_step": 200,
+      "budget_envelope_id": "analyze-medium"
+    },
+    {
+      "scenario_id": "stress-cancel-recovery",
+      "description": "Cancellation and recovery pressure with bursty workloads",
+      "pressure_class": "cancel_recovery",
+      "duration_steps": 60,
+      "checkpoint_interval_steps": 10,
+      "seed": 4242,
+      "concurrency_level": 4,
+      "cancellation_rate_pct": 30,
+      "finding_volume_per_step": 100,
+      "budget_envelope_id": "remediate-medium"
+    },
+    {
+      "scenario_id": "soak-steady-state",
+      "description": "Long-duration steady-state workload for saturation detection",
+      "pressure_class": "steady_state",
+      "duration_steps": 500,
+      "checkpoint_interval_steps": 50,
+      "seed": 4242,
+      "concurrency_level": 4,
+      "cancellation_rate_pct": 2,
+      "finding_volume_per_step": 50,
+      "budget_envelope_id": "scan-medium"
+    }
+  ],
+  "budget_envelopes": [
+    {
+      "envelope_id": "scan-large",
+      "workflow_category": "scan",
+      "dataset_profile": "large",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 128
+    },
+    {
+      "envelope_id": "analyze-medium",
+      "workflow_category": "analyze",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 96
+    },
+    {
+      "envelope_id": "remediate-medium",
+      "workflow_category": "remediate",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 500,
+      "latency_p95_ms": 1500,
+      "latency_p99_ms": 3000,
+      "memory_ceiling_mb": 64
+    },
+    {
+      "envelope_id": "scan-medium",
+      "workflow_category": "scan",
+      "dataset_profile": "medium",
+      "latency_p50_ms": 200,
+      "latency_p95_ms": 500,
+      "latency_p99_ms": 1000,
+      "memory_ceiling_mb": 64
+    }
+  ],
+  "saturation_indicators": {
+    "description": "Signals used to detect resource saturation in failure outputs",
+    "indicator_classes": [
+      "latency_drift",
+      "memory_drift",
+      "error_rate_drift",
+      "checkpoint_timeout",
+      "gc_pressure"
+    ]
+  },
+  "determinism_invariants": [
+    "Same seed + same scenario → same checkpoint_metrics sequence",
+    "Same seed + same scenario → same violation list",
+    "Same seed + same scenario → same quality score",
+    "Checkpoint metrics are ordered by checkpoint_index ascending",
+    "Runs are ordered by scenario_id lexically",
+    "Saturation indicators are sorted lexically within failure_output"
+  ]
+}

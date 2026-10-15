@@ -1,0 +1,28 @@
+{
+  "agent_mail": {
+    "agents": [],
+    "available": false,
+    "messages": [],
+    "reservations": [],
+    "status": "unavailable"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "UnknownAgent",
+        "id": "asupersync-unknown1",
+        "title": "Unknown freshness",
+        "updated_at": "2026-05-07T00:00:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [],
+    "status": "ok"
+  }
+}

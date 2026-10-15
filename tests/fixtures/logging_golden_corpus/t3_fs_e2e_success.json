@@ -1,0 +1,30 @@
+{
+  "fixture_id": "golden-t3-fs-e2e-success",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "T3",
+  "description": "Representative success trace for fs/process/signal e2e",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "t3_fs_read_write_lifecycle",
+    "correlation_id": "t3-fs-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "File read/write lifecycle with signal-safe cleanup verified",
+    "replay_pointer": "cargo test --test tokio_fs_process_signal_e2e -- t3_fs_read_write --nocapture"
+  },
+  "required_fields": [
+    "schema_version",
+    "scenario_id",
+    "correlation_id",
+    "phase",
+    "outcome",
+    "detail",
+    "replay_pointer"
+  ],
+  "invariants": [
+    "All 7 schema fields present",
+    "correlation_id matches slug format",
+    "phase is one of: setup, execute, verify, teardown",
+    "outcome is one of: pass, fail, skip, error"
+  ]
+}

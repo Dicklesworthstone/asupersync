@@ -1,0 +1,782 @@
+{
+  "contract_version": "validation-frontier-ledger-v1",
+  "bead_id": "asupersync-aj7lx3.3",
+  "description": "Schema and fixture corpus for recording exact validation frontiers when broad proof commands stop in unrelated blockers.",
+  "record_schema_version": "validation-frontier-record-v1",
+  "decision_classes": [
+    {
+      "decision": "pass",
+      "meaning": "The intended proof command completed and is the primary validation claim."
+    },
+    {
+      "decision": "blocked-external",
+      "meaning": "The intended proof command or commit path stopped in an unrelated external blocker; cite the blocker and the narrower supplemental proof."
+    },
+    {
+      "decision": "failed-local",
+      "meaning": "The intended proof command stopped in a blocker caused by the owned slice itself."
+    }
+  ],
+  "error_classes": [
+    {
+      "error_class": "none",
+      "surface": "successful proof lane",
+      "ownership_expectation": "Use only for pass rows whose required proof lane actually ran and exited successfully."
+    },
+    {
+      "error_class": "rustc_compile_error",
+      "surface": "cargo check or cargo test",
+      "ownership_expectation": "Route to the file owner or local bead when the touched slice caused the compile stop."
+    },
+    {
+      "error_class": "clippy_lint_wall",
+      "surface": "cargo clippy",
+      "ownership_expectation": "Treat unrelated lint debt as an external blocker unless the touched slice introduced it."
+    },
+    {
+      "error_class": "file_reservation_conflict",
+      "surface": "agent-mail reservation",
+      "ownership_expectation": "Treat as external coordination blocker; cite the holding agent and expiry."
+    },
+    {
+      "error_class": "peer_dirty_index_conflict",
+      "surface": "shared git index",
+      "ownership_expectation": "Treat as external shared-main blocker; cite the staged peer paths before committing."
+    },
+    {
+      "error_class": "rch_admission_refusal",
+      "surface": "rch remote admission",
+      "ownership_expectation": "Treat as external environment blocker when RCH_REQUIRE_REMOTE=1 refuses local fallback before the proof lane runs."
+    },
+    {
+      "error_class": "rch_topology_preflight",
+      "surface": "rch remote topology preflight",
+      "ownership_expectation": "Treat as external infrastructure blocker when RCH admits a worker but fails dependency or topology preflight before Cargo starts; local and direct-SSH Cargo fallback remain invalid proof substitutes."
+    },
+    {
+      "error_class": "rustfmt_diff",
+      "surface": "rustfmt --check",
+      "ownership_expectation": "Treat as local when the diff overlaps the owned reservation scope; otherwise cite the dirty formatter frontier."
+    },
+    {
+      "error_class": "truncated_rustc_output",
+      "surface": "cargo check or cargo test output capture",
+      "ownership_expectation": "Preserve the first exact rustc blocker and mark the lane truncated so agents do not infer a complete diagnostic inventory."
+    }
+  ],
+  "record_fields": [
+    {
+      "name": "command",
+      "type": "string",
+      "description": "The intended proof or coordination command that was attempted."
+    },
+    {
+      "name": "proof_lane_id",
+      "type": "string",
+      "description": "Stable proof lane identifier, such as production-lib-check, lib-test, all-targets-check, clippy, rustdoc, rustfmt, or rch-admission."
+    },
+    {
+      "name": "commit",
+      "type": "string",
+      "description": "Repository commit that the attempt targeted."
+    },
+    {
+      "name": "timestamp",
+      "type": "string",
+      "description": "RFC 3339 timestamp for the attempt."
+    },
+    {
+      "name": "touched_files",
+      "type": "string[]",
+      "description": "Owned files that motivated the validation attempt."
+    },
+    {
+      "name": "dirty_tree_summary",
+      "type": "object",
+      "description": "Tracked modified, deleted, untracked, and overlap state for the shared-main checkout at attempt time."
+    },
+    {
+      "name": "rch_result.admission",
+      "type": "string",
+      "description": "RCH worker admission result: remote-executed, remote-refused, local-fallback-refused, or not-applicable."
+    },
+    {
+      "name": "rch_result.worker",
+      "type": "string|null",
+      "description": "Remote worker that ran the lane when admitted."
+    },
+    {
+      "name": "rch_result.local_fallback_refused",
+      "type": "boolean",
+      "description": "Whether RCH_REQUIRE_REMOTE=1 refused to fall back locally."
+    },
+    {
+      "name": "rch_result.rch_version",
+      "type": "string",
+      "description": "RCH CLI version captured for topology-preflight blocker receipts."
+    },
+    {
+      "name": "rch_result.topology_probe_summary",
+      "type": "object",
+      "description": "Read-only summary of worker /data/projects and /dp topology checks when topology preflight fails before Cargo starts."
+    },
+    {
+      "name": "rch_result.cargo_started",
+      "type": "boolean",
+      "description": "Whether the remote-required command passed RCH preflight far enough for Cargo to emit compile, check, run, or finish output."
+    },
+    {
+      "name": "rch_result.stderr_signature",
+      "type": "string",
+      "description": "Stable stderr signature for topology-preflight failures that occur before Cargo emits diagnostics."
+    },
+    {
+      "name": "exit_status",
+      "type": "integer",
+      "description": "Process exit status for the proof lane or coordination command."
+    },
+    {
+      "name": "decision",
+      "type": "enum(pass|blocked-external|failed-local)",
+      "description": "How the result should be cited in a close reason."
+    },
+    {
+      "name": "error_class",
+      "type": "string",
+      "description": "Normalized blocker classification."
+    },
+    {
+      "name": "first_blocker",
+      "type": "object|null",
+      "description": "First exact blocker for blocked or failed lanes; null only for pass rows."
+    },
+    {
+      "name": "first_failure.crate_or_surface",
+      "type": "string",
+      "description": "The first crate or coordination surface that stopped the attempt."
+    },
+    {
+      "name": "first_failure.target",
+      "type": "string",
+      "description": "The first failing cargo target or coordination target."
+    },
+    {
+      "name": "first_failure.file",
+      "type": "string",
+      "description": "The first failing file or path."
+    },
+    {
+      "name": "first_failure.line",
+      "type": "integer",
+      "description": "Line number for code blockers; 0 for coordination-only blockers."
+    },
+    {
+      "name": "error_buckets",
+      "type": "object[]",
+      "description": "Diagnostics grouped by file, module, stable error code or lint, and ownership hint."
+    },
+    {
+      "name": "affected_files",
+      "type": "string[]",
+      "description": "Files implicated by the proof output, distinct from the files intentionally touched."
+    },
+    {
+      "name": "likely_owner",
+      "type": "string",
+      "description": "Best current ownership hint, including 'local_change' or external agent names."
+    },
+    {
+      "name": "likely_bead",
+      "type": "string|null",
+      "description": "Best current bead hint when known."
+    },
+    {
+      "name": "blocker_origin",
+      "type": "object",
+      "description": "Best-effort recent git commit metadata for the first blocker path, including commit, subject, author, and parsed bead id when available."
+    },
+    {
+      "name": "external_to_narrow_fuzz_target_work",
+      "type": "boolean",
+      "description": "Whether the blocker is outside the owned narrow fuzz-target or artifact slice and should be cited as external frontier debt."
+    },
+    {
+      "name": "green_proof_claimed",
+      "type": "boolean",
+      "description": "Whether this row is allowed to feed a green Beads or Agent Mail proof claim."
+    },
+    {
+      "name": "supplemental_proof_command",
+      "type": "string",
+      "description": "The narrower proof that still covered the local change."
+    },
+    {
+      "name": "summary",
+      "type": "string",
+      "description": "Short blocker summary that can be pasted directly into a close reason."
+    }
+  ],
+  "close_reason_template": {
+    "required_fields": [
+      "decision",
+      "command",
+      "first_failure.file",
+      "first_failure.line",
+      "proof_lane_id",
+      "exit_status",
+      "dirty_tree_summary",
+      "rch_result.admission",
+      "error_buckets",
+      "affected_files",
+      "error_class",
+      "summary",
+      "external_to_narrow_fuzz_target_work",
+      "supplemental_proof_command"
+    ],
+    "example": "blocked-external: intended `rch exec -- cargo test --test combinator_select_fairness_determinism_audit -- --nocapture`; stopped at `src/sync/semaphore.rs:37` (`rustc_compile_error`, unused imports) while touching `tests/combinator_select_fairness_determinism_audit.rs`; supplemental proof `rch exec -- rustfmt --edition 2024 --check tests/combinator_select_fairness_determinism_audit.rs`."
+  },
+  "redaction_rules": [
+    "Do not include home-directory paths or bearer tokens.",
+    "Prefer repo-relative file paths and exact rustc/clippy error summaries.",
+    "Record local fallback markers explicitly instead of hiding them."
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "VF-RUSTC-COMPILE-STOP",
+      "source_kind": "rustc_output",
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "timestamp": "2026-05-07T08:34:15Z",
+      "touched_files": [
+        "src/messaging/consumer.rs",
+        "fuzz/fuzz_targets/namespace_kernel.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- rustfmt --edition 2024 --check src/messaging/consumer.rs fuzz/fuzz_targets/namespace_kernel.rs",
+      "snippet": "error[E0004]: non-exhaustive patterns: `DeliverPolicy::ByStartTime(_)` not covered\n  --> src/messaging/consumer.rs:2198:11\n   |\n2198 |     match deliver_policy {\n   |           ^^^^^^^^^^^^^^ pattern `DeliverPolicy::ByStartTime(_)` not covered\n   |\nerror: could not compile `asupersync` (lib) due to 1 previous error\n",
+      "expected_record": {
+        "decision": "failed-local",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib",
+          "file": "src/messaging/consumer.rs",
+          "line": 2198
+        },
+        "likely_owner": "local_change",
+        "likely_bead": "asupersync-cu6cfw",
+        "external_to_narrow_fuzz_target_work": false,
+        "summary": "non-exhaustive patterns: `DeliverPolicy::ByStartTime(_)` not covered"
+      }
+    },
+    {
+      "fixture_id": "VF-CLIPPY-LINT-WALL",
+      "source_kind": "clippy_output",
+      "command": "rch exec -- cargo clippy -p asupersync-conformance --bin otel_resource_conformance -- -D warnings",
+      "timestamp": "2026-05-07T08:07:53Z",
+      "touched_files": [
+        "conformance/src/bin/otel_resource_conformance.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- cargo test -p asupersync-conformance --bin otel_resource_conformance -- --nocapture",
+      "snippet": "error: this function has too many arguments (8/7)\n   --> src/observability/otel.rs:114:1\n    |\n114 | fn build_pipeline(...) {\n    | ^^^^^^^^^^^^^^^^^^^^^^\n    |\n    = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments\n    = note: `-D clippy::too-many-arguments` implied by `-D warnings`\nerror: could not compile `asupersync` (lib) due to 1 previous error\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "clippy_lint_wall",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib",
+          "file": "src/observability/otel.rs",
+          "line": 114
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "this function has too many arguments (8/7)"
+      }
+    },
+    {
+      "fixture_id": "VF-FILE-RESERVATION-CONFLICT",
+      "source_kind": "file_reservation_conflict",
+      "command": "file_reservation_paths(project_key=\"/data/projects/asupersync\", agent_name=\"BoldHill\", paths=[\"README.md\"], ttl_seconds=3600, exclusive=true)",
+      "timestamp": "2026-05-07T08:38:04Z",
+      "touched_files": [
+        "README.md"
+      ],
+      "supplemental_proof_command": "br show asupersync-aj7lx3.1 --json",
+      "likely_bead_hint": "asupersync-aj7lx3.1",
+      "snippet": "{\"granted\":[],\"conflicts\":[{\"path\":\"README.md\",\"holders\":[{\"agent\":\"SunnyHollow\",\"path_pattern\":\"README.md\",\"exclusive\":true,\"expires_ts\":\"2026-05-07T09:36:30.647793Z\"}]}]}",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "file_reservation_conflict",
+        "first_failure": {
+          "crate_or_surface": "agent-mail",
+          "target": "reservation",
+          "file": "README.md",
+          "line": 0
+        },
+        "likely_owner": "SunnyHollow",
+        "likely_bead": "asupersync-aj7lx3.1",
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "exclusive reservation held by SunnyHollow until 2026-05-07T09:36:30.647793Z"
+      }
+    },
+    {
+      "fixture_id": "VF-PEER-DIRTY-INDEX",
+      "source_kind": "peer_dirty_index",
+      "command": "git diff --cached --name-only",
+      "timestamp": "2026-05-07T08:20:11Z",
+      "touched_files": [
+        "tests/combinator_select_fairness_determinism_audit.rs"
+      ],
+      "supplemental_proof_command": "git restore --staged .beads/issues.jsonl fuzz/fuzz_targets/raptorq_codec_symbol_corruption.rs && git diff --cached --name-only",
+      "snippet": ".beads/issues.jsonl\nfuzz/fuzz_targets/raptorq_codec_symbol_corruption.rs\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "peer_dirty_index_conflict",
+        "first_failure": {
+          "crate_or_surface": "git",
+          "target": "staged-index",
+          "file": ".beads/issues.jsonl",
+          "line": 0
+        },
+        "likely_owner": "shared-main peer dirt",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "unrelated staged paths present before commit"
+      }
+    },
+    {
+      "fixture_id": "VF-ALL-TARGETS-SCHEDULER-BUDGET-TEST-WALL",
+      "source_kind": "rustc_broad_frontier_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "timestamp": "2026-05-10T07:13:20Z",
+      "touched_files": [
+        "fuzz/fuzz_targets/h2_data_frame_after_end_stream.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_copperspring_h2_data_after_end_stream cargo check --manifest-path fuzz/Cargo.toml --bin h2_data_frame_after_end_stream",
+      "snippet": "error[E0599]: no function or associated item named `test_with_budget` found for struct `Cx` in the current scope\n   --> tests/scheduler_cooperative_budget_yield_audit.rs:461:22\n    |\n461 |         let cx = Cx::test_with_budget(Budget::INFINITE.with_poll_quota(0));\n    |                      ^^^^^^^^^^^^^^^^ function or associated item not found in `Cx`\n\nerror: could not compile `asupersync` (test \"scheduler_cooperative_budget_yield_audit\") due to 5 previous errors\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "test \"scheduler_cooperative_budget_yield_audit\"",
+          "file": "tests/scheduler_cooperative_budget_yield_audit.rs",
+          "line": 461
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "no function or associated item named `test_with_budget` found for struct `Cx` in the current scope"
+      }
+    },
+    {
+      "fixture_id": "VF-ALL-TARGETS-RUNTIME-YIELD-UNSAFE-WALL",
+      "source_kind": "rustc_broad_frontier_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "timestamp": "2026-05-10T07:27:22Z",
+      "touched_files": [
+        "fuzz/fuzz_targets/h2_max_concurrent_streams.rs"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_copperspring_h2_max_concurrent_streams cargo check --manifest-path fuzz/Cargo.toml --bin h2_max_concurrent_streams",
+      "snippet": "error: usage of an `unsafe` block\n   --> tests/runtime_yield_now_cooperative_fairness_audit.rs:451:26\n    |\n451 |             let pinned = unsafe { Pin::new_unchecked(&mut yfut) };\n    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nerror: could not compile `asupersync` (test \"runtime_yield_now_cooperative_fairness_audit\") due to 5 previous errors; 1 warning emitted\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "test \"runtime_yield_now_cooperative_fairness_audit\"",
+          "file": "tests/runtime_yield_now_cooperative_fairness_audit.rs",
+          "line": 451
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "usage of an `unsafe` block"
+      }
+    },
+    {
+      "fixture_id": "VF-RUSTC-JSON-COMPILE-STOP",
+      "source_kind": "rustc_json_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract -- --format json",
+      "timestamp": "2026-05-23T03:31:00Z",
+      "touched_files": [
+        "tests/validation_frontier_ledger_contract.rs",
+        "artifacts/validation_frontier_ledger_schema_v1.json"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract fixture_parser_matches_expected_records",
+      "snippet": "{\"reason\":\"compiler-message\",\"target\":{\"name\":\"validation_frontier_ledger_contract\",\"kind\":[\"test\"],\"crate_name\":\"asupersync\"},\"message\":{\"message\":\"missing field `proof_lane_id` in initializer of `ValidationFrontierRecord`\",\"code\":{\"code\":\"E0063\",\"explanation\":null},\"level\":\"error\",\"spans\":[{\"file_name\":\"tests/validation_frontier_ledger_contract.rs\",\"line_start\":18,\"is_primary\":true}]}}\n",
+      "expected_record": {
+        "decision": "failed-local",
+        "error_class": "rustc_compile_error",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "test \"validation_frontier_ledger_contract\"",
+          "file": "tests/validation_frontier_ledger_contract.rs",
+          "line": 18
+        },
+        "likely_owner": "local_change",
+        "likely_bead": "asupersync-oxqrae.1",
+        "external_to_narrow_fuzz_target_work": false,
+        "summary": "missing field `proof_lane_id` in initializer of `ValidationFrontierRecord`"
+      }
+    },
+    {
+      "fixture_id": "VF-RCH-REMOTE-REQUIRED-REFUSAL",
+      "source_kind": "rch_remote_required_refusal",
+      "command": "timeout 900s env RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-targets/asupersync/asw1 cargo check -p asupersync --lib",
+      "timestamp": "2026-05-23T03:32:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json"
+      ],
+      "supplemental_proof_command": "git diff --check -- artifacts/validation_frontier_ledger_schema_v1.json tests/validation_frontier_ledger_contract.rs",
+      "snippet": "RCH_REQUIRE_REMOTE=1: remote worker admission refused; insufficient_slots=3 active_project_exclusion=2; local fallback refused\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rch_admission_refusal",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "remote-admission",
+          "file": "rch",
+          "line": 0
+        },
+        "likely_owner": "rch worker pool",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "RCH_REQUIRE_REMOTE=1: remote worker admission refused; insufficient_slots=3 active_project_exclusion=2; local fallback refused"
+      }
+    },
+    {
+      "fixture_id": "VF-RCH-TOPOLOGY-PREFLIGHT-SHELL",
+      "source_kind": "rch_topology_preflight_output",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asup_e204_test CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib sync::semaphore::tests::try_acquire_error_display_has_asup_e204 --features test-internals -- --nocapture",
+      "timestamp": "2026-06-11T01:12:03Z",
+      "touched_files": [
+        "src/sync/semaphore.rs",
+        "docs/error_codes/registry.json",
+        "docs/error_codes/ASUP-E204.md",
+        "docs/error_codes/README.md"
+      ],
+      "supplemental_proof_command": "rch check --json && ssh vmi1149989 'test -d /data/projects && readlink /dp'",
+      "preflight_receipt": {
+        "schema_version": "rch-topology-preflight-receipt-v1",
+        "command_class": "remote-required-cargo-test",
+        "rch_version": "rch 1.0.41 (commit e2ed51271047)",
+        "daemon_readiness": "not_ready: worker ovh-a disk_critical_without_fresh_telemetry",
+        "selected_worker": "vmi1149989",
+        "topology_probe_summary": {
+          "data_projects": "exists",
+          "dp": "symlink:/data/projects"
+        },
+        "failure_phase": "remote-topology-preflight",
+        "stderr_signature": "sh: 18: Syntax error: newline unexpected (expecting \")\")",
+        "cargo_started": false
+      },
+      "snippet": "Selected worker: vmi1149989 (ssh://root@161.97.65.227:22, load 18.50, free mem 310.8GB)\nStarting remote compilation pipeline...\nPrepared dependency sync manifest for 10 roots\nRemote execution failed: remote topology preflight failed on vmi1149989 (status Some(2)): stdout='' stderr='sh: 18: Syntax error: newline unexpected (expecting \")\")', running locally\n[RCH] local (remote execution failed)\n[RCH] remote required; refusing local fallback (remote execution failed)\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "rch_topology_preflight",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "topology-preflight",
+          "file": "rch",
+          "line": 0
+        },
+        "likely_owner": "rch topology preflight",
+        "likely_bead": "asupersync-validation-frontier-v2-b5cjsv.8",
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "remote topology preflight failed before Cargo started: sh: 18: Syntax error: newline unexpected (expecting \")\")"
+      }
+    },
+    {
+      "fixture_id": "VF-RCH-TOPOLOGY-CARGO-STARTED",
+      "source_kind": "rch_topology_preflight_output",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "timestamp": "2026-06-11T01:16:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "supplemental_proof_command": "git diff --check -- artifacts/validation_frontier_ledger_schema_v1.json tests/validation_frontier_ledger_contract.rs",
+      "preflight_receipt": {
+        "schema_version": "rch-topology-preflight-receipt-v1",
+        "command_class": "remote-required-cargo-test",
+        "rch_version": "rch 1.0.41 (commit e2ed51271047)",
+        "daemon_readiness": "ready",
+        "selected_worker": "vmi1227854",
+        "topology_probe_summary": {
+          "data_projects": "exists",
+          "dp": "symlink:/data/projects"
+        },
+        "failure_phase": "none",
+        "stderr_signature": "Compiling asupersync",
+        "cargo_started": true
+      },
+      "snippet": "Selected worker: vmi1227854 (ssh://root@worker.example:22, load 1.20, free mem 212.0GB)\nStarting remote compilation pipeline...\nPrepared dependency sync manifest for 10 roots\nCompiling asupersync v0.3.3 (/data/projects/asupersync)\nFinished `test` profile [unoptimized + debuginfo] target(s) in 12.34s\nRunning tests/validation_frontier_ledger_contract.rs\n",
+      "expected_record": {
+        "decision": "pass",
+        "error_class": "none",
+        "first_failure": {
+          "crate_or_surface": "rch",
+          "target": "topology-preflight",
+          "file": "",
+          "line": 0
+        },
+        "likely_owner": "rch topology preflight",
+        "likely_bead": "asupersync-validation-frontier-v2-b5cjsv.8",
+        "external_to_narrow_fuzz_target_work": false,
+        "summary": "remote topology preflight passed and Cargo started on worker vmi1227854; no source proof is implied"
+      }
+    },
+    {
+      "fixture_id": "VF-RUSTFMT-DIFF",
+      "source_kind": "rustfmt_diff",
+      "command": "rustfmt --edition 2024 --check tests/validation_frontier_ledger_contract.rs",
+      "timestamp": "2026-05-23T03:33:00Z",
+      "touched_files": [
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "supplemental_proof_command": "git diff --check -- tests/validation_frontier_ledger_contract.rs",
+      "snippet": "Diff in tests/validation_frontier_ledger_contract.rs:18:\n struct ValidationFrontierRecord {\n-    command: String,\n+    proof_lane_id: String,\n",
+      "expected_record": {
+        "decision": "failed-local",
+        "error_class": "rustfmt_diff",
+        "first_failure": {
+          "crate_or_surface": "rustfmt",
+          "target": "format-check",
+          "file": "tests/validation_frontier_ledger_contract.rs",
+          "line": 18
+        },
+        "likely_owner": "local_change",
+        "likely_bead": "asupersync-oxqrae.1",
+        "external_to_narrow_fuzz_target_work": false,
+        "summary": "rustfmt diff in tests/validation_frontier_ledger_contract.rs:18"
+      }
+    },
+    {
+      "fixture_id": "VF-TRUNCATED-RUSTC-OUTPUT",
+      "source_kind": "truncated_rustc_output",
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests cargo test -p asupersync --lib runtime::region_heap -- --nocapture",
+      "timestamp": "2026-05-23T03:34:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json"
+      ],
+      "supplemental_proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_ledger cargo test -p asupersync --test validation_frontier_ledger_contract",
+      "snippet": "error[E0599]: no method named `drain_to_quiescence` found for struct `RegionHeap` in the current scope\n   --> src/runtime/region_heap.rs:44:18\n    |\n44  |         heap.drain_to_quiescence();\n    |              ^^^^^^^^^^^^^^^^^^^ method not found in `RegionHeap`\n[output truncated after 8192 bytes]\nerror: could not compile `asupersync` (lib test) due to 149 previous errors\n",
+      "expected_record": {
+        "decision": "blocked-external",
+        "error_class": "truncated_rustc_output",
+        "first_failure": {
+          "crate_or_surface": "asupersync",
+          "target": "lib test",
+          "file": "src/runtime/region_heap.rs",
+          "line": 44
+        },
+        "likely_owner": "shared-main external blocker",
+        "likely_bead": null,
+        "external_to_narrow_fuzz_target_work": true,
+        "summary": "no method named `drain_to_quiescence` found for struct `RegionHeap` in the current scope"
+      }
+    }
+  ],
+  "proof_attempt_records": [
+    {
+      "record_id": "ASW1-PRODUCTION-LIB-CHECK-PASS",
+      "proof_lane_id": "production-lib-check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-targets/asupersync/dustygorge_asw1 cargo check -p asupersync --lib",
+      "commit": "9efb59011",
+      "timestamp": "2026-05-23T03:18:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "dirty_tree_summary": {
+        "tracked_modified": [
+          "src/runtime/region_heap.rs",
+          "src/runtime/resource_monitor.rs"
+        ],
+        "deleted": [
+          "tests/fixtures/rch_target_inventory/mixed_candidates.json",
+          "tests/fixtures/rch_target_inventory/mixed_candidates_expected.json"
+        ],
+        "untracked": [
+          "patch.py"
+        ],
+        "overlaps_touched_files": false
+      },
+      "rch_result": {
+        "admission": "remote-executed",
+        "worker": "vmi1227854",
+        "local_fallback_refused": false
+      },
+      "exit_status": 0,
+      "decision": "pass",
+      "error_class": "none",
+      "first_blocker": null,
+      "first_failure": {
+        "crate_or_surface": "asupersync",
+        "target": "lib",
+        "file": "",
+        "line": 0
+      },
+      "error_buckets": [],
+      "affected_files": [],
+      "likely_owner": "local_change",
+      "likely_bead": "asupersync-oxqrae.1",
+      "external_to_narrow_fuzz_target_work": false,
+      "green_proof_claimed": true,
+      "supplemental_proof_command": "git diff --check -- artifacts/validation_frontier_ledger_schema_v1.json tests/validation_frontier_ledger_contract.rs",
+      "summary": "production lib check passed on remote worker; no broad lib-test or all-targets proof is implied"
+    },
+    {
+      "record_id": "ASW1-ALL-TARGETS-BLOCKED-SCHEDULER-BUDGET",
+      "proof_lane_id": "all-targets-check",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-targets/asupersync/dustygorge_asw1 cargo check -p asupersync --all-targets",
+      "commit": "6b1dfa3c0",
+      "timestamp": "2026-05-23T03:19:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "dirty_tree_summary": {
+        "tracked_modified": [
+          "src/runtime/region_heap.rs",
+          "src/runtime/resource_monitor.rs",
+          "tests/sync_conformance.rs"
+        ],
+        "deleted": [
+          "tests/fixtures/rch_target_inventory/mixed_candidates.json",
+          "tests/fixtures/rch_target_inventory/mixed_candidates_expected.json"
+        ],
+        "untracked": [
+          "exact_func.txt",
+          "patch.py",
+          "test_starts_with",
+          "test_then_some"
+        ],
+        "overlaps_touched_files": false
+      },
+      "rch_result": {
+        "admission": "remote-executed",
+        "worker": "vmi1227854",
+        "local_fallback_refused": false
+      },
+      "exit_status": 101,
+      "decision": "blocked-external",
+      "error_class": "rustc_compile_error",
+      "first_blocker": {
+        "crate_or_surface": "asupersync",
+        "target": "test \"scheduler_cooperative_budget_yield_audit\"",
+        "file": "tests/scheduler_cooperative_budget_yield_audit.rs",
+        "line": 461,
+        "error_class": "rustc_compile_error",
+        "summary": "no function or associated item named `test_with_budget` found for struct `Cx` in the current scope"
+      },
+      "first_failure": {
+        "crate_or_surface": "asupersync",
+        "target": "test \"scheduler_cooperative_budget_yield_audit\"",
+        "file": "tests/scheduler_cooperative_budget_yield_audit.rs",
+        "line": 461
+      },
+      "error_buckets": [
+        {
+          "file": "tests/scheduler_cooperative_budget_yield_audit.rs",
+          "module": "scheduler_cooperative_budget_yield_audit",
+          "error_code": "E0599",
+          "count": 5,
+          "first_line": 461,
+          "summary": "no function or associated item named `test_with_budget` found for struct `Cx` in the current scope",
+          "likely_commit": null,
+          "likely_bead": null,
+          "owner": "shared-main external blocker"
+        }
+      ],
+      "affected_files": [
+        "tests/scheduler_cooperative_budget_yield_audit.rs"
+      ],
+      "likely_owner": "shared-main external blocker",
+      "likely_bead": null,
+      "external_to_narrow_fuzz_target_work": true,
+      "green_proof_claimed": false,
+      "supplemental_proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-targets/asupersync/dustygorge_asw1 cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture",
+      "summary": "all-targets check stopped in unrelated scheduler cooperative-budget audit debt before validating the ASW-1 artifact slice"
+    },
+    {
+      "record_id": "ASW1-RCH-REMOTE-REFUSED",
+      "proof_lane_id": "rch-admission",
+      "command": "timeout 900s env RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-targets/asupersync/dustygorge_asw1 cargo test -p asupersync --test validation_frontier_ledger_contract -- --nocapture",
+      "commit": "6b1dfa3c0",
+      "timestamp": "2026-05-23T03:20:00Z",
+      "touched_files": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs"
+      ],
+      "dirty_tree_summary": {
+        "tracked_modified": [],
+        "deleted": [],
+        "untracked": [],
+        "overlaps_touched_files": false
+      },
+      "rch_result": {
+        "admission": "remote-refused",
+        "worker": null,
+        "local_fallback_refused": true
+      },
+      "exit_status": 75,
+      "decision": "blocked-external",
+      "error_class": "rch_admission_refusal",
+      "first_blocker": {
+        "crate_or_surface": "rch",
+        "target": "remote-admission",
+        "file": "rch",
+        "line": 0,
+        "error_class": "rch_admission_refusal",
+        "summary": "RCH_REQUIRE_REMOTE=1 refused local fallback because no remote worker was admitted"
+      },
+      "first_failure": {
+        "crate_or_surface": "rch",
+        "target": "remote-admission",
+        "file": "rch",
+        "line": 0
+      },
+      "error_buckets": [
+        {
+          "file": "rch",
+          "module": "remote-admission",
+          "error_code": "rch::remote_admission_refusal",
+          "count": 1,
+          "first_line": 0,
+          "summary": "RCH_REQUIRE_REMOTE=1 refused local fallback because no remote worker was admitted",
+          "likely_commit": null,
+          "likely_bead": null,
+          "owner": "rch worker pool"
+        }
+      ],
+      "affected_files": [],
+      "likely_owner": "rch worker pool",
+      "likely_bead": null,
+      "external_to_narrow_fuzz_target_work": true,
+      "green_proof_claimed": false,
+      "supplemental_proof_command": "git diff --check -- artifacts/validation_frontier_ledger_schema_v1.json tests/validation_frontier_ledger_contract.rs",
+      "summary": "remote-required proof lane never ran; do not cite it as green proof"
+    }
+  ],
+  "golden_summaries": [
+    {
+      "record_id": "ASW1-PRODUCTION-LIB-CHECK-PASS",
+      "expected_summary": "production-lib-check pass exit=0 worker=vmi1227854 dirty_overlap=false buckets=0 first=none"
+    },
+    {
+      "record_id": "ASW1-ALL-TARGETS-BLOCKED-SCHEDULER-BUDGET",
+      "expected_summary": "all-targets-check blocked-external exit=101 worker=vmi1227854 dirty_overlap=false buckets=1 first=tests/scheduler_cooperative_budget_yield_audit.rs:461 rustc_compile_error"
+    },
+    {
+      "record_id": "ASW1-RCH-REMOTE-REFUSED",
+      "expected_summary": "rch-admission blocked-external exit=75 worker=none dirty_overlap=false buckets=1 first=rch:0 rch_admission_refusal"
+    }
+  ],
+  "contract_tests": [
+    "tests/validation_frontier_ledger_contract.rs"
+  ],
+  "docs": [
+    "docs/ci_proof_gates_contract.md"
+  ]
+}

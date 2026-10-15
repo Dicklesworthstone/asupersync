@@ -1,0 +1,25 @@
+{
+  "helpers": [
+    {
+      "capability_id": "proof-lane-routing",
+      "commit": "6acfc0012345",
+      "fixture_root": "tests/fixtures/proof_runner",
+      "helper_id": "local-cargo-proof-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/proof_runner.py",
+      "status": "shipped",
+      "summary": "Proof helper advertises a local Cargo validation command that must not be cited by swarm agents.",
+      "test_path": "tests/proof_runner_contract.rs",
+      "validation": [
+        "cargo test -p asupersync --test proof_runner_contract",
+        "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_remote_required cargo test -p asupersync --test proof_receipt_inventory_contract",
+        "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
+        "echo rch exec --; cargo clippy -p asupersync --test proof_receipt_inventory_contract -- -D warnings",
+        "rch exec -- sh -c 'cargo test -p asupersync --test proof_receipt_inventory_contract'",
+        "rm -rf /tmp/asupersync-proof-cache",
+        "git reset --hard",
+        "git worktree add ../asupersync-proof-scratch"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "authority-flow-audit-smoke-run-report-v1",
+  "contract_version": "authority-flow-audit-v1",
+  "run_dir": "target/authority-flow-audit-smoke/run_20260508_055503",
+  "dry_run": false,
+  "rch_required": true,
+  "validation_passed": true,
+  "results": [
+    {
+      "scenario_id": "AFA-SMOKE-ABUSE",
+      "status": "passed",
+      "exit_code": 0,
+      "executed_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_authority_flow_audit_AFA_SMOKE_ABUSE cargo test -p asupersync --test authority_flow_audit_contract --features test-internals abuse -- --nocapture"
+    },
+    {
+      "scenario_id": "AFA-SMOKE-REVOCATION",
+      "status": "passed",
+      "exit_code": 0,
+      "executed_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_authority_flow_audit_AFA_SMOKE_REVOCATION cargo test -p asupersync --test authority_flow_audit_contract --features test-internals revocation -- --nocapture"
+    }
+  ],
+  "status": "passed"
+}

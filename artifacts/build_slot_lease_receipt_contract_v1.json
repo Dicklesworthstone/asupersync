@@ -1,0 +1,412 @@
+{
+  "schema_version": "build-slot-lease-receipt-contract-v1",
+  "bead_id": "asupersync-vjc3pv.7",
+  "capability_id": "build_slot_lease_receipts",
+  "artifact_path": "artifacts/build_slot_lease_receipt_contract_v1.json",
+  "contract_test": "tests/build_slot_lease_receipt_contract.rs",
+  "generated_at_utc": "2026-05-19T00:47:00Z",
+  "support_class": "artifact-contract-backed",
+  "side_effect_policy": {
+    "mode": "report_only",
+    "beads_mutation_allowed": false,
+    "agent_mail_mutation_allowed": false,
+    "filesystem_cleanup_allowed": false,
+    "cargo_execution_allowed": false,
+    "local_cargo_fallback_allowed": false,
+    "notes": "A build-slot lease receipt describes coordination state. It never grants permission to mutate Agent Mail, Beads, git state, files, or validation policy by itself."
+  },
+  "required_receipt_fields": [
+    "slot_name",
+    "requester_agent",
+    "exclusive",
+    "acquired_at_utc",
+    "expires_at_utc",
+    "observed_at_utc",
+    "observation_age_seconds",
+    "ttl_seconds",
+    "lease_state",
+    "seconds_until_expiry",
+    "holders",
+    "conflicts",
+    "release_required",
+    "release_observed",
+    "command_context",
+    "expected_decision"
+  ],
+  "required_command_context_fields": [
+    "remote_required",
+    "local_fallback_detected",
+    "cargo_target_dir",
+    "validation_command"
+  ],
+  "required_decision_outputs": [
+    "accept_lease",
+    "warn_expiring_soon",
+    "fail_closed_expired",
+    "fail_closed_exclusive_conflict",
+    "fail_closed_missing_release",
+    "fail_closed_stale_observation",
+    "fail_closed_malformed_receipt"
+  ],
+  "decision_priority_order": [
+    "malformed_receipt",
+    "stale_observation",
+    "expired_lease",
+    "exclusive_conflict",
+    "missing_release",
+    "expiring_soon",
+    "accept_lease"
+  ],
+  "freshness_policy": {
+    "max_observation_age_seconds": 300,
+    "stale_decision": "fail_closed_stale_observation",
+    "renew_before_expiry_seconds": 120,
+    "notes": "Lease receipts are point-in-time coordination evidence. Stale observations are rejected before interpreting slot availability."
+  },
+  "decision_rules": [
+    {
+      "rule_id": "malformed-receipt",
+      "priority": 10,
+      "trigger": "receipt_status == malformed",
+      "decision": "fail_closed_malformed_receipt",
+      "required_issue_kind": "malformed_receipt",
+      "operator_action": "discard receipt and collect a complete build-slot snapshot"
+    },
+    {
+      "rule_id": "stale-observation",
+      "priority": 20,
+      "trigger": "observation_age_seconds > freshness_policy.max_observation_age_seconds",
+      "decision": "fail_closed_stale_observation",
+      "required_issue_kind": "stale_observation",
+      "operator_action": "refresh Agent Mail build-slot state before using the receipt"
+    },
+    {
+      "rule_id": "expired-lease",
+      "priority": 30,
+      "trigger": "lease_state == expired || seconds_until_expiry == 0",
+      "decision": "fail_closed_expired",
+      "required_issue_kind": "expired_lease",
+      "operator_action": "do not count the lease as active; reacquire or wait for the owner to renew"
+    },
+    {
+      "rule_id": "exclusive-conflict",
+      "priority": 40,
+      "trigger": "exclusive == true && conflicts is nonempty",
+      "decision": "fail_closed_exclusive_conflict",
+      "required_issue_kind": "exclusive_conflict",
+      "operator_action": "coordinate with active holders instead of running a competing build"
+    },
+    {
+      "rule_id": "missing-release",
+      "priority": 50,
+      "trigger": "release_required == true && release_observed == false",
+      "decision": "fail_closed_missing_release",
+      "required_issue_kind": "missing_release",
+      "operator_action": "treat the slot as uncleared until a release or expiry receipt is observed"
+    },
+    {
+      "rule_id": "expiring-soon",
+      "priority": 60,
+      "trigger": "seconds_until_expiry <= freshness_policy.renew_before_expiry_seconds",
+      "decision": "warn_expiring_soon",
+      "required_issue_kind": "lease_expiring_soon",
+      "operator_action": "renew before launching a long remote proof lane"
+    },
+    {
+      "rule_id": "accept-lease",
+      "priority": 70,
+      "trigger": "fresh complete receipt with active lease, no conflicts, no pending release, and enough TTL",
+      "decision": "accept_lease",
+      "required_issue_kind": "",
+      "operator_action": "use the lease as coordination evidence for the scoped remote proof lane"
+    }
+  ],
+  "validation": {
+    "json_probe": "jq empty artifacts/build_slot_lease_receipt_contract_v1.json",
+    "format_check": "rustfmt --edition 2024 --check tests/build_slot_lease_receipt_contract.rs",
+    "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture",
+    "local_fallback_policy": "Any local fallback marker in a receipt or validation transcript invalidates the receipt for swarm proof coordination."
+  },
+  "forbidden_command_fragments": [
+    "git reset --hard",
+    "git clean -fd",
+    "rm -rf",
+    "git worktree add",
+    "git checkout -b",
+    "git switch -c",
+    "bare cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+  ],
+  "scenarios": [
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-HEALTHY",
+      "description": "A fresh exclusive build-slot lease with no conflicts and enough TTL is acceptable coordination evidence for one scoped remote proof lane.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:40:00Z",
+      "expires_at_utc": "2026-05-19T01:10:00Z",
+      "observed_at_utc": "2026-05-19T00:45:00Z",
+      "observation_age_seconds": 20,
+      "ttl_seconds": 1800,
+      "lease_state": "active",
+      "seconds_until_expiry": 1500,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-healthy",
+          "last_seen_age_seconds": 12
+        }
+      ],
+      "conflicts": [],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "accept_lease",
+        "rule_id": "accept-lease",
+        "issue_kind": "",
+        "operator_action": "use_lease_for_scoped_remote_lane"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-EXPIRING-SOON",
+      "description": "A fresh active lease near expiry is not failed, but it must be renewed before starting a long proof lane.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:40:00Z",
+      "expires_at_utc": "2026-05-19T00:46:00Z",
+      "observed_at_utc": "2026-05-19T00:44:20Z",
+      "observation_age_seconds": 15,
+      "ttl_seconds": 360,
+      "lease_state": "active",
+      "seconds_until_expiry": 100,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-expiring",
+          "last_seen_age_seconds": 10
+        }
+      ],
+      "conflicts": [],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "warn_expiring_soon",
+        "rule_id": "expiring-soon",
+        "issue_kind": "lease_expiring_soon",
+        "operator_action": "renew_before_long_remote_lane"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-EXPIRED",
+      "description": "An expired lease cannot be counted as active even if no conflicting holder is visible.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:10:00Z",
+      "expires_at_utc": "2026-05-19T00:40:00Z",
+      "observed_at_utc": "2026-05-19T00:45:00Z",
+      "observation_age_seconds": 25,
+      "ttl_seconds": 1800,
+      "lease_state": "expired",
+      "seconds_until_expiry": 0,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-expired",
+          "last_seen_age_seconds": 350
+        }
+      ],
+      "conflicts": [],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "fail_closed_expired",
+        "rule_id": "expired-lease",
+        "issue_kind": "expired_lease",
+        "operator_action": "reacquire_or_wait_for_renewal"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-EXCLUSIVE-CONFLICT",
+      "description": "A competing active exclusive holder is a fail-closed conflict and must be coordinated before running the build.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:40:00Z",
+      "expires_at_utc": "2026-05-19T01:10:00Z",
+      "observed_at_utc": "2026-05-19T00:45:00Z",
+      "observation_age_seconds": 20,
+      "ttl_seconds": 1800,
+      "lease_state": "active",
+      "seconds_until_expiry": 1500,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-requester",
+          "last_seen_age_seconds": 12
+        },
+        {
+          "agent": "RainyPine",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-conflict",
+          "last_seen_age_seconds": 8
+        }
+      ],
+      "conflicts": [
+        {
+          "agent": "RainyPine",
+          "lease_id": "build-slot-lease-conflict",
+          "reason": "active exclusive holder overlaps requested slot"
+        }
+      ],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "fail_closed_exclusive_conflict",
+        "rule_id": "exclusive-conflict",
+        "issue_kind": "exclusive_conflict",
+        "operator_action": "coordinate_with_active_holder"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-MISSING-RELEASE",
+      "description": "A lane that required an explicit release but has not observed it remains uncleared even when the lease is still fresh.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:15:00Z",
+      "expires_at_utc": "2026-05-19T00:45:00Z",
+      "observed_at_utc": "2026-05-19T00:44:00Z",
+      "observation_age_seconds": 30,
+      "ttl_seconds": 1800,
+      "lease_state": "active",
+      "seconds_until_expiry": 180,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-needs-release",
+          "last_seen_age_seconds": 20
+        }
+      ],
+      "conflicts": [],
+      "release_required": true,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "fail_closed_missing_release",
+        "rule_id": "missing-release",
+        "issue_kind": "missing_release",
+        "operator_action": "wait_for_release_or_expiry_receipt"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-STALE-OBSERVATION",
+      "description": "A stale observation is rejected before interpreting holder, release, or expiry fields.",
+      "receipt_status": "complete",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:30:00Z",
+      "expires_at_utc": "2026-05-19T01:00:00Z",
+      "observed_at_utc": "2026-05-19T00:35:00Z",
+      "observation_age_seconds": 900,
+      "ttl_seconds": 1800,
+      "lease_state": "active",
+      "seconds_until_expiry": 1500,
+      "holders": [
+        {
+          "agent": "RubyRobin",
+          "exclusive": true,
+          "lease_id": "build-slot-lease-stale",
+          "last_seen_age_seconds": 600
+        }
+      ],
+      "conflicts": [],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "fail_closed_stale_observation",
+        "rule_id": "stale-observation",
+        "issue_kind": "stale_observation",
+        "operator_action": "refresh_build_slot_snapshot"
+      }
+    },
+    {
+      "scenario_id": "BUILD-SLOT-LEASE-MALFORMED",
+      "description": "A malformed receipt fails closed before any freshness or conflict interpretation.",
+      "receipt_status": "malformed",
+      "slot_name": "cargo-test",
+      "requester_agent": "RubyRobin",
+      "exclusive": true,
+      "acquired_at_utc": "2026-05-19T00:30:00Z",
+      "expires_at_utc": "2026-05-19T01:00:00Z",
+      "observed_at_utc": "2026-05-19T00:45:00Z",
+      "observation_age_seconds": 5,
+      "ttl_seconds": 1800,
+      "lease_state": "active",
+      "seconds_until_expiry": 1500,
+      "holders": [],
+      "conflicts": [],
+      "release_required": false,
+      "release_observed": false,
+      "command_context": {
+        "remote_required": true,
+        "local_fallback_detected": false,
+        "cargo_target_dir": "/tmp/rch_target_rubyrobin_build_slot_receipt",
+        "validation_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_rubyrobin_build_slot_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test build_slot_lease_receipt_contract -- --nocapture"
+      },
+      "expected_decision": {
+        "decision": "fail_closed_malformed_receipt",
+        "rule_id": "malformed-receipt",
+        "issue_kind": "malformed_receipt",
+        "operator_action": "collect_complete_receipt"
+      }
+    }
+  ]
+}

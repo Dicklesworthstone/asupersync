@@ -1,0 +1,105 @@
+{
+  "contract_version": "kernel-fast-path-prototype-v1",
+  "bead_id": "asupersync-1508v.4.5",
+  "runner_bundle_schema_version": "kernel-fast-path-prototype-smoke-bundle-v1",
+  "runner_report_schema_version": "kernel-fast-path-prototype-smoke-run-report-v1",
+  "runner_script": "scripts/run_kernel_fast_path_prototype_smoke.sh",
+  "prototype_surfaces": [
+    {
+      "surface_id": "shard-local-dispatch",
+      "description": "Thread-local batch buffer for owner push/pop, reducing lock acquisitions",
+      "owner_file": "src/runtime/scheduler/local_queue.rs",
+      "incumbent_mechanism": "Mutex<IntrusiveStack> on every push/pop",
+      "prototype_mechanism": "Thread-local batch buffer with overflow flush to shared stack",
+      "fallback_flag": "shard_local_dispatch",
+      "default_batch_size": 8
+    },
+    {
+      "surface_id": "wake-coalescing",
+      "description": "Bloom filter front-end for high-frequency duplicate wake absorption",
+      "owner_file": "src/runtime/waker.rs",
+      "incumbent_mechanism": "Mutex<HashSet<TaskId>> on every wake",
+      "prototype_mechanism": "Bloom filter check before lock acquisition, fallback on saturation",
+      "fallback_flag": "wake_coalescing",
+      "default_bloom_bits": 256
+    },
+    {
+      "surface_id": "adaptive-steal",
+      "description": "Adaptive steal lookahead based on recent steal success rate",
+      "owner_file": "src/runtime/scheduler/stealing.rs",
+      "incumbent_mechanism": "Power of Two Choices with linear fallback scan",
+      "prototype_mechanism": "2-4 adaptive candidates with EMA-based lookahead truncation",
+      "fallback_flag": "adaptive_steal",
+      "default_ema_alpha": 0.1
+    }
+  ],
+  "fallback_seam": {
+    "config_struct": "FastPathConfig",
+    "defaults_to_incumbent": true,
+    "flags": ["shard_local_dispatch", "wake_coalescing", "adaptive_steal"],
+    "parameters": ["batch_size", "bloom_bits", "steal_ema_alpha"]
+  },
+  "benchmark_dimensions": [
+    {
+      "dimension_id": "owner-push-pop-throughput",
+      "metrics": ["throughput_ops_sec", "lock_acquisitions_per_op"],
+      "description": "Local push/pop throughput with and without shard-local batch"
+    },
+    {
+      "dimension_id": "wake-dedup-throughput",
+      "metrics": ["throughput_ops_sec", "lock_acquisitions", "false_positive_rate"],
+      "description": "Wake dedup throughput under varying duplicate rates"
+    },
+    {
+      "dimension_id": "steal-latency",
+      "metrics": ["p50_ns", "p95_ns", "p99_ns", "steal_success_rate"],
+      "description": "Steal latency distribution with adaptive lookahead"
+    },
+    {
+      "dimension_id": "e2e-task-throughput",
+      "metrics": ["throughput_tasks_sec", "p99_ns", "p999_ns"],
+      "description": "End-to-end task throughput under mixed workload"
+    }
+  ],
+  "structured_log_fields_required": [
+    "prototype_surface",
+    "fast_path_active",
+    "worker_count",
+    "batch_size",
+    "bloom_bits",
+    "steal_ema_alpha",
+    "throughput_ops_sec",
+    "p50_ns",
+    "p95_ns",
+    "p99_ns",
+    "lock_acquisitions",
+    "false_positive_rate",
+    "steal_success_rate",
+    "verdict"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA04-SMOKE-PROTOTYPE-SURFACES",
+      "description": "Verify prototype surface catalog and fallback flag completeness",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa042 cargo test --test kernel_fast_path_prototype_contract prototype_surface -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-FALLBACK-SEAM",
+      "description": "Verify fallback seam config defaults to incumbent behavior",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa042 cargo test --test kernel_fast_path_prototype_contract fallback -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-BENCHMARKS",
+      "description": "Verify benchmark dimension catalog and metrics",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa042 cargo test --test kernel_fast_path_prototype_contract benchmark -- --nocapture"
+    },
+    {
+      "scenario_id": "AA04-SMOKE-FUNCTIONAL",
+      "description": "Verify functional invariants for local queue, waker, and steal path",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa042 cargo test --test kernel_fast_path_prototype_contract functional -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.4.6"
+  ]
+}

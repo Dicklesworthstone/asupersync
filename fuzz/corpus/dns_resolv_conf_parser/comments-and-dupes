@@ -1,0 +1,4 @@
+# primary
+nameserver 8.8.8.8 ; duplicate should collapse
+nameserver 8.8.8.8 extra ignored
+search example.test

@@ -1,0 +1,53 @@
+{
+  "schema_version": "swarm-coordination-replay-input-v1",
+  "events": [
+    {
+      "id": "claim-a",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "agent": "BlackDove",
+      "type": "claim",
+      "bead_id": "asupersync-aj7lx3.18"
+    },
+    {
+      "id": "stand-down",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "agent": "BlackDove",
+      "type": "stand_down",
+      "bead_id": "asupersync-aj7lx3.18"
+    },
+    {
+      "id": "claim-b",
+      "timestamp": "2026-05-08T05:02:00Z",
+      "agent": "CopperSpring",
+      "type": "claim",
+      "bead_id": "asupersync-aj7lx3.18"
+    },
+    {
+      "id": "reservation-a",
+      "timestamp": "2026-05-08T05:03:00Z",
+      "agent": "BlackDove",
+      "type": "reservation",
+      "path": "tests/example.rs",
+      "exclusive": true,
+      "status": "active"
+    },
+    {
+      "id": "reservation-release",
+      "timestamp": "2026-05-08T05:04:00Z",
+      "agent": "BlackDove",
+      "type": "reservation",
+      "path": "tests/example.rs",
+      "exclusive": true,
+      "status": "released"
+    },
+    {
+      "id": "reservation-b",
+      "timestamp": "2026-05-08T05:05:00Z",
+      "agent": "CopperSpring",
+      "type": "reservation",
+      "path": "tests/example.rs",
+      "exclusive": true,
+      "status": "active"
+    }
+  ]
+}

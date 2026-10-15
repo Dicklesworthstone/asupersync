@@ -1,0 +1,34 @@
+{
+  "events": [
+    {
+      "version": 1,
+      "seq": 5,
+      "time": {"nanos": 5000000},
+      "logical_time": {"process_id": 1, "sequence": 5},
+      "kind": "ObligationCommit",
+      "data": {
+        "Obligation": {
+          "obligation": 789,
+          "task": 123,
+          "region": 456,
+          "kind": "Permit",
+          "state": "Committed",
+          "duration_ns": 1500,
+          "abort_reason": null
+        }
+      }
+    }
+  ],
+  "browser_schema": null,
+  "serialization_tests": {
+    "test_json": true,
+    "test_invalid_utf8": false,
+    "test_large_values": false,
+    "test_malformed_enums": false
+  },
+  "version_tests": {
+    "future_versions": [],
+    "past_versions": [],
+    "invalid_versions": []
+  }
+}

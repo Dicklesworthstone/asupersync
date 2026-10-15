@@ -1,0 +1,8 @@
+---
+source: src/record/finalizer.rs
+expression: escalation_policy_matrix()
+---
+policy|is_soft|allows_continuation|default_match
+Soft|true|false|false
+BoundedLog|false|true|true
+BoundedPanic|false|false|false

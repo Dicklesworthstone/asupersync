@@ -1,0 +1,54 @@
+{
+  "claim_count": 1,
+  "claims": [
+    {
+      "category": "stale proof",
+      "claim_id": "stale-proof-claim",
+      "fresh": false,
+      "missing_doc_markers": [],
+      "missing_marker_count": 0,
+      "present_marker_count": 2,
+      "proof_evidence_issue_count": 1,
+      "proof_evidence_issues": [
+        {
+          "kind": "unciteable-proof-evidence-status",
+          "summary": "stale-proof-claim proof evidence status is stale-evidence"
+        }
+      ],
+      "proof_evidence_status": "stale-evidence",
+      "required_marker_count": 2,
+      "status": "green"
+    }
+  ],
+  "current_date": "2026-05-08",
+  "decision": "blocked-proof-evidence-stale",
+  "documents": {
+    "AGENTS.md": {
+      "missing_marker_count": 0,
+      "path": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_proof_AGENTS.md",
+      "present_marker_count": 1,
+      "required_marker_count": 1
+    },
+    "README.md": {
+      "missing_marker_count": 0,
+      "path": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_proof_README.md",
+      "present_marker_count": 1,
+      "required_marker_count": 1
+    }
+  },
+  "forbidden_actions": {
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:20:00Z",
+  "missing_marker_count": 0,
+  "non_mutating": true,
+  "present_marker_count": 2,
+  "proof_evidence_issue_count": 1,
+  "required_marker_count": 2,
+  "schema_version": "readme-claim-freshness-v1",
+  "snapshot": "/data/projects/asupersync/tests/fixtures/readme_claim_freshness/stale_proof_evidence_snapshot.json",
+  "verdict": "stale"
+}

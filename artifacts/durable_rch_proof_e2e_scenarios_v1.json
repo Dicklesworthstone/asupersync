@@ -1,0 +1,440 @@
+{
+  "contract_version": "durable-rch-proof-e2e-scenarios-v1",
+  "bead_id": "asupersync-durable-rch-proof-submission-zxnnhe.7",
+  "source_of_truth": {
+    "contract": "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+    "contract_test": "tests/durable_rch_proof_e2e_contract.rs",
+    "submission_cli": "scripts/durable_rch_proof_submission.py",
+    "receipt_capture_cli": "scripts/durable_rch_proof_receipt.py",
+    "receipt_contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+    "mail_templates": "artifacts/durable_rch_proof_mail_templates_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "runbook": "docs/proof_runner_usage.md"
+  },
+  "policy": {
+    "deterministic_fixture_replay_only": true,
+    "network_access_required_for_tests": false,
+    "live_rch_required_for_tests": false,
+    "live_agent_mail_required_for_tests": false,
+    "tracker_mutation_allowed": false,
+    "raw_agent_mail_bodies_allowed": false,
+    "required_branch": "main",
+    "required_query_command_prefix": "python3 scripts/durable_rch_proof_submission.py query",
+    "duplicate_policy": "coalesce-identical-lane-head-command",
+    "local_fallback_allowed": false,
+    "non_claim_boundaries": [
+      "live-rch-fleet-availability",
+      "release-readiness",
+      "unrelated-proof-lanes",
+      "workspace-health"
+    ]
+  },
+  "required_scenario_ids": [
+    "cargo_failure_not_green",
+    "client_disconnected_partial_resumable",
+    "dirty_overlap_refused_before_execution",
+    "duplicate_lane_head_coalesced",
+    "heartbeat_stale_infra_blocked",
+    "local_fallback_refused",
+    "stale_head_refused_before_execution",
+    "stale_progress_canceled_stale_evidence",
+    "terminal_pass_citable_exact_lane",
+    "unsupported_broad_claim_refused",
+    "wrong_command_envelope_refused",
+    "wrong_feature_set_refused"
+  ],
+  "required_status_row_ids": [
+    "durable-receipt-unsupported-broad-claim",
+    "durable-receipt-wrong-command-envelope",
+    "durable-receipt-wrong-feature-set"
+  ],
+  "closeout_proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_e2e_contract -- --nocapture",
+  "scenarios": [
+    {
+      "scenario_id": "terminal_pass_citable_exact_lane",
+      "kind": "receipt-capture",
+      "description": "Submit, detach, capture a terminal remote pass, then query the exact manifest lane as citable proof.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "terminal_pass.json",
+      "mail_template_id": "terminal-pass-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "accepted",
+        "lifecycle_state": "terminal_pass",
+        "terminal_classification": "pass",
+        "proof_evidence_status": "fresh-rch-pass",
+        "outcome_status": "pass",
+        "requested_claim_citable": true,
+        "exact_lane_citable": true,
+        "reason_codes": [],
+        "not_cargo_failure": true,
+        "first_blocker_contains": []
+      },
+      "cli_assertions": [
+        {
+          "operation": "status",
+          "expected_decision": "accepted",
+          "expected_terminal": true,
+          "expected_receipt_available": true,
+          "expected_reason_codes": []
+        },
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "accepted",
+          "expected_terminal": true,
+          "expected_reason_codes": []
+        }
+      ]
+    },
+    {
+      "scenario_id": "cargo_failure_not_green",
+      "kind": "receipt-capture",
+      "description": "Submit, detach, capture a Cargo failure receipt, and refuse it as green proof while preserving the first blocker.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "cargo_failure.json",
+      "mail_template_id": "terminal-fail-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_fail",
+        "terminal_classification": "cargo_failure",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "fail",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "failed-proof-status"
+        ],
+        "not_cargo_failure": false,
+        "first_blocker_contains": [
+          "error[E0308]",
+          "mismatched types"
+        ]
+      },
+      "cli_assertions": [
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "refused",
+          "expected_terminal": true,
+          "expected_reason_codes": [
+            "failed-proof-status"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "client_disconnected_partial_resumable",
+      "kind": "receipt-capture",
+      "description": "Submit, detach, lose the client before terminal status, and classify the partial receipt as resumable or refused, never citable.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "client_disconnected_partial.json",
+      "mail_template_id": "handoff-to-next-agent",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "partial",
+        "terminal_classification": "client_disconnected_partial",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "partial",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "failed-proof-status",
+          "receipt-not-terminal"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": [
+          "client disconnected"
+        ]
+      },
+      "cli_assertions": [
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "refused",
+          "expected_terminal": false,
+          "expected_reason_codes": [
+            "failed-proof-status",
+            "receipt-not-terminal"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "stale_progress_canceled_stale_evidence",
+      "kind": "receipt-capture",
+      "description": "Submit, detach, cancel for stale progress, and classify it as stale evidence distinct from proof failure.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "stale_progress_canceled.json",
+      "mail_template_id": "stale-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_stale",
+        "terminal_classification": "stale_progress_canceled",
+        "proof_evidence_status": "stale-evidence",
+        "outcome_status": "stale",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "failed-proof-status"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": [
+          "stale progress"
+        ]
+      },
+      "cli_assertions": [
+        {
+          "operation": "status",
+          "expected_decision": "accepted",
+          "expected_terminal": true,
+          "expected_receipt_available": true,
+          "expected_reason_codes": []
+        },
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "refused",
+          "expected_terminal": true,
+          "expected_reason_codes": [
+            "failed-proof-status"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "heartbeat_stale_infra_blocked",
+      "kind": "receipt-capture",
+      "description": "Submit, detach, observe stale worker heartbeat, and classify infrastructure staleness apart from source failure.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "heartbeat_stale_infra.json",
+      "mail_template_id": "handoff-to-next-agent",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_infra_error",
+        "terminal_classification": "heartbeat_stale_infra",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "infra_error",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "failed-proof-status"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": [
+          "heartbeat"
+        ]
+      },
+      "cli_assertions": [
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "refused",
+          "expected_terminal": true,
+          "expected_reason_codes": [
+            "failed-proof-status"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "local_fallback_refused",
+      "kind": "receipt-capture",
+      "description": "Replay a local fallback marker and fail closed even when the surrounding command resembles the manifest lane.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "local_fallback_refused.json",
+      "mail_template_id": "terminal-fail-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_fail",
+        "terminal_classification": "local_fallback_refused",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "local_fallback_refused",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "local-fallback-marker"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": [
+          "[RCH] local"
+        ]
+      },
+      "cli_assertions": [
+        {
+          "operation": "query",
+          "claim": "proof-lane-manifest-contract",
+          "expected_decision": "refused",
+          "expected_terminal": true,
+          "expected_reason_codes": [
+            "local-fallback-marker"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "stale_head_refused_before_execution",
+      "kind": "submission-refusal",
+      "description": "Refuse a submission whose observed HEAD differs from the expected HEAD before invoking RCH.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "submission_args": [
+        "--head-commit",
+        "2222222222222222222222222222222222222222",
+        "--expected-head",
+        "01a40c0e9a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0"
+      ],
+      "mail_template_id": "terminal-fail-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_fail",
+        "terminal_classification": "cargo_failure",
+        "proof_evidence_status": "refused",
+        "outcome_status": "not-executed",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "stale-head"
+        ],
+        "not_cargo_failure": false,
+        "first_blocker_contains": []
+      }
+    },
+    {
+      "scenario_id": "dirty_overlap_refused_before_execution",
+      "kind": "submission-refusal",
+      "description": "Refuse a submission with a dirty path overlapping the manifest lane source frontier before invoking RCH.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "submission_args": [
+        "--dirty-frontier-status",
+        "dirty",
+        "--dirty-path",
+        "tests/proof_lane_manifest_contract.rs"
+      ],
+      "mail_template_id": "terminal-fail-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_fail",
+        "terminal_classification": "cargo_failure",
+        "proof_evidence_status": "refused",
+        "outcome_status": "not-executed",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "dirty-frontier-overlap"
+        ],
+        "not_cargo_failure": false,
+        "first_blocker_contains": []
+      }
+    },
+    {
+      "scenario_id": "duplicate_lane_head_coalesced",
+      "kind": "submission-coalesce",
+      "description": "Submitting the same lane, HEAD, and command coalesces to the existing running submission instead of launching duplicate RCH work.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "mail_template_id": "running-proof-lane",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "coalesced",
+        "lifecycle_state": "running",
+        "terminal_classification": "pending",
+        "proof_evidence_status": "rerun-required",
+        "outcome_status": "not-terminal",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [],
+        "not_cargo_failure": true,
+        "first_blocker_contains": []
+      }
+    },
+    {
+      "scenario_id": "unsupported_broad_claim_refused",
+      "kind": "cli-query-policy",
+      "description": "A terminal pass receipt remains citable for the exact lane but is refused for release-readiness, workspace-health, and live fleet claims.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "capture_fixture": "terminal_pass.json",
+      "policy_status_row_id": "durable-receipt-unsupported-broad-claim",
+      "mail_template_id": "handoff-to-next-agent",
+      "requested_claim": "release-readiness",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_pass",
+        "terminal_classification": "pass",
+        "proof_evidence_status": "unsupported",
+        "outcome_status": "pass",
+        "requested_claim_citable": false,
+        "exact_lane_citable": true,
+        "reason_codes": [
+          "broad-claim-unsupported"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": []
+      },
+      "cli_assertions": [
+        {
+          "operation": "query",
+          "claim": "release-readiness",
+          "expected_decision": "refused",
+          "expected_terminal": true,
+          "expected_reason_codes": [
+            "broad-claim-unsupported"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario_id": "wrong_command_envelope_refused",
+      "kind": "status-row-policy",
+      "description": "A receipt whose command envelope no longer matches the manifest lane is blocked until the exact lane is rerun.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "policy_status_row_id": "durable-receipt-wrong-command-envelope",
+      "mail_template_id": "handoff-to-next-agent",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_pass",
+        "terminal_classification": "pass",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "pass",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "command-envelope-mismatch"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": []
+      }
+    },
+    {
+      "scenario_id": "wrong_feature_set_refused",
+      "kind": "status-row-policy",
+      "description": "A receipt captured with a feature set different from the manifest lane is blocked instead of widening its claim.",
+      "manifest_lane_id": "proof-lane-manifest-contract",
+      "policy_status_row_id": "durable-receipt-wrong-feature-set",
+      "mail_template_id": "handoff-to-next-agent",
+      "requested_claim": "proof-lane-manifest-contract",
+      "expected": {
+        "primary_decision": "refused",
+        "lifecycle_state": "terminal_pass",
+        "terminal_classification": "pass",
+        "proof_evidence_status": "blocked",
+        "outcome_status": "pass",
+        "requested_claim_citable": false,
+        "exact_lane_citable": false,
+        "reason_codes": [
+          "wrong-feature-set"
+        ],
+        "not_cargo_failure": true,
+        "first_blocker_contains": []
+      }
+    }
+  ],
+  "golden_scenario_matrix_markdown": "| scenario_id | kind | lifecycle_state | terminal_classification | proof_evidence_status | requested_claim_citable | primary_decision | mail_template_id |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n| cargo_failure_not_green | receipt-capture | terminal_fail | cargo_failure | blocked | false | refused | terminal-fail-proof-lane |\n| client_disconnected_partial_resumable | receipt-capture | partial | client_disconnected_partial | blocked | false | refused | handoff-to-next-agent |\n| dirty_overlap_refused_before_execution | submission-refusal | terminal_fail | cargo_failure | refused | false | refused | terminal-fail-proof-lane |\n| duplicate_lane_head_coalesced | submission-coalesce | running | pending | rerun-required | false | coalesced | running-proof-lane |\n| heartbeat_stale_infra_blocked | receipt-capture | terminal_infra_error | heartbeat_stale_infra | blocked | false | refused | handoff-to-next-agent |\n| local_fallback_refused | receipt-capture | terminal_fail | local_fallback_refused | blocked | false | refused | terminal-fail-proof-lane |\n| stale_head_refused_before_execution | submission-refusal | terminal_fail | cargo_failure | refused | false | refused | terminal-fail-proof-lane |\n| stale_progress_canceled_stale_evidence | receipt-capture | terminal_stale | stale_progress_canceled | stale-evidence | false | refused | stale-proof-lane |\n| terminal_pass_citable_exact_lane | receipt-capture | terminal_pass | pass | fresh-rch-pass | true | accepted | terminal-pass-proof-lane |\n| unsupported_broad_claim_refused | cli-query-policy | terminal_pass | pass | unsupported | false | refused | handoff-to-next-agent |\n| wrong_command_envelope_refused | status-row-policy | terminal_pass | pass | blocked | false | refused | handoff-to-next-agent |\n| wrong_feature_set_refused | status-row-policy | terminal_pass | pass | blocked | false | refused | handoff-to-next-agent |\n"
+}

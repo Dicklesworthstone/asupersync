@@ -1,0 +1,12 @@
+{
+  "cv_pct": 12.55136584240096,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 0.3424156475539397,
+  "median_ns": 0.33068311684652896,
+  "name": "time/duration_since",
+  "p95_ns": 0.4270040207455487,
+  "p99_ns": 0.4574966453890365,
+  "profile": "release-perf",
+  "std_dev_ns": 0.04297784062612125
+}

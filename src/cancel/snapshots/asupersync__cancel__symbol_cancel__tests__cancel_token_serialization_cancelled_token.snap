@@ -1,0 +1,10 @@
+---
+source: src/cancel/symbol_cancel.rs
+expression: hex_output
+---
+Token: cancelled_token
+Token ID: 0x24c64de6e8aa6e00
+Object ID: 0xaaaabbbbccccdddd:0xeeeeffff00001111
+Cancelled: true
+Wire bytes: [24, c6, 4d, e6, e8, aa, 6e, 00, aa, aa, bb, bb, cc, cc, dd, dd, ee, ee, ff, ff, 00, 00, 11, 11, 01]
+Hex: 24c64de6e8aa6e00aaaabbbbccccddddeeeeffff0000111101

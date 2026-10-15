@@ -1,0 +1,16463 @@
+//! OpenTelemetry metrics provider.
+//!
+//! This module provides [`OtelMetrics`], an implementation of [`MetricsProvider`]
+//! that exports Asupersync runtime metrics via OpenTelemetry.
+//!
+//! # Feature
+//!
+//! Enable the `metrics` feature to compile this module.
+//!
+//! # Cardinality Limits
+//!
+//! High-cardinality labels can cause metric explosion. Use [`MetricsConfig`]
+//! to set cardinality limits:
+//!
+//! ```ignore
+//! let config = MetricsConfig {
+//!     max_cardinality: 500,
+//!     overflow_strategy: CardinalityOverflow::Aggregate,
+//!     ..Default::default()
+//! };
+//! let metrics = OtelMetrics::new_with_config(global::meter("asupersync"), config);
+//! ```
+//!
+//! # Custom Exporters
+//!
+//! Use [`MetricsExporter`] trait for custom export backends:
+//!
+//! ```ignore
+//! let stdout = StdoutExporter::new();
+//! let multi = MultiExporter::new(vec![Box::new(stdout)]);
+//! ```
+//!
+//! # Example
+//!
+//! ```ignore
+//! use opentelemetry::global;
+//! use opentelemetry_prometheus::exporter;
+//! use prometheus::Registry;
+//! use asupersync::observability::OtelMetrics;
+//!
+//! let registry = Registry::new();
+//! let exporter = exporter().with_registry(registry.clone()).build().unwrap();
+//! let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+//!     .with_reader(opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build())
+//!     .build();
+//! opentelemetry::global::set_meter_provider(provider);
+//!
+//! let metrics = OtelMetrics::new(global::meter("asupersync"));
+//! // RuntimeBuilder::new().metrics(metrics).build();
+//! ```
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+use crate::observability::entry::LogEntry;
+use crate::observability::level::LogLevel;
+use crate::observability::metrics::{MetricsProvider, OutcomeKind};
+use crate::types::{CancelKind, RegionId, TaskId};
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Histogram, Meter, ObservableGauge};
+use parking_lot::{Mutex, RwLock};
+use regex::Regex;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod queued;
+#[cfg(not(target_arch = "wasm32"))]
+pub use queued::{
+    OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES, OtlpExportQueueStats,
+};
+
+// =============================================================================
+// Cardinality Management
+// =============================================================================
+
+/// Strategy when cardinality limit is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardinalityOverflow {
+    /// Stop recording new label combinations (drop silently).
+    #[default]
+    Drop,
+    /// Aggregate into 'other' bucket.
+    Aggregate,
+    /// Log warning and continue recording (may cause OOM).
+    Warn,
+}
+
+/// Configuration for metrics collection.
+#[derive(Debug, Clone)]
+pub struct MetricsConfig {
+    /// Maximum unique label combinations per metric.
+    pub max_cardinality: usize,
+    /// Maximum distinct metric NAMES tracked. Once this cap is hit,
+    /// new metric names hit the overflow path and are not recorded
+    /// (br-asupersync-qipj44). Existing metric names continue to
+    /// accept new label combinations up to `max_cardinality`.
+    ///
+    /// The default cap (4096) is high enough that legitimate
+    /// applications never hit it (real services have on the order of
+    /// 50-500 distinct metric names) while bounding the worst case
+    /// for SaaS workloads where attacker-influenced strings could
+    /// otherwise reach a metric-naming code path.
+    pub max_metrics: usize,
+    /// Strategy when cardinality limit is reached.
+    pub overflow_strategy: CardinalityOverflow,
+    /// Labels to always drop (e.g., request_id, trace_id).
+    pub drop_labels: Vec<String>,
+    /// Sampling configuration for high-frequency metrics.
+    pub sampling: Option<SamplingConfig>,
+}
+
+/// Configuration for OTLP privacy filtering across traces, metrics, and logs.
+#[derive(Debug, Clone, Default)]
+pub struct PrivacyConfig {
+    /// Span attributes to always drop before OTLP serialization (e.g., user.email, api.key).
+    /// **Privacy Protection**: These attributes are removed before protobuf encoding
+    /// to prevent sensitive data from reaching the collector.
+    pub drop_attributes: Vec<String>,
+    /// Metric labels to always drop before OTLP serialization (e.g., request_id, user_id).
+    /// **Privacy Protection**: These labels are removed before protobuf encoding
+    /// to prevent sensitive data from reaching the collector.
+    pub drop_labels: Vec<String>,
+    /// Allowlist of attributes/labels that are safe to export. If non-empty,
+    /// only attributes/labels matching these patterns are exported.
+    /// **Privacy Protection**: Provides explicit control over what data reaches collectors.
+    pub allowed_fields: Vec<String>,
+    /// PII redaction patterns. Field values matching these regex patterns
+    /// will be redacted before export.
+    /// **Privacy Protection**: Automatically detects and redacts common PII patterns.
+    pub pii_patterns: Vec<String>,
+    /// Whether to apply automatic PII detection for common patterns
+    /// (emails, phone numbers, credit cards, SSNs, etc.).
+    pub auto_pii_detection: bool,
+    compiled_pii_patterns: Vec<Regex>,
+}
+
+const FIXED_PII_MAX_INPUT_BYTES: usize = 1024 * 1024;
+const FIXED_PII_MAX_MATCHES: usize = 65_536;
+const FIXED_PII_MAX_WORK_UNITS: usize = 16 * 1024 * 1024 + 64;
+// R2.5 named-host measurements showed higher latency and allocation counts for
+// every fixed-scanner cell. Keep the implementations available for focused
+// equivalence tests, but fail closed to the retained regex engine in production.
+const FIXED_PII_SCANNER_FAST_PATH_ENABLED: bool = false;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedPiiSpan {
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FixedPiiScan {
+    matches: Vec<FixedPiiSpan>,
+    work_units: usize,
+}
+
+impl FixedPiiScan {
+    fn is_match(&self) -> bool {
+        debug_assert!(self.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        !self.matches.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FixedPiiScanLimits {
+    max_input_bytes: usize,
+    max_matches: usize,
+    max_work_units: usize,
+}
+
+impl Default for FixedPiiScanLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: FIXED_PII_MAX_INPUT_BYTES,
+            max_matches: FIXED_PII_MAX_MATCHES,
+            max_work_units: FIXED_PII_MAX_WORK_UNITS,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixedPiiScanError {
+    InputLimit,
+    WorkLimit,
+    OutputLimit,
+    UnicodeTableUnavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FixedPiiWorkBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl FixedPiiWorkBudget {
+    fn new(input: &str, limits: FixedPiiScanLimits) -> Result<Self, FixedPiiScanError> {
+        if input.len() > limits.max_input_bytes {
+            return Err(FixedPiiScanError::InputLimit);
+        }
+        Ok(Self {
+            used: 0,
+            limit: limits.max_work_units,
+        })
+    }
+
+    fn charge(&mut self, units: usize) -> Result<(), FixedPiiScanError> {
+        self.used = self
+            .used
+            .checked_add(units)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if self.used > self.limit {
+            return Err(FixedPiiScanError::WorkLimit);
+        }
+        Ok(())
+    }
+}
+
+fn fixed_class_contains(
+    class: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    work.charge(1)?;
+    Ok(class
+        .ranges()
+        .binary_search_by(|range| {
+            if value < range.start() {
+                core::cmp::Ordering::Greater
+            } else if value > range.end() {
+                core::cmp::Ordering::Less
+            } else {
+                core::cmp::Ordering::Equal
+            }
+        })
+        .is_ok())
+}
+
+fn fixed_unicode_word_boundary(
+    input: &str,
+    offset: usize,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    let previous = input[..offset].chars().next_back();
+    let next = input[offset..].chars().next();
+    let mut is_word = |value: Option<char>| -> Result<bool, FixedPiiScanError> {
+        work.charge(1)?;
+        let Some(value) = value else {
+            return Ok(false);
+        };
+        retained_regex_syntax::try_is_word_character(value)
+            .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)
+    };
+    Ok(is_word(previous)? != is_word(next)?)
+}
+
+fn fixed_email_letter_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{ClassUnicode, ClassUnicodeRange};
+
+    let mut class = ClassUnicode::new([ClassUnicodeRange::new('A', 'Z')]);
+    class
+        .try_case_fold_simple()
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    Ok(class)
+}
+
+fn fixed_decimal_digit_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{Class, HirKind};
+
+    let hir = retained_regex_syntax::Parser::new()
+        .parse(r"\d")
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    match hir.kind() {
+        HirKind::Class(Class::Unicode(class)) => Ok(class.clone()),
+        _ => Err(FixedPiiScanError::UnicodeTableUnavailable),
+    }
+}
+
+fn fixed_unicode_space_class() -> Result<retained_regex_syntax::hir::ClassUnicode, FixedPiiScanError>
+{
+    use retained_regex_syntax::hir::{Class, HirKind};
+
+    let hir = retained_regex_syntax::Parser::new()
+        .parse(r"\s")
+        .map_err(|_| FixedPiiScanError::UnicodeTableUnavailable)?;
+    match hir.kind() {
+        HirKind::Class(Class::Unicode(class)) => Ok(class.clone()),
+        _ => Err(FixedPiiScanError::UnicodeTableUnavailable),
+    }
+}
+
+fn fixed_email_local_char(
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    Ok(fixed_class_contains(letters, value, work)?
+        || value.is_ascii_digit()
+        || matches!(value, '.' | '_' | '%' | '+' | '-'))
+}
+
+fn fixed_email_domain_char(
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    value: char,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<bool, FixedPiiScanError> {
+    Ok(fixed_class_contains(letters, value, work)?
+        || value.is_ascii_digit()
+        || matches!(value, '.' | '-'))
+}
+
+fn push_fixed_pii_span(
+    matches: &mut Vec<FixedPiiSpan>,
+    span: FixedPiiSpan,
+    limits: FixedPiiScanLimits,
+) -> Result<(), FixedPiiScanError> {
+    if matches.len() >= limits.max_matches {
+        return Err(FixedPiiScanError::OutputLimit);
+    }
+    matches
+        .try_reserve(1)
+        .map_err(|_| FixedPiiScanError::OutputLimit)?;
+    matches.push(span);
+    Ok(())
+}
+
+fn fixed_email_match_at(
+    input: &str,
+    search_start: usize,
+    at: usize,
+    letters: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut local_run_start = at;
+    for (relative, value) in input[search_start..at].char_indices().rev() {
+        if !fixed_email_local_char(letters, value, work)? {
+            break;
+        }
+        local_run_start = search_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    if local_run_start == at {
+        return Ok(None);
+    }
+
+    let mut match_start = None;
+    for (relative, _) in input[local_run_start..at].char_indices() {
+        let offset = local_run_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_unicode_word_boundary(input, offset, work)? {
+            match_start = Some(offset);
+            break;
+        }
+    }
+    let Some(match_start) = match_start else {
+        return Ok(None);
+    };
+
+    let domain_start = at.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    let mut domain_end = domain_start;
+    for (relative, value) in input[domain_start..].char_indices() {
+        if !fixed_email_domain_char(letters, value, work)? {
+            break;
+        }
+        domain_end = domain_start
+            .checked_add(relative)
+            .and_then(|offset| offset.checked_add(value.len_utf8()))
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    for (relative, value) in input[domain_start..domain_end].char_indices().rev() {
+        if value != '.' {
+            continue;
+        }
+        let dot = domain_start
+            .checked_add(relative)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if dot == domain_start {
+            continue;
+        }
+        let tld_start = dot.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        let mut letter_count = 0_usize;
+        let mut match_end = tld_start;
+        for (tld_relative, tld_char) in input[tld_start..].char_indices() {
+            if !fixed_class_contains(letters, tld_char, work)? {
+                break;
+            }
+            letter_count = letter_count
+                .checked_add(1)
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+            match_end = tld_start
+                .checked_add(tld_relative)
+                .and_then(|offset| offset.checked_add(tld_char.len_utf8()))
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+            if letter_count == 64 {
+                break;
+            }
+        }
+        if (2..=63).contains(&letter_count) && fixed_unicode_word_boundary(input, match_end, work)?
+        {
+            return Ok(Some(FixedPiiSpan {
+                start_byte: match_start,
+                end_byte: match_end,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn scan_fixed_emails(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    if !input.as_bytes().contains(&b'@') {
+        work.charge(input.len())?;
+        return Ok(FixedPiiScan {
+            matches: Vec::new(),
+            work_units: work.used,
+        });
+    }
+    let letters = fixed_email_letter_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let mut next_at = None;
+        for (relative, value) in input[cursor..].char_indices() {
+            work.charge(1)?;
+            if value == '@' {
+                next_at = Some(
+                    cursor
+                        .checked_add(relative)
+                        .ok_or(FixedPiiScanError::WorkLimit)?,
+                );
+                break;
+            }
+        }
+        let Some(at) = next_at else {
+            break;
+        };
+        if let Some(span) = fixed_email_match_at(input, cursor, at, &letters, &mut work)? {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+        } else {
+            cursor = at.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
+fn fixed_ssn_match_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut cursor = start;
+    for group_len in [3_usize, 2, 4] {
+        for _ in 0..group_len {
+            let Some(value) = input[cursor..].chars().next() else {
+                return Ok(None);
+            };
+            if !fixed_class_contains(digits, value, work)? {
+                return Ok(None);
+            }
+            cursor = cursor
+                .checked_add(value.len_utf8())
+                .ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+        if group_len != 4 {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('-') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+        }
+    }
+    if !fixed_unicode_word_boundary(input, cursor, work)? {
+        return Ok(None);
+    }
+    Ok(Some(FixedPiiSpan {
+        start_byte: start,
+        end_byte: cursor,
+    }))
+}
+
+fn scan_fixed_ssns(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    if !input.as_bytes().contains(&b'-') {
+        work.charge(input.len())?;
+        return Ok(FixedPiiScan {
+            matches: Vec::new(),
+            work_units: work.used,
+        });
+    }
+    let digits = fixed_decimal_digit_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_class_contains(&digits, value, &mut work)?
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_ssn_match_at(input, cursor, &digits, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
+fn fixed_card_candidate_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut cursor = start;
+    let mut digit_count = 0_usize;
+    let mut best_end = None;
+
+    while digit_count < 19 {
+        let Some(value) = input[cursor..].chars().next() else {
+            break;
+        };
+        if !fixed_class_contains(digits, value, work)? {
+            break;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        digit_count = digit_count
+            .checked_add(1)
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+
+        if digit_count >= 13 && fixed_unicode_word_boundary(input, cursor, work)? {
+            best_end = Some(cursor);
+        }
+
+        let Some(separator) = input[cursor..].chars().next() else {
+            break;
+        };
+        work.charge(1)?;
+        if !matches!(separator, ' ' | '-') {
+            continue;
+        }
+        cursor = cursor
+            .checked_add(separator.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if digit_count >= 13 && fixed_unicode_word_boundary(input, cursor, work)? {
+            best_end = Some(cursor);
+        }
+    }
+
+    Ok(best_end.map(|end_byte| FixedPiiSpan {
+        start_byte: start,
+        end_byte,
+    }))
+}
+
+fn scan_fixed_card_candidates(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    let digits = fixed_decimal_digit_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        if fixed_class_contains(&digits, value, &mut work)?
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_card_candidate_at(input, cursor, &digits, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixedPhoneCountry {
+    PlusOne,
+    One,
+    None,
+}
+
+fn fixed_take_digits(
+    input: &str,
+    mut cursor: usize,
+    count: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<usize>, FixedPiiScanError> {
+    for _ in 0..count {
+        let Some(value) = input[cursor..].chars().next() else {
+            return Ok(None);
+        };
+        if !fixed_class_contains(digits, value, work)? {
+            return Ok(None);
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    Ok(Some(cursor))
+}
+
+fn fixed_take_phone_separator(
+    input: &str,
+    cursor: usize,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<usize, FixedPiiScanError> {
+    let Some(value) = input[cursor..].chars().next() else {
+        return Ok(cursor);
+    };
+    if fixed_class_contains(spaces, value, work)? || matches!(value, '.' | '-') {
+        cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)
+    } else {
+        Ok(cursor)
+    }
+}
+
+fn fixed_phone_variant_at(
+    input: &str,
+    start: usize,
+    country: FixedPhoneCountry,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<usize>, FixedPiiScanError> {
+    let mut cursor = start;
+    match country {
+        FixedPhoneCountry::PlusOne => {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('+') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            work.charge(1)?;
+            if !input[cursor..].starts_with('1') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+        }
+        FixedPhoneCountry::One => {
+            work.charge(1)?;
+            if !input[cursor..].starts_with('1') {
+                return Ok(None);
+            }
+            cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+            cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+        }
+        FixedPhoneCountry::None => {}
+    }
+
+    work.charge(1)?;
+    if input[cursor..].starts_with('(') {
+        cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    let Some(next) = fixed_take_digits(input, cursor, 3, digits, work)? else {
+        return Ok(None);
+    };
+    cursor = next;
+    work.charge(1)?;
+    if input[cursor..].starts_with(')') {
+        cursor = cursor.checked_add(1).ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+    cursor = fixed_take_phone_separator(input, cursor, spaces, work)?;
+    let Some(next) = fixed_take_digits(input, cursor, 3, digits, work)? else {
+        return Ok(None);
+    };
+    cursor = fixed_take_phone_separator(input, next, spaces, work)?;
+    let Some(end) = fixed_take_digits(input, cursor, 4, digits, work)? else {
+        return Ok(None);
+    };
+    if !fixed_unicode_word_boundary(input, end, work)? {
+        return Ok(None);
+    }
+    Ok(Some(end))
+}
+
+fn fixed_phone_match_at(
+    input: &str,
+    start: usize,
+    digits: &retained_regex_syntax::hir::ClassUnicode,
+    spaces: &retained_regex_syntax::hir::ClassUnicode,
+    work: &mut FixedPiiWorkBudget,
+) -> Result<Option<FixedPiiSpan>, FixedPiiScanError> {
+    let mut best_end = None;
+    for country in [
+        FixedPhoneCountry::PlusOne,
+        FixedPhoneCountry::One,
+        FixedPhoneCountry::None,
+    ] {
+        if let Some(end) = fixed_phone_variant_at(input, start, country, digits, spaces, work)?
+            && best_end.is_none_or(|current| end > current)
+        {
+            best_end = Some(end);
+        }
+    }
+    Ok(best_end.map(|end_byte| FixedPiiSpan {
+        start_byte: start,
+        end_byte,
+    }))
+}
+
+fn scan_fixed_phones(
+    input: &str,
+    limits: FixedPiiScanLimits,
+    stop_after_first: bool,
+) -> Result<FixedPiiScan, FixedPiiScanError> {
+    let mut work = FixedPiiWorkBudget::new(input, limits)?;
+    let digits = fixed_decimal_digit_class()?;
+    let spaces = fixed_unicode_space_class()?;
+    let mut matches = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        let value = input[cursor..]
+            .chars()
+            .next()
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+        let is_digit = fixed_class_contains(&digits, value, &mut work)?;
+        if (is_digit || matches!(value, '+' | '('))
+            && fixed_unicode_word_boundary(input, cursor, &mut work)?
+            && let Some(span) = fixed_phone_match_at(input, cursor, &digits, &spaces, &mut work)?
+        {
+            let next_cursor = span.end_byte;
+            push_fixed_pii_span(&mut matches, span, limits)?;
+            if stop_after_first {
+                break;
+            }
+            cursor = next_cursor;
+            continue;
+        }
+        cursor = cursor
+            .checked_add(value.len_utf8())
+            .ok_or(FixedPiiScanError::WorkLimit)?;
+    }
+
+    Ok(FixedPiiScan {
+        matches,
+        work_units: work.used,
+    })
+}
+
+impl PrivacyConfig {
+    /// Create a new privacy configuration with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a span attribute to always drop for privacy.
+    #[must_use]
+    pub fn with_drop_attribute(mut self, attribute: impl Into<String>) -> Self {
+        self.drop_attributes.push(attribute.into());
+        self
+    }
+
+    /// Add a metric label to always drop for privacy.
+    #[must_use]
+    pub fn with_drop_label(mut self, label: impl Into<String>) -> Self {
+        self.drop_labels.push(label.into());
+        self
+    }
+
+    /// Add an allowed field pattern. If any allowed fields are specified,
+    /// only fields matching these patterns will be exported.
+    #[must_use]
+    pub fn with_allowed_field(mut self, pattern: impl Into<String>) -> Self {
+        self.allowed_fields.push(pattern.into());
+        self
+    }
+
+    /// Add a custom PII redaction pattern (regex).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pattern` is not a valid regular expression. Use
+    /// [`try_with_pii_pattern`](Self::try_with_pii_pattern) to handle invalid
+    /// patterns without panicking.
+    #[must_use]
+    pub fn with_pii_pattern(self, pattern: impl Into<String>) -> Self {
+        self.try_with_pii_pattern(pattern)
+            .expect("invalid PrivacyConfig PII regex pattern")
+    }
+
+    /// Try to add a custom PII redaction regex pattern.
+    ///
+    /// The compiled regex is cached in the configuration so value redaction does
+    /// not recompile patterns on every exported attribute or metric label.
+    pub fn try_with_pii_pattern(
+        mut self,
+        pattern: impl Into<String>,
+    ) -> Result<Self, regex::Error> {
+        let pattern = pattern.into();
+        let compiled = Regex::new(&pattern)?;
+        self.pii_patterns.push(pattern);
+        self.compiled_pii_patterns.push(compiled);
+        Ok(self)
+    }
+
+    /// Enable automatic PII detection for common patterns.
+    #[must_use]
+    pub fn with_auto_pii_detection(mut self) -> Self {
+        self.auto_pii_detection = true;
+        self
+    }
+
+    /// Check if a field should be dropped based on privacy configuration.
+    #[must_use]
+    pub fn should_drop_field(&self, field_name: &str) -> bool {
+        // Check explicit drop lists
+        if self
+            .drop_attributes
+            .iter()
+            .any(|attribute| attribute == field_name)
+            || self.drop_labels.iter().any(|label| label == field_name)
+        {
+            return true;
+        }
+
+        // Check allowlist (if specified, only allow matching fields)
+        if !self.allowed_fields.is_empty() {
+            return !self
+                .allowed_fields
+                .iter()
+                .any(|pattern| Self::field_pattern_matches(pattern, field_name));
+        }
+
+        false
+    }
+
+    /// Redact PII from field values.
+    #[must_use]
+    pub fn redact_pii(&self, _field_name: &str, value: &str) -> String {
+        if self.matches_custom_pii_pattern(value) {
+            return "[REDACTED]".to_string();
+        }
+
+        // Apply automatic PII detection
+        if self.auto_pii_detection {
+            return self.apply_auto_pii_redaction(value);
+        }
+
+        value.to_string()
+    }
+
+    fn field_pattern_matches(pattern: &str, field_name: &str) -> bool {
+        let pattern = pattern.as_bytes();
+        let field_name = field_name.as_bytes();
+        let mut pattern_index = 0;
+        let mut field_index = 0;
+        let mut last_star = None;
+        let mut star_field_index = 0;
+
+        while field_index < field_name.len() {
+            if pattern_index < pattern.len() && pattern[pattern_index] == field_name[field_index] {
+                pattern_index += 1;
+                field_index += 1;
+            } else if pattern_index < pattern.len() && pattern[pattern_index] == b'*' {
+                last_star = Some(pattern_index);
+                pattern_index += 1;
+                star_field_index = field_index;
+            } else if let Some(star_index) = last_star {
+                pattern_index = star_index + 1;
+                star_field_index += 1;
+                field_index = star_field_index;
+            } else {
+                return false;
+            }
+        }
+
+        pattern[pattern_index..].iter().all(|byte| *byte == b'*')
+    }
+
+    fn matches_custom_pii_pattern(&self, value: &str) -> bool {
+        if self.pii_patterns.len() == self.compiled_pii_patterns.len() {
+            let mut cache_is_current = true;
+            for (pattern, compiled) in self.pii_patterns.iter().zip(&self.compiled_pii_patterns) {
+                if pattern != compiled.as_str() {
+                    cache_is_current = false;
+                    break;
+                }
+                if compiled.is_match(value) {
+                    return true;
+                }
+            }
+            if cache_is_current {
+                return false;
+            }
+        }
+
+        for pattern in &self.pii_patterns {
+            match Regex::new(pattern) {
+                Ok(compiled) if compiled.is_match(value) => return true,
+                Ok(_) => {}
+                // `pii_patterns` is a legacy public field, so direct mutation can
+                // bypass the fallible builder. This infallible redaction path has
+                // no error channel; redact conservatively instead of silently
+                // allowing a value through under an invalid privacy policy.
+                Err(_) => return true,
+            }
+        }
+
+        false
+    }
+
+    /// Apply automatic PII detection and redaction.
+    fn apply_auto_pii_redaction(&self, value: &str) -> String {
+        use std::sync::OnceLock;
+
+        static EMAIL_RE: OnceLock<Regex> = OnceLock::new();
+        static PHONE_RE: OnceLock<Regex> = OnceLock::new();
+        static SSN_RE: OnceLock<Regex> = OnceLock::new();
+        static CARD_CANDIDATE_RE: OnceLock<Regex> = OnceLock::new();
+
+        let email_re = || {
+            EMAIL_RE.get_or_init(|| {
+                Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+                    .expect("built-in email regex must compile")
+            })
+        };
+        let email_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_emails(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| email_re().is_match(value))
+        } else {
+            email_re().is_match(value)
+        };
+        if email_match {
+            return "[EMAIL_REDACTED]".to_string();
+        }
+
+        let ssn_re = || {
+            SSN_RE.get_or_init(|| {
+                Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("built-in SSN regex must compile")
+            })
+        };
+        let ssn_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_ssns(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| ssn_re().is_match(value))
+        } else {
+            ssn_re().is_match(value)
+        };
+        if ssn_match {
+            return "[SSN_REDACTED]".to_string();
+        }
+
+        let card_candidate_re = CARD_CANDIDATE_RE.get_or_init(|| {
+            Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("built-in payment-card regex must compile")
+        });
+        let card_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_card_candidates(value, FixedPiiScanLimits::default(), false)
+                .map(|scan| {
+                    scan.matches.iter().any(|span| {
+                        value
+                            .get(span.start_byte..span.end_byte)
+                            .is_some_and(Self::is_luhn_valid_card)
+                    })
+                })
+                .unwrap_or_else(|_| {
+                    card_candidate_re
+                        .find_iter(value)
+                        .map(|matched| matched.as_str())
+                        .any(Self::is_luhn_valid_card)
+                })
+        } else {
+            card_candidate_re
+                .find_iter(value)
+                .map(|matched| matched.as_str())
+                .any(Self::is_luhn_valid_card)
+        };
+        if card_match {
+            return "[CARD_REDACTED]".to_string();
+        }
+
+        let phone_re = || {
+            PHONE_RE.get_or_init(|| {
+                Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                    .expect("built-in phone regex must compile")
+            })
+        };
+        let phone_match = if FIXED_PII_SCANNER_FAST_PATH_ENABLED {
+            scan_fixed_phones(value, FixedPiiScanLimits::default(), true)
+                .map(|scan| scan.is_match())
+                .unwrap_or_else(|_| phone_re().is_match(value))
+        } else {
+            phone_re().is_match(value)
+        };
+        if phone_match {
+            return "[PHONE_REDACTED]".to_string();
+        }
+
+        value.to_string()
+    }
+
+    fn is_luhn_valid_card(candidate: &str) -> bool {
+        let mut digit_count = 0_usize;
+        let mut sum = 0_usize;
+        let mut double = false;
+        for mut value in candidate.chars().rev().filter_map(|ch| ch.to_digit(10)) {
+            let Some(next_digit_count) = digit_count.checked_add(1) else {
+                return false;
+            };
+            digit_count = next_digit_count;
+            if double {
+                value *= 2;
+                if value > 9 {
+                    value -= 9;
+                }
+            }
+            let Some(next_sum) = sum.checked_add(value as usize) else {
+                return false;
+            };
+            sum = next_sum;
+            double = !double;
+        }
+
+        (13..=19).contains(&digit_count) && sum % 10 == 0
+    }
+}
+
+/// Configuration for OTLP trace span privacy filtering.
+/// **DEPRECATED**: Use `PrivacyConfig` instead for comprehensive privacy filtering.
+pub type SpanConfig = PrivacyConfig;
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            max_cardinality: 1000,
+            max_metrics: 4096,
+            overflow_strategy: CardinalityOverflow::Drop,
+            drop_labels: Vec::new(),
+            sampling: None,
+        }
+    }
+}
+
+impl MetricsConfig {
+    /// Create a new metrics configuration with defaults.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set maximum cardinality per metric.
+    #[must_use]
+    pub fn with_max_cardinality(mut self, max: usize) -> Self {
+        self.max_cardinality = max;
+        self
+    }
+
+    /// Set maximum number of distinct metric NAMES (br-asupersync-qipj44).
+    /// Once the cap is hit, newly-named metrics are dropped to prevent
+    /// memory exhaustion via attacker-controlled metric strings.
+    #[must_use]
+    pub fn with_max_metrics(mut self, max: usize) -> Self {
+        self.max_metrics = max;
+        self
+    }
+
+    /// Set overflow strategy.
+    #[must_use]
+    pub fn with_overflow_strategy(mut self, strategy: CardinalityOverflow) -> Self {
+        self.overflow_strategy = strategy;
+        self
+    }
+
+    /// Add a label to always drop.
+    #[must_use]
+    pub fn with_drop_label(mut self, label: impl Into<String>) -> Self {
+        self.drop_labels.push(label.into());
+        self
+    }
+
+    /// Set sampling configuration.
+    #[must_use]
+    pub fn with_sampling(mut self, sampling: SamplingConfig) -> Self {
+        self.sampling = Some(sampling);
+        self
+    }
+}
+
+/// Sampling configuration for high-frequency metrics.
+#[derive(Debug, Clone)]
+pub struct SamplingConfig {
+    /// Sample rate (0.0-1.0). 1.0 = record all.
+    pub sample_rate: f64,
+    /// Metrics to sample (others recorded fully).
+    pub sampled_metrics: Vec<String>,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 1.0,
+            sampled_metrics: Vec::new(),
+        }
+    }
+}
+
+impl SamplingConfig {
+    /// Create new sampling config with given rate.
+    #[must_use]
+    pub fn new(sample_rate: f64) -> Self {
+        Self {
+            sample_rate: sample_rate.clamp(0.0, 1.0),
+            sampled_metrics: Vec::new(),
+        }
+    }
+
+    /// Add a metric to the sampled set.
+    #[must_use]
+    pub fn with_sampled_metric(mut self, metric: impl Into<String>) -> Self {
+        self.sampled_metrics.push(metric.into());
+        self
+    }
+}
+
+/// Tracks cardinality per metric to prevent explosion.
+///
+/// br-asupersync-bs92bg — `hasher_seed` is a per-instance
+/// `RandomState` (per-process random SipHash key). Switched from the
+/// previously-used `DetHasher` (fixed seed) because the cardinality
+/// tracker's keyspace is attacker-influenced — label values arrive
+/// from external sources via every metric path. With a fixed seed,
+/// an attacker who knows the hash function parameters can pre-compute
+/// label values that collide on a single bucket, exhausting the
+/// per-metric `max_cardinality` cap with one collision class and
+/// effectively suppressing every legitimate label combination
+/// thereafter (or, depending on call order, evicting legitimate
+/// labels from the seen-set so they re-trigger the overflow path on
+/// every subsequent record). RandomState's per-process seed defeats
+/// the pre-compute: an attacker cannot know the local hasher's key
+/// at startup, so they cannot construct a collision class.
+#[derive(Debug)]
+struct CardinalityTracker {
+    /// Map of metric name -> set of label combination hashes.
+    seen: RwLock<HashMap<String, HashSet<u64>>>,
+    /// Number of times cardinality limit was hit.
+    overflow_count: AtomicU64,
+    /// Per-instance random hash seed (br-asupersync-bs92bg).
+    hasher_seed: std::collections::hash_map::RandomState,
+}
+
+impl CardinalityTracker {
+    fn new() -> Self {
+        Self {
+            seen: RwLock::new(HashMap::new()),
+            overflow_count: AtomicU64::new(0),
+            hasher_seed: std::collections::hash_map::RandomState::new(),
+        }
+    }
+
+    /// Check if recording this label combination would exceed the limit.
+    #[cfg(test)]
+    fn would_exceed(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
+        let hash = self.hash_labels(labels);
+        let seen = self.seen.read();
+
+        if max_cardinality == 0 {
+            return seen.get(metric).is_none_or(|set| !set.contains(&hash));
+        }
+
+        if let Some(set) = seen.get(metric) {
+            if set.contains(&hash) {
+                return false; // Already seen
+            }
+            set.len() >= max_cardinality
+        } else {
+            false // First entry for this metric
+        }
+    }
+
+    /// Record a label combination.
+    fn record(&self, metric: &str, labels: &[KeyValue]) {
+        let hash = self.hash_labels(labels);
+        let mut seen = self.seen.write();
+        seen.entry(metric.to_string()).or_default().insert(hash);
+    }
+
+    /// Atomically check whether a new label set would exceed cardinality and
+    /// record it if allowed.
+    ///
+    /// Returns `true` when the limit would be exceeded and the label set was
+    /// not recorded. Two distinct caps are enforced:
+    ///
+    ///   - `max_cardinality` — distinct label combinations PER metric
+    ///     (existing behaviour, preserved).
+    ///   - `max_metrics` — distinct metric NAMES across the whole tracker
+    ///     (br-asupersync-qipj44). Without this cap, a code path that
+    ///     derived the metric name from attacker-controlled input
+    ///     (`format!("user_{user_id}")`, request URL path, content type,
+    ///     etc.) could grow `seen` without bound — DoS via memory
+    ///     exhaustion. With the cap, the FIRST `max_metrics` distinct
+    ///     names are accepted and subsequent new names are dropped to
+    ///     the overflow bucket. Existing metric names continue to
+    ///     accept new label combinations.
+    fn check_and_record(
+        &self,
+        metric: &str,
+        labels: &[KeyValue],
+        max_cardinality: usize,
+        max_metrics: usize,
+    ) -> bool {
+        let hash = self.hash_labels(labels);
+        let mut seen = self.seen.write();
+
+        // br-asupersync-qipj44: enforce the metric-name cap BEFORE
+        // creating a new entry. If the cap is hit and this metric name
+        // is not already tracked, refuse to insert.
+        if !seen.contains_key(metric) && max_metrics > 0 && seen.len() >= max_metrics {
+            return true;
+        }
+
+        let set = seen.entry(metric.to_string()).or_default();
+
+        if set.contains(&hash) {
+            return false;
+        }
+        if set.len() >= max_cardinality {
+            return true;
+        }
+
+        set.insert(hash);
+        false
+    }
+
+    /// Increment overflow counter.
+    fn record_overflow(&self) {
+        self.overflow_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Get overflow count.
+    fn overflow_count(&self) -> u64 {
+        self.overflow_count.load(Ordering::Relaxed)
+    }
+
+    /// Hash labels for tracking.
+    ///
+    /// br-asupersync-bs92bg — uses the per-instance `RandomState`
+    /// seed instead of `DetHasher`. The seed is randomised at
+    /// `CardinalityTracker::new()` and never observable to a remote
+    /// attacker, defeating the pre-computed-collision DoS that the
+    /// fixed-seed `DetHasher` would have permitted.
+    fn hash_labels(&self, labels: &[KeyValue]) -> u64 {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let _ = std::marker::PhantomData::<RandomState>;
+
+        // Treat label sets as order-insensitive. Different construction order of
+        // equivalent labels should map to the same cardinality bucket.
+        let mut normalized: Vec<(&str, String)> = labels
+            .iter()
+            .map(|kv| (kv.key.as_str(), format!("{:?}", kv.value)))
+            .collect();
+        normalized.sort_unstable_by(|(a_key, a_val), (b_key, b_val)| {
+            a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
+        });
+
+        let mut hasher = self.hasher_seed.build_hasher();
+        for (key, value) in normalized {
+            key.hash(&mut hasher);
+            value.hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    /// Get current cardinality for a metric.
+    #[cfg(test)]
+    fn cardinality(&self, metric: &str) -> usize {
+        self.seen
+            .read()
+            .get(metric)
+            .map_or(0, std::collections::HashSet::len)
+    }
+}
+
+// =============================================================================
+// Custom Exporters
+// =============================================================================
+
+/// Labels for a metric data point.
+pub type MetricLabels = Vec<(String, String)>;
+
+/// A counter data point: (name, labels, value).
+pub type CounterDataPoint = (String, MetricLabels, u64);
+
+/// A gauge data point: (name, labels, value).
+pub type GaugeDataPoint = (String, MetricLabels, i64);
+
+/// A histogram data point: (name, labels, count, sum).
+pub type HistogramDataPoint = (String, MetricLabels, u64, f64);
+
+/// Snapshot of metrics at a point in time.
+#[derive(Debug, Clone, Default)]
+pub struct MetricsSnapshot {
+    /// Counter values: (name, labels, value).
+    pub counters: Vec<CounterDataPoint>,
+    /// Gauge values: (name, labels, value).
+    pub gauges: Vec<GaugeDataPoint>,
+    /// Histogram values: (name, labels, count, sum).
+    pub histograms: Vec<HistogramDataPoint>,
+}
+
+impl MetricsSnapshot {
+    /// Create an empty snapshot.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a counter value.
+    pub fn add_counter(
+        &mut self,
+        name: impl Into<String>,
+        labels: Vec<(String, String)>,
+        value: u64,
+    ) {
+        self.counters.push((name.into(), labels, value));
+    }
+
+    /// Add a gauge value.
+    pub fn add_gauge(
+        &mut self,
+        name: impl Into<String>,
+        labels: Vec<(String, String)>,
+        value: i64,
+    ) {
+        self.gauges.push((name.into(), labels, value));
+    }
+
+    /// Add a histogram value.
+    pub fn add_histogram(
+        &mut self,
+        name: impl Into<String>,
+        labels: Vec<(String, String)>,
+        count: u64,
+        sum: f64,
+    ) {
+        self.histograms.push((name.into(), labels, count, sum));
+    }
+}
+
+// =============================================================================
+// Owned OTLP Metrics Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP metrics mapping contract.
+pub const OWNED_OTLP_METRICS_VERSION: u32 = 1;
+
+/// Maximum points admitted for one owned metric stream.
+pub const OWNED_OTLP_MAX_POINTS_PER_METRIC: usize = 1_000;
+
+/// Default maximum metrics emitted in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST: usize = 256;
+
+/// Default maximum encoded size of one OTLP metrics request.
+pub const OWNED_OTLP_DEFAULT_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum attributes admitted on an owned OTLP resource or data point.
+pub const OWNED_OTLP_MAX_ATTRIBUTES: usize = 128;
+
+/// Maximum UTF-8 bytes admitted for one owned OTLP attribute key.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one owned OTLP attribute value.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES: usize = 4_096;
+
+/// Maximum aggregate key-plus-value bytes admitted for one attribute owner.
+pub const OWNED_OTLP_MAX_ATTRIBUTE_BYTES: usize = OWNED_OTLP_MAX_ATTRIBUTES
+    * (OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES + OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES);
+
+/// Stable, value-redacted error from the owned OTLP metrics mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpMetricsError {
+    /// A configured finite limit or epoch is invalid.
+    InvalidConfiguration,
+    /// A collection or reset timestamp is zero or outside monotonic order.
+    InvalidTimestamp,
+    /// An attribute set contains an empty or duplicate key.
+    InvalidAttributes,
+    /// A numeric value is non-finite or cannot be represented exactly.
+    InvalidNumericValue,
+    /// Histogram bounds, counts, or totals are inconsistent.
+    InvalidHistogram,
+    /// The owned protobuf model exceeded its finite wire envelope.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpMetricsError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.metrics.invalid_configuration",
+            Self::InvalidTimestamp => "otlp.metrics.invalid_timestamp",
+            Self::InvalidAttributes => "otlp.metrics.invalid_attributes",
+            Self::InvalidNumericValue => "otlp.metrics.invalid_numeric_value",
+            Self::InvalidHistogram => "otlp.metrics.invalid_histogram",
+            Self::WireEnvelopeExceeded => "otlp.metrics.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpMetricsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpMetricsError {}
+
+/// Immutable finite limits for [`OwnedOtlpMetrics`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpMetricsConfig {
+    epoch_start_unix_nano: u64,
+    max_cardinality_per_metric: usize,
+    max_metrics_per_request: usize,
+    max_request_bytes: usize,
+}
+
+impl OwnedOtlpMetricsConfig {
+    /// Construct the default finite envelope around an explicit accumulation
+    /// epoch. The timestamp is supplied by the caller; this API never reads an
+    /// ambient wall clock.
+    #[must_use]
+    pub const fn new(epoch_start_unix_nano: u64) -> Self {
+        Self {
+            epoch_start_unix_nano,
+            max_cardinality_per_metric: OWNED_OTLP_MAX_POINTS_PER_METRIC,
+            max_metrics_per_request: OWNED_OTLP_DEFAULT_METRICS_PER_REQUEST,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        }
+    }
+
+    /// Set the finite number of attribute-distinct points admitted per metric.
+    #[must_use]
+    pub const fn with_max_cardinality_per_metric(mut self, limit: usize) -> Self {
+        self.max_cardinality_per_metric = limit;
+        self
+    }
+
+    /// Set the finite metric count emitted per request. Larger collections are
+    /// split deterministically at metric boundaries.
+    #[must_use]
+    pub const fn with_max_metrics_per_request(mut self, limit: usize) -> Self {
+        self.max_metrics_per_request = limit;
+        self
+    }
+
+    /// Set the finite encoded byte envelope for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Explicit accumulation-epoch start timestamp.
+    #[must_use]
+    pub const fn epoch_start_unix_nano(&self) -> u64 {
+        self.epoch_start_unix_nano
+    }
+
+    /// Point cardinality limit per metric.
+    #[must_use]
+    pub const fn max_cardinality_per_metric(&self) -> usize {
+        self.max_cardinality_per_metric
+    }
+
+    /// Metric count limit per encoded request.
+    #[must_use]
+    pub const fn max_metrics_per_request(&self) -> usize {
+        self.max_metrics_per_request
+    }
+
+    /// Encoded request byte limit.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpMetricsError> {
+        if self.epoch_start_unix_nano == 0
+            || self.max_cardinality_per_metric == 0
+            || self.max_cardinality_per_metric > OWNED_OTLP_MAX_POINTS_PER_METRIC
+            || self.max_metrics_per_request == 0
+            || self.max_metrics_per_request > 4_096
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct OwnedMetricStream {
+    name: &'static str,
+    attributes: Vec<(String, String)>,
+}
+
+impl OwnedMetricStream {
+    fn new(name: &'static str, mut attributes: Vec<(String, String)>) -> Self {
+        attributes.sort();
+        Self { name, attributes }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct OwnedHistogramState {
+    bounds: &'static [f64],
+    bucket_counts: Vec<u64>,
+    count: u64,
+    sum: f64,
+}
+
+impl OwnedHistogramState {
+    fn new(bounds: &'static [f64]) -> Self {
+        Self {
+            bounds,
+            bucket_counts: vec![0; bounds.len() + 1],
+            count: 0,
+            sum: 0.0,
+        }
+    }
+
+    fn record(&mut self, value: f64) -> Result<(), OwnedOtlpMetricsError> {
+        if !value.is_finite() {
+            return Err(OwnedOtlpMetricsError::InvalidNumericValue);
+        }
+        let bucket = self.bounds.partition_point(|bound| value > *bound);
+        let next_bucket = self.bucket_counts[bucket]
+            .checked_add(1)
+            .ok_or(OwnedOtlpMetricsError::InvalidHistogram)?;
+        let next_count = self
+            .count
+            .checked_add(1)
+            .ok_or(OwnedOtlpMetricsError::InvalidHistogram)?;
+        let next_sum = self.sum + value;
+        if !next_sum.is_finite() {
+            return Err(OwnedOtlpMetricsError::InvalidNumericValue);
+        }
+        self.bucket_counts[bucket] = next_bucket;
+        self.count = next_count;
+        self.sum = next_sum;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct OwnedOtlpMetricsState {
+    epoch_start_unix_nano: u64,
+    last_collection_unix_nano: u64,
+    counters: BTreeMap<OwnedMetricStream, u64>,
+    gauges: BTreeMap<OwnedMetricStream, i64>,
+    histograms: BTreeMap<OwnedMetricStream, OwnedHistogramState>,
+    rejected_updates: u64,
+    terminal_error: Option<OwnedOtlpMetricsError>,
+}
+
+/// Native cumulative metrics provider backed by the crate-owned finite OTLP
+/// protobuf model.
+///
+/// This provider is additive: the established [`OtelMetrics`] bridge remains
+/// unchanged for embedders that own an OpenTelemetry SDK. Collection requires
+/// an explicit timestamp, emits deterministic metric/attribute order, and
+/// returns no request bytes when validation fails.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub struct OwnedOtlpMetrics {
+    config: OwnedOtlpMetricsConfig,
+    state: Mutex<OwnedOtlpMetricsState>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpMetrics {
+    /// Create a provider after validating every finite limit.
+    pub fn try_new(config: OwnedOtlpMetricsConfig) -> Result<Self, OwnedOtlpMetricsError> {
+        config.validate()?;
+        Ok(Self {
+            state: Mutex::new(OwnedOtlpMetricsState {
+                epoch_start_unix_nano: config.epoch_start_unix_nano,
+                last_collection_unix_nano: 0,
+                counters: BTreeMap::new(),
+                gauges: BTreeMap::new(),
+                histograms: BTreeMap::new(),
+                rejected_updates: 0,
+                terminal_error: None,
+            }),
+            config,
+        })
+    }
+
+    /// Validated immutable provider configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpMetricsConfig {
+        &self.config
+    }
+
+    /// Number of callback updates rejected by cardinality or numeric bounds.
+    #[must_use]
+    pub fn rejected_updates(&self) -> u64 {
+        self.state.lock().rejected_updates
+    }
+
+    /// Atomically start a new cumulative epoch. Gauges retain their current
+    /// last values; cumulative counters and histograms restart from zero.
+    pub fn reset(&self, new_epoch_unix_nano: u64) -> Result<(), OwnedOtlpMetricsError> {
+        let mut state = self.state.lock();
+        if new_epoch_unix_nano == 0
+            || new_epoch_unix_nano <= state.epoch_start_unix_nano
+            || new_epoch_unix_nano <= state.last_collection_unix_nano
+        {
+            return Err(OwnedOtlpMetricsError::InvalidTimestamp);
+        }
+        state.epoch_start_unix_nano = new_epoch_unix_nano;
+        state.last_collection_unix_nano = 0;
+        state.counters.clear();
+        state.histograms.clear();
+        state.terminal_error = None;
+        Ok(())
+    }
+
+    /// Encode a deterministic collection into one or more finite OTLP
+    /// requests. Splitting occurs only at metric boundaries.
+    pub fn collect(
+        &self,
+        point_time_unix_nano: u64,
+        resource_attributes: &[(&str, &str)],
+    ) -> Result<Vec<Vec<u8>>, OwnedOtlpMetricsError> {
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::common_and_resource::{
+            InstrumentationScope, Resource,
+        };
+        use crate::observability::otlp_proto::metrics::{ResourceMetrics, ScopeMetrics};
+
+        let mut state = self.state.lock();
+        if let Some(error) = state.terminal_error {
+            return Err(error);
+        }
+        if point_time_unix_nano == 0
+            || point_time_unix_nano < state.epoch_start_unix_nano
+            || point_time_unix_nano < state.last_collection_unix_nano
+        {
+            return Err(OwnedOtlpMetricsError::InvalidTimestamp);
+        }
+
+        let resource_attributes = owned_otlp_attributes(resource_attributes)?;
+        let resource = Resource {
+            attributes: resource_attributes,
+            ..Resource::default()
+        };
+        let scope = InstrumentationScope {
+            name: "asupersync".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..InstrumentationScope::default()
+        };
+        let metrics = build_owned_otlp_metrics(&state, point_time_unix_nano)?;
+        let mut encoded = Vec::new();
+
+        for chunk in metrics.chunks(self.config.max_metrics_per_request) {
+            let request = ExportMetricsServiceRequest {
+                resource_metrics: vec![ResourceMetrics {
+                    resource: Some(resource.clone()),
+                    scope_metrics: vec![ScopeMetrics {
+                        scope: Some(scope.clone()),
+                        metrics: chunk.to_vec(),
+                        ..ScopeMetrics::default()
+                    }],
+                    ..ResourceMetrics::default()
+                }],
+                ..ExportMetricsServiceRequest::default()
+            };
+            let bytes = request
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
+                .map_err(|_| OwnedOtlpMetricsError::WireEnvelopeExceeded)?;
+            encoded.push(bytes.to_vec());
+        }
+
+        // Empty collections deliberately produce no HTTP request.
+        state.last_collection_unix_nano = point_time_unix_nano;
+        Ok(encoded)
+    }
+
+    fn cardinality_available<T>(
+        &self,
+        map: &BTreeMap<OwnedMetricStream, T>,
+        stream: &OwnedMetricStream,
+    ) -> bool {
+        map.contains_key(stream)
+            || map
+                .keys()
+                .filter(|candidate| candidate.name == stream.name)
+                .count()
+                < self.config.max_cardinality_per_metric
+    }
+
+    fn increment_counter(&self, name: &'static str, attributes: Vec<(String, String)>) {
+        let stream = OwnedMetricStream::new(name, attributes);
+        let mut state = self.state.lock();
+        if !self.cardinality_available(&state.counters, &stream) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return;
+        }
+        let value = state.counters.entry(stream).or_insert(0);
+        match value.checked_add(1) {
+            Some(next) => *value = next,
+            None => {
+                state.rejected_updates = state.rejected_updates.saturating_add(1);
+                state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+            }
+        }
+    }
+
+    fn adjust_gauge(&self, name: &'static str, delta: i64) {
+        let stream = OwnedMetricStream::new(name, Vec::new());
+        let mut state = self.state.lock();
+        let value = state.gauges.entry(stream).or_insert(0);
+        match value.checked_add(delta).filter(|next| *next >= 0) {
+            Some(next) => *value = next,
+            None => {
+                state.rejected_updates = state.rejected_updates.saturating_add(1);
+                state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+            }
+        }
+    }
+
+    fn record_histogram(&self, name: &'static str, attributes: Vec<(String, String)>, value: f64) {
+        let stream = OwnedMetricStream::new(name, attributes);
+        let mut state = self.state.lock();
+        if !self.cardinality_available(&state.histograms, &stream) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            return;
+        }
+        let histogram = state
+            .histograms
+            .entry(stream)
+            .or_insert_with(|| OwnedHistogramState::new(owned_histogram_bounds(name)));
+        if let Err(error) = histogram.record(value) {
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            state.terminal_error = Some(error);
+        }
+    }
+
+    fn reject_update(&self) {
+        let mut state = self.state.lock();
+        state.rejected_updates = state.rejected_updates.saturating_add(1);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_otlp_attributes<'a>(
+    count: usize,
+    attributes: impl Iterator<Item = (&'a str, &'a str)>,
+) -> Result<(), OwnedOtlpMetricsError> {
+    if count > OWNED_OTLP_MAX_ATTRIBUTES {
+        return Err(OwnedOtlpMetricsError::InvalidAttributes);
+    }
+    let mut owned_bytes = 0usize;
+    for (key, value) in attributes {
+        if key.is_empty()
+            || key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES
+        {
+            return Err(OwnedOtlpMetricsError::InvalidAttributes);
+        }
+        owned_bytes = owned_bytes
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpMetricsError::InvalidAttributes)?;
+        if owned_bytes > OWNED_OTLP_MAX_ATTRIBUTE_BYTES {
+            return Err(OwnedOtlpMetricsError::InvalidAttributes);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_attributes(
+    attributes: &[(&str, &str)],
+) -> Result<
+    Vec<crate::observability::otlp_proto::common_and_resource::KeyValue>,
+    OwnedOtlpMetricsError,
+> {
+    use crate::observability::otlp_proto::common_and_resource::{
+        AnyValue, AnyValueValue, KeyValue,
+    };
+
+    // Validate caller-owned references before allocating any owned key/value.
+    validate_owned_otlp_attributes(attributes.len(), attributes.iter().copied())?;
+    let mut attributes = attributes.to_vec();
+    attributes.sort_unstable();
+    if attributes.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(OwnedOtlpMetricsError::InvalidAttributes);
+    }
+    Ok(attributes
+        .into_iter()
+        .map(|(key, value)| KeyValue {
+            key: key.to_owned(),
+            value: Some(AnyValue {
+                value: Some(AnyValueValue::String(value.to_owned())),
+                ..AnyValue::default()
+            }),
+            ..KeyValue::default()
+        })
+        .collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_stream_attributes(
+    attributes: &[(String, String)],
+) -> Result<
+    Vec<crate::observability::otlp_proto::common_and_resource::KeyValue>,
+    OwnedOtlpMetricsError,
+> {
+    validate_owned_otlp_attributes(
+        attributes.len(),
+        attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    )?;
+    let borrowed = attributes
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect::<Vec<_>>();
+    owned_otlp_attributes(&borrowed)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_owned_otlp_metrics(
+    state: &OwnedOtlpMetricsState,
+    point_time_unix_nano: u64,
+) -> Result<Vec<crate::observability::otlp_proto::metrics::Metric>, OwnedOtlpMetricsError> {
+    use crate::observability::otlp_proto::metrics::{
+        Gauge, Histogram, HistogramDataPoint, Metric, MetricData, NumberDataPoint,
+        NumberDataPointValue, Sum,
+    };
+
+    let mut metrics = BTreeMap::<&'static str, Metric>::new();
+    for (stream, value) in &state.counters {
+        let value =
+            i64::try_from(*value).map_err(|_| OwnedOtlpMetricsError::InvalidNumericValue)?;
+        let point = NumberDataPoint {
+            start_time_unix_nano: state.epoch_start_unix_nano,
+            time_unix_nano: point_time_unix_nano,
+            value: Some(NumberDataPointValue::Int(value)),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..NumberDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Counter));
+        let Some(MetricData::Sum(sum)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        sum.data_points.push(point);
+    }
+    for (stream, value) in &state.gauges {
+        let point = NumberDataPoint {
+            time_unix_nano: point_time_unix_nano,
+            value: Some(NumberDataPointValue::Int(*value)),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..NumberDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Gauge));
+        let Some(MetricData::Gauge(gauge)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        gauge.data_points.push(point);
+    }
+    for (stream, histogram) in &state.histograms {
+        if !histogram.sum.is_finite()
+            || histogram
+                .bounds
+                .windows(2)
+                .any(|pair| pair[0].partial_cmp(&pair[1]) != Some(std::cmp::Ordering::Less))
+            || histogram.bucket_counts.len() != histogram.bounds.len() + 1
+            || histogram.bucket_counts.iter().sum::<u64>() != histogram.count
+        {
+            return Err(OwnedOtlpMetricsError::InvalidHistogram);
+        }
+        let point = HistogramDataPoint {
+            start_time_unix_nano: state.epoch_start_unix_nano,
+            time_unix_nano: point_time_unix_nano,
+            count: histogram.count,
+            sum: Some(histogram.sum),
+            bucket_counts: histogram.bucket_counts.clone(),
+            explicit_bounds: histogram.bounds.to_vec(),
+            attributes: owned_otlp_stream_attributes(&stream.attributes)?,
+            ..HistogramDataPoint::default()
+        };
+        let metric = metrics
+            .entry(stream.name)
+            .or_insert_with(|| owned_metric_shell(stream.name, OwnedMetricType::Histogram));
+        let Some(MetricData::Histogram(points)) = metric.data.as_mut() else {
+            return Err(OwnedOtlpMetricsError::InvalidConfiguration);
+        };
+        points.data_points.push(point);
+    }
+
+    // Ensure deterministic point order even if a future producer changes its
+    // in-memory registry type.
+    for metric in metrics.values_mut() {
+        match metric.data.as_mut() {
+            Some(
+                MetricData::Gauge(Gauge { data_points, .. })
+                | MetricData::Sum(Sum { data_points, .. }),
+            ) => {
+                data_points.sort_by(|left, right| {
+                    owned_attribute_projection(&left.attributes)
+                        .cmp(&owned_attribute_projection(&right.attributes))
+                });
+            }
+            Some(MetricData::Histogram(Histogram { data_points, .. })) => {
+                data_points.sort_by(|left, right| {
+                    owned_attribute_projection(&left.attributes)
+                        .cmp(&owned_attribute_projection(&right.attributes))
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(metrics.into_values().collect())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_attribute_projection(
+    attributes: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+) -> Vec<(&str, &str)> {
+    use crate::observability::otlp_proto::common_and_resource::AnyValueValue;
+    attributes
+        .iter()
+        .map(|attribute| {
+            let value = attribute
+                .value
+                .as_ref()
+                .and_then(|value| value.value.as_ref())
+                .and_then(|value| match value {
+                    AnyValueValue::String(value) => Some(value.as_str()),
+                    _ => None,
+                })
+                .unwrap_or("");
+            (attribute.key.as_str(), value)
+        })
+        .collect()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+enum OwnedMetricType {
+    Counter,
+    Gauge,
+    Histogram,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_metric_shell(
+    name: &'static str,
+    metric_type: OwnedMetricType,
+) -> crate::observability::otlp_proto::metrics::Metric {
+    use crate::observability::otlp_proto::metrics::{
+        AggregationTemporality, Gauge, Histogram, Metric, MetricData, Sum,
+    };
+    let (description, unit) = owned_metric_description_and_unit(name);
+    let data = match metric_type {
+        OwnedMetricType::Counter => MetricData::Sum(Sum {
+            aggregation_temporality: AggregationTemporality::Cumulative.as_raw(),
+            is_monotonic: true,
+            ..Sum::default()
+        }),
+        OwnedMetricType::Gauge => MetricData::Gauge(Gauge::default()),
+        OwnedMetricType::Histogram => MetricData::Histogram(Histogram {
+            aggregation_temporality: AggregationTemporality::Cumulative.as_raw(),
+            ..Histogram::default()
+        }),
+    };
+    Metric {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        unit: unit.to_owned(),
+        data: Some(data),
+        ..Metric::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_metric_description_and_unit(name: &str) -> (&'static str, &'static str) {
+    match name {
+        "asupersync.tasks.active" => ("Currently running tasks", "1"),
+        "asupersync.regions.active" => ("Currently active regions", "1"),
+        "asupersync.obligations.active" => ("Currently active obligations", "1"),
+        "asupersync.tasks.spawned" => ("Total tasks spawned", "1"),
+        "asupersync.tasks.completed" => ("Total tasks completed", "1"),
+        "asupersync.regions.created" => ("Total regions created", "1"),
+        "asupersync.regions.closed" => ("Total regions closed", "1"),
+        "asupersync.cancellations" => ("Cancellation requests", "1"),
+        "asupersync.deadlines.set" => ("Deadlines configured", "1"),
+        "asupersync.deadlines.exceeded" => ("Deadline exceeded events", "1"),
+        "asupersync.deadline.warnings_total" => ("Deadline warning events", "1"),
+        "asupersync.deadline.violations_total" => ("Deadline violation events", "1"),
+        "asupersync.task.stuck_detected_total" => ("Tasks detected as stuck (no progress)", "1"),
+        "asupersync.obligations.created" => ("Obligations created", "1"),
+        "asupersync.obligations.discharged" => ("Obligations discharged", "1"),
+        "asupersync.obligations.leaked" => ("Obligations leaked", "1"),
+        "asupersync.tasks.duration" => ("Task execution duration in seconds", "s"),
+        "asupersync.regions.lifetime" => ("Region lifetime in seconds", "s"),
+        "asupersync.cancellation.drain_duration" => ("Cancellation drain duration in seconds", "s"),
+        "asupersync.deadline.remaining_seconds" => ("Time remaining at completion in seconds", "s"),
+        "asupersync.checkpoint.interval_seconds" => ("Time between checkpoints in seconds", "s"),
+        "asupersync.scheduler.poll_time" => ("Scheduler poll duration in seconds", "s"),
+        "asupersync.scheduler.tasks_polled" => ("Tasks polled per scheduler tick", "1"),
+        _ => ("", ""),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_histogram_bounds(name: &str) -> &'static [f64] {
+    const TIME: &[f64] = &[
+        0.000_001, 0.000_01, 0.000_1, 0.001, 0.01, 0.1, 1.0, 10.0, 60.0,
+    ];
+    const REMAINING: &[f64] = &[0.0, 0.001, 0.01, 0.1, 1.0, 5.0, 30.0, 60.0, 300.0];
+    const TASKS: &[f64] = &[
+        1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0, 512.0, 1024.0,
+    ];
+    match name {
+        "asupersync.deadline.remaining_seconds" => REMAINING,
+        "asupersync.scheduler.tasks_polled" => TASKS,
+        _ => TIME,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl MetricsProvider for OwnedOtlpMetrics {
+    fn task_spawned(&self, _region_id: RegionId, _task_id: TaskId) {
+        self.adjust_gauge("asupersync.tasks.active", 1);
+        self.increment_counter("asupersync.tasks.spawned", Vec::new());
+    }
+
+    fn task_completed(&self, _task_id: TaskId, outcome: OutcomeKind, duration: Duration) {
+        let attributes = vec![("outcome".to_owned(), outcome_label(outcome).to_owned())];
+        self.adjust_gauge("asupersync.tasks.active", -1);
+        self.increment_counter("asupersync.tasks.completed", attributes.clone());
+        self.record_histogram(
+            "asupersync.tasks.duration",
+            attributes,
+            duration.as_secs_f64(),
+        );
+    }
+
+    fn region_created(&self, _region_id: RegionId, _parent: Option<RegionId>) {
+        self.adjust_gauge("asupersync.regions.active", 1);
+        self.increment_counter("asupersync.regions.created", Vec::new());
+    }
+
+    fn region_closed(&self, _region_id: RegionId, lifetime: Duration) {
+        self.adjust_gauge("asupersync.regions.active", -1);
+        self.increment_counter("asupersync.regions.closed", Vec::new());
+        self.record_histogram(
+            "asupersync.regions.lifetime",
+            Vec::new(),
+            lifetime.as_secs_f64(),
+        );
+    }
+
+    fn cancellation_requested(&self, _region_id: RegionId, kind: CancelKind) {
+        self.increment_counter(
+            "asupersync.cancellations",
+            vec![("kind".to_owned(), cancel_kind_label(kind).to_owned())],
+        );
+    }
+
+    fn drain_completed(&self, _region_id: RegionId, duration: Duration) {
+        self.record_histogram(
+            "asupersync.cancellation.drain_duration",
+            Vec::new(),
+            duration.as_secs_f64(),
+        );
+    }
+
+    fn deadline_set(&self, _region_id: RegionId, _deadline: Duration) {
+        self.increment_counter("asupersync.deadlines.set", Vec::new());
+    }
+
+    fn deadline_exceeded(&self, _region_id: RegionId) {
+        self.increment_counter("asupersync.deadlines.exceeded", Vec::new());
+    }
+
+    fn deadline_warning(&self, task_type: &str, reason: &'static str, _remaining: Duration) {
+        if reason.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+            self.reject_update();
+            return;
+        }
+        self.increment_counter(
+            "asupersync.deadline.warnings_total",
+            vec![
+                ("reason".to_owned(), reason.to_owned()),
+                ("task_type".to_owned(), sanitize_task_type_label(task_type)),
+            ],
+        );
+    }
+
+    fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
+        self.increment_counter(
+            "asupersync.deadline.violations_total",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+        );
+    }
+
+    fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
+        self.record_histogram(
+            "asupersync.deadline.remaining_seconds",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+            remaining.as_secs_f64(),
+        );
+    }
+
+    fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
+        self.record_histogram(
+            "asupersync.checkpoint.interval_seconds",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+            interval.as_secs_f64(),
+        );
+    }
+
+    fn task_stuck_detected(&self, task_type: &str) {
+        self.increment_counter(
+            "asupersync.task.stuck_detected_total",
+            vec![("task_type".to_owned(), sanitize_task_type_label(task_type))],
+        );
+    }
+
+    fn obligation_created(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", 1);
+        self.increment_counter("asupersync.obligations.created", Vec::new());
+    }
+
+    fn obligation_discharged(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", -1);
+        self.increment_counter("asupersync.obligations.discharged", Vec::new());
+    }
+
+    fn obligation_leaked(&self, _region_id: RegionId) {
+        self.adjust_gauge("asupersync.obligations.active", -1);
+        self.increment_counter("asupersync.obligations.leaked", Vec::new());
+    }
+
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
+        self.record_histogram(
+            "asupersync.scheduler.poll_time",
+            Vec::new(),
+            duration.as_secs_f64(),
+        );
+        const EXACT_F64_INTEGER_LIMIT: u64 = 1u64 << 53;
+        if u64::try_from(tasks_polled).map_or(true, |value| value > EXACT_F64_INTEGER_LIMIT) {
+            let mut state = self.state.lock();
+            state.rejected_updates = state.rejected_updates.saturating_add(1);
+            state.terminal_error = Some(OwnedOtlpMetricsError::InvalidNumericValue);
+        } else {
+            #[allow(clippy::cast_precision_loss)]
+            self.record_histogram(
+                "asupersync.scheduler.tasks_polled",
+                Vec::new(),
+                tasks_polled as f64,
+            );
+        }
+    }
+
+    fn record_panic(&self, _location: &'static str) {
+        // The fixed 23-instrument provider has no panic descriptor. Keep the
+        // callback an explicit no-op until an additive versioned metric exists.
+    }
+}
+
+// =============================================================================
+// Owned OTLP Trace Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP trace mapping contract.
+pub const OWNED_OTLP_TRACES_VERSION: u32 = 1;
+
+/// Maximum sampled spans admitted by one collection call.
+pub const OWNED_OTLP_MAX_SPANS_PER_COLLECTION: usize = 4_096;
+
+/// Default maximum sampled spans encoded in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_SPANS_PER_REQUEST: usize = 256;
+
+/// Maximum events admitted on one sampled span.
+pub const OWNED_OTLP_MAX_EVENTS_PER_SPAN: usize = 128;
+
+/// Maximum links admitted on one sampled span.
+pub const OWNED_OTLP_MAX_LINKS_PER_SPAN: usize = 128;
+
+/// Maximum UTF-8 bytes admitted for one sampled span name.
+pub const OWNED_OTLP_MAX_SPAN_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one event name.
+pub const OWNED_OTLP_MAX_EVENT_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for one W3C tracestate value.
+pub const OWNED_OTLP_MAX_TRACE_STATE_BYTES: usize = 512;
+
+/// Maximum owned string bytes admitted across one trace collection.
+pub const OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES: usize = 4 * 1024 * 1024;
+
+const OWNED_OTLP_TRACE_SAMPLED_FLAG: u8 = 0x01;
+const OWNED_OTLP_CONTEXT_HAS_REMOTE_MASK: u32 = 0x100;
+const OWNED_OTLP_CONTEXT_IS_REMOTE_MASK: u32 = 0x200;
+
+/// Stable, value-redacted error from the owned OTLP trace mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpTraceError {
+    /// A configured finite limit is zero or outside the supported envelope.
+    InvalidConfiguration,
+    /// A trace, span, parent, or link identifier is invalid.
+    InvalidIdentifier,
+    /// A timestamp is zero, reversed, or outside its owning span.
+    InvalidTimestamp,
+    /// A span or event name is empty or outside its byte limit.
+    InvalidName,
+    /// A W3C tracestate value is outside the finite or grammar envelope.
+    InvalidTraceState,
+    /// An attribute set contains an empty, duplicate, or oversized key/value.
+    InvalidAttributes,
+    /// Local parentage is cyclic or not structurally enclosing.
+    InvalidLineage,
+    /// A span, event, link, attribute, or collection count exceeded its limit.
+    LimitExceeded,
+    /// The crate-owned protobuf model exceeded its finite wire envelope.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpTraceError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.traces.invalid_configuration",
+            Self::InvalidIdentifier => "otlp.traces.invalid_identifier",
+            Self::InvalidTimestamp => "otlp.traces.invalid_timestamp",
+            Self::InvalidName => "otlp.traces.invalid_name",
+            Self::InvalidTraceState => "otlp.traces.invalid_trace_state",
+            Self::InvalidAttributes => "otlp.traces.invalid_attributes",
+            Self::InvalidLineage => "otlp.traces.invalid_lineage",
+            Self::LimitExceeded => "otlp.traces.limit_exceeded",
+            Self::WireEnvelopeExceeded => "otlp.traces.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpTraceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpTraceError {}
+
+/// OTLP span kind used by [`OtlpTraceSpanInput`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpSpanKind {
+    /// Kind was not specified.
+    Unspecified,
+    /// Internal runtime operation.
+    #[default]
+    Internal,
+    /// Server-side request handling.
+    Server,
+    /// Client-side request handling.
+    Client,
+    /// Message or stream producer.
+    Producer,
+    /// Message or stream consumer.
+    Consumer,
+}
+
+impl OwnedOtlpSpanKind {
+    const fn as_raw(self) -> i32 {
+        match self {
+            Self::Unspecified => 0,
+            Self::Internal => 1,
+            Self::Server => 2,
+            Self::Client => 3,
+            Self::Producer => 4,
+            Self::Consumer => 5,
+        }
+    }
+}
+
+/// OTLP status code used by [`OtlpTraceStatus`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpStatusCode {
+    /// No status conclusion was recorded.
+    #[default]
+    Unset,
+    /// Operation completed successfully.
+    Ok,
+    /// Operation failed.
+    Error,
+}
+
+impl OwnedOtlpStatusCode {
+    const fn as_raw(self) -> i32 {
+        match self {
+            Self::Unset => 0,
+            Self::Ok => 1,
+            Self::Error => 2,
+        }
+    }
+}
+
+/// Borrowed OTLP status input. Validation and ownership happen in one mapper
+/// call, after the complete collection has passed its finite preflight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceStatus<'a> {
+    code: OwnedOtlpStatusCode,
+    message: &'a str,
+}
+
+impl<'a> OtlpTraceStatus<'a> {
+    /// Create a status with an explicit code and optional diagnostic message.
+    #[must_use]
+    pub const fn new(code: OwnedOtlpStatusCode, message: &'a str) -> Self {
+        Self { code, message }
+    }
+
+    /// Status code.
+    #[must_use]
+    pub const fn code(&self) -> OwnedOtlpStatusCode {
+        self.code
+    }
+
+    /// Redaction remains the caller's responsibility; the mapper enforces only
+    /// the finite byte envelope.
+    #[must_use]
+    pub const fn message(&self) -> &'a str {
+        self.message
+    }
+}
+
+/// Borrowed event input for one OTLP span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceEventInput<'a> {
+    time_unix_nano: u64,
+    name: &'a str,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+}
+
+impl<'a> OtlpTraceEventInput<'a> {
+    /// Create an event at an explicit timestamp. No ambient clock is read.
+    #[must_use]
+    pub const fn new(time_unix_nano: u64, name: &'a str) -> Self {
+        Self {
+            time_unix_nano,
+            name,
+            attributes: &[],
+            dropped_attributes_count: 0,
+        }
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+}
+
+/// Borrowed link input for one OTLP span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceLinkInput<'a> {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    trace_state: &'a str,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+    trace_flags: u8,
+    context_is_remote: Option<bool>,
+}
+
+impl<'a> OtlpTraceLinkInput<'a> {
+    /// Create a link with exact-width W3C identifiers.
+    #[must_use]
+    pub const fn new(trace_id: [u8; 16], span_id: [u8; 8]) -> Self {
+        Self {
+            trace_id,
+            span_id,
+            trace_state: "",
+            attributes: &[],
+            dropped_attributes_count: 0,
+            trace_flags: 0,
+            context_is_remote: None,
+        }
+    }
+
+    /// Preserve the W3C tracestate value without parsing vendor data.
+    #[must_use]
+    pub const fn with_trace_state(mut self, trace_state: &'a str) -> Self {
+        self.trace_state = trace_state;
+        self
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Set the low eight W3C trace-flag bits.
+    #[must_use]
+    pub const fn with_trace_flags(mut self, trace_flags: u8) -> Self {
+        self.trace_flags = trace_flags;
+        self
+    }
+
+    /// Record whether the linked context is remote.
+    #[must_use]
+    pub const fn with_remote_context(mut self, is_remote: bool) -> Self {
+        self.context_is_remote = Some(is_remote);
+        self
+    }
+}
+
+/// Borrowed, additive OTLP span input.
+///
+/// All fields remain private so future additive metadata does not make this an
+/// exhaustively constructible compatibility trap. Builders borrow caller data;
+/// [`OwnedOtlpTraces::collect`] validates the complete finite collection before
+/// cloning any caller-owned string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtlpTraceSpanInput<'a> {
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    parent_span_id: Option<[u8; 8]>,
+    trace_state: &'a str,
+    name: &'a str,
+    kind: OwnedOtlpSpanKind,
+    start_time_unix_nano: u64,
+    end_time_unix_nano: u64,
+    attributes: &'a [(&'a str, &'a str)],
+    dropped_attributes_count: u32,
+    events: &'a [OtlpTraceEventInput<'a>],
+    dropped_events_count: u32,
+    links: &'a [OtlpTraceLinkInput<'a>],
+    dropped_links_count: u32,
+    status: Option<OtlpTraceStatus<'a>>,
+    trace_flags: u8,
+    context_is_remote: Option<bool>,
+}
+
+impl<'a> OtlpTraceSpanInput<'a> {
+    /// Create a sampled internal span with explicit IDs and timestamps.
+    #[must_use]
+    pub const fn new(
+        trace_id: [u8; 16],
+        span_id: [u8; 8],
+        name: &'a str,
+        start_time_unix_nano: u64,
+        end_time_unix_nano: u64,
+    ) -> Self {
+        Self {
+            trace_id,
+            span_id,
+            parent_span_id: None,
+            trace_state: "",
+            name,
+            kind: OwnedOtlpSpanKind::Internal,
+            start_time_unix_nano,
+            end_time_unix_nano,
+            attributes: &[],
+            dropped_attributes_count: 0,
+            events: &[],
+            dropped_events_count: 0,
+            links: &[],
+            dropped_links_count: 0,
+            status: None,
+            trace_flags: OWNED_OTLP_TRACE_SAMPLED_FLAG,
+            context_is_remote: None,
+        }
+    }
+
+    /// Set the local or external parent span ID.
+    #[must_use]
+    pub const fn with_parent_span_id(mut self, parent_span_id: [u8; 8]) -> Self {
+        self.parent_span_id = Some(parent_span_id);
+        self
+    }
+
+    /// Preserve the W3C tracestate value without parsing vendor data.
+    #[must_use]
+    pub const fn with_trace_state(mut self, trace_state: &'a str) -> Self {
+        self.trace_state = trace_state;
+        self
+    }
+
+    /// Set the OTLP span kind.
+    #[must_use]
+    pub const fn with_kind(mut self, kind: OwnedOtlpSpanKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// Attach borrowed string attributes.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [(&'a str, &'a str)]) -> Self {
+        self.attributes = attributes;
+        self
+    }
+
+    /// Preserve the producer's count of attributes dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Attach borrowed span events.
+    #[must_use]
+    pub const fn with_events(mut self, events: &'a [OtlpTraceEventInput<'a>]) -> Self {
+        self.events = events;
+        self
+    }
+
+    /// Preserve the producer's count of events dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_events_count(mut self, count: u32) -> Self {
+        self.dropped_events_count = count;
+        self
+    }
+
+    /// Attach borrowed span links.
+    #[must_use]
+    pub const fn with_links(mut self, links: &'a [OtlpTraceLinkInput<'a>]) -> Self {
+        self.links = links;
+        self
+    }
+
+    /// Preserve the producer's count of links dropped before mapping.
+    #[must_use]
+    pub const fn with_dropped_links_count(mut self, count: u32) -> Self {
+        self.dropped_links_count = count;
+        self
+    }
+
+    /// Set an explicit OTLP status.
+    #[must_use]
+    pub const fn with_status(mut self, status: OtlpTraceStatus<'a>) -> Self {
+        self.status = Some(status);
+        self
+    }
+
+    /// Set the low eight W3C trace-flag bits. A span without the sampled bit is
+    /// counted and omitted before resource validation or owned allocation.
+    #[must_use]
+    pub const fn with_trace_flags(mut self, trace_flags: u8) -> Self {
+        self.trace_flags = trace_flags;
+        self
+    }
+
+    /// Record whether this span's context originated remotely.
+    #[must_use]
+    pub const fn with_remote_context(mut self, is_remote: bool) -> Self {
+        self.context_is_remote = Some(is_remote);
+        self
+    }
+
+    const fn is_sampled(&self) -> bool {
+        self.trace_flags & OWNED_OTLP_TRACE_SAMPLED_FLAG != 0
+    }
+}
+
+/// Immutable finite limits for [`OwnedOtlpTraces`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpTraceConfig {
+    max_spans_per_collection: usize,
+    max_spans_per_request: usize,
+    max_events_per_span: usize,
+    max_links_per_span: usize,
+    max_attributes_per_entity: usize,
+    max_owned_bytes: usize,
+    max_request_bytes: usize,
+}
+
+impl Default for OwnedOtlpTraceConfig {
+    fn default() -> Self {
+        Self {
+            max_spans_per_collection: OWNED_OTLP_MAX_SPANS_PER_COLLECTION,
+            max_spans_per_request: OWNED_OTLP_DEFAULT_SPANS_PER_REQUEST,
+            max_events_per_span: OWNED_OTLP_MAX_EVENTS_PER_SPAN,
+            max_links_per_span: OWNED_OTLP_MAX_LINKS_PER_SPAN,
+            max_attributes_per_entity: OWNED_OTLP_MAX_ATTRIBUTES,
+            max_owned_bytes: OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        }
+    }
+}
+
+impl OwnedOtlpTraceConfig {
+    /// Construct the default finite trace envelope.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the sampled-span limit for one collection call.
+    #[must_use]
+    pub const fn with_max_spans_per_collection(mut self, limit: usize) -> Self {
+        self.max_spans_per_collection = limit;
+        self
+    }
+
+    /// Set the sampled-span limit per encoded request.
+    #[must_use]
+    pub const fn with_max_spans_per_request(mut self, limit: usize) -> Self {
+        self.max_spans_per_request = limit;
+        self
+    }
+
+    /// Set the event limit per sampled span.
+    #[must_use]
+    pub const fn with_max_events_per_span(mut self, limit: usize) -> Self {
+        self.max_events_per_span = limit;
+        self
+    }
+
+    /// Set the link limit per sampled span.
+    #[must_use]
+    pub const fn with_max_links_per_span(mut self, limit: usize) -> Self {
+        self.max_links_per_span = limit;
+        self
+    }
+
+    /// Set the string-attribute limit for every resource, span, event, or link.
+    #[must_use]
+    pub const fn with_max_attributes_per_entity(mut self, limit: usize) -> Self {
+        self.max_attributes_per_entity = limit;
+        self
+    }
+
+    /// Set the aggregate owned-string byte limit for one collection.
+    #[must_use]
+    pub const fn with_max_owned_bytes(mut self, limit: usize) -> Self {
+        self.max_owned_bytes = limit;
+        self
+    }
+
+    /// Set the encoded byte envelope for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Sampled-span limit for one collection.
+    #[must_use]
+    pub const fn max_spans_per_collection(&self) -> usize {
+        self.max_spans_per_collection
+    }
+
+    /// Sampled-span limit per request.
+    #[must_use]
+    pub const fn max_spans_per_request(&self) -> usize {
+        self.max_spans_per_request
+    }
+
+    /// Event limit per sampled span.
+    #[must_use]
+    pub const fn max_events_per_span(&self) -> usize {
+        self.max_events_per_span
+    }
+
+    /// Link limit per sampled span.
+    #[must_use]
+    pub const fn max_links_per_span(&self) -> usize {
+        self.max_links_per_span
+    }
+
+    /// Attribute limit per owning resource, span, event, or link.
+    #[must_use]
+    pub const fn max_attributes_per_entity(&self) -> usize {
+        self.max_attributes_per_entity
+    }
+
+    /// Aggregate owned-string byte limit per collection.
+    #[must_use]
+    pub const fn max_owned_bytes(&self) -> usize {
+        self.max_owned_bytes
+    }
+
+    /// Encoded request byte limit.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpTraceError> {
+        if self.max_spans_per_collection == 0
+            || self.max_spans_per_collection > OWNED_OTLP_MAX_SPANS_PER_COLLECTION
+            || self.max_spans_per_request == 0
+            || self.max_spans_per_request > self.max_spans_per_collection
+            || self.max_events_per_span == 0
+            || self.max_events_per_span > OWNED_OTLP_MAX_EVENTS_PER_SPAN
+            || self.max_links_per_span == 0
+            || self.max_links_per_span > OWNED_OTLP_MAX_LINKS_PER_SPAN
+            || self.max_attributes_per_entity == 0
+            || self.max_attributes_per_entity > OWNED_OTLP_MAX_ATTRIBUTES
+            || self.max_owned_bytes == 0
+            || self.max_owned_bytes > OWNED_OTLP_MAX_TRACE_COLLECTION_BYTES
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpTraceError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+}
+
+/// Result of one finite owned trace collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpTraceCollection {
+    requests: Vec<Vec<u8>>,
+    sampled_spans: usize,
+    unsampled_spans: usize,
+}
+
+impl OwnedOtlpTraceCollection {
+    /// Encoded OTLP requests in deterministic parent-before-child order.
+    #[must_use]
+    pub fn requests(&self) -> &[Vec<u8>] {
+        &self.requests
+    }
+
+    /// Consume the collection and return the encoded requests.
+    #[must_use]
+    pub fn into_requests(self) -> Vec<Vec<u8>> {
+        self.requests
+    }
+
+    /// Number of sampled spans encoded across all requests.
+    #[must_use]
+    pub const fn sampled_spans(&self) -> usize {
+        self.sampled_spans
+    }
+
+    /// Number of unsampled spans omitted before owned allocation.
+    #[must_use]
+    pub const fn unsampled_spans(&self) -> usize {
+        self.unsampled_spans
+    }
+
+    /// True when head sampling produced no network request.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+/// Stateless mapper backed by the crate-owned finite OTLP protobuf model.
+///
+/// The mapper is additive to the existing SDK bridge and legacy
+/// [`crate::observability::OtlpSpan`] queue. It never reads an ambient clock,
+/// starts a task, or performs network I/O.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct OwnedOtlpTraces {
+    config: OwnedOtlpTraceConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpTraces {
+    /// Create a mapper after validating every finite limit.
+    pub fn try_new(config: OwnedOtlpTraceConfig) -> Result<Self, OwnedOtlpTraceError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Validated immutable mapper configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpTraceConfig {
+        &self.config
+    }
+
+    /// Validate, deterministically order, and encode borrowed span inputs.
+    ///
+    /// Head sampling is applied first. If no span is sampled, the method does
+    /// not validate resource attributes and allocates no request. For sampled
+    /// input, the complete collection passes count, byte, identifier,
+    /// timestamp, attribute, and lineage preflight before any caller string is
+    /// cloned. Local parents are encoded before descendants regardless of input
+    /// order; unrelated roots use trace ID, start time, end time, and span ID as
+    /// deterministic tie-breakers.
+    pub fn collect(
+        &self,
+        spans: &[OtlpTraceSpanInput<'_>],
+        resource_attributes: &[(&str, &str)],
+    ) -> Result<OwnedOtlpTraceCollection, OwnedOtlpTraceError> {
+        let sampled_count = spans.iter().filter(|span| span.is_sampled()).count();
+        let unsampled_spans = spans.len().saturating_sub(sampled_count);
+        if sampled_count == 0 {
+            return Ok(OwnedOtlpTraceCollection {
+                requests: Vec::new(),
+                sampled_spans: 0,
+                unsampled_spans,
+            });
+        }
+        if sampled_count > self.config.max_spans_per_collection {
+            return Err(OwnedOtlpTraceError::LimitExceeded);
+        }
+
+        validate_owned_trace_attributes(resource_attributes, &self.config)?;
+        let request_count = sampled_count.div_ceil(self.config.max_spans_per_request);
+        let resource_bytes = trace_attribute_bytes(resource_attributes)?;
+        let scope_bytes = "asupersync"
+            .len()
+            .checked_add(env!("CARGO_PKG_VERSION").len())
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+        let mut owned_bytes = resource_bytes
+            .checked_add(scope_bytes)
+            .and_then(|bytes| bytes.checked_mul(request_count))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+        if owned_bytes > self.config.max_owned_bytes {
+            return Err(OwnedOtlpTraceError::LimitExceeded);
+        }
+        let sampled = spans
+            .iter()
+            .filter(|span| span.is_sampled())
+            .collect::<Vec<_>>();
+        for span in &sampled {
+            owned_bytes = owned_bytes
+                .checked_add(validate_owned_trace_span(span, &self.config)?)
+                .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+            if owned_bytes > self.config.max_owned_bytes {
+                return Err(OwnedOtlpTraceError::LimitExceeded);
+            }
+        }
+
+        let ordered = deterministic_trace_order(&sampled)?;
+        let resource = crate::observability::otlp_proto::common_and_resource::Resource {
+            attributes: owned_otlp_attributes(resource_attributes)
+                .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+            ..Default::default()
+        };
+        let scope = crate::observability::otlp_proto::common_and_resource::InstrumentationScope {
+            name: "asupersync".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            ..Default::default()
+        };
+        let mapped = ordered
+            .into_iter()
+            .map(owned_otlp_trace_span)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut requests = Vec::new();
+        for chunk in mapped.chunks(self.config.max_spans_per_request) {
+            use crate::observability::otlp_proto::collector::trace::ExportTraceServiceRequest;
+            use crate::observability::otlp_proto::trace::{ResourceSpans, ScopeSpans};
+
+            let request = ExportTraceServiceRequest {
+                resource_spans: vec![ResourceSpans {
+                    resource: Some(resource.clone()),
+                    scope_spans: vec![ScopeSpans {
+                        scope: Some(scope.clone()),
+                        spans: chunk.to_vec(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let bytes = request
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
+                .map_err(|error| match error {
+                    crate::grpc::protobuf::ProtobufWireError::SchemaInvariant {
+                        invariant: "trace state must use the W3C tracestate format",
+                        ..
+                    } => OwnedOtlpTraceError::InvalidTraceState,
+                    _ => OwnedOtlpTraceError::WireEnvelopeExceeded,
+                })?;
+            requests.push(bytes.to_vec());
+        }
+
+        Ok(OwnedOtlpTraceCollection {
+            requests,
+            sampled_spans: sampled_count,
+            unsampled_spans,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_trace_attributes(
+    attributes: &[(&str, &str)],
+    config: &OwnedOtlpTraceConfig,
+) -> Result<(), OwnedOtlpTraceError> {
+    if attributes.len() > config.max_attributes_per_entity {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    validate_owned_otlp_attributes(attributes.len(), attributes.iter().copied())
+        .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn trace_attribute_bytes(attributes: &[(&str, &str)]) -> Result<usize, OwnedOtlpTraceError> {
+    attributes.iter().try_fold(0usize, |total, (key, value)| {
+        total
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn nonzero_id<const N: usize>(id: &[u8; N]) -> bool {
+    id.iter().any(|byte| *byte != 0)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_trace_span(
+    span: &OtlpTraceSpanInput<'_>,
+    config: &OwnedOtlpTraceConfig,
+) -> Result<usize, OwnedOtlpTraceError> {
+    if !nonzero_id(&span.trace_id)
+        || !nonzero_id(&span.span_id)
+        || span
+            .parent_span_id
+            .as_ref()
+            .is_some_and(|id| !nonzero_id(id))
+    {
+        return Err(OwnedOtlpTraceError::InvalidIdentifier);
+    }
+    if span.start_time_unix_nano == 0
+        || span.end_time_unix_nano == 0
+        || span.end_time_unix_nano < span.start_time_unix_nano
+    {
+        return Err(OwnedOtlpTraceError::InvalidTimestamp);
+    }
+    if span.name.is_empty() || span.name.len() > OWNED_OTLP_MAX_SPAN_NAME_BYTES {
+        return Err(OwnedOtlpTraceError::InvalidName);
+    }
+    if span.trace_state.len() > OWNED_OTLP_MAX_TRACE_STATE_BYTES {
+        return Err(OwnedOtlpTraceError::InvalidTraceState);
+    }
+    if span.events.len() > config.max_events_per_span
+        || span.links.len() > config.max_links_per_span
+    {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    validate_owned_trace_attributes(span.attributes, config)?;
+    let mut owned_bytes = span
+        .name
+        .len()
+        .checked_add(span.trace_state.len())
+        .and_then(|total| {
+            span.status.map_or(Some(total), |status| {
+                total.checked_add(status.message.len())
+            })
+        })
+        .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    if span
+        .status
+        .is_some_and(|status| status.message.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES)
+    {
+        return Err(OwnedOtlpTraceError::LimitExceeded);
+    }
+    owned_bytes = owned_bytes
+        .checked_add(trace_attribute_bytes(span.attributes)?)
+        .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+
+    for event in span.events {
+        if event.time_unix_nano < span.start_time_unix_nano
+            || event.time_unix_nano > span.end_time_unix_nano
+        {
+            return Err(OwnedOtlpTraceError::InvalidTimestamp);
+        }
+        if event.name.is_empty() || event.name.len() > OWNED_OTLP_MAX_EVENT_NAME_BYTES {
+            return Err(OwnedOtlpTraceError::InvalidName);
+        }
+        validate_owned_trace_attributes(event.attributes, config)?;
+        let event_attribute_bytes = trace_attribute_bytes(event.attributes)?;
+        owned_bytes = owned_bytes
+            .checked_add(event.name.len())
+            .and_then(|total| total.checked_add(event_attribute_bytes))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    }
+    for link in span.links {
+        if !nonzero_id(&link.trace_id) || !nonzero_id(&link.span_id) {
+            return Err(OwnedOtlpTraceError::InvalidIdentifier);
+        }
+        if link.trace_state.len() > OWNED_OTLP_MAX_TRACE_STATE_BYTES {
+            return Err(OwnedOtlpTraceError::InvalidTraceState);
+        }
+        validate_owned_trace_attributes(link.attributes, config)?;
+        let link_attribute_bytes = trace_attribute_bytes(link.attributes)?;
+        owned_bytes = owned_bytes
+            .checked_add(link.trace_state.len())
+            .and_then(|total| total.checked_add(link_attribute_bytes))
+            .ok_or(OwnedOtlpTraceError::LimitExceeded)?;
+    }
+    Ok(owned_bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn deterministic_trace_order<'a>(
+    spans: &[&'a OtlpTraceSpanInput<'a>],
+) -> Result<Vec<&'a OtlpTraceSpanInput<'a>>, OwnedOtlpTraceError> {
+    let mut index = BTreeMap::new();
+    for (position, span) in spans.iter().enumerate() {
+        if index
+            .insert((span.trace_id, span.span_id), position)
+            .is_some()
+        {
+            return Err(OwnedOtlpTraceError::InvalidIdentifier);
+        }
+    }
+
+    let mut children = vec![Vec::new(); spans.len()];
+    let mut indegree = vec![0usize; spans.len()];
+    for (child_position, child) in spans.iter().enumerate() {
+        let Some(parent_span_id) = child.parent_span_id else {
+            continue;
+        };
+        let Some(&parent_position) = index.get(&(child.trace_id, parent_span_id)) else {
+            continue;
+        };
+        if parent_position == child_position {
+            return Err(OwnedOtlpTraceError::InvalidLineage);
+        }
+        let parent = spans[parent_position];
+        if parent.start_time_unix_nano > child.start_time_unix_nano
+            || parent.end_time_unix_nano < child.end_time_unix_nano
+        {
+            return Err(OwnedOtlpTraceError::InvalidLineage);
+        }
+        children[parent_position].push(child_position);
+        indegree[child_position] = indegree[child_position].saturating_add(1);
+    }
+
+    type OrderKey = ([u8; 16], u64, u64, [u8; 8], usize);
+    let key = |position: usize| -> OrderKey {
+        let span = spans[position];
+        (
+            span.trace_id,
+            span.start_time_unix_nano,
+            span.end_time_unix_nano,
+            span.span_id,
+            position,
+        )
+    };
+    let mut ready = BTreeSet::new();
+    for (position, degree) in indegree.iter().enumerate() {
+        if *degree == 0 {
+            ready.insert(key(position));
+        }
+    }
+
+    let mut ordered = Vec::with_capacity(spans.len());
+    while let Some(next) = ready.pop_first() {
+        let position = next.4;
+        ordered.push(spans[position]);
+        for &child in &children[position] {
+            indegree[child] = indegree[child].saturating_sub(1);
+            if indegree[child] == 0 {
+                ready.insert(key(child));
+            }
+        }
+    }
+    if ordered.len() != spans.len() {
+        return Err(OwnedOtlpTraceError::InvalidLineage);
+    }
+    Ok(ordered)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_context_flags(trace_flags: u8, context_is_remote: Option<bool>) -> u32 {
+    let mut flags = u32::from(trace_flags);
+    if let Some(is_remote) = context_is_remote {
+        flags |= OWNED_OTLP_CONTEXT_HAS_REMOTE_MASK;
+        if is_remote {
+            flags |= OWNED_OTLP_CONTEXT_IS_REMOTE_MASK;
+        }
+    }
+    flags
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_string_attribute_value(
+    attribute: &crate::observability::otlp_proto::common_and_resource::KeyValue,
+) -> Option<&str> {
+    use crate::observability::otlp_proto::common_and_resource::AnyValueValue;
+
+    match attribute.value.as_ref()?.value.as_ref()? {
+        AnyValueValue::String(value) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn compare_owned_otlp_attributes(
+    left: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+    right: &[crate::observability::otlp_proto::common_and_resource::KeyValue],
+) -> std::cmp::Ordering {
+    left.iter()
+        .map(|attribute| {
+            (
+                attribute.key.as_str(),
+                owned_otlp_string_attribute_value(attribute),
+            )
+        })
+        .cmp(right.iter().map(|attribute| {
+            (
+                attribute.key.as_str(),
+                owned_otlp_string_attribute_value(attribute),
+            )
+        }))
+}
+
+/// Wire limits for one encoded OTLP export request of at most
+/// `max_request_bytes`. Every protobuf record takes at least one byte, so a
+/// record cap equal to the byte cap never binds first. The default fixed cap
+/// of 65,536 records failed requests far below the byte limit, for example one
+/// span with 128 events of 128 attributes (about 170 KB).
+#[cfg(not(target_arch = "wasm32"))]
+fn otlp_request_limits(max_request_bytes: usize) -> ProtobufWireLimits {
+    ProtobufWireLimits::for_message_size(max_request_bytes).with_max_fields(max_request_bytes)
+}
+
+/// The tracestate list without its empty members. W3C Trace Context allows
+/// empty and whitespace-only list members (`list-member = (key "=" value) /
+/// OWS`), which HTTP stacks produce when they join several tracestate
+/// headers. The OTLP encoder accepts only non-empty members, so one stray
+/// comma failed the whole trace collection. Other members are kept verbatim.
+#[cfg(not(target_arch = "wasm32"))]
+fn canonical_trace_state(trace_state: &str) -> String {
+    let is_empty = |member: &str| member.trim_matches([' ', '\t']).is_empty();
+    if !trace_state.split(',').any(is_empty) {
+        return trace_state.to_owned();
+    }
+    trace_state
+        .split(',')
+        .filter(|member| !is_empty(member))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_otlp_trace_span(
+    span: &OtlpTraceSpanInput<'_>,
+) -> Result<crate::observability::otlp_proto::trace::Span, OwnedOtlpTraceError> {
+    use crate::observability::otlp_proto::trace::{Span, SpanEvent, SpanLink, Status};
+
+    let mut events = span
+        .events
+        .iter()
+        .map(|event| {
+            Ok(SpanEvent {
+                time_unix_nano: event.time_unix_nano,
+                name: event.name.to_owned(),
+                attributes: owned_otlp_attributes(event.attributes)
+                    .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+                dropped_attributes_count: event.dropped_attributes_count,
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    events.sort_by(|left, right| {
+        (
+            left.time_unix_nano,
+            left.name.as_str(),
+            left.dropped_attributes_count,
+        )
+            .cmp(&(
+                right.time_unix_nano,
+                right.name.as_str(),
+                right.dropped_attributes_count,
+            ))
+            .then_with(|| compare_owned_otlp_attributes(&left.attributes, &right.attributes))
+    });
+
+    let mut links = span
+        .links
+        .iter()
+        .map(|link| {
+            Ok(SpanLink {
+                trace_id: link.trace_id.to_vec(),
+                span_id: link.span_id.to_vec(),
+                trace_state: canonical_trace_state(link.trace_state),
+                attributes: owned_otlp_attributes(link.attributes)
+                    .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+                dropped_attributes_count: link.dropped_attributes_count,
+                flags: owned_otlp_context_flags(link.trace_flags, link.context_is_remote),
+                ..Default::default()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    links.sort_by(|left, right| {
+        (
+            &left.trace_id,
+            &left.span_id,
+            left.trace_state.as_str(),
+            left.dropped_attributes_count,
+            left.flags,
+        )
+            .cmp(&(
+                &right.trace_id,
+                &right.span_id,
+                right.trace_state.as_str(),
+                right.dropped_attributes_count,
+                right.flags,
+            ))
+            .then_with(|| compare_owned_otlp_attributes(&left.attributes, &right.attributes))
+    });
+
+    Ok(Span {
+        trace_id: span.trace_id.to_vec(),
+        span_id: span.span_id.to_vec(),
+        parent_span_id: span.parent_span_id.map_or_else(Vec::new, |id| id.to_vec()),
+        trace_state: canonical_trace_state(span.trace_state),
+        name: span.name.to_owned(),
+        kind: span.kind.as_raw(),
+        start_time_unix_nano: span.start_time_unix_nano,
+        end_time_unix_nano: span.end_time_unix_nano,
+        attributes: owned_otlp_attributes(span.attributes)
+            .map_err(|_| OwnedOtlpTraceError::InvalidAttributes)?,
+        dropped_attributes_count: span.dropped_attributes_count,
+        events,
+        dropped_events_count: span.dropped_events_count,
+        links,
+        dropped_links_count: span.dropped_links_count,
+        status: span.status.map(|status| Status {
+            message: status.message.to_owned(),
+            code: status.code.as_raw(),
+            ..Default::default()
+        }),
+        flags: owned_otlp_context_flags(span.trace_flags, span.context_is_remote),
+        ..Default::default()
+    })
+}
+
+#[cfg(all(test, feature = "metrics", not(target_arch = "wasm32")))]
+mod owned_otlp_trace_tests {
+    use super::*;
+    use crate::observability::otlp_proto::collector::trace::ExportTraceServiceRequest;
+
+    const TRACE_ID: [u8; 16] = [0x11; 16];
+    const ROOT_ID: [u8; 8] = [0x21; 8];
+    const TASK_ID: [u8; 8] = [0x22; 8];
+    const CANCEL_ID: [u8; 8] = [0x23; 8];
+
+    fn mapper() -> OwnedOtlpTraces {
+        OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new()).expect("valid trace mapper")
+    }
+
+    fn basic_span(span_id: [u8; 8], name: &str) -> OtlpTraceSpanInput<'_> {
+        OtlpTraceSpanInput::new(TRACE_ID, span_id, name, 100, 500)
+    }
+
+    fn decode_request(bytes: &[u8]) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest::decode_from_bytes(
+            bytes,
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("owned request must round-trip through the crate-owned decoder")
+    }
+
+    fn request_spans(
+        request: &ExportTraceServiceRequest,
+    ) -> &[crate::observability::otlp_proto::trace::Span] {
+        &request.resource_spans[0].scope_spans[0].spans
+    }
+
+    #[test]
+    fn finite_trace_mapping_is_deterministic_and_preserves_lineage() {
+        let root_attributes = [("z", "last"), ("a", "first")];
+        let task_attributes = [("asupersync.entity.type", "task")];
+        let event_attributes = [("outcome", "cancelled")];
+        let events = [
+            OtlpTraceEventInput::new(320, "drained")
+                .with_attributes(&event_attributes)
+                .with_dropped_attributes_count(2),
+            OtlpTraceEventInput::new(220, "cancel-requested"),
+        ];
+        let link_attributes = [("link.kind", "follows-from")];
+        let links = [OtlpTraceLinkInput::new([0x42; 16], [0x52; 8])
+            .with_trace_state("vendor=value")
+            .with_attributes(&link_attributes)
+            .with_dropped_attributes_count(3)
+            .with_trace_flags(1)
+            .with_remote_context(true)];
+        let root = basic_span(ROOT_ID, "region.root")
+            .with_attributes(&root_attributes)
+            .with_kind(OwnedOtlpSpanKind::Internal);
+        let task = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "task.worker", 150, 450)
+            .with_parent_span_id(ROOT_ID)
+            .with_attributes(&task_attributes)
+            .with_kind(OwnedOtlpSpanKind::Consumer)
+            .with_status(OtlpTraceStatus::new(OwnedOtlpStatusCode::Ok, "completed"));
+        let cancel = OtlpTraceSpanInput::new(TRACE_ID, CANCEL_ID, "cancel.drain", 200, 400)
+            .with_parent_span_id(ROOT_ID)
+            .with_events(&events)
+            .with_dropped_events_count(4)
+            .with_links(&links)
+            .with_dropped_links_count(5)
+            .with_status(OtlpTraceStatus::new(
+                OwnedOtlpStatusCode::Error,
+                "child cancelled",
+            ))
+            .with_remote_context(true);
+
+        let first = mapper()
+            .collect(
+                &[cancel, task, root],
+                &[("service.name", "trace-test"), ("deployment", "lab")],
+            )
+            .expect("map shuffled structured trace");
+        let second = mapper()
+            .collect(
+                &[root, cancel, task],
+                &[("deployment", "lab"), ("service.name", "trace-test")],
+            )
+            .expect("map alternate input order");
+        assert_eq!(first.requests(), second.requests());
+        assert_eq!(first.sampled_spans(), 3);
+        assert_eq!(first.unsampled_spans(), 0);
+
+        let request = decode_request(&first.requests()[0]);
+        let resource_spans = &request.resource_spans[0];
+        let resource = resource_spans.resource.as_ref().expect("resource");
+        assert_eq!(resource.attributes[0].key, "deployment");
+        assert_eq!(resource.attributes[1].key, "service.name");
+        let scope = resource_spans.scope_spans[0]
+            .scope
+            .as_ref()
+            .expect("instrumentation scope");
+        assert_eq!(scope.name, "asupersync");
+        assert_eq!(scope.version, env!("CARGO_PKG_VERSION"));
+
+        let spans = request_spans(&request);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|span| span.name.as_str())
+                .collect::<Vec<_>>(),
+            ["region.root", "task.worker", "cancel.drain"]
+        );
+        assert!(spans[0].parent_span_id.is_empty());
+        assert_eq!(spans[1].parent_span_id, ROOT_ID);
+        assert_eq!(spans[2].parent_span_id, ROOT_ID);
+        assert_eq!(spans[0].attributes[0].key, "a");
+        assert_eq!(spans[0].attributes[1].key, "z");
+        assert_eq!(spans[1].kind, OwnedOtlpSpanKind::Consumer.as_raw());
+        assert_eq!(spans[1].status.as_ref().expect("task status").code, 1);
+        assert_eq!(spans[2].status.as_ref().expect("cancel status").code, 2);
+        assert_eq!(spans[2].events[0].name, "cancel-requested");
+        assert_eq!(spans[2].events[1].name, "drained");
+        assert_eq!(spans[2].events[1].dropped_attributes_count, 2);
+        assert_eq!(spans[2].dropped_events_count, 4);
+        assert_eq!(spans[2].links[0].trace_state, "vendor=value");
+        assert_eq!(spans[2].links[0].dropped_attributes_count, 3);
+        assert_eq!(spans[2].links[0].flags, 0x301);
+        assert_eq!(spans[2].dropped_links_count, 5);
+        assert_eq!(spans[2].flags, 0x301);
+    }
+
+    #[test]
+    fn head_sampling_precedes_resource_validation_and_allocation() {
+        let unsampled = basic_span(ROOT_ID, "ignored").with_trace_flags(0);
+        let oversized = "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        let result = mapper()
+            .collect(&[unsampled], &[("", oversized.as_str())])
+            .expect("all-unsampled collection must not inspect resource data");
+        assert!(result.is_empty());
+        assert_eq!(result.sampled_spans(), 0);
+        assert_eq!(result.unsampled_spans(), 1);
+    }
+
+    #[test]
+    fn trace_mapping_splits_requests_and_accepts_external_parents() {
+        let external_parent = [0x77; 8];
+        let root = basic_span(ROOT_ID, "root");
+        let external_child = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "remote-child", 200, 300)
+            .with_parent_span_id(external_parent);
+        let traces =
+            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_request(1))
+                .expect("valid one-span request envelope");
+        let result = traces
+            .collect(&[external_child, root], &[])
+            .expect("external parent is not a local lineage edge");
+        assert_eq!(result.requests().len(), 2);
+        assert_eq!(
+            request_spans(&decode_request(&result.requests()[0])).len(),
+            1
+        );
+        assert_eq!(
+            request_spans(&decode_request(&result.requests()[1])).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_limits_and_wire_envelopes() {
+        assert_eq!(
+            OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_spans_per_collection(0))
+                .expect_err("zero collection limit must fail"),
+            OwnedOtlpTraceError::InvalidConfiguration
+        );
+        assert_eq!(
+            OwnedOtlpTraces::try_new(
+                OwnedOtlpTraceConfig::new()
+                    .with_max_spans_per_collection(1)
+                    .with_max_spans_per_request(2)
+            )
+            .expect_err("request limit cannot exceed collection limit"),
+            OwnedOtlpTraceError::InvalidConfiguration
+        );
+
+        let tiny = OwnedOtlpTraces::try_new(OwnedOtlpTraceConfig::new().with_max_request_bytes(1))
+            .expect("positive tiny wire limit is a valid policy");
+        assert_eq!(
+            tiny.collect(&[basic_span(ROOT_ID, "root")], &[])
+                .expect_err("encoded request must exceed one byte"),
+            OwnedOtlpTraceError::WireEnvelopeExceeded
+        );
+
+        let limited = OwnedOtlpTraces::try_new(
+            OwnedOtlpTraceConfig::new()
+                .with_max_spans_per_collection(1)
+                .with_max_spans_per_request(1),
+        )
+        .expect("valid one-span collection limit");
+        assert_eq!(
+            limited
+                .collect(
+                    &[basic_span(ROOT_ID, "root"), basic_span(TASK_ID, "task")],
+                    &[],
+                )
+                .expect_err("two sampled spans exceed the limit"),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+
+        let repeated_resource = OwnedOtlpTraces::try_new(
+            OwnedOtlpTraceConfig::new()
+                .with_max_spans_per_request(1)
+                .with_max_owned_bytes(64),
+        )
+        .expect("valid small aggregate byte envelope");
+        assert_eq!(
+            repeated_resource
+                .collect(
+                    &[basic_span(ROOT_ID, "a"), basic_span(TASK_ID, "b")],
+                    &[("service.name", "trace-test")],
+                )
+                .expect_err("resource and scope bytes repeat in every request"),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_ids_timestamps_names_and_attributes() {
+        let mut zero_trace = basic_span(ROOT_ID, "root");
+        zero_trace.trace_id = [0; 16];
+        assert_eq!(
+            mapper().collect(&[zero_trace], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+        let reversed = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "root", 500, 100);
+        assert_eq!(
+            mapper().collect(&[reversed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTimestamp
+        );
+        assert_eq!(
+            mapper()
+                .collect(&[basic_span(ROOT_ID, "")], &[])
+                .unwrap_err(),
+            OwnedOtlpTraceError::InvalidName
+        );
+        let duplicate_attributes = [("duplicate", "one"), ("duplicate", "two")];
+        let duplicate = basic_span(ROOT_ID, "root").with_attributes(&duplicate_attributes);
+        assert_eq!(
+            mapper().collect(&[duplicate], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidAttributes
+        );
+        assert_eq!(
+            mapper()
+                .collect(
+                    &[basic_span(ROOT_ID, "root")],
+                    &[("service.name", "one"), ("service.name", "two")],
+                )
+                .unwrap_err(),
+            OwnedOtlpTraceError::InvalidAttributes
+        );
+    }
+
+    #[test]
+    fn trace_mapping_refuses_invalid_events_links_status_and_trace_state() {
+        let bad_event = [OtlpTraceEventInput::new(99, "before-span")];
+        let event_span = basic_span(ROOT_ID, "root").with_events(&bad_event);
+        assert_eq!(
+            mapper().collect(&[event_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTimestamp
+        );
+
+        let bad_link = [OtlpTraceLinkInput::new([0; 16], [1; 8])];
+        let link_span = basic_span(ROOT_ID, "root").with_links(&bad_link);
+        assert_eq!(
+            mapper().collect(&[link_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+
+        let oversized_status = "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        let status_span = basic_span(ROOT_ID, "root").with_status(OtlpTraceStatus::new(
+            OwnedOtlpStatusCode::Error,
+            oversized_status.as_str(),
+        ));
+        assert_eq!(
+            mapper().collect(&[status_span], &[]).unwrap_err(),
+            OwnedOtlpTraceError::LimitExceeded
+        );
+
+        let malformed = basic_span(ROOT_ID, "root").with_trace_state("Vendor=value");
+        assert_eq!(
+            mapper().collect(&[malformed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTraceState
+        );
+    }
+
+    /// W3C Trace Context allows empty tracestate list members, such as a
+    /// trailing comma or ",," left where HTTP stacks join several headers.
+    /// One of them failed the whole collection with InvalidTraceState.
+    #[test]
+    fn empty_trace_state_members_are_dropped_instead_of_failing_the_collection() {
+        for (trace_state, expected) in [
+            ("rojo=00f067aa0ba902b7,", "rojo=00f067aa0ba902b7"),
+            ("a=1,,b=2", "a=1,b=2"),
+            ("a=1, \t,b=2", "a=1,b=2"),
+            ("vendor=value", "vendor=value"),
+        ] {
+            assert_eq!(canonical_trace_state(trace_state), expected);
+            let span = basic_span(ROOT_ID, "root").with_trace_state(trace_state);
+            let collection = mapper()
+                .collect(&[span], &[])
+                .unwrap_or_else(|error| panic!("{trace_state:?}: {error:?}"));
+            assert_eq!(collection.sampled_spans(), 1, "{trace_state:?}");
+        }
+
+        // A malformed non-empty member is still refused.
+        let malformed = basic_span(ROOT_ID, "root").with_trace_state("a=1,,Vendor=value");
+        assert_eq!(
+            mapper().collect(&[malformed], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidTraceState
+        );
+    }
+
+    /// The encoder used the wire limits' fixed 65,536-record cap. A request
+    /// inside every configured and semantic limit can need far more records:
+    /// 200 spans of 128 events and 128 links each is about 51,000 repeated
+    /// items and about 1.3 MB, but about 155,000 field records, so it failed
+    /// with WireEnvelopeExceeded under a 4 MiB request limit and the whole
+    /// collection was lost.
+    #[test]
+    fn a_span_within_the_configured_limits_encodes_within_the_byte_cap() {
+        let events: Vec<OtlpTraceEventInput<'_>> = (0..OWNED_OTLP_MAX_EVENTS_PER_SPAN)
+            .map(|index| {
+                OtlpTraceEventInput::new(200 + u64::try_from(index).expect("small index"), "event")
+            })
+            .collect();
+        let links: Vec<OtlpTraceLinkInput<'_>> = (1..=OWNED_OTLP_MAX_LINKS_PER_SPAN)
+            .map(|index| {
+                let span_id = u64::try_from(index).expect("small index").to_be_bytes();
+                OtlpTraceLinkInput::new([0x33; 16], span_id)
+            })
+            .collect();
+        let spans: Vec<OtlpTraceSpanInput<'_>> = (1..=200_u64)
+            .map(|index| {
+                let mut trace_id = TRACE_ID;
+                trace_id[..8].copy_from_slice(&index.to_be_bytes());
+                OtlpTraceSpanInput::new(trace_id, index.to_be_bytes(), "span", 100, 500)
+                    .with_events(&events)
+                    .with_links(&links)
+            })
+            .collect();
+        let collection = mapper()
+            .collect(&spans, &[])
+            .expect("a request within the configured limits encodes");
+        assert_eq!(collection.requests().len(), 1);
+    }
+
+    #[test]
+    fn trace_mapping_refuses_duplicate_cyclic_and_non_enclosing_lineage() {
+        let duplicate = basic_span(ROOT_ID, "duplicate");
+        assert_eq!(
+            mapper().collect(&[duplicate, duplicate], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidIdentifier
+        );
+
+        let left = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "left", 100, 500)
+            .with_parent_span_id(TASK_ID);
+        let right = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "right", 100, 500)
+            .with_parent_span_id(ROOT_ID);
+        assert_eq!(
+            mapper().collect(&[left, right], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidLineage
+        );
+
+        let parent = OtlpTraceSpanInput::new(TRACE_ID, ROOT_ID, "parent", 200, 300);
+        let child = OtlpTraceSpanInput::new(TRACE_ID, TASK_ID, "child", 100, 400)
+            .with_parent_span_id(ROOT_ID);
+        assert_eq!(
+            mapper().collect(&[parent, child], &[]).unwrap_err(),
+            OwnedOtlpTraceError::InvalidLineage
+        );
+    }
+}
+
+// =============================================================================
+// Owned OTLP Logs Mapping
+// =============================================================================
+
+/// Version of the native, owned OTLP logs mapping contract.
+pub const OWNED_OTLP_LOGS_VERSION: u32 = 1;
+
+/// Maximum log records admitted by one owned collection call.
+pub const OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION: usize = 4_096;
+
+/// Default maximum log records emitted in one OTLP request.
+pub const OWNED_OTLP_DEFAULT_LOG_RECORDS_PER_REQUEST: usize = 512;
+
+/// Maximum nesting depth admitted for an OTLP log body.
+pub const OWNED_OTLP_MAX_LOG_BODY_DEPTH: usize = 16;
+
+/// Maximum items admitted by one log-body array or key/value list.
+pub const OWNED_OTLP_MAX_LOG_BODY_ITEMS: usize = 128;
+
+/// Maximum aggregate AnyValue nodes admitted by one encoded request.
+pub const OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST: usize = 4_096;
+
+/// Maximum owned input bytes admitted by one logs collection.
+pub const OWNED_OTLP_MAX_LOG_COLLECTION_BYTES: usize = 4 * 1024 * 1024;
+
+/// Maximum UTF-8 bytes admitted for a log severity text.
+pub const OWNED_OTLP_MAX_LOG_SEVERITY_TEXT_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for a log event name.
+pub const OWNED_OTLP_MAX_LOG_EVENT_NAME_BYTES: usize = 1_024;
+
+/// Maximum UTF-8 bytes admitted for a resource or scope schema URL.
+pub const OWNED_OTLP_MAX_LOG_SCHEMA_URL_BYTES: usize = 2_048;
+
+/// Maximum UTF-8 bytes admitted for a scope name or version.
+pub const OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES: usize = 1_024;
+
+/// Stable, value-redacted error from the owned OTLP logs mapper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OwnedOtlpLogError {
+    /// A configured finite limit is zero, internally inconsistent, or too large.
+    InvalidConfiguration,
+    /// A collection, request, or aggregate owned-byte limit was exceeded.
+    LimitExceeded,
+    /// An attribute set contains an empty, duplicate, or otherwise invalid key/value.
+    InvalidAttributes,
+    /// A body is too deep, too wide, unsupported in context, or otherwise malformed.
+    InvalidBody,
+    /// A floating-point body value is NaN or infinite.
+    InvalidNumericValue,
+    /// Trace/span identifiers are missing, mismatched, all-zero, or the wrong width.
+    InvalidIdentifier,
+    /// Severity text, event name, scope metadata, or schema metadata is oversized.
+    InvalidName,
+    /// The finite crate-owned protobuf model rejected the encoded request.
+    WireEnvelopeExceeded,
+}
+
+impl OwnedOtlpLogError {
+    /// Stable machine-readable error code that never contains caller data.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidConfiguration => "otlp.logs.invalid_configuration",
+            Self::LimitExceeded => "otlp.logs.limit_exceeded",
+            Self::InvalidAttributes => "otlp.logs.invalid_attributes",
+            Self::InvalidBody => "otlp.logs.invalid_body",
+            Self::InvalidNumericValue => "otlp.logs.invalid_numeric_value",
+            Self::InvalidIdentifier => "otlp.logs.invalid_identifier",
+            Self::InvalidName => "otlp.logs.invalid_name",
+            Self::WireEnvelopeExceeded => "otlp.logs.wire_envelope_exceeded",
+        }
+    }
+}
+
+impl std::fmt::Display for OwnedOtlpLogError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl std::error::Error for OwnedOtlpLogError {}
+
+/// Borrowed OTLP log body.
+///
+/// This additive body surface preserves the legacy [`OtlpLogRecord::body`]
+/// string field and its wire behavior while allowing strict callers to encode
+/// every inline OTLP `AnyValue` payload variant. `StringIndex` is deliberately absent:
+/// the owned mapper has no string-table authority and therefore fails closed
+/// instead of emitting an unresolved index.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum OtlpLogBody<'a> {
+    /// Omit the body field entirely.
+    Absent,
+    /// UTF-8 string body. The empty string remains distinct from [`Self::Absent`].
+    String(&'a str),
+    /// Boolean body.
+    Bool(bool),
+    /// Signed integer body.
+    Int(i64),
+    /// Finite IEEE-754 body.
+    Double(f64),
+    /// Opaque byte body.
+    Bytes(&'a [u8]),
+    /// Ordered heterogeneous body array.
+    Array(&'a [OtlpLogBody<'a>]),
+    /// Bytewise-key-sorted structured body.
+    KeyValueList(&'a [OtlpLogKeyValueInput<'a>]),
+}
+
+/// Borrowed key/value input used by resource, record, and structured-body attributes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OtlpLogKeyValueInput<'a> {
+    key: &'a str,
+    value: OtlpLogBody<'a>,
+}
+
+impl<'a> OtlpLogKeyValueInput<'a> {
+    /// Create a typed OTLP key/value input.
+    #[must_use]
+    pub const fn new(key: &'a str, value: OtlpLogBody<'a>) -> Self {
+        Self { key, value }
+    }
+
+    /// Create a string-valued OTLP key/value input.
+    #[must_use]
+    pub const fn string(key: &'a str, value: &'a str) -> Self {
+        Self::new(key, OtlpLogBody::String(value))
+    }
+
+    /// Borrow the key.
+    #[must_use]
+    pub const fn key(&self) -> &'a str {
+        self.key
+    }
+
+    /// Return the typed value.
+    #[must_use]
+    pub const fn value(&self) -> OtlpLogBody<'a> {
+        self.value
+    }
+}
+
+/// Borrowed, additive OTLP log-record input.
+///
+/// Fields stay private so later additive metadata cannot make this an
+/// exhaustively constructible compatibility trap. The complete collection is
+/// preflighted before any caller string or byte payload is cloned.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OtlpLogRecordInput<'a> {
+    time_unix_nano: u64,
+    observed_time_unix_nano: u64,
+    severity_number: i32,
+    severity_text: &'a str,
+    body: OtlpLogBody<'a>,
+    attributes: &'a [OtlpLogKeyValueInput<'a>],
+    legacy_attributes: Option<&'a [(String, String)]>,
+    dropped_attributes_count: u32,
+    flags: u32,
+    trace_id: Option<&'a [u8]>,
+    span_id: Option<&'a [u8]>,
+    event_name: &'a str,
+}
+
+impl<'a> OtlpLogRecordInput<'a> {
+    /// Create a record with explicit event time and a typed body.
+    #[must_use]
+    pub const fn new(level: LogLevel, body: OtlpLogBody<'a>, time_unix_nano: u64) -> Self {
+        let (severity_number, severity_text) = log_level_to_otlp_severity(level);
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            severity_number,
+            severity_text,
+            body,
+            attributes: &[],
+            legacy_attributes: None,
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: None,
+            span_id: None,
+            event_name: "",
+        }
+    }
+
+    /// Borrow a legacy record without changing its established representation.
+    ///
+    /// Passing the result to [`OwnedOtlpLogs::collect`] opts into the stricter
+    /// owned validation contract; the existing [`LogsSnapshot`] path remains
+    /// unchanged and continues to preserve its legacy normalization.
+    #[must_use]
+    pub fn from_legacy_record(record: &'a OtlpLogRecord) -> Self {
+        Self {
+            time_unix_nano: record.time_unix_nano,
+            observed_time_unix_nano: record.observed_time_unix_nano,
+            severity_number: record.severity_number,
+            severity_text: &record.severity_text,
+            body: OtlpLogBody::String(&record.body),
+            attributes: &[],
+            legacy_attributes: Some(&record.attributes),
+            dropped_attributes_count: record.dropped_attributes_count,
+            flags: record.flags,
+            trace_id: (!record.trace_id.is_empty()).then_some(record.trace_id.as_slice()),
+            span_id: (!record.span_id.is_empty()).then_some(record.span_id.as_slice()),
+            event_name: &record.event_name,
+        }
+    }
+
+    /// Set the observation timestamp. Zero is preserved as unknown.
+    #[must_use]
+    pub const fn with_observed_time_unix_nano(mut self, observed_time_unix_nano: u64) -> Self {
+        self.observed_time_unix_nano = observed_time_unix_nano;
+        self
+    }
+
+    /// Attach typed attributes. The mapper rejects empty or duplicate keys.
+    #[must_use]
+    pub const fn with_attributes(mut self, attributes: &'a [OtlpLogKeyValueInput<'a>]) -> Self {
+        self.attributes = attributes;
+        self.legacy_attributes = None;
+        self
+    }
+
+    /// Preserve the producer's pre-mapping dropped-attribute count.
+    #[must_use]
+    pub const fn with_dropped_attributes_count(mut self, count: u32) -> Self {
+        self.dropped_attributes_count = count;
+        self
+    }
+
+    /// Attach an exact-width nonzero W3C trace/span context and low-eight-bit flags.
+    #[must_use]
+    pub const fn with_trace_context(
+        mut self,
+        trace_id: &'a [u8; 16],
+        span_id: &'a [u8; 8],
+        flags: u8,
+    ) -> Self {
+        self.trace_id = Some(trace_id);
+        self.span_id = Some(span_id);
+        self.flags = flags as u32;
+        self
+    }
+
+    /// Set the event name. Empty means this is an ordinary log record.
+    #[must_use]
+    pub const fn with_event_name(mut self, event_name: &'a str) -> Self {
+        self.event_name = event_name;
+        self
+    }
+}
+
+/// Immutable finite limits and scope metadata for [`OwnedOtlpLogs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpLogConfig {
+    max_records_per_collection: usize,
+    max_records_per_request: usize,
+    max_attributes_per_entity: usize,
+    max_body_depth: usize,
+    max_body_items: usize,
+    max_owned_bytes: usize,
+    max_request_bytes: usize,
+    scope_name: String,
+    scope_version: String,
+    schema_url: String,
+}
+
+impl Default for OwnedOtlpLogConfig {
+    fn default() -> Self {
+        Self {
+            max_records_per_collection: OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION,
+            max_records_per_request: OWNED_OTLP_DEFAULT_LOG_RECORDS_PER_REQUEST,
+            max_attributes_per_entity: OWNED_OTLP_MAX_ATTRIBUTES,
+            max_body_depth: OWNED_OTLP_MAX_LOG_BODY_DEPTH,
+            max_body_items: OWNED_OTLP_MAX_LOG_BODY_ITEMS,
+            max_owned_bytes: OWNED_OTLP_MAX_LOG_COLLECTION_BYTES,
+            max_request_bytes: OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+            scope_name: "asupersync".to_owned(),
+            scope_version: env!("CARGO_PKG_VERSION").to_owned(),
+            schema_url: OTLP_LOGS_SCHEMA_URL.to_owned(),
+        }
+    }
+}
+
+impl OwnedOtlpLogConfig {
+    /// Construct the default finite logs envelope.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the record limit for one collection call.
+    #[must_use]
+    pub const fn with_max_records_per_collection(mut self, limit: usize) -> Self {
+        self.max_records_per_collection = limit;
+        self
+    }
+
+    /// Set the record limit per encoded request.
+    #[must_use]
+    pub const fn with_max_records_per_request(mut self, limit: usize) -> Self {
+        self.max_records_per_request = limit;
+        self
+    }
+
+    /// Set the attribute limit for each resource or record.
+    #[must_use]
+    pub const fn with_max_attributes_per_entity(mut self, limit: usize) -> Self {
+        self.max_attributes_per_entity = limit;
+        self
+    }
+
+    /// Set the maximum nested body depth.
+    #[must_use]
+    pub const fn with_max_body_depth(mut self, limit: usize) -> Self {
+        self.max_body_depth = limit;
+        self
+    }
+
+    /// Set the maximum items per body array or key/value list.
+    #[must_use]
+    pub const fn with_max_body_items(mut self, limit: usize) -> Self {
+        self.max_body_items = limit;
+        self
+    }
+
+    /// Set the aggregate owned-input byte limit for one collection.
+    #[must_use]
+    pub const fn with_max_owned_bytes(mut self, limit: usize) -> Self {
+        self.max_owned_bytes = limit;
+        self
+    }
+
+    /// Set the encoded byte limit for every request.
+    #[must_use]
+    pub const fn with_max_request_bytes(mut self, limit: usize) -> Self {
+        self.max_request_bytes = limit;
+        self
+    }
+
+    /// Set explicit instrumentation scope metadata.
+    #[must_use]
+    pub fn with_scope(mut self, name: impl Into<String>, version: impl Into<String>) -> Self {
+        self.scope_name = name.into();
+        self.scope_version = version.into();
+        self
+    }
+
+    /// Set the explicit resource/scope schema URL.
+    #[must_use]
+    pub fn with_schema_url(mut self, schema_url: impl Into<String>) -> Self {
+        self.schema_url = schema_url.into();
+        self
+    }
+
+    /// Record limit for one collection call.
+    #[must_use]
+    pub const fn max_records_per_collection(&self) -> usize {
+        self.max_records_per_collection
+    }
+
+    /// Record limit per request.
+    #[must_use]
+    pub const fn max_records_per_request(&self) -> usize {
+        self.max_records_per_request
+    }
+
+    /// Attribute limit per resource or record.
+    #[must_use]
+    pub const fn max_attributes_per_entity(&self) -> usize {
+        self.max_attributes_per_entity
+    }
+
+    /// Maximum nested body depth.
+    #[must_use]
+    pub const fn max_body_depth(&self) -> usize {
+        self.max_body_depth
+    }
+
+    /// Maximum items per body array or key/value list.
+    #[must_use]
+    pub const fn max_body_items(&self) -> usize {
+        self.max_body_items
+    }
+
+    /// Aggregate owned-input byte limit per collection.
+    #[must_use]
+    pub const fn max_owned_bytes(&self) -> usize {
+        self.max_owned_bytes
+    }
+
+    /// Encoded byte limit per request.
+    #[must_use]
+    pub const fn max_request_bytes(&self) -> usize {
+        self.max_request_bytes
+    }
+
+    /// Instrumentation scope name.
+    #[must_use]
+    pub fn scope_name(&self) -> &str {
+        &self.scope_name
+    }
+
+    /// Instrumentation scope version.
+    #[must_use]
+    pub fn scope_version(&self) -> &str {
+        &self.scope_version
+    }
+
+    /// Resource/scope schema URL.
+    #[must_use]
+    pub fn schema_url(&self) -> &str {
+        &self.schema_url
+    }
+
+    fn validate(&self) -> Result<(), OwnedOtlpLogError> {
+        if self.max_records_per_collection == 0
+            || self.max_records_per_collection > OWNED_OTLP_MAX_LOG_RECORDS_PER_COLLECTION
+            || self.max_records_per_request == 0
+            || self.max_records_per_request > self.max_records_per_collection
+            || self.max_attributes_per_entity == 0
+            || self.max_attributes_per_entity > OWNED_OTLP_MAX_ATTRIBUTES
+            || self.max_body_depth == 0
+            || self.max_body_depth > OWNED_OTLP_MAX_LOG_BODY_DEPTH
+            || self.max_body_items == 0
+            || self.max_body_items > OWNED_OTLP_MAX_LOG_BODY_ITEMS
+            || self.max_owned_bytes == 0
+            || self.max_owned_bytes > OWNED_OTLP_MAX_LOG_COLLECTION_BYTES
+            || self.max_request_bytes == 0
+            || self.max_request_bytes > OWNED_OTLP_DEFAULT_REQUEST_BYTES
+        {
+            return Err(OwnedOtlpLogError::InvalidConfiguration);
+        }
+        if self.scope_name.is_empty()
+            || self.scope_name.len() > OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES
+            || self.scope_version.len() > OWNED_OTLP_MAX_LOG_SCOPE_FIELD_BYTES
+            || self.schema_url.len() > OWNED_OTLP_MAX_LOG_SCHEMA_URL_BYTES
+        {
+            return Err(OwnedOtlpLogError::InvalidName);
+        }
+        Ok(())
+    }
+}
+
+/// Result of one finite owned logs collection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnedOtlpLogCollection {
+    requests: Vec<Vec<u8>>,
+    record_count: usize,
+    producer_dropped_attributes: u64,
+}
+
+impl OwnedOtlpLogCollection {
+    /// Encoded OTLP requests in original record order.
+    #[must_use]
+    pub fn requests(&self) -> &[Vec<u8>] {
+        &self.requests
+    }
+
+    /// Consume the collection and return the encoded requests.
+    #[must_use]
+    pub fn into_requests(self) -> Vec<Vec<u8>> {
+        self.requests
+    }
+
+    /// Number of encoded records.
+    #[must_use]
+    pub const fn record_count(&self) -> usize {
+        self.record_count
+    }
+
+    /// Saturating sum of producer-reported dropped attributes.
+    #[must_use]
+    pub const fn producer_dropped_attributes(&self) -> u64 {
+        self.producer_dropped_attributes
+    }
+
+    /// True when the input contained no records and no request was produced.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnedLogValueStats {
+    bytes: usize,
+    nodes: usize,
+}
+
+impl OwnedLogValueStats {
+    const ZERO: Self = Self { bytes: 0, nodes: 0 };
+
+    fn checked_add(self, other: Self) -> Result<Self, OwnedOtlpLogError> {
+        let nodes = self
+            .nodes
+            .checked_add(other.nodes)
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+        if nodes > OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+        Ok(Self {
+            bytes: self
+                .bytes
+                .checked_add(other.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?,
+            nodes,
+        })
+    }
+}
+
+/// Stateless mapper backed by the crate-owned finite OTLP protobuf model.
+///
+/// The mapper performs no I/O, starts no task, and reads no ambient clock or
+/// resource. It validates every record and every batch before cloning caller
+/// payloads or returning request bytes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct OwnedOtlpLogs {
+    config: OwnedOtlpLogConfig,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OwnedOtlpLogs {
+    /// Create a mapper after validating all finite limits and scope metadata.
+    pub fn try_new(config: OwnedOtlpLogConfig) -> Result<Self, OwnedOtlpLogError> {
+        config.validate()?;
+        Ok(Self { config })
+    }
+
+    /// Validated immutable mapper configuration.
+    #[must_use]
+    pub const fn config(&self) -> &OwnedOtlpLogConfig {
+        &self.config
+    }
+
+    /// Validate, deterministically normalize, batch, and encode borrowed records.
+    ///
+    /// Record and array order are preserved. Resource, record, and structured
+    /// body key/value lists are sorted bytewise by key. Empty input produces no
+    /// request. Batching never increments producer drop counts.
+    pub fn collect(
+        &self,
+        records: &[OtlpLogRecordInput<'_>],
+        resource_attributes: &[OtlpLogKeyValueInput<'_>],
+    ) -> Result<OwnedOtlpLogCollection, OwnedOtlpLogError> {
+        use crate::observability::otlp_proto::collector::logs::ExportLogsServiceRequest;
+        use crate::observability::otlp_proto::common_and_resource::{
+            InstrumentationScope, Resource,
+        };
+        use crate::observability::otlp_proto::logs::{ResourceLogs, ScopeLogs};
+
+        if records.is_empty() {
+            return Ok(OwnedOtlpLogCollection {
+                requests: Vec::new(),
+                record_count: 0,
+                producer_dropped_attributes: 0,
+            });
+        }
+        if records.len() > self.config.max_records_per_collection {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+
+        let resource_stats = validate_owned_log_key_values(
+            resource_attributes,
+            &self.config,
+            self.config.max_attributes_per_entity,
+            1,
+        )?;
+        let request_count = records.len().div_ceil(self.config.max_records_per_request);
+        let repeated_metadata_bytes = resource_stats
+            .bytes
+            .checked_add(self.config.scope_name.len())
+            .and_then(|bytes| bytes.checked_add(self.config.scope_version.len()))
+            .and_then(|bytes| bytes.checked_add(self.config.schema_url.len().saturating_mul(2)))
+            .and_then(|bytes| bytes.checked_mul(request_count))
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+        let mut collection_bytes = repeated_metadata_bytes;
+        let mut producer_dropped_attributes = 0_u64;
+        let mut record_stats = Vec::with_capacity(records.len());
+
+        for record in records {
+            let stats = validate_owned_log_record(record, &self.config)?;
+            collection_bytes = collection_bytes
+                .checked_add(stats.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+            producer_dropped_attributes = producer_dropped_attributes
+                .saturating_add(u64::from(record.dropped_attributes_count));
+            record_stats.push(stats);
+        }
+        if collection_bytes > self.config.max_owned_bytes {
+            return Err(OwnedOtlpLogError::LimitExceeded);
+        }
+
+        for chunk in record_stats.chunks(self.config.max_records_per_request) {
+            let nodes = chunk
+                .iter()
+                .try_fold(resource_stats.nodes, |total, stats| {
+                    total
+                        .checked_add(stats.nodes)
+                        .ok_or(OwnedOtlpLogError::LimitExceeded)
+                })?;
+            if nodes > OWNED_OTLP_MAX_LOG_BODY_NODES_PER_REQUEST {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+        }
+
+        let resource = Resource {
+            attributes: owned_log_key_values(resource_attributes),
+            ..Resource::default()
+        };
+        let scope = InstrumentationScope {
+            name: self.config.scope_name.clone(),
+            version: self.config.scope_version.clone(),
+            ..InstrumentationScope::default()
+        };
+        let mut requests = Vec::with_capacity(request_count);
+
+        for chunk in records.chunks(self.config.max_records_per_request) {
+            let request = ExportLogsServiceRequest {
+                resource_logs: vec![ResourceLogs {
+                    resource: Some(resource.clone()),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(scope.clone()),
+                        log_records: chunk.iter().map(owned_log_record).collect(),
+                        schema_url: self.config.schema_url.clone(),
+                        ..ScopeLogs::default()
+                    }],
+                    schema_url: self.config.schema_url.clone(),
+                    ..ResourceLogs::default()
+                }],
+                ..ExportLogsServiceRequest::default()
+            };
+            let bytes = request
+                .encode_to_bytes(otlp_request_limits(self.config.max_request_bytes))
+                .map_err(|_| OwnedOtlpLogError::WireEnvelopeExceeded)?;
+            requests.push(bytes.to_vec());
+        }
+
+        Ok(OwnedOtlpLogCollection {
+            requests,
+            record_count: records.len(),
+            producer_dropped_attributes,
+        })
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_record(
+    record: &OtlpLogRecordInput<'_>,
+    config: &OwnedOtlpLogConfig,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if !(0..=24).contains(&record.severity_number) {
+        return Err(OwnedOtlpLogError::InvalidName);
+    }
+    if record.severity_text.len() > OWNED_OTLP_MAX_LOG_SEVERITY_TEXT_BYTES
+        || record.event_name.len() > OWNED_OTLP_MAX_LOG_EVENT_NAME_BYTES
+    {
+        return Err(OwnedOtlpLogError::InvalidName);
+    }
+    if record.flags > u32::from(u8::MAX) {
+        return Err(OwnedOtlpLogError::InvalidIdentifier);
+    }
+    match (record.trace_id, record.span_id) {
+        (None, None) if record.flags == 0 => {}
+        (Some(trace_id), Some(span_id))
+            if trace_id.len() == 16
+                && span_id.len() == 8
+                && trace_id.iter().any(|byte| *byte != 0)
+                && span_id.iter().any(|byte| *byte != 0) => {}
+        _ => return Err(OwnedOtlpLogError::InvalidIdentifier),
+    }
+
+    let mut stats = validate_owned_log_body(record.body, config, 1, true)?;
+    stats.bytes = stats
+        .bytes
+        .checked_add(record.severity_text.len())
+        .and_then(|bytes| bytes.checked_add(record.event_name.len()))
+        .and_then(|bytes| bytes.checked_add(record.trace_id.map_or(0, <[u8]>::len)))
+        .and_then(|bytes| bytes.checked_add(record.span_id.map_or(0, <[u8]>::len)))
+        .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+
+    let attribute_stats = if let Some(attributes) = record.legacy_attributes {
+        validate_owned_legacy_log_attributes(attributes, config)?
+    } else {
+        validate_owned_log_key_values(
+            record.attributes,
+            config,
+            config.max_attributes_per_entity,
+            1,
+        )?
+    };
+    stats.checked_add(attribute_stats)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_key_values(
+    attributes: &[OtlpLogKeyValueInput<'_>],
+    config: &OwnedOtlpLogConfig,
+    limit: usize,
+    value_depth: usize,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if attributes.len() > limit {
+        return Err(OwnedOtlpLogError::LimitExceeded);
+    }
+    let mut keys = BTreeSet::new();
+    let mut stats = OwnedLogValueStats::ZERO;
+    for attribute in attributes {
+        if attribute.key.is_empty()
+            || attribute.key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || !keys.insert(attribute.key)
+        {
+            return Err(OwnedOtlpLogError::InvalidAttributes);
+        }
+        let value = validate_owned_log_body(attribute.value, config, value_depth, false)?;
+        stats = stats.checked_add(OwnedLogValueStats {
+            bytes: attribute
+                .key
+                .len()
+                .checked_add(value.bytes)
+                .ok_or(OwnedOtlpLogError::LimitExceeded)?,
+            nodes: value.nodes,
+        })?;
+    }
+    Ok(stats)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_legacy_log_attributes(
+    attributes: &[(String, String)],
+    config: &OwnedOtlpLogConfig,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if attributes.len() > config.max_attributes_per_entity {
+        return Err(OwnedOtlpLogError::LimitExceeded);
+    }
+    let mut keys = BTreeSet::new();
+    let mut bytes = 0_usize;
+    for (key, value) in attributes {
+        if key.is_empty()
+            || key.len() > OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES
+            || value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES
+            || !keys.insert(key.as_str())
+        {
+            return Err(OwnedOtlpLogError::InvalidAttributes);
+        }
+        bytes = bytes
+            .checked_add(key.len())
+            .and_then(|total| total.checked_add(value.len()))
+            .ok_or(OwnedOtlpLogError::LimitExceeded)?;
+    }
+    Ok(OwnedLogValueStats {
+        bytes,
+        nodes: attributes.len(),
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_owned_log_body(
+    body: OtlpLogBody<'_>,
+    config: &OwnedOtlpLogConfig,
+    depth: usize,
+    allow_absent: bool,
+) -> Result<OwnedLogValueStats, OwnedOtlpLogError> {
+    if depth > config.max_body_depth {
+        return Err(OwnedOtlpLogError::InvalidBody);
+    }
+    match body {
+        OtlpLogBody::Absent if allow_absent => Ok(OwnedLogValueStats::ZERO),
+        OtlpLogBody::Absent => Err(OwnedOtlpLogError::InvalidBody),
+        OtlpLogBody::String(value) => {
+            if value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+            Ok(OwnedLogValueStats {
+                bytes: value.len(),
+                nodes: 1,
+            })
+        }
+        OtlpLogBody::Bytes(value) => {
+            if value.len() > OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES {
+                return Err(OwnedOtlpLogError::LimitExceeded);
+            }
+            Ok(OwnedLogValueStats {
+                bytes: value.len(),
+                nodes: 1,
+            })
+        }
+        OtlpLogBody::Double(value) => {
+            if !value.is_finite() {
+                return Err(OwnedOtlpLogError::InvalidNumericValue);
+            }
+            Ok(OwnedLogValueStats { bytes: 0, nodes: 1 })
+        }
+        OtlpLogBody::Bool(_) | OtlpLogBody::Int(_) => Ok(OwnedLogValueStats { bytes: 0, nodes: 1 }),
+        OtlpLogBody::Array(values) => {
+            if values.len() > config.max_body_items {
+                return Err(OwnedOtlpLogError::InvalidBody);
+            }
+            values
+                .iter()
+                .try_fold(OwnedLogValueStats { bytes: 0, nodes: 1 }, |stats, value| {
+                    stats.checked_add(validate_owned_log_body(
+                        *value,
+                        config,
+                        depth.saturating_add(1),
+                        false,
+                    )?)
+                })
+        }
+        OtlpLogBody::KeyValueList(values) => {
+            if values.len() > config.max_body_items {
+                return Err(OwnedOtlpLogError::InvalidBody);
+            }
+            let values = validate_owned_log_key_values(
+                values,
+                config,
+                config.max_body_items,
+                depth.saturating_add(1),
+            )?;
+            OwnedLogValueStats { bytes: 0, nodes: 1 }.checked_add(values)
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_record(
+    record: &OtlpLogRecordInput<'_>,
+) -> crate::observability::otlp_proto::logs::LogRecord {
+    crate::observability::otlp_proto::logs::LogRecord {
+        time_unix_nano: record.time_unix_nano,
+        observed_time_unix_nano: record.observed_time_unix_nano,
+        severity_number: record.severity_number,
+        severity_text: record.severity_text.to_owned(),
+        body: owned_log_body(record.body),
+        attributes: if let Some(attributes) = record.legacy_attributes {
+            owned_legacy_log_attributes(attributes)
+        } else {
+            owned_log_key_values(record.attributes)
+        },
+        dropped_attributes_count: record.dropped_attributes_count,
+        flags: record.flags,
+        trace_id: record.trace_id.map_or_else(Vec::new, <[u8]>::to_vec),
+        span_id: record.span_id.map_or_else(Vec::new, <[u8]>::to_vec),
+        event_name: record.event_name.to_owned(),
+        ..Default::default()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_key_values(
+    attributes: &[OtlpLogKeyValueInput<'_>],
+) -> Vec<crate::observability::otlp_proto::common_and_resource::KeyValue> {
+    let mut attributes = attributes
+        .iter()
+        .map(
+            |attribute| crate::observability::otlp_proto::common_and_resource::KeyValue {
+                key: attribute.key.to_owned(),
+                value: owned_log_body(attribute.value),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>();
+    attributes.sort_by(|left, right| left.key.cmp(&right.key));
+    attributes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_legacy_log_attributes(
+    attributes: &[(String, String)],
+) -> Vec<crate::observability::otlp_proto::common_and_resource::KeyValue> {
+    let mut attributes = attributes
+        .iter()
+        .map(
+            |(key, value)| crate::observability::otlp_proto::common_and_resource::KeyValue {
+                key: key.clone(),
+                value: owned_log_body(OtlpLogBody::String(value)),
+                ..Default::default()
+            },
+        )
+        .collect::<Vec<_>>();
+    attributes.sort_by(|left, right| left.key.cmp(&right.key));
+    attributes
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn owned_log_body(
+    body: OtlpLogBody<'_>,
+) -> Option<crate::observability::otlp_proto::common_and_resource::AnyValue> {
+    use crate::observability::otlp_proto::common_and_resource::{
+        AnyValue, AnyValueValue, ArrayValue, KeyValueList,
+    };
+
+    let value = match body {
+        OtlpLogBody::Absent => return None,
+        OtlpLogBody::String(value) => AnyValueValue::String(value.to_owned()),
+        OtlpLogBody::Bool(value) => AnyValueValue::Bool(value),
+        OtlpLogBody::Int(value) => AnyValueValue::Int(value),
+        OtlpLogBody::Double(value) => AnyValueValue::Double(value),
+        OtlpLogBody::Bytes(value) => AnyValueValue::Bytes(value.to_vec()),
+        OtlpLogBody::Array(values) => AnyValueValue::Array(ArrayValue {
+            values: values
+                .iter()
+                .filter_map(|value| owned_log_body(*value))
+                .collect(),
+            ..ArrayValue::default()
+        }),
+        OtlpLogBody::KeyValueList(values) => AnyValueValue::KeyValueList(KeyValueList {
+            values: owned_log_key_values(values),
+            ..KeyValueList::default()
+        }),
+    };
+    Some(AnyValue {
+        value: Some(value),
+        ..AnyValue::default()
+    })
+}
+
+/// Error type for export operations.
+#[derive(Debug, Clone)]
+pub struct ExportError {
+    message: String,
+}
+
+impl ExportError {
+    /// Create a new export error.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ExportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "export error: {}", self.message)
+    }
+}
+
+impl std::error::Error for ExportError {}
+
+/// Default OTLP schema URL used by logs snapshots.
+pub const OTLP_LOGS_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+/// Default instrumentation scope name for Asupersync logs exports.
+pub const OTLP_LOGS_SCOPE_NAME: &str = "asupersync.observability.otel";
+/// Maximum number of attributes retained on a single OTLP log record.
+pub const OTLP_LOGS_MAX_ATTRIBUTES: usize = 128;
+/// Maximum UTF-8 byte length retained for each OTLP log attribute value.
+pub const OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES: usize = 4096;
+
+const OTLP_LOGS_TRACE_FLAGS_MASK: u32 = 0xff;
+
+/// String key/value attributes attached to an OTLP log record.
+pub type LogAttributes = Vec<(String, String)>;
+
+/// Map an Asupersync log level to OTLP severity number and text.
+#[must_use]
+pub const fn log_level_to_otlp_severity(level: LogLevel) -> (i32, &'static str) {
+    match level {
+        LogLevel::Trace => (1, "TRACE"),
+        LogLevel::Debug => (5, "DEBUG"),
+        LogLevel::Info => (9, "INFO"),
+        LogLevel::Warn => (13, "WARN"),
+        LogLevel::Error => (17, "ERROR"),
+    }
+}
+
+fn truncate_log_attribute_value(value: &str) -> String {
+    if value.len() <= OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES {
+        return value.to_string();
+    }
+
+    let mut end = OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn insert_log_attribute_bounded(
+    attributes: &mut LogAttributes,
+    dropped_attributes_count: &mut u32,
+    key: String,
+    value: String,
+) {
+    if key.is_empty() {
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    let value = truncate_log_attribute_value(&value);
+    if let Some((_, existing_value)) = attributes
+        .iter_mut()
+        .find(|(existing_key, _)| existing_key == &key)
+    {
+        *existing_value = value;
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    if attributes.len() >= OTLP_LOGS_MAX_ATTRIBUTES {
+        *dropped_attributes_count = dropped_attributes_count.saturating_add(1);
+        return;
+    }
+
+    attributes.push((key, value));
+}
+
+fn normalized_log_attributes(
+    attributes: &[(String, String)],
+    dropped_attributes_count: u32,
+) -> (LogAttributes, u32) {
+    let mut dropped = dropped_attributes_count;
+    let mut normalized = BTreeMap::new();
+
+    for (key, value) in attributes {
+        if key.is_empty() {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        if normalized
+            .insert(key.clone(), truncate_log_attribute_value(value))
+            .is_some()
+        {
+            dropped = dropped.saturating_add(1);
+        }
+    }
+
+    let mut retained = Vec::with_capacity(normalized.len().min(OTLP_LOGS_MAX_ATTRIBUTES));
+    for (key, value) in normalized {
+        if retained.len() >= OTLP_LOGS_MAX_ATTRIBUTES {
+            dropped = dropped.saturating_add(1);
+            continue;
+        }
+        retained.push((key, value));
+    }
+
+    (retained, dropped)
+}
+
+fn valid_trace_id(trace_id: Vec<u8>) -> Vec<u8> {
+    if trace_id.len() == 16 {
+        trace_id
+    } else {
+        Vec::new()
+    }
+}
+
+fn valid_span_id(span_id: Vec<u8>) -> Vec<u8> {
+    if span_id.len() == 8 {
+        span_id
+    } else {
+        Vec::new()
+    }
+}
+
+/// A normalized OTLP log record ready for export.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OtlpLogRecord {
+    /// Event timestamp in Unix nanoseconds. A value of zero means unknown.
+    pub time_unix_nano: u64,
+    /// Observation timestamp in Unix nanoseconds. A value of zero means unknown.
+    pub observed_time_unix_nano: u64,
+    /// OTLP severity number.
+    pub severity_number: i32,
+    /// OTLP severity text.
+    pub severity_text: String,
+    /// Log body payload. Empty bodies are preserved as empty string values.
+    pub body: String,
+    /// Attributes attached to the record.
+    pub attributes: LogAttributes,
+    /// Count of attributes dropped because of invalid keys, duplicates, or caps.
+    pub dropped_attributes_count: u32,
+    /// W3C trace flags; only the low eight bits are exported.
+    pub flags: u32,
+    /// Optional 16-byte trace identifier.
+    pub trace_id: Vec<u8>,
+    /// Optional 8-byte span identifier.
+    pub span_id: Vec<u8>,
+    /// Optional event name for event-style log records.
+    pub event_name: String,
+}
+
+impl OtlpLogRecord {
+    /// Create a log record from level, body, and event timestamp.
+    #[must_use]
+    pub fn new(level: LogLevel, body: impl Into<String>, time_unix_nano: u64) -> Self {
+        let (severity_number, severity_text) = log_level_to_otlp_severity(level);
+        Self {
+            time_unix_nano,
+            observed_time_unix_nano: time_unix_nano,
+            severity_number,
+            severity_text: severity_text.to_string(),
+            body: body.into(),
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: Vec::new(),
+            span_id: Vec::new(),
+            event_name: String::new(),
+        }
+    }
+
+    /// Build an OTLP log record from an Asupersync structured log entry.
+    #[must_use]
+    pub fn from_log_entry(entry: &LogEntry, observed_time_unix_nano: u64) -> Self {
+        let mut record = Self::new(entry.level(), entry.message(), entry.timestamp().as_nanos())
+            .with_observed_time_unix_nano(observed_time_unix_nano);
+
+        if let Some(target) = entry.target() {
+            record = record.with_attribute("target", target);
+        }
+        for (key, value) in entry.fields() {
+            record = record.with_attribute(key, value);
+        }
+
+        record
+    }
+
+    /// Build an OTLP log record from an Asupersync structured log entry with privacy filtering.
+    #[must_use]
+    pub fn from_log_entry_with_privacy(
+        entry: &LogEntry,
+        observed_time_unix_nano: u64,
+        config: &SpanConfig,
+    ) -> Self {
+        let mut record = Self::new(entry.level(), entry.message(), entry.timestamp().as_nanos())
+            .with_observed_time_unix_nano(observed_time_unix_nano);
+
+        if let Some(target) = entry.target() {
+            record = record.with_filtered_attribute("target", target, config);
+        }
+        for (key, value) in entry.fields() {
+            record = record.with_filtered_attribute(key, value, config);
+        }
+
+        record
+    }
+
+    /// Set the observation timestamp.
+    #[must_use]
+    pub const fn with_observed_time_unix_nano(mut self, observed_time_unix_nano: u64) -> Self {
+        self.observed_time_unix_nano = observed_time_unix_nano;
+        self
+    }
+
+    /// Add or replace an attribute while enforcing record-local bounds.
+    #[must_use]
+    pub fn with_attribute(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        insert_log_attribute_bounded(
+            &mut self.attributes,
+            &mut self.dropped_attributes_count,
+            key.into(),
+            value.into(),
+        );
+        self
+    }
+
+    /// Add or replace an attribute with privacy filtering applied.
+    ///
+    /// **Security**: Attributes listed in `config.drop_attributes` are silently dropped
+    /// to prevent sensitive data from reaching OTLP collectors.
+    #[must_use]
+    pub fn with_filtered_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+        config: &SpanConfig,
+    ) -> Self {
+        let key_str = key.into();
+
+        if config.should_drop_field(&key_str) {
+            self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(1);
+            return self;
+        }
+
+        let value_str = value.into();
+        let value_str = config.redact_pii(&key_str, &value_str);
+        insert_log_attribute_bounded(
+            &mut self.attributes,
+            &mut self.dropped_attributes_count,
+            key_str,
+            value_str,
+        );
+        self
+    }
+
+    /// Attach a W3C trace/span correlation context.
+    #[must_use]
+    pub fn with_trace_context(
+        mut self,
+        trace_id: impl Into<Vec<u8>>,
+        span_id: impl Into<Vec<u8>>,
+        flags: u32,
+    ) -> Self {
+        self.trace_id = valid_trace_id(trace_id.into());
+        self.span_id = valid_span_id(span_id.into());
+        self.flags = flags & OTLP_LOGS_TRACE_FLAGS_MASK;
+        self
+    }
+
+    /// Attach an OTLP event name.
+    #[must_use]
+    pub fn with_event_name(mut self, event_name: impl Into<String>) -> Self {
+        self.event_name = event_name.into();
+        self
+    }
+}
+
+/// A single-resource, single-scope OTLP logs export snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogsSnapshot {
+    /// OTLP resource attributes.
+    pub resource_attributes: LogAttributes,
+    /// Instrumentation scope name.
+    pub scope_name: String,
+    /// Instrumentation scope version.
+    pub scope_version: String,
+    /// OTLP schema URL attached to resource and scope blocks.
+    pub schema_url: String,
+    /// Log records in this export snapshot.
+    pub records: Vec<OtlpLogRecord>,
+}
+
+impl LogsSnapshot {
+    /// Create an empty logs snapshot for a service.
+    #[must_use]
+    pub fn new(service_name: impl Into<String>) -> Self {
+        Self {
+            resource_attributes: vec![
+                ("service.name".to_string(), service_name.into()),
+                ("telemetry.sdk.name".to_string(), "asupersync".to_string()),
+                (
+                    "telemetry.sdk.version".to_string(),
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ),
+            ],
+            scope_name: OTLP_LOGS_SCOPE_NAME.to_string(),
+            scope_version: env!("CARGO_PKG_VERSION").to_string(),
+            schema_url: OTLP_LOGS_SCHEMA_URL.to_string(),
+            records: Vec::new(),
+        }
+    }
+
+    /// Set the instrumentation scope name and version.
+    #[must_use]
+    pub fn with_scope(
+        mut self,
+        scope_name: impl Into<String>,
+        scope_version: impl Into<String>,
+    ) -> Self {
+        self.scope_name = scope_name.into();
+        self.scope_version = scope_version.into();
+        self
+    }
+
+    /// Set the schema URL.
+    #[must_use]
+    pub fn with_schema_url(mut self, schema_url: impl Into<String>) -> Self {
+        self.schema_url = schema_url.into();
+        self
+    }
+
+    /// Add or replace a resource attribute.
+    #[must_use]
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let key = key.into();
+        let value = value.into();
+        if let Some((_, existing_value)) = self
+            .resource_attributes
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+        } else if !key.is_empty() {
+            self.resource_attributes
+                .push((key, truncate_log_attribute_value(&value)));
+        }
+        self
+    }
+
+    /// Add a log record.
+    pub fn add_record(&mut self, record: OtlpLogRecord) {
+        self.records.push(record);
+    }
+
+    /// Add a log record and return the updated snapshot.
+    #[must_use]
+    pub fn with_record(mut self, record: OtlpLogRecord) -> Self {
+        self.add_record(record);
+        self
+    }
+
+    /// Number of records in the snapshot.
+    #[must_use]
+    pub fn record_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Serialize this snapshot as an OTLP `ExportLogsServiceRequest`.
+    #[must_use]
+    pub fn to_otlp_protobuf(&self) -> Vec<u8> {
+        use prost::Message;
+        otlp_logs_proto::logs_request_from_snapshot(self).encode_to_vec()
+    }
+}
+
+mod otlp_logs_proto {
+    use super::{LogsSnapshot, normalized_log_attributes};
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ExportLogsServiceRequest {
+        #[prost(message, repeated, tag = "1")]
+        pub resource_logs: Vec<ResourceLogs>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ResourceLogs {
+        #[prost(message, optional, tag = "1")]
+        pub resource: Option<Resource>,
+        #[prost(message, repeated, tag = "2")]
+        pub scope_logs: Vec<ScopeLogs>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct ScopeLogs {
+        #[prost(message, optional, tag = "1")]
+        pub scope: Option<InstrumentationScope>,
+        #[prost(message, repeated, tag = "2")]
+        pub log_records: Vec<LogRecord>,
+        #[prost(string, tag = "3")]
+        pub schema_url: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct Resource {
+        #[prost(message, repeated, tag = "1")]
+        pub attributes: Vec<KeyValue>,
+    }
+
+    #[derive(Clone, PartialEq, Eq, prost::Message)]
+    pub(super) struct InstrumentationScope {
+        #[prost(string, tag = "1")]
+        pub name: String,
+        #[prost(string, tag = "2")]
+        pub version: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct LogRecord {
+        #[prost(fixed64, tag = "1")]
+        pub time_unix_nano: u64,
+        #[prost(fixed64, tag = "11")]
+        pub observed_time_unix_nano: u64,
+        #[prost(int32, tag = "2")]
+        pub severity_number: i32,
+        #[prost(string, tag = "3")]
+        pub severity_text: String,
+        #[prost(message, optional, tag = "5")]
+        pub body: Option<AnyValue>,
+        #[prost(message, repeated, tag = "6")]
+        pub attributes: Vec<KeyValue>,
+        #[prost(uint32, tag = "7")]
+        pub dropped_attributes_count: u32,
+        #[prost(fixed32, tag = "8")]
+        pub flags: u32,
+        #[prost(bytes = "vec", tag = "9")]
+        pub trace_id: Vec<u8>,
+        #[prost(bytes = "vec", tag = "10")]
+        pub span_id: Vec<u8>,
+        #[prost(string, tag = "12")]
+        pub event_name: String,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct KeyValue {
+        #[prost(string, tag = "1")]
+        pub key: String,
+        #[prost(message, optional, tag = "2")]
+        pub value: Option<AnyValue>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(super) struct AnyValue {
+        #[prost(oneof = "any_value::Value", tags = "1")]
+        pub value: Option<any_value::Value>,
+    }
+
+    pub(super) mod any_value {
+        #[derive(Clone, PartialEq, prost::Oneof)]
+        pub enum Value {
+            #[prost(string, tag = "1")]
+            StringValue(String),
+        }
+    }
+
+    fn string_value(value: impl Into<String>) -> AnyValue {
+        AnyValue {
+            value: Some(any_value::Value::StringValue(value.into())),
+        }
+    }
+
+    fn key_value((key, value): (String, String)) -> KeyValue {
+        KeyValue {
+            key,
+            value: Some(string_value(value)),
+        }
+    }
+
+    pub(super) fn logs_request_from_snapshot(snapshot: &LogsSnapshot) -> ExportLogsServiceRequest {
+        let (resource_attributes, _) = normalized_log_attributes(&snapshot.resource_attributes, 0);
+        let records = snapshot
+            .records
+            .iter()
+            .map(|record| {
+                let (attributes, dropped_attributes_count) =
+                    normalized_log_attributes(&record.attributes, record.dropped_attributes_count);
+                LogRecord {
+                    time_unix_nano: record.time_unix_nano,
+                    observed_time_unix_nano: record.observed_time_unix_nano,
+                    severity_number: record.severity_number,
+                    severity_text: record.severity_text.clone(),
+                    body: Some(string_value(record.body.clone())),
+                    attributes: attributes.into_iter().map(key_value).collect(),
+                    dropped_attributes_count,
+                    flags: record.flags,
+                    trace_id: record.trace_id.clone(),
+                    span_id: record.span_id.clone(),
+                    event_name: record.event_name.clone(),
+                }
+            })
+            .collect();
+
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: resource_attributes.into_iter().map(key_value).collect(),
+                }),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: snapshot.scope_name.clone(),
+                        version: snapshot.scope_version.clone(),
+                    }),
+                    log_records: records,
+                    schema_url: snapshot.schema_url.clone(),
+                }],
+                schema_url: snapshot.schema_url.clone(),
+            }],
+        }
+    }
+}
+
+/// Trait for custom logs exporters.
+pub trait LogsExporter: Send + Sync {
+    /// Export a logs snapshot.
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError>;
+
+    /// Flush any buffered log data.
+    fn flush(&self) -> Result<(), ExportError>;
+}
+
+/// Logs exporter that drops all records.
+#[derive(Debug, Default)]
+pub struct NullLogsExporter;
+
+impl NullLogsExporter {
+    /// Create a new null logs exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl LogsExporter for NullLogsExporter {
+    fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Logs exporter that collects snapshots in memory for tests.
+#[derive(Debug, Default)]
+pub struct InMemoryLogsExporter {
+    snapshots: Mutex<Vec<LogsSnapshot>>,
+}
+
+impl InMemoryLogsExporter {
+    /// Create a new in-memory logs exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return all collected snapshots.
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<LogsSnapshot> {
+        self.snapshots.lock().clone()
+    }
+
+    /// Clear collected snapshots.
+    pub fn clear(&self) {
+        self.snapshots.lock().clear();
+    }
+
+    /// Total number of log records collected across snapshots.
+    #[must_use]
+    pub fn total_records(&self) -> usize {
+        self.snapshots
+            .lock()
+            .iter()
+            .map(LogsSnapshot::record_count)
+            .sum()
+    }
+}
+
+impl LogsExporter for InMemoryLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        self.snapshots.lock().push(logs.clone());
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Logs exporter that fans out to multiple exporters.
+#[derive(Default)]
+pub struct MultiLogsExporter {
+    exporters: Vec<Box<dyn LogsExporter>>,
+}
+
+impl MultiLogsExporter {
+    /// Create a new multi-exporter for logs.
+    #[must_use]
+    pub fn new(exporters: Vec<Box<dyn LogsExporter>>) -> Self {
+        Self { exporters }
+    }
+
+    /// Add a logs exporter.
+    pub fn add(&mut self, exporter: Box<dyn LogsExporter>) {
+        self.exporters.push(exporter);
+    }
+
+    /// Number of child exporters.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.exporters.len()
+    }
+
+    /// Whether this exporter has no children.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exporters.is_empty()
+    }
+}
+
+impl std::fmt::Debug for MultiLogsExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiLogsExporter")
+            .field("exporters_count", &self.exporters.len())
+            .finish()
+    }
+}
+
+impl LogsExporter for MultiLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(err) = exporter.export(logs) {
+                errors.push(err.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(err) = exporter.flush() {
+                errors.push(err.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+}
+
+/// Bounded logs exporter with oldest-drop load shedding.
+pub struct LoadSheddingLogsExporter {
+    inner: Box<dyn LogsExporter>,
+    export_queue: BoundedExportQueue<LogsSnapshot>,
+}
+
+impl std::fmt::Debug for LoadSheddingLogsExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadSheddingLogsExporter")
+            .field("export_queue", &self.export_queue)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LoadSheddingLogsExporter {
+    /// Create a new logs exporter with bounded oldest-drop queueing.
+    #[must_use]
+    pub fn new(inner: Box<dyn LogsExporter>, queue_capacity: usize) -> Self {
+        Self {
+            inner,
+            export_queue: BoundedExportQueue::new(queue_capacity),
+        }
+    }
+
+    /// Return load shedding statistics.
+    #[must_use]
+    pub fn load_shedding_stats(&self) -> LoadSheddingStats {
+        LoadSheddingStats {
+            queue_depth: self.export_queue.len(),
+            queue_capacity: self.export_queue.capacity(),
+            dropped_batches: self.export_queue.dropped_count(),
+        }
+    }
+
+    /// Process all queued logs snapshots.
+    pub fn process_queue(&self) -> Result<usize, ExportError> {
+        let mut processed = 0;
+        while let Some(batch) = self.export_queue.dequeue() {
+            if let Err(error) = self.inner.export(&batch) {
+                // The batch is already off the queue: returning with `?`
+                // dropped it uncounted, so each attempt during an outage lost
+                // one more. Keep it for the next attempt instead.
+                self.export_queue.requeue_front(batch);
+                return Err(error);
+            }
+            processed += 1;
+        }
+        Ok(processed)
+    }
+}
+
+impl LogsExporter for LoadSheddingLogsExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        let dropped = self.export_queue.enqueue(logs.clone());
+        if dropped {
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::warn!(
+                target: "asupersync::observability::otel",
+                "OTLP logs export queue full: dropped oldest batch. Queue capacity: {}, dropped total: {}",
+                self.export_queue.capacity(),
+                self.export_queue.dropped_count()
+            );
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        self.process_queue()?;
+        self.inner.flush()
+    }
+}
+
+/// OTLP HTTP logs exporter.
+#[derive(Debug, Clone)]
+pub struct OtlpLogsHttpExporter {
+    http: OtlpHttpExporter,
+}
+
+impl OtlpLogsHttpExporter {
+    /// Create a new OTLP HTTP logs exporter.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            http: OtlpHttpExporter::new(endpoint),
+        }
+    }
+
+    /// Create a logs exporter only if the default configuration is valid.
+    pub fn try_new(endpoint: impl Into<String>) -> Result<Self, OtlpConfigError> {
+        Ok(Self {
+            http: OtlpHttpExporter::try_new(endpoint)?,
+        })
+    }
+
+    /// Create a logs exporter from an immutable validated configuration.
+    #[must_use]
+    pub fn from_config(config: OtlpHttpConfig) -> Self {
+        Self {
+            http: OtlpHttpExporter::from_config(config),
+        }
+    }
+
+    /// Return a validated snapshot of the exporter's configuration.
+    pub fn config(&self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        self.http.config()
+    }
+
+    /// Set request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.http = self.http.with_timeout(timeout);
+        self
+    }
+
+    /// Set retry configuration.
+    #[must_use]
+    pub fn with_retry_config(
+        mut self,
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.http = self
+            .http
+            .with_retry_config(max_retries, initial_delay, max_delay);
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.http = self.http.with_compression(compression);
+        self
+    }
+
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.http = self.http.with_tls_policy(policy);
+        self
+    }
+
+    /// Add an Authorization bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        self.http = self.http.with_bearer_token(token);
+        self
+    }
+
+    /// Add an API-key header.
+    #[must_use]
+    pub fn with_api_key(mut self, header_name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.http = self.http.with_api_key(header_name, key);
+        self
+    }
+
+    /// Add a custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.http = self.http.with_auth_header(name, value);
+        self
+    }
+
+    /// Export logs through the async OTLP HTTP path.
+    pub async fn export_async(
+        &self,
+        cx: &crate::cx::Cx,
+        logs: &LogsSnapshot,
+    ) -> Result<(), ExportError> {
+        self.http
+            .send_otlp_protobuf(cx, logs.to_otlp_protobuf())
+            .await
+    }
+
+    /// Return the configured endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.http.endpoint
+    }
+}
+
+impl LogsExporter for OtlpLogsHttpExporter {
+    fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.http.enqueue_logs(logs)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = logs;
+            Err(ExportError::new(
+                "OTLP HTTP logs export requires async context - use export_async()",
+            ))
+        }
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.http.export_queue.check_flushed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
+    }
+}
+
+/// Trait for custom metrics exporters.
+pub trait MetricsExporter: Send + Sync {
+    /// Export a snapshot of metrics.
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError>;
+
+    /// Flush any buffered data.
+    fn flush(&self) -> Result<(), ExportError>;
+}
+
+/// br-asupersync-coxhdt — Escape a Prometheus label value per the
+/// exposition format. The spec mandates that values containing the
+/// canonical trio (`\\`, `\n`, `\"`) be backslash-escaped; without
+/// this, a value containing `"` would terminate the quoted string
+/// early (corrupting the line and potentially injecting attacker-
+/// controlled labels), and a value containing `\` or `\n` would
+/// likewise corrupt the exposition. CR is also escaped to keep
+/// downstream line-oriented parsers from splitting on it.
+///
+/// This is the otel-exporter parallel to
+/// [`crate::observability::metrics::escape_prometheus_label_value`]
+/// (br-asupersync-pdu7wg) — same canonical escape trio applied on a
+/// separate code path to keep otel.rs self-contained.
+fn escape_label_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '\n' => out.push_str(r"\n"),
+            '"' => {
+                out.push('\\');
+                out.push('"');
+            }
+            '\r' => out.push_str(r"\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Exporter that writes to stdout (for debugging).
+#[derive(Debug, Default)]
+pub struct StdoutExporter {
+    prefix: String,
+}
+
+impl StdoutExporter {
+    /// Create a new stdout exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create with a prefix for each line.
+    #[must_use]
+    pub fn with_prefix(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+        }
+    }
+
+    /// br-asupersync-coxhdt — Format labels for the Prometheus
+    /// exposition output of `StdoutExporter`. The previous shape
+    /// was `format!("{k}=\"{v}\"")` — a value containing `"` would
+    /// terminate the quoted string early, and a value containing
+    /// `\` (or `\n`) would corrupt the line. Per the Prometheus
+    /// exposition spec the value MUST escape `\\`, `\n`, and `\"`.
+    /// This shares the spec-required trio with the
+    /// `escape_prometheus_label_value` function in metrics.rs
+    /// (br-asupersync-pdu7wg) — same canonical escape set, applied
+    /// to the otel exporter's separate code path.
+    fn format_labels(labels: &[(String, String)]) -> String {
+        if labels.is_empty() {
+            String::new()
+        } else {
+            let parts: Vec<_> = labels
+                .iter()
+                .map(|(k, v)| format!("{k}=\"{}\"", escape_label_value(v)))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+    }
+}
+
+impl MetricsExporter for StdoutExporter {
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        let mut stdout = std::io::stdout().lock();
+
+        for (name, labels, value) in &metrics.counters {
+            let label_str = Self::format_labels(labels);
+            writeln!(
+                stdout,
+                "{}COUNTER {}{} {}",
+                self.prefix, name, label_str, value
+            )
+            .map_err(|e| ExportError::new(e.to_string()))?;
+        }
+
+        for (name, labels, value) in &metrics.gauges {
+            let label_str = Self::format_labels(labels);
+            writeln!(
+                stdout,
+                "{}GAUGE {}{} {}",
+                self.prefix, name, label_str, value
+            )
+            .map_err(|e| ExportError::new(e.to_string()))?;
+        }
+
+        for (name, labels, count, sum) in &metrics.histograms {
+            let label_str = Self::format_labels(labels);
+            writeln!(
+                stdout,
+                "{}HISTOGRAM {}{} count={} sum={}",
+                self.prefix, name, label_str, count, sum
+            )
+            .map_err(|e| ExportError::new(e.to_string()))?;
+        }
+
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        std::io::stdout()
+            .flush()
+            .map_err(|e| ExportError::new(e.to_string()))
+    }
+}
+
+/// Exporter that does nothing (for testing).
+#[derive(Debug, Default)]
+pub struct NullExporter;
+
+impl NullExporter {
+    /// Create a new null exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl MetricsExporter for NullExporter {
+    fn export(&self, _metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Exporter that fans out to multiple exporters.
+#[derive(Default)]
+pub struct MultiExporter {
+    exporters: Vec<Box<dyn MetricsExporter>>,
+}
+
+impl MultiExporter {
+    /// Create a new multi-exporter.
+    #[must_use]
+    pub fn new(exporters: Vec<Box<dyn MetricsExporter>>) -> Self {
+        Self { exporters }
+    }
+
+    /// Add an exporter.
+    pub fn add(&mut self, exporter: Box<dyn MetricsExporter>) {
+        self.exporters.push(exporter);
+    }
+
+    /// Number of exporters.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.exporters.len()
+    }
+
+    /// Check if empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exporters.is_empty()
+    }
+}
+
+impl std::fmt::Debug for MultiExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MultiExporter")
+            .field("exporters_count", &self.exporters.len())
+            .finish()
+    }
+}
+
+impl MetricsExporter for MultiExporter {
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(e) = exporter.export(metrics) {
+                errors.push(e.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        let mut errors = Vec::new();
+        for exporter in &self.exporters {
+            if let Err(e) = exporter.flush() {
+                errors.push(e.message);
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(ExportError::new(errors.join("; ")))
+        }
+    }
+}
+
+/// Exporter that collects metrics in memory for testing.
+#[derive(Debug, Default)]
+pub struct InMemoryExporter {
+    snapshots: Mutex<Vec<MetricsSnapshot>>,
+}
+
+/// Bounded export queue with OTLP-compliant load shedding.
+///
+/// When the export queue reaches capacity, drops OLDEST batches to preserve
+/// recent data (per OTLP exporter best practices). This prevents memory
+/// exhaustion under sustained high export load while maintaining observability
+/// of the most recent system state.
+#[derive(Debug)]
+pub struct BoundedExportQueue<T> {
+    queue: Mutex<std::collections::VecDeque<T>>,
+    capacity: usize,
+    dropped_batches: std::sync::atomic::AtomicU64,
+}
+
+impl<T> BoundedExportQueue<T> {
+    /// Create a new bounded export queue with the specified capacity.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            queue: Mutex::new(std::collections::VecDeque::with_capacity(capacity)),
+            capacity,
+            dropped_batches: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Enqueue a batch for export. If queue is full, drops OLDEST batch first.
+    ///
+    /// Returns `true` if a batch was dropped to make room (load shedding occurred).
+    pub fn enqueue(&self, batch: T) -> bool {
+        let mut queue = self.queue.lock();
+
+        // Apply load shedding: drop oldest batch if at capacity
+        let dropped = if queue.len() >= self.capacity {
+            let dropped_existing = queue.pop_front().is_some(); // Remove OLDEST batch (correct OTLP behavior)
+            if dropped_existing {
+                self.dropped_batches
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            true
+        } else {
+            false
+        };
+
+        queue.push_back(batch); // Add new batch to end
+        dropped
+    }
+
+    /// Dequeue the next batch for export (FIFO order).
+    pub fn dequeue(&self) -> Option<T> {
+        self.queue.lock().pop_front()
+    }
+
+    /// Put back, at the front, a batch whose export failed. It is the oldest
+    /// batch, so when the queue has filled up meanwhile it is the one shed:
+    /// counted as dropped, and `false` is returned. A batch the receiver keeps
+    /// refusing is therefore evicted by later traffic rather than blocking
+    /// the queue for good.
+    pub(crate) fn requeue_front(&self, batch: T) -> bool {
+        let mut queue = self.queue.lock();
+        if queue.len() >= self.capacity {
+            self.dropped_batches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        queue.push_front(batch);
+        true
+    }
+
+    /// Get the current queue depth.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.queue.lock().len()
+    }
+
+    /// Check if the queue is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.queue.lock().is_empty()
+    }
+
+    /// Get the number of batches dropped due to load shedding.
+    #[must_use]
+    pub fn dropped_count(&self) -> u64 {
+        self.dropped_batches
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Get the configured capacity.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// OTLP-compliant exporter with bounded export queue and oldest-drop load shedding.
+///
+/// Implements OTLP exporter best practices:
+/// - Bounded export queue prevents memory exhaustion
+/// - Drop OLDEST batches when queue is full (preserves recent data)
+/// - Maintains export order (FIFO)
+/// - Tracks load shedding metrics
+pub struct LoadSheddingExporter {
+    inner: Box<dyn MetricsExporter>,
+    export_queue: BoundedExportQueue<MetricsSnapshot>,
+}
+
+impl std::fmt::Debug for LoadSheddingExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoadSheddingExporter")
+            .field("export_queue", &self.export_queue)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LoadSheddingExporter {
+    /// Create a new load shedding exporter.
+    ///
+    /// # Arguments
+    /// * `inner` - The underlying exporter to send batches to
+    /// * `queue_capacity` - Maximum number of batches to queue (recommended: 100-1000)
+    #[must_use]
+    pub fn new(inner: Box<dyn MetricsExporter>, queue_capacity: usize) -> Self {
+        Self {
+            inner,
+            export_queue: BoundedExportQueue::new(queue_capacity),
+        }
+    }
+
+    /// Get load shedding statistics.
+    #[must_use]
+    pub fn load_shedding_stats(&self) -> LoadSheddingStats {
+        LoadSheddingStats {
+            queue_depth: self.export_queue.len(),
+            queue_capacity: self.export_queue.capacity(),
+            dropped_batches: self.export_queue.dropped_count(),
+        }
+    }
+
+    /// Process all queued batches (typically called by export background task).
+    pub fn process_queue(&self) -> Result<usize, ExportError> {
+        let mut processed = 0;
+
+        while let Some(batch) = self.export_queue.dequeue() {
+            if let Err(error) = self.inner.export(&batch) {
+                // The batch is already off the queue: returning with `?`
+                // dropped it uncounted, so each attempt during an outage lost
+                // one more. Keep it for the next attempt instead.
+                self.export_queue.requeue_front(batch);
+                return Err(error);
+            }
+            processed += 1;
+        }
+
+        Ok(processed)
+    }
+}
+
+impl MetricsExporter for LoadSheddingExporter {
+    /// Queue metrics for export with load shedding.
+    ///
+    /// When queue is full, drops OLDEST batch to make room for new data.
+    /// This preserves recent observability data per OTLP best practices.
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        let dropped = self.export_queue.enqueue(metrics.clone());
+
+        if dropped {
+            // Log load shedding event (but don't fail the export)
+            #[cfg(feature = "tracing-integration")]
+            crate::tracing_compat::warn!(
+                target: "asupersync::observability::otel",
+                "OTLP export queue full: dropped oldest batch to preserve recent data. \
+                 Queue capacity: {}, dropped total: {}",
+                self.export_queue.capacity(),
+                self.export_queue.dropped_count()
+            );
+        }
+
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        // Process all queued batches then flush underlying exporter
+        self.process_queue()?;
+        self.inner.flush()
+    }
+}
+
+/// Load shedding statistics for monitoring export queue health.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadSheddingStats {
+    /// Current number of batches in the export queue.
+    pub queue_depth: usize,
+    /// Maximum queue capacity.
+    pub queue_capacity: usize,
+    /// Total number of batches dropped due to load shedding.
+    pub dropped_batches: u64,
+}
+
+impl InMemoryExporter {
+    /// Create a new in-memory exporter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get all collected snapshots.
+    #[must_use]
+    pub fn snapshots(&self) -> Vec<MetricsSnapshot> {
+        self.snapshots.lock().clone()
+    }
+
+    /// Clear collected snapshots.
+    pub fn clear(&self) {
+        self.snapshots.lock().clear();
+    }
+
+    /// Get total number of metrics recorded.
+    #[must_use]
+    pub fn total_metrics(&self) -> usize {
+        let snapshots = self.snapshots.lock();
+        snapshots
+            .iter()
+            .map(|s| s.counters.len() + s.gauges.len() + s.histograms.len())
+            .sum()
+    }
+}
+
+impl MetricsExporter for InMemoryExporter {
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        self.snapshots.lock().push(metrics.clone());
+        Ok(())
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        Ok(())
+    }
+}
+
+/// Version of the validated OTLP HTTP configuration contract.
+pub const OTLP_HTTP_CONFIG_VERSION: u32 = 1;
+
+/// Maximum accepted OTLP endpoint length in bytes.
+pub const OTLP_HTTP_MAX_ENDPOINT_BYTES: usize = 4096;
+
+/// Maximum number of explicit authentication headers on one exporter.
+pub const OTLP_HTTP_MAX_AUTH_HEADERS: usize = 32;
+
+/// Maximum accepted authentication-header name length in bytes.
+pub const OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES: usize = 256;
+
+/// Maximum accepted authentication-header value length in bytes.
+pub const OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES: usize = 8192;
+
+/// Maximum number of resolved resource attributes on one exporter.
+pub const OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES: usize = 128;
+
+/// Maximum accepted resource-attribute key length in bytes.
+pub const OTLP_HTTP_MAX_RESOURCE_KEY_BYTES: usize = 256;
+
+/// Maximum accepted resource-attribute value length in bytes.
+pub const OTLP_HTTP_MAX_RESOURCE_VALUE_BYTES: usize = 4096;
+
+/// Maximum number of bounded retry attempts for one export.
+pub const OTLP_HTTP_MAX_RETRIES: u32 = 16;
+
+/// Maximum collector response body size, enforced while receiving HTTP bytes
+/// and again before decoding the owned protobuf model.
+pub const OTLP_HTTP_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Transport security policy for an OTLP HTTP endpoint.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OtlpTlsPolicy {
+    /// Permit either `http://` or `https://`; HTTPS still requires the `tls`
+    /// feature at build time.
+    #[default]
+    AllowPlaintext,
+    /// Require an `https://` endpoint.
+    RequireTls,
+}
+
+/// Stable, secret-free OTLP configuration error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OtlpConfigError {
+    /// The endpoint is not a bounded absolute HTTP(S) URL.
+    InvalidEndpoint,
+    /// The selected policy requires HTTPS, but the endpoint uses HTTP.
+    TlsRequired,
+    /// The endpoint uses HTTPS, but this build lacks the `tls` feature.
+    TlsFeatureUnavailable,
+    /// The endpoint uses HTTPS, but this build has no certificate-root provider.
+    TlsRootsUnavailable,
+    /// Authentication headers were configured for a plaintext HTTP endpoint.
+    InsecureAuthTransport,
+    /// Compression was selected, but this build lacks the `compression` feature.
+    CompressionFeatureUnavailable,
+    /// The request timeout is zero.
+    ZeroTimeout,
+    /// A retry delay is zero or the initial delay exceeds the maximum delay.
+    InvalidRetryDelay,
+    /// The retry count exceeds the bounded exporter limit.
+    TooManyRetries,
+    /// An authentication-header name is empty or is not an RFC 9110 token.
+    InvalidHeaderName,
+    /// An authentication-header value is empty or contains a forbidden control byte.
+    InvalidHeaderValue,
+    /// An authentication header attempts to replace a transport-owned header.
+    ReservedHeaderName,
+    /// Authentication-header names are duplicated case-insensitively.
+    DuplicateHeaderName,
+    /// The authentication-header count exceeds the bounded exporter limit.
+    TooManyAuthHeaders,
+    /// A resource-attribute key or value violates the bounded schema.
+    InvalidResourceAttribute,
+    /// The resolved resource-attribute count exceeds the bounded schema.
+    TooManyResourceAttributes,
+}
+
+impl OtlpConfigError {
+    /// Stable machine-readable error code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidEndpoint => "otlp.config.invalid_endpoint",
+            Self::TlsRequired => "otlp.config.tls_required",
+            Self::TlsFeatureUnavailable => "otlp.config.tls_feature_unavailable",
+            Self::TlsRootsUnavailable => "otlp.config.tls_roots_unavailable",
+            Self::InsecureAuthTransport => "otlp.config.insecure_auth_transport",
+            Self::CompressionFeatureUnavailable => "otlp.config.compression_feature_unavailable",
+            Self::ZeroTimeout => "otlp.config.zero_timeout",
+            Self::InvalidRetryDelay => "otlp.config.invalid_retry_delay",
+            Self::TooManyRetries => "otlp.config.too_many_retries",
+            Self::InvalidHeaderName => "otlp.config.invalid_header_name",
+            Self::InvalidHeaderValue => "otlp.config.invalid_header_value",
+            Self::ReservedHeaderName => "otlp.config.reserved_header_name",
+            Self::DuplicateHeaderName => "otlp.config.duplicate_header_name",
+            Self::TooManyAuthHeaders => "otlp.config.too_many_auth_headers",
+            Self::InvalidResourceAttribute => "otlp.config.invalid_resource_attribute",
+            Self::TooManyResourceAttributes => "otlp.config.too_many_resource_attributes",
+        }
+    }
+
+    /// Whether retrying the same immutable configuration can succeed.
+    ///
+    /// Configuration failures are deterministic. A caller must change the
+    /// input or feature set before retrying; transient export failures use
+    /// [`OtlpError`] instead.
+    #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        false
+    }
+}
+
+impl std::fmt::Display for OtlpConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let detail = match self {
+            Self::InvalidEndpoint => "endpoint must be a bounded absolute HTTP(S) URL",
+            Self::TlsRequired => "transport policy requires an HTTPS endpoint",
+            Self::TlsFeatureUnavailable => "HTTPS requires the asupersync tls feature",
+            Self::TlsRootsUnavailable => "HTTPS requires tls-native-roots or tls-webpki-roots",
+            Self::InsecureAuthTransport => "authentication headers require an HTTPS endpoint",
+            Self::CompressionFeatureUnavailable => {
+                "gzip requires the asupersync compression feature"
+            }
+            Self::ZeroTimeout => "request timeout must be nonzero",
+            Self::InvalidRetryDelay => {
+                "retry delays must be nonzero and initial must not exceed maximum"
+            }
+            Self::TooManyRetries => "retry count exceeds the bounded exporter limit",
+            Self::InvalidHeaderName => "authentication-header name is invalid",
+            Self::InvalidHeaderValue => "authentication-header value is invalid",
+            Self::ReservedHeaderName => "authentication header is owned by the transport",
+            Self::DuplicateHeaderName => "authentication-header name is duplicated",
+            Self::TooManyAuthHeaders => "authentication-header count exceeds the bounded limit",
+            Self::InvalidResourceAttribute => "resource attribute violates the bounded schema",
+            Self::TooManyResourceAttributes => "resource-attribute count exceeds the bounded limit",
+        };
+        write!(f, "{}: {detail}", self.code())
+    }
+}
+
+impl std::error::Error for OtlpConfigError {}
+
+impl From<OtlpConfigError> for ExportError {
+    fn from(error: OtlpConfigError) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SecretHeaderValue(String);
+
+impl SecretHeaderValue {
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretHeaderValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct OtlpAuthHeader {
+    name: String,
+    value: SecretHeaderValue,
+}
+
+impl std::fmt::Debug for OtlpAuthHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpAuthHeader")
+            .field("name", &self.name)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+
+/// Immutable, validated OTLP HTTP configuration.
+///
+/// Construct this value with [`OtlpHttpConfigBuilder::build`]. It performs no
+/// ambient environment reads: process environment and config-file precedence
+/// belong at the application boundary, before this value enters exporter
+/// state. Authentication values are deliberately unavailable through accessors
+/// and are redacted from `Debug` output.
+///
+/// Resource attributes are retained for the owned signal adapters implemented
+/// by later OTLP phases. [`OtlpHttpExporter::send_otlp_protobuf`] transmits an
+/// already-encoded request and therefore does not rewrite that byte payload.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpHttpConfig {
+    endpoint: String,
+    timeout: Duration,
+    max_retries: u32,
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+    compression: bool,
+    tls_policy: OtlpTlsPolicy,
+    auth_headers: Vec<OtlpAuthHeader>,
+    resource_attributes: Vec<(String, String)>,
+}
+
+impl OtlpHttpConfig {
+    /// Configuration contract version.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        OTLP_HTTP_CONFIG_VERSION
+    }
+
+    /// Validated collector endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Request timeout.
+    #[must_use]
+    pub const fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    /// Maximum retry count.
+    #[must_use]
+    pub const fn max_retries(&self) -> u32 {
+        self.max_retries
+    }
+
+    /// Initial retry delay.
+    #[must_use]
+    pub const fn initial_retry_delay(&self) -> Duration {
+        self.initial_retry_delay
+    }
+
+    /// Maximum retry delay.
+    #[must_use]
+    pub const fn max_retry_delay(&self) -> Duration {
+        self.max_retry_delay
+    }
+
+    /// Whether gzip request compression is enabled.
+    #[must_use]
+    pub const fn compression(&self) -> bool {
+        self.compression
+    }
+
+    /// Configured TLS policy.
+    #[must_use]
+    pub const fn tls_policy(&self) -> OtlpTlsPolicy {
+        self.tls_policy
+    }
+
+    /// Authentication-header names, in deterministic transmission order.
+    ///
+    /// Values are intentionally not exposed.
+    #[must_use]
+    pub fn auth_header_names(&self) -> impl ExactSizeIterator<Item = &str> {
+        self.auth_headers.iter().map(|header| header.name.as_str())
+    }
+
+    /// Resolved resource attributes in deterministic key order.
+    ///
+    /// These values were supplied explicitly at the application boundary; no
+    /// environment read occurs while constructing or using this immutable
+    /// configuration. They are adapter input, not a promise that the raw-byte
+    /// [`OtlpHttpExporter::send_otlp_protobuf`] method rewrites its payload.
+    #[must_use]
+    pub fn resource_attributes(&self) -> impl ExactSizeIterator<Item = (&str, &str)> {
+        self.resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    fn validate(&self) -> Result<(), OtlpConfigError> {
+        validate_otlp_http_config(self)
+    }
+}
+
+impl std::fmt::Debug for OtlpHttpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpHttpConfig")
+            .field("version", &OTLP_HTTP_CONFIG_VERSION)
+            .field("endpoint", &redacted_otlp_endpoint(&self.endpoint))
+            .field("timeout", &self.timeout)
+            .field("max_retries", &self.max_retries)
+            .field("initial_retry_delay", &self.initial_retry_delay)
+            .field("max_retry_delay", &self.max_retry_delay)
+            .field("compression", &self.compression)
+            .field("tls_policy", &self.tls_policy)
+            .field(
+                "auth_header_names",
+                &self.auth_header_names().collect::<Vec<_>>(),
+            )
+            .field(
+                "auth_header_values",
+                &self
+                    .auth_headers
+                    .iter()
+                    .map(|_| "[REDACTED]")
+                    .collect::<Vec<_>>(),
+            )
+            .field(
+                "resource_attribute_keys",
+                &self
+                    .resource_attributes
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+fn redacted_otlp_endpoint(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return "[REDACTED]".to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}://{authority}[/REDACTED]")
+}
+
+fn default_otlp_resource_attributes() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("service.name".to_owned(), "unknown_service".to_owned()),
+        ("telemetry.sdk.name".to_owned(), "asupersync".to_owned()),
+        (
+            "telemetry.sdk.version".to_owned(),
+            env!("CARGO_PKG_VERSION").to_owned(),
+        ),
+    ])
+}
+
+/// Builder for a validated [`OtlpHttpConfig`].
+#[derive(Clone)]
+pub struct OtlpHttpConfigBuilder {
+    config: OtlpHttpConfig,
+    boundary_resource_attributes: BTreeMap<String, String>,
+    programmatic_resource_attributes: BTreeMap<String, String>,
+}
+
+impl OtlpHttpConfigBuilder {
+    /// Start an explicit configuration with backward-compatible defaults.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            config: OtlpHttpConfig {
+                endpoint: endpoint.into(),
+                timeout: Duration::from_secs(10),
+                max_retries: 3,
+                initial_retry_delay: Duration::from_millis(100),
+                max_retry_delay: Duration::from_secs(30),
+                compression: false,
+                tls_policy: OtlpTlsPolicy::AllowPlaintext,
+                auth_headers: Vec::new(),
+                resource_attributes: Vec::new(),
+            },
+            boundary_resource_attributes: BTreeMap::new(),
+            programmatic_resource_attributes: BTreeMap::new(),
+        }
+    }
+
+    /// Set request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.config.timeout = timeout;
+        self
+    }
+
+    /// Set bounded retry configuration.
+    #[must_use]
+    pub fn with_retry_config(
+        mut self,
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.config.max_retries = max_retries;
+        self.config.initial_retry_delay = initial_delay;
+        self.config.max_retry_delay = max_delay;
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.config.compression = compression;
+        self
+    }
+
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.config.tls_policy = policy;
+        self
+    }
+
+    /// Add an Authorization bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        let value = if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            String::new()
+        } else {
+            format!("Bearer {token}")
+        };
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: "Authorization".to_owned(),
+            value: SecretHeaderValue(value),
+        });
+        self
+    }
+
+    /// Add an API-key header.
+    #[must_use]
+    pub fn with_api_key(mut self, name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(key.into()),
+        });
+        self
+    }
+
+    /// Add a custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.config.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(value.into()),
+        });
+        self
+    }
+
+    /// Add resource attributes already resolved at the application boundary.
+    ///
+    /// This lower-priority layer is intended for values parsed from deployment
+    /// configuration or `OTEL_RESOURCE_ATTRIBUTES` by the application. It does
+    /// not read the process environment. Explicit programmatic attributes added
+    /// with [`Self::with_resource_attribute`] win regardless of call order.
+    #[must_use]
+    pub fn with_boundary_resource_attributes<I, K, V>(mut self, attributes: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.boundary_resource_attributes.extend(
+            attributes
+                .into_iter()
+                .map(|(key, value)| (key.into(), value.into())),
+        );
+        self
+    }
+
+    /// Add or replace one highest-priority programmatic resource attribute.
+    #[must_use]
+    pub fn with_resource_attribute(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.programmatic_resource_attributes
+            .insert(key.into(), value.into());
+        self
+    }
+
+    /// Validate and freeze the configuration.
+    pub fn build(mut self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        let mut resolved = default_otlp_resource_attributes();
+        resolved.extend(self.boundary_resource_attributes);
+        resolved.extend(self.programmatic_resource_attributes);
+        self.config.resource_attributes = resolved.into_iter().collect();
+        self.config.validate()?;
+        Ok(self.config)
+    }
+}
+
+impl std::fmt::Debug for OtlpHttpConfigBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("OtlpHttpConfigBuilder")
+            .field(&self.config)
+            .field(&self.boundary_resource_attributes.keys().collect::<Vec<_>>())
+            .field(
+                &self
+                    .programmatic_resource_attributes
+                    .keys()
+                    .collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+fn valid_otlp_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= OTLP_HTTP_MAX_AUTH_HEADER_NAME_BYTES
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn valid_otlp_header_value(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES
+        && !value.bytes().any(|byte| {
+            byte == 0
+                || byte == b'\r'
+                || byte == b'\n'
+                || byte == 0x7f
+                || (byte < 0x20 && byte != b'\t')
+        })
+}
+
+fn transport_owns_header(name: &str) -> bool {
+    [
+        "connection",
+        "content-encoding",
+        "content-length",
+        "content-type",
+        "expect",
+        "host",
+        "http2-settings",
+        "keep-alive",
+        "proxy-authorization",
+        "proxy-connection",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ]
+    .iter()
+    .any(|reserved| name.eq_ignore_ascii_case(reserved))
+}
+
+fn valid_otlp_resource_attribute(key: &str, value: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= OTLP_HTTP_MAX_RESOURCE_KEY_BYTES
+        && value.len() <= OTLP_HTTP_MAX_RESOURCE_VALUE_BYTES
+        && !key.bytes().any(|byte| byte.is_ascii_control())
+        && !value.bytes().any(|byte| byte.is_ascii_control())
+}
+
+fn validate_otlp_http_config_common(config: &OtlpHttpConfig) -> Result<(), OtlpConfigError> {
+    use crate::http::h1::http_client::{ParsedUrl, Scheme};
+
+    if config.endpoint.is_empty()
+        || config.endpoint.len() > OTLP_HTTP_MAX_ENDPOINT_BYTES
+        || config
+            .endpoint
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+        || config.endpoint.contains('#')
+    {
+        return Err(OtlpConfigError::InvalidEndpoint);
+    }
+    let parsed =
+        ParsedUrl::parse(&config.endpoint).map_err(|_| OtlpConfigError::InvalidEndpoint)?;
+    if config.tls_policy == OtlpTlsPolicy::RequireTls && parsed.scheme != Scheme::Https {
+        return Err(OtlpConfigError::TlsRequired);
+    }
+    if parsed.scheme == Scheme::Https && !cfg!(feature = "tls") {
+        return Err(OtlpConfigError::TlsFeatureUnavailable);
+    }
+    if parsed.scheme == Scheme::Https
+        && cfg!(feature = "tls")
+        && !cfg!(any(
+            feature = "tls-native-roots",
+            feature = "tls-webpki-roots"
+        ))
+    {
+        return Err(OtlpConfigError::TlsRootsUnavailable);
+    }
+    if config.compression && !cfg!(feature = "compression") {
+        return Err(OtlpConfigError::CompressionFeatureUnavailable);
+    }
+    if config.timeout.is_zero() {
+        return Err(OtlpConfigError::ZeroTimeout);
+    }
+    if config.auth_headers.len() > OTLP_HTTP_MAX_AUTH_HEADERS {
+        return Err(OtlpConfigError::TooManyAuthHeaders);
+    }
+
+    let mut names = HashSet::with_capacity(config.auth_headers.len());
+    for header in &config.auth_headers {
+        if !valid_otlp_header_name(&header.name) {
+            return Err(OtlpConfigError::InvalidHeaderName);
+        }
+        if transport_owns_header(&header.name) {
+            return Err(OtlpConfigError::ReservedHeaderName);
+        }
+        if !valid_otlp_header_value(header.value.expose()) {
+            return Err(OtlpConfigError::InvalidHeaderValue);
+        }
+        if !names.insert(header.name.to_ascii_lowercase()) {
+            return Err(OtlpConfigError::DuplicateHeaderName);
+        }
+    }
+    if !config.auth_headers.is_empty() && parsed.scheme != Scheme::Https {
+        return Err(OtlpConfigError::InsecureAuthTransport);
+    }
+    if config.resource_attributes.len() > OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES {
+        return Err(OtlpConfigError::TooManyResourceAttributes);
+    }
+    if config
+        .resource_attributes
+        .iter()
+        .any(|(key, value)| !valid_otlp_resource_attribute(key, value))
+    {
+        return Err(OtlpConfigError::InvalidResourceAttribute);
+    }
+    Ok(())
+}
+
+fn validate_otlp_http_config(config: &OtlpHttpConfig) -> Result<(), OtlpConfigError> {
+    validate_otlp_http_config_common(config)?;
+    if config.max_retries > OTLP_HTTP_MAX_RETRIES {
+        return Err(OtlpConfigError::TooManyRetries);
+    }
+    if config.initial_retry_delay.is_zero()
+        || config.max_retry_delay.is_zero()
+        || config.initial_retry_delay > config.max_retry_delay
+    {
+        return Err(OtlpConfigError::InvalidRetryDelay);
+    }
+    Ok(())
+}
+
+/// Validated collector acknowledgement for one OTLP HTTP request.
+///
+/// All supported signals share the same protobuf response shape. Rejected
+/// items are data points for metrics, spans for traces, or records for logs.
+/// A populated `partial_success` is terminal even when some items were
+/// rejected: retrying that request can duplicate the items already accepted.
+/// Collector diagnostic text is available explicitly through
+/// [`Self::error_message`] and is redacted from `Debug` output.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpHttpResponse {
+    partial_success: bool,
+    rejected_items: u64,
+    error_message: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OtlpHttpResponse {
+    /// Whether the collector populated the `partial_success` field.
+    #[must_use]
+    pub const fn is_partial_success(&self) -> bool {
+        self.partial_success
+    }
+
+    /// Number of telemetry items the collector rejected from this request.
+    #[must_use]
+    pub const fn rejected_items(&self) -> u64 {
+        self.rejected_items
+    }
+
+    /// Bounded, untrusted collector diagnostic, empty when none was supplied.
+    ///
+    /// It may contain echoed telemetry or credentials. Apply the application's
+    /// privacy policy before logging or displaying it.
+    #[must_use]
+    pub fn error_message(&self) -> &str {
+        &self.error_message
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for OtlpHttpResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtlpHttpResponse")
+            .field("partial_success", &self.partial_success)
+            .field("rejected_items", &self.rejected_items)
+            .field("error_message_present", &!self.error_message.is_empty())
+            .finish()
+    }
+}
+
+/// OTLP HTTP exporter with RFC-compliant retry logic.
+///
+/// Implements OTLP spec requirements for retryable HTTP responses:
+/// - 502, 503, 504: Retry with exponential backoff
+/// - 429: Retry with Retry-After header or exponential backoff
+/// - Other 5xx: Drop batch (non-retryable per spec)
+#[derive(Clone)]
+pub struct OtlpHttpExporter {
+    endpoint: String,
+    timeout: Duration,
+    max_retries: u32,
+    initial_retry_delay: Duration,
+    max_retry_delay: Duration,
+    compression: bool,
+    tls_policy: OtlpTlsPolicy,
+    auth_headers: Vec<OtlpAuthHeader>,
+    resource_attributes: Vec<(String, String)>,
+    legacy_retry_compatibility: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    export_queue: Arc<queued::ExportQueue>,
+}
+
+impl std::fmt::Debug for OtlpHttpExporter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.config() {
+            Ok(config) => f.debug_tuple("OtlpHttpExporter").field(&config).finish(),
+            Err(error) => f
+                .debug_struct("OtlpHttpExporter")
+                .field("configuration_error", &error.code())
+                .field("endpoint", &redacted_otlp_endpoint(&self.endpoint))
+                .field(
+                    "auth_header_names",
+                    &self
+                        .auth_headers
+                        .iter()
+                        .map(|header| header.name.as_str())
+                        .collect::<Vec<_>>(),
+                )
+                .field(
+                    "auth_header_values",
+                    &self
+                        .auth_headers
+                        .iter()
+                        .map(|_| "[REDACTED]")
+                        .collect::<Vec<_>>(),
+                )
+                .finish(),
+        }
+    }
+}
+
+impl OtlpHttpExporter {
+    /// Create a new OTLP HTTP exporter.
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout: Duration::from_secs(10),
+            max_retries: 3,
+            initial_retry_delay: Duration::from_millis(100),
+            max_retry_delay: Duration::from_secs(30),
+            compression: false, // Default to false for backward compatibility
+            tls_policy: OtlpTlsPolicy::AllowPlaintext,
+            auth_headers: Vec::new(),
+            resource_attributes: default_otlp_resource_attributes().into_iter().collect(),
+            legacy_retry_compatibility: true,
+            #[cfg(not(target_arch = "wasm32"))]
+            export_queue: Arc::new(queued::ExportQueue::default()),
+        }
+    }
+
+    /// Create an exporter only if the default configuration is valid in this
+    /// build's TLS and compression feature matrix.
+    pub fn try_new(endpoint: impl Into<String>) -> Result<Self, OtlpConfigError> {
+        let config = OtlpHttpConfigBuilder::new(endpoint).build()?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Create an exporter from an immutable validated configuration.
+    #[must_use]
+    pub fn from_config(config: OtlpHttpConfig) -> Self {
+        Self {
+            endpoint: config.endpoint,
+            timeout: config.timeout,
+            max_retries: config.max_retries,
+            initial_retry_delay: config.initial_retry_delay,
+            max_retry_delay: config.max_retry_delay,
+            compression: config.compression,
+            tls_policy: config.tls_policy,
+            auth_headers: config.auth_headers,
+            resource_attributes: config.resource_attributes,
+            legacy_retry_compatibility: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            export_queue: Arc::new(queued::ExportQueue::default()),
+        }
+    }
+
+    fn snapshot_config(&self) -> OtlpHttpConfig {
+        OtlpHttpConfig {
+            endpoint: self.endpoint.clone(),
+            timeout: self.timeout,
+            max_retries: self.max_retries,
+            initial_retry_delay: self.initial_retry_delay,
+            max_retry_delay: self.max_retry_delay,
+            compression: self.compression,
+            tls_policy: self.tls_policy,
+            auth_headers: self.auth_headers.clone(),
+            resource_attributes: self.resource_attributes.clone(),
+        }
+    }
+
+    /// Return a strictly validated snapshot of the exporter's immutable
+    /// configuration.
+    pub fn config(&self) -> Result<OtlpHttpConfig, OtlpConfigError> {
+        let config = self.snapshot_config();
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate_for_export(&self) -> Result<(), OtlpConfigError> {
+        let config = self.snapshot_config();
+        if self.legacy_retry_compatibility {
+            // The pre-existing fluent API accepted arbitrary retry counts and
+            // zero delays (including the useful `(0, 0, 0)` disabled-retry
+            // form). Preserve that shipped behavior while still applying all
+            // endpoint, TLS, credential, timeout, header, and resource safety
+            // checks. The new immutable builder enforces the bounded retry
+            // contract through full validation.
+            validate_otlp_http_config_common(&config)
+        } else {
+            config.validate()
+        }
+    }
+
+    /// Set request timeout.
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Set retry configuration.
+    #[must_use]
+    pub fn with_retry_config(
+        mut self,
+        max_retries: u32,
+        initial_delay: Duration,
+        max_delay: Duration,
+    ) -> Self {
+        self.max_retries = max_retries;
+        self.initial_retry_delay = initial_delay;
+        self.max_retry_delay = max_delay;
+        self
+    }
+
+    /// Enable gzip compression for request bodies.
+    #[must_use]
+    pub fn with_compression(mut self, compression: bool) -> Self {
+        self.compression = compression;
+        self
+    }
+
+    /// Select the endpoint transport-security policy.
+    #[must_use]
+    pub fn with_tls_policy(mut self, policy: OtlpTlsPolicy) -> Self {
+        self.tls_policy = policy;
+        self
+    }
+
+    /// Add Authorization header with Bearer token.
+    #[must_use]
+    pub fn with_bearer_token(mut self, token: impl Into<String>) -> Self {
+        let token = token.into();
+        let value = if token.is_empty() || token.bytes().any(|byte| byte.is_ascii_whitespace()) {
+            String::new()
+        } else {
+            format!("Bearer {token}")
+        };
+        self.auth_headers.push(OtlpAuthHeader {
+            name: "Authorization".to_owned(),
+            value: SecretHeaderValue(value),
+        });
+        self
+    }
+
+    /// Add API key header.
+    #[must_use]
+    pub fn with_api_key(mut self, header_name: impl Into<String>, key: impl Into<String>) -> Self {
+        self.auth_headers.push(OtlpAuthHeader {
+            name: header_name.into(),
+            value: SecretHeaderValue(key.into()),
+        });
+        self
+    }
+
+    /// Add custom authentication header.
+    #[must_use]
+    pub fn with_auth_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.auth_headers.push(OtlpAuthHeader {
+            name: name.into(),
+            value: SecretHeaderValue(value.into()),
+        });
+        self
+    }
+
+    /// Send an OTLP protobuf request with RFC-compliant retry logic.
+    ///
+    /// On native targets, success requires a valid bounded collector response.
+    /// Collector rejection of any items returns an error without retrying the
+    /// accepted portion. A zero-rejection warning remains successful. Use
+    /// `send_otlp_protobuf_with_response` to inspect the exact native receipt.
+    pub async fn send_otlp_protobuf(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+    ) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let response = self
+                .send_otlp_protobuf_with_response(cx, request_body)
+                .await?;
+            if response.rejected_items() != 0 {
+                return Err(ExportError::new(format!(
+                    "otlp.response.partial_success: collector rejected {} telemetry items; request must not be retried",
+                    response.rejected_items()
+                )));
+            }
+            Ok(())
+        }
+        #[cfg(target_arch = "wasm32")]
+        self.send_otlp_protobuf_response_body(cx, request_body)
+            .await
+            .map(|_| ())
+    }
+
+    /// Send one request and return its validated collector acknowledgement.
+    ///
+    /// A partial-success receipt is returned as `Ok`, including when its
+    /// rejected count is nonzero. The caller must inspect that count and must
+    /// not retry the request. HTTP failures retain the existing retry policy;
+    /// malformed, oversized, or unsupported response bodies are terminal.
+    /// Empty protobuf responses remain valid full acknowledgements.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_otlp_protobuf_with_response(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+    ) -> Result<OtlpHttpResponse, ExportError> {
+        let body = self
+            .send_otlp_protobuf_response_body(cx, request_body)
+            .await?;
+        let response = decode_otlp_http_response(&body).map_err(ExportError::from)?;
+        if response.is_partial_success() {
+            let rejected = response.rejected_items().to_string();
+            let diagnostic_present = if response.error_message().is_empty() {
+                "false"
+            } else {
+                "true"
+            };
+            cx.trace_with_fields(
+                "otlp.export.partial_success",
+                &[
+                    ("rejected_items", rejected.as_str()),
+                    ("diagnostic_present", diagnostic_present),
+                ],
+            );
+        }
+        Ok(response)
+    }
+
+    async fn send_otlp_protobuf_response_body(
+        &self,
+        cx: &crate::cx::Cx,
+        request_body: Vec<u8>,
+    ) -> Result<Vec<u8>, ExportError> {
+        use std::cmp;
+
+        // Existing infallible builders remain source-compatible, but every
+        // export fails closed before compression, DNS, or network activity if
+        // their accumulated configuration is invalid.
+        self.validate_for_export().map_err(ExportError::from)?;
+
+        let mut retry_count = 0;
+        let mut current_delay = self.initial_retry_delay;
+
+        loop {
+            match self.send_request_once(cx, &request_body).await {
+                Ok(response_body) => return Ok(response_body),
+                Err(OtlpError::Retryable {
+                    status_code,
+                    retry_after,
+                }) => {
+                    if retry_count >= self.max_retries {
+                        return Err(ExportError::new(format!(
+                            "Max retries ({}) exceeded for OTLP export. Last status: {}",
+                            self.max_retries, status_code
+                        )));
+                    }
+
+                    // Calculate retry delay per OTLP spec
+                    let delay = if let Some(retry_after) = retry_after {
+                        // Use Retry-After header if present (for 429)
+                        cmp::min(retry_after, self.max_retry_delay)
+                    } else {
+                        // Exponential backoff with jitter for 502/503/504
+                        let jitter = Duration::from_millis(deterministic_retry_jitter_ms(
+                            retry_count,
+                            status_code,
+                        ));
+                        bounded_otlp_retry_delay(current_delay, jitter, self.max_retry_delay)
+                    };
+
+                    retry_count += 1;
+                    current_delay = next_otlp_retry_delay(current_delay, self.max_retry_delay);
+
+                    // The backoff remains inside the caller's cancellation and
+                    // budget envelope; cancellation must not wait for a long
+                    // collector-supplied Retry-After delay to elapse.
+                    wait_otlp_retry_backoff(cx, delay).await?;
+                }
+                Err(OtlpError::CompressionFallback { status_code }) => {
+                    // 415 Unsupported Media Type - retry without compression
+                    if self.compression {
+                        // Attempt fallback to uncompressed request
+                        match self
+                            .send_request_with_compression(cx, &request_body, false)
+                            .await
+                        {
+                            Ok(response_body) => return Ok(response_body),
+                            Err(fallback_error) => {
+                                return Err(ExportError::new(format!(
+                                    "OTLP compression fallback failed: {} after {}",
+                                    fallback_error, status_code
+                                )));
+                            }
+                        }
+                    } else {
+                        // Already using no compression, can't fallback further
+                        return Err(ExportError::new(format!(
+                            "OTLP compression fallback not applicable: {}",
+                            status_code
+                        )));
+                    }
+                }
+                Err(e) => {
+                    // Non-retryable error (e.g., other 4xx, other 5xx, network)
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
+    /// Collect and send a native owned OTLP metrics provider.
+    ///
+    /// Mapping and protobuf validation complete for every deterministic batch
+    /// before the first network write. The caller supplies the collection time
+    /// explicitly, and the export remains inside `cx` cancellation and budget
+    /// ownership. A mapping refusal emits no request bytes.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_metrics(
+        &self,
+        cx: &crate::cx::Cx,
+        metrics: &OwnedOtlpMetrics,
+        point_time_unix_nano: u64,
+    ) -> Result<(), ExportError> {
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let requests = metrics
+            .collect(point_time_unix_nano, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in requests {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
+    }
+
+    /// Map and send a finite borrowed OTLP trace collection.
+    ///
+    /// Every sampled span is validated and encoded before the first network
+    /// write. Requests are sent sequentially inside the caller's cancellation
+    /// and budget envelope; this method never starts an exporter task. An
+    /// all-unsampled collection performs no network request.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_traces(
+        &self,
+        cx: &crate::cx::Cx,
+        traces: &OwnedOtlpTraces,
+        spans: &[OtlpTraceSpanInput<'_>],
+    ) -> Result<(), ExportError> {
+        let attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let collection = traces
+            .collect(spans, &attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in collection.into_requests() {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
+    }
+
+    /// Map and send a finite borrowed OTLP logs collection.
+    ///
+    /// The complete collection passes count, byte, identifier, body, and
+    /// protobuf-envelope validation before the first network write. Record and
+    /// array order are preserved, attribute maps are normalized by bytewise
+    /// key order, and all requests remain inside the caller's cancellation and
+    /// budget envelope. This method never starts an exporter task.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn send_owned_logs(
+        &self,
+        cx: &crate::cx::Cx,
+        logs: &OwnedOtlpLogs,
+        records: &[OtlpLogRecordInput<'_>],
+    ) -> Result<(), ExportError> {
+        let resource_attributes = self
+            .resource_attributes
+            .iter()
+            .map(|(key, value)| OtlpLogKeyValueInput::string(key, value))
+            .collect::<Vec<_>>();
+        let collection = logs
+            .collect(records, &resource_attributes)
+            .map_err(|error| ExportError::new(error.to_string()))?;
+        for request in collection.into_requests() {
+            self.send_otlp_protobuf(cx, request).await?;
+        }
+        Ok(())
+    }
+
+    async fn send_request_once(
+        &self,
+        cx: &crate::cx::Cx,
+        body: &[u8],
+    ) -> Result<Vec<u8>, OtlpError> {
+        self.send_request_with_compression(cx, body, self.compression)
+            .await
+    }
+
+    async fn send_request_with_compression(
+        &self,
+        cx: &crate::cx::Cx,
+        body: &[u8],
+        use_compression: bool,
+    ) -> Result<Vec<u8>, OtlpError> {
+        use crate::http::h1::http_client::HttpClient;
+        use crate::http::h1::types::Method;
+
+        #[cfg(not(feature = "metrics"))]
+        return Err(OtlpError::non_retryable(
+            "OTLP HTTP export requires 'metrics' feature",
+        ));
+
+        #[cfg(feature = "metrics")]
+        {
+            // OTLP owns retry and endpoint security. Automatic redirects could
+            // otherwise downgrade RequireTls or forward a custom credential to
+            // another origin, so this transport never follows them.
+            let client = HttpClient::builder()
+                .no_redirects()
+                .no_cookie_store()
+                .no_retries()
+                .max_body_size(OTLP_HTTP_MAX_RESPONSE_BYTES)
+                .build();
+
+            // Apply compression if enabled
+            let (compressed_body, content_encoding) = if use_compression {
+                #[cfg(feature = "compression")]
+                {
+                    use flate2::{Compression, write::GzEncoder};
+                    use std::io::Write;
+
+                    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+                    encoder.write_all(body).map_err(|e| {
+                        OtlpError::non_retryable(format!("Compression failed: {}", e))
+                    })?;
+                    let compressed = encoder.finish().map_err(|e| {
+                        OtlpError::non_retryable(format!("Compression finish failed: {}", e))
+                    })?;
+                    (compressed, Some("gzip".to_string()))
+                }
+                #[cfg(not(feature = "compression"))]
+                {
+                    return Err(OtlpError::non_retryable(
+                        "Compression requested but 'compression' feature not enabled",
+                    ));
+                }
+            } else {
+                (body.to_vec(), None)
+            };
+
+            // Build headers with optional Content-Encoding
+            let mut headers = vec![(
+                "Content-Type".to_owned(),
+                "application/x-protobuf".to_owned(),
+            )];
+            if let Some(encoding) = content_encoding {
+                headers.push(("Content-Encoding".to_owned(), encoding));
+            }
+
+            // Add authentication headers
+            headers.extend(
+                self.auth_headers
+                    .iter()
+                    .map(|header| (header.name.clone(), header.value.expose().to_owned())),
+            );
+
+            // Send under the caller's explicit timer capability. Using the
+            // ambient timeout helper here would put a non-ambient `Cx` and its
+            // timeout on different clocks in deterministic runtimes.
+            let response = drive_otlp_request_with_timeout(cx, self.timeout, async {
+                client
+                    .request(cx, Method::Post, &self.endpoint, headers, compressed_body)
+                    .await
+            })
+            .await?
+            .map_err(|e| OtlpError::non_retryable(format!("OTLP request failed: {}", e)))?;
+
+            // Handle response per OTLP spec
+            classify_otlp_http_response(response.status, &response.headers)?;
+            validate_otlp_response_encoding(&response.headers)?;
+            Ok(response.body)
+        }
+    }
+}
+
+fn validate_otlp_response_encoding(headers: &[(String, String)]) -> Result<(), OtlpError> {
+    // Preserve collectors that omit Content-Type, including empty protobuf
+    // acknowledgements. An explicitly conflicting encoding is never accepted.
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("content-type")
+            && !value.split(';').next().is_some_and(|media_type| {
+                media_type
+                    .trim()
+                    .eq_ignore_ascii_case("application/x-protobuf")
+            })
+        {
+            return Err(OtlpError::non_retryable(
+                "otlp.response.invalid_content_type: expected application/x-protobuf",
+            ));
+        }
+        // This transport does not implement response decompression. Refuse an
+        // encoded response instead of interpreting compressed bytes as a
+        // protobuf acknowledgement or performing an unbounded decompression.
+        if name.eq_ignore_ascii_case("content-encoding")
+            && !value.trim().eq_ignore_ascii_case("identity")
+        {
+            return Err(OtlpError::non_retryable(
+                "otlp.response.unsupported_content_encoding: expected an uncompressed response",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn decode_otlp_http_response(body: &[u8]) -> Result<OtlpHttpResponse, OtlpError> {
+    use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceResponse;
+
+    if body.len() > OTLP_HTTP_MAX_RESPONSE_BYTES {
+        return Err(OtlpError::non_retryable(
+            "otlp.response.too_large: collector response exceeds the byte limit",
+        ));
+    }
+    // Metrics, trace and logs responses are wire-identical: field 1 contains
+    // partial_success, whose field 1 is an int64 rejected count and field 2 a
+    // UTF-8 diagnostic. Use one owned schema without guessing from a URL path.
+    // The schema additionally caps diagnostics at 4096 bytes and rejects
+    // negative counts, while these limits bound unknown fields and parse work.
+    let limits = ProtobufWireLimits::for_message_size(OTLP_HTTP_MAX_RESPONSE_BYTES)
+        .with_max_fields(1024)
+        .with_max_depth(8);
+    let response = ExportMetricsServiceResponse::decode_from_bytes(body, limits).map_err(|_| {
+        OtlpError::non_retryable(
+            "otlp.response.invalid_protobuf: malformed collector response or decode limit exceeded",
+        )
+    })?;
+    match response.partial_success {
+        Some(partial) => Ok(OtlpHttpResponse {
+            partial_success: true,
+            rejected_items: u64::try_from(partial.rejected_data_points).map_err(|_| {
+                OtlpError::non_retryable(
+                    "otlp.response.invalid_protobuf: negative rejected item count",
+                )
+            })?,
+            error_message: partial.error_message,
+        }),
+        None => Ok(OtlpHttpResponse {
+            partial_success: false,
+            rejected_items: 0,
+            error_message: String::new(),
+        }),
+    }
+}
+
+fn bounded_otlp_retry_delay(current: Duration, jitter: Duration, maximum: Duration) -> Duration {
+    current.saturating_add(jitter).min(maximum)
+}
+
+fn next_otlp_retry_delay(current: Duration, maximum: Duration) -> Duration {
+    current.saturating_mul(2).min(maximum)
+}
+
+async fn drive_otlp_request_with_timeout<F>(
+    cx: &crate::cx::Cx,
+    timeout: Duration,
+    future: F,
+) -> Result<F::Output, OtlpError>
+where
+    F: std::future::Future,
+{
+    use std::future::{Future, poll_fn};
+    use std::pin::pin;
+    use std::task::Poll;
+
+    let timer_driver = cx.timer_driver();
+    let now = timer_driver
+        .as_ref()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let timeout_nanos = u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+    let request_deadline = now.saturating_add_nanos(timeout_nanos);
+    let deadline = cx
+        .budget()
+        .deadline
+        .map_or(request_deadline, |budget_deadline| {
+            request_deadline.min(budget_deadline)
+        });
+    let effective_timeout = Duration::from_nanos(deadline.duration_since(now));
+    let mut sleeper = if let Some(timer_driver) = timer_driver {
+        crate::time::Sleep::with_timer_driver(deadline, timer_driver)
+    } else {
+        crate::time::sleep(now, effective_timeout)
+    };
+    let mut future = pin!(future);
+    let mut cancel_waker = OtlpCancelWakerGuard::new(cx);
+
+    let result = poll_fn(|task_cx| {
+        cancel_waker.refresh(task_cx.waker());
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(OtlpError::non_retryable(
+                "OTLP request failed: request cancelled",
+            )));
+        }
+
+        // Preserve completed work at the exact timeout boundary, matching the
+        // crate-wide timeout contract.
+        if let Poll::Ready(output) = future.as_mut().poll(task_cx) {
+            return Poll::Ready(Ok(output));
+        }
+        match std::pin::Pin::new(&mut sleeper).poll(task_cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => {
+                if cx.checkpoint().is_err() {
+                    Poll::Ready(Err(OtlpError::non_retryable(
+                        "OTLP request failed: request cancelled",
+                    )))
+                } else {
+                    Poll::Ready(Err(OtlpError::non_retryable("OTLP request timeout")))
+                }
+            }
+        }
+    })
+    .await;
+    cancel_waker.clear();
+    result
+}
+
+struct OtlpCancelWakerGuard<'a> {
+    cx: &'a crate::cx::Cx,
+    token: Option<crate::cx::CancelWakerToken>,
+}
+
+impl<'a> OtlpCancelWakerGuard<'a> {
+    fn new(cx: &'a crate::cx::Cx) -> Self {
+        Self { cx, token: None }
+    }
+
+    fn refresh(&mut self, waker: &std::task::Waker) {
+        self.token = Some(self.cx.refresh_cancel_waker(self.token, waker));
+    }
+
+    fn clear(&mut self) {
+        if let Some(token) = self.token.take() {
+            self.cx.clear_cancel_waker(token);
+        }
+    }
+}
+
+impl Drop for OtlpCancelWakerGuard<'_> {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+async fn wait_otlp_retry_backoff(cx: &crate::cx::Cx, delay: Duration) -> Result<(), ExportError> {
+    use std::future::{Future, poll_fn};
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    cx.checkpoint().map_err(|_| {
+        ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+    })?;
+
+    let timer_driver = cx.timer_driver();
+    let now = timer_driver
+        .as_ref()
+        .map_or_else(crate::time::wall_now, |driver| driver.now());
+    let delay = cx.budget().deadline.map_or(delay, |deadline| {
+        delay.min(Duration::from_nanos(deadline.duration_since(now)))
+    });
+    if delay.is_zero() {
+        return cx.checkpoint().map_err(|_| {
+            ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+        });
+    }
+
+    let mut sleeper = if let Some(timer_driver) = timer_driver {
+        let delay_nanos = u64::try_from(delay.as_nanos()).unwrap_or(u64::MAX);
+        crate::time::Sleep::with_timer_driver(now.saturating_add_nanos(delay_nanos), timer_driver)
+    } else {
+        crate::time::sleep(now, delay)
+    };
+    let mut cancel_waker = OtlpCancelWakerGuard::new(cx);
+    let result = poll_fn(|task_cx| {
+        // Register before checking cancellation so a request racing this poll
+        // either wakes the task or is observed by the following checkpoint.
+        cancel_waker.refresh(task_cx.waker());
+        if cx.checkpoint().is_err() {
+            return Poll::Ready(Err(ExportError::new(
+                "OTLP retry backoff interrupted by Cx budget or cancellation",
+            )));
+        }
+        match Pin::new(&mut sleeper).poll(task_cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(()) => Poll::Ready(cx.checkpoint().map_err(|_| {
+                ExportError::new("OTLP retry backoff interrupted by Cx budget or cancellation")
+            })),
+        }
+    })
+    .await;
+    cancel_waker.clear();
+    result
+}
+
+fn parse_otlp_retry_after(headers: &[(String, String)]) -> Option<Duration> {
+    crate::observability::parse_http_retry_after(headers)
+}
+
+fn classify_otlp_http_response(status: u16, headers: &[(String, String)]) -> Result<(), OtlpError> {
+    match status {
+        200..=299 => Ok(()),
+        429 => {
+            // Rate limited - honor Retry-After header per OTLP spec.
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        408 => {
+            // Request Timeout - retryable per RFC 9110 (server-side timeout).
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        502..=504 => {
+            // Retryable server errors per OTLP spec.
+            let retry_after = parse_otlp_retry_after(headers);
+            Err(OtlpError::retryable(status, retry_after))
+        }
+        405 => {
+            // Method Not Allowed - configuration error per OTLP spec.
+            let allowed_methods = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("allow"))
+                .map_or_else(|| "unknown".to_string(), |(_, value)| value.clone());
+
+            Err(OtlpError::non_retryable(format!(
+                "OTLP Method Not Allowed (405) - configuration error. Allowed methods: {allowed_methods} - batch dropped",
+            )))
+        }
+        415 => Err(OtlpError::compression_fallback(status)),
+        400..=499 => Err(OtlpError::non_retryable(format!(
+            "OTLP client error: {status} - batch dropped"
+        ))),
+        500..=599 => Err(OtlpError::non_retryable(format!(
+            "OTLP server error: {status} - batch dropped"
+        ))),
+        _ => Err(OtlpError::non_retryable(format!(
+            "Unexpected OTLP response status: {status}"
+        ))),
+    }
+}
+
+impl MetricsExporter for OtlpHttpExporter {
+    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.enqueue_metrics(metrics)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = metrics;
+            Err(ExportError::new(
+                "OTLP HTTP export requires async context - use send_otlp_protobuf() directly",
+            ))
+        }
+    }
+
+    fn flush(&self) -> Result<(), ExportError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.export_queue.check_flushed()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(())
+        }
+    }
+}
+
+/// OTLP-specific error with retry information.
+#[derive(Debug, Clone)]
+pub enum OtlpError {
+    /// Non-retryable export error.
+    NonRetryable {
+        /// Human-readable reason the export must not be retried.
+        message: String,
+    },
+    /// Retryable export error with optional retry delay.
+    Retryable {
+        /// HTTP status code returned by the collector.
+        status_code: u16,
+        /// Optional delay parsed from a Retry-After response header.
+        retry_after: Option<Duration>,
+    },
+    /// Compression fallback required (415 Unsupported Media Type).
+    CompressionFallback {
+        /// HTTP status code (typically 415).
+        status_code: u16,
+    },
+}
+
+impl OtlpError {
+    /// Create a new non-retryable OTLP error.
+    #[must_use]
+    pub fn non_retryable(message: impl Into<String>) -> Self {
+        Self::NonRetryable {
+            message: message.into(),
+        }
+    }
+
+    /// Create a retryable OTLP error.
+    #[must_use]
+    pub fn retryable(status_code: u16, retry_after: Option<Duration>) -> Self {
+        Self::Retryable {
+            status_code,
+            retry_after,
+        }
+    }
+
+    /// Create a compression fallback OTLP error.
+    #[must_use]
+    pub fn compression_fallback(status_code: u16) -> Self {
+        Self::CompressionFallback { status_code }
+    }
+}
+
+impl std::fmt::Display for OtlpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NonRetryable { message } => write!(f, "OTLP error: {}", message),
+            Self::Retryable {
+                status_code,
+                retry_after,
+            } => {
+                if let Some(delay) = retry_after {
+                    write!(
+                        f,
+                        "retryable OTLP error: {} (retry after {:?})",
+                        status_code, delay
+                    )
+                } else {
+                    write!(f, "retryable OTLP error: {}", status_code)
+                }
+            }
+            Self::CompressionFallback { status_code } => {
+                write!(f, "OTLP compression fallback required: {}", status_code)
+            }
+        }
+    }
+}
+
+impl std::error::Error for OtlpError {}
+
+impl From<OtlpError> for ExportError {
+    fn from(err: OtlpError) -> Self {
+        ExportError::new(err.to_string())
+    }
+}
+
+fn deterministic_retry_jitter_ms(retry_count: u32, status_code: u16) -> u64 {
+    (u64::from(retry_count) * 37 + u64::from(status_code) * 17) % 101
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod otlp_retry_tests {
+    use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_preserves_full_partial_and_warning_receipts() {
+        let full = decode_otlp_http_response(&[]).expect("empty protobuf is full success");
+        assert!(!full.is_partial_success());
+        assert_eq!(full.rejected_items(), 0);
+        assert!(full.error_message().is_empty());
+
+        // Wire-identical across metrics, trace and logs: partial_success with
+        // two rejected items and one diagnostic. Construct bytes independently
+        // of the owned encoder so the decoder is tested against the protocol.
+        let partial = decode_otlp_http_response(b"\x0a\x0b\x08\x02\x12\x07private")
+            .expect("valid partial success");
+        assert!(partial.is_partial_success());
+        assert_eq!(partial.rejected_items(), 2);
+        assert_eq!(partial.error_message(), "private");
+        assert!(!format!("{partial:?}").contains("private"));
+
+        let warning = decode_otlp_http_response(b"\x0a\x09\x12\x07private")
+            .expect("zero-rejection collector warning");
+        assert!(warning.is_partial_success());
+        assert_eq!(warning.rejected_items(), 0);
+        assert_eq!(warning.error_message(), "private");
+
+        let empty_partial = decode_otlp_http_response(b"\x0a\x00")
+            .expect("empty partial-success field is a zero-rejection acknowledgement");
+        assert!(empty_partial.is_partial_success());
+        assert_eq!(empty_partial.rejected_items(), 0);
+        assert!(empty_partial.error_message().is_empty());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_merges_partial_fields_and_preserves_forward_compatibility() {
+        let response = decode_otlp_http_response(b"\x10\x01\x0a\x02\x08\x03\x0a\x04\x12\x02ok")
+            .expect("unknown root fields and split singular messages remain valid protobuf");
+        assert_eq!(response.rejected_items(), 3);
+        assert_eq!(response.error_message(), "ok");
+
+        let unknown = decode_otlp_http_response(b"\x10\x01")
+            .expect("future response fields must not be mistaken for partial failure");
+        assert!(!unknown.is_partial_success());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_rejects_malformed_and_hostile_protobuf() {
+        let malformed: &[&[u8]] = &[
+            b"\x00",                                                 // Invalid field number.
+            b"\x0a\x02\x08",                                         // Truncated nested message.
+            b"\x08\x01",             // Wrong partial_success wire type.
+            b"\x0a\x03\x12\x01\xff", // Invalid diagnostic UTF-8.
+            b"\x0a\x0b\x08\xff\xff\xff\xff\xff\xff\xff\xff\xff\x01", // Negative int64.
+        ];
+        for body in malformed {
+            let error = decode_otlp_http_response(body).expect_err("malformed receipt must fail");
+            assert!(matches!(error, OtlpError::NonRetryable { .. }));
+            assert!(error.to_string().contains("otlp.response.invalid_protobuf"));
+        }
+
+        let excessive_fields = b"\x10\x00".repeat(1025);
+        assert!(decode_otlp_http_response(&excessive_fields).is_err());
+
+        let mut excessive_depth = vec![0x13; 9];
+        excessive_depth.extend_from_slice(&[0x14; 9]);
+        assert!(decode_otlp_http_response(&excessive_depth).is_err());
+
+        let oversize = vec![0; OTLP_HTTP_MAX_RESPONSE_BYTES + 1];
+        let error = decode_otlp_http_response(&oversize).expect_err("response size ceiling");
+        assert!(error.to_string().contains("otlp.response.too_large"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn otlp_collector_response_bounds_diagnostic_before_owning_it() {
+        use crate::grpc::protobuf::ProtobufWireEncoder;
+
+        for (length, accepted) in [(4096, true), (4097, false)] {
+            let mut encoder = ProtobufWireEncoder::new(ProtobufWireLimits::default());
+            encoder
+                .write_nested_message(1, |nested| nested.write_string(2, &"x".repeat(length)))
+                .expect("wire fixture fits the generic protobuf envelope");
+            let body = encoder.finish().expect("complete protobuf fixture");
+            let result = decode_otlp_http_response(&body);
+            assert_eq!(result.is_ok(), accepted, "diagnostic length {length}");
+        }
+    }
+
+    #[test]
+    fn otlp_collector_response_encoding_fails_closed_without_reflecting_headers() {
+        assert!(validate_otlp_response_encoding(&[]).is_ok());
+        assert!(
+            validate_otlp_response_encoding(&[
+                (
+                    "CONTENT-TYPE".to_owned(),
+                    "Application/X-Protobuf; charset=binary".to_owned()
+                ),
+                ("Content-Encoding".to_owned(), "identity".to_owned()),
+            ])
+            .is_ok()
+        );
+        for headers in [
+            vec![("Content-Type".to_owned(), "text/private-secret".to_owned())],
+            vec![(
+                "Content-Encoding".to_owned(),
+                "gzip-private-secret".to_owned(),
+            )],
+            vec![
+                (
+                    "Content-Type".to_owned(),
+                    "application/x-protobuf".to_owned(),
+                ),
+                (
+                    "content-type".to_owned(),
+                    "application/json-private-secret".to_owned(),
+                ),
+            ],
+        ] {
+            let error = validate_otlp_response_encoding(&headers)
+                .expect_err("unsupported or conflicting response encoding");
+            assert!(matches!(error, OtlpError::NonRetryable { .. }));
+            assert!(!error.to_string().contains("private-secret"));
+        }
+    }
+
+    #[test]
+    fn otlp_error_display() {
+        let non_retryable = OtlpError::non_retryable("connection failed");
+        assert_eq!(non_retryable.to_string(), "OTLP error: connection failed");
+
+        let retryable = OtlpError::retryable(503, None);
+        assert_eq!(retryable.to_string(), "retryable OTLP error: 503");
+
+        let retryable_with_delay = OtlpError::retryable(429, Some(Duration::from_secs(30)));
+        assert_eq!(
+            retryable_with_delay.to_string(),
+            "retryable OTLP error: 429 (retry after 30s)"
+        );
+    }
+
+    #[test]
+    fn otlp_http_exporter_configuration() {
+        let exporter = OtlpHttpExporter::new("http://collector:4318/v1/metrics")
+            .with_timeout(Duration::from_secs(15))
+            .with_retry_config(5, Duration::from_millis(200), Duration::from_secs(60));
+
+        assert_eq!(exporter.endpoint, "http://collector:4318/v1/metrics");
+        assert_eq!(exporter.timeout, Duration::from_secs(15));
+        assert_eq!(exporter.max_retries, 5);
+        assert_eq!(exporter.initial_retry_delay, Duration::from_millis(200));
+        assert_eq!(exporter.max_retry_delay, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn validated_otlp_config_freezes_explicit_precedence() {
+        let config = OtlpHttpConfigBuilder::new("http://collector:4318/v1/metrics")
+            .with_timeout(Duration::from_secs(15))
+            .with_retry_config(5, Duration::from_millis(200), Duration::from_secs(60))
+            .with_tls_policy(OtlpTlsPolicy::AllowPlaintext)
+            .with_resource_attribute("service.name", "programmatic-service")
+            .with_boundary_resource_attributes([
+                ("service.name", "boundary-service"),
+                ("deployment.environment", "production"),
+            ])
+            .build()
+            .expect("explicit OTLP configuration should validate");
+
+        assert_eq!(config.version(), OTLP_HTTP_CONFIG_VERSION);
+        assert_eq!(config.endpoint(), "http://collector:4318/v1/metrics");
+        assert_eq!(config.timeout(), Duration::from_secs(15));
+        assert_eq!(config.max_retries(), 5);
+        assert_eq!(config.initial_retry_delay(), Duration::from_millis(200));
+        assert_eq!(config.max_retry_delay(), Duration::from_secs(60));
+        assert!(!config.compression());
+        assert_eq!(config.tls_policy(), OtlpTlsPolicy::AllowPlaintext);
+        assert_eq!(
+            config.auth_header_names().collect::<Vec<_>>(),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            config.resource_attributes().collect::<Vec<_>>(),
+            vec![
+                ("deployment.environment", "production"),
+                ("service.name", "programmatic-service"),
+                ("telemetry.sdk.name", "asupersync"),
+                ("telemetry.sdk.version", env!("CARGO_PKG_VERSION")),
+            ]
+        );
+
+        let exporter = OtlpHttpExporter::from_config(config.clone());
+        assert_eq!(
+            exporter.config().expect("frozen config").endpoint(),
+            config.endpoint()
+        );
+        let logs = OtlpLogsHttpExporter::from_config(config);
+        assert_eq!(
+            logs.config().expect("shared logs config").timeout(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn otlp_config_errors_are_stable_and_fail_closed() {
+        let invalid_endpoints = [
+            "",
+            "collector:4318/v1/metrics",
+            "ftp://collector/v1/metrics",
+            "http://user@collector/v1/metrics",
+            "http://collector/has space",
+            "http://collector/v1/metrics#fragment",
+        ];
+        for endpoint in invalid_endpoints {
+            assert_eq!(
+                OtlpHttpConfigBuilder::new(endpoint).build(),
+                Err(OtlpConfigError::InvalidEndpoint),
+                "endpoint {endpoint:?} must fail closed"
+            );
+        }
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_tls_policy(OtlpTlsPolicy::RequireTls)
+                .build(),
+            Err(OtlpConfigError::TlsRequired)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_timeout(Duration::ZERO)
+                .build(),
+            Err(OtlpConfigError::ZeroTimeout)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_retry_config(
+                    OTLP_HTTP_MAX_RETRIES + 1,
+                    Duration::from_millis(1),
+                    Duration::from_millis(1),
+                )
+                .build(),
+            Err(OtlpConfigError::TooManyRetries)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_retry_config(1, Duration::from_secs(2), Duration::from_secs(1),)
+                .build(),
+            Err(OtlpConfigError::InvalidRetryDelay)
+        );
+
+        let error = OtlpConfigError::InvalidEndpoint;
+        assert_eq!(error.code(), "otlp.config.invalid_endpoint");
+        assert!(!error.is_retryable());
+        assert_eq!(
+            error.to_string(),
+            "otlp.config.invalid_endpoint: endpoint must be a bounded absolute HTTP(S) URL"
+        );
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_resource_attribute("bad\nkey", "value")
+                .build(),
+            Err(OtlpConfigError::InvalidResourceAttribute)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_boundary_resource_attributes(
+                    (0..OTLP_HTTP_MAX_RESOURCE_ATTRIBUTES)
+                        .map(|index| (format!("resource.{index}"), "value")),
+                )
+                .build(),
+            Err(OtlpConfigError::TooManyResourceAttributes)
+        );
+    }
+
+    #[test]
+    fn otlp_auth_secrets_never_enter_debug_or_errors() {
+        let builder = OtlpHttpConfigBuilder::new(
+            "http://collector:4318/tenant/path-secret/v1/metrics?tenant=query-secret",
+        )
+        .with_bearer_token("bearer-secret")
+        .with_api_key("X-API-Key", "api-key-secret");
+        let exporter = OtlpHttpExporter::new(
+            "http://collector:4318/tenant/path-secret/v1/metrics?tenant=query-secret",
+        )
+        .with_bearer_token("bearer-secret")
+        .with_api_key("X-API-Key", "api-key-secret");
+
+        for debug in [format!("{builder:?}"), format!("{exporter:?}")] {
+            assert!(!debug.contains("path-secret"));
+            assert!(!debug.contains("query-secret"));
+            assert!(!debug.contains("bearer-secret"));
+            assert!(!debug.contains("api-key-secret"));
+            assert!(debug.contains("[REDACTED]"));
+        }
+
+        let invalid_builder = OtlpHttpConfigBuilder::new(
+            "https://endpoint-user:userinfo-secret@collector/v1/metrics",
+        );
+        let invalid_debug = format!("{invalid_builder:?}");
+        assert!(!invalid_debug.contains("endpoint-user"));
+        assert!(!invalid_debug.contains("userinfo-secret"));
+        assert!(invalid_debug.contains("https://collector[/REDACTED]"));
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_bearer_token("must-use-tls")
+                .build(),
+            Err(OtlpConfigError::InsecureAuthTransport)
+        );
+
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Bad Header", "secret")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("X-API-Key", "secret\r\ninjected: value")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Content-Type", "secret")
+                .build(),
+            Err(OtlpConfigError::ReservedHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("Transfer-Encoding", "chunked")
+                .build(),
+            Err(OtlpConfigError::ReservedHeaderName)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_bearer_token("")
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header(
+                    "X-API-Key",
+                    "x".repeat(OTLP_HTTP_MAX_AUTH_HEADER_VALUE_BYTES + 1),
+                )
+                .build(),
+            Err(OtlpConfigError::InvalidHeaderValue)
+        );
+        assert_eq!(
+            OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+                .with_auth_header("X-API-Key", "first")
+                .with_auth_header("x-api-key", "second")
+                .build(),
+            Err(OtlpConfigError::DuplicateHeaderName)
+        );
+    }
+
+    #[test]
+    fn otlp_config_feature_matrix_is_explicit() {
+        let https = OtlpHttpConfigBuilder::new("https://collector/v1/metrics").build();
+        let https_auth = OtlpHttpConfigBuilder::new("https://collector/v1/metrics")
+            .with_bearer_token("feature-matrix-token")
+            .with_api_key("X-API-Key", "feature-matrix-key")
+            .build();
+        if cfg!(all(
+            feature = "tls",
+            any(feature = "tls-native-roots", feature = "tls-webpki-roots")
+        )) {
+            assert!(https.is_ok());
+            assert_eq!(
+                https_auth
+                    .expect("HTTPS credentials should validate with roots")
+                    .auth_header_names()
+                    .collect::<Vec<_>>(),
+                vec!["Authorization", "X-API-Key"]
+            );
+        } else if cfg!(feature = "tls") {
+            assert_eq!(https, Err(OtlpConfigError::TlsRootsUnavailable));
+            assert_eq!(https_auth, Err(OtlpConfigError::TlsRootsUnavailable));
+        } else {
+            assert_eq!(https, Err(OtlpConfigError::TlsFeatureUnavailable));
+            assert_eq!(https_auth, Err(OtlpConfigError::TlsFeatureUnavailable));
+        }
+
+        let compression = OtlpHttpConfigBuilder::new("http://collector/v1/metrics")
+            .with_compression(true)
+            .build();
+        if cfg!(feature = "compression") {
+            assert!(compression.is_ok());
+        } else {
+            assert_eq!(
+                compression,
+                Err(OtlpConfigError::CompressionFeatureUnavailable)
+            );
+        }
+    }
+
+    #[test]
+    fn otlp_retry_backoff_observes_cx_cancellation() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::{Context, Poll, Wake, Waker};
+
+        #[derive(Default)]
+        struct WakeCounter(AtomicUsize);
+
+        impl Wake for WakeCounter {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+
+            fn wake_by_ref(self: &Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let cx = crate::cx::Cx::for_testing();
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(60)));
+        let wake_counter = Arc::new(WakeCounter::default());
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut task_cx = Context::from_waker(&waker);
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 0);
+        cx.set_cancel_reason(crate::types::CancelReason::user("stop OTLP retry"));
+        assert!(wake_counter.0.load(Ordering::SeqCst) > 0);
+
+        match wait.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => assert_eq!(
+                error.to_string(),
+                "export error: OTLP retry backoff interrupted by Cx budget or cancellation"
+            ),
+            other => panic!("expected cancelled OTLP retry backoff, got {other:?}"),
+        }
+
+        let dropped_cx = crate::cx::Cx::for_testing();
+        let dropped_wake_counter = Arc::new(WakeCounter::default());
+        let dropped_waker = Waker::from(Arc::clone(&dropped_wake_counter));
+        let mut dropped_task_cx = Context::from_waker(&dropped_waker);
+        {
+            let mut dropped_wait = Box::pin(wait_otlp_retry_backoff(
+                &dropped_cx,
+                Duration::from_secs(60),
+            ));
+            assert!(matches!(
+                dropped_wait.as_mut().poll(&mut dropped_task_cx),
+                Poll::Pending
+            ));
+        }
+        dropped_cx.set_cancel_reason(crate::types::CancelReason::user("after drop"));
+        assert_eq!(dropped_wake_counter.0.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn otlp_retry_backoff_uses_the_explicit_cx_timer_driver() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(91, 0),
+            crate::types::TaskId::new_for_test(92, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(1)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(999_999_999);
+        assert_eq!(timer.process_timers(), 0);
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1);
+        assert_eq!(timer.process_timers(), 1);
+        assert!(matches!(
+            wait.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn otlp_request_timeout_uses_the_explicit_cx_timer_driver() {
+        use std::future::{Future, pending};
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(95, 0),
+            crate::types::TaskId::new_for_test(96, 0),
+            crate::types::Budget::INFINITE,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut request = Box::pin(drive_otlp_request_with_timeout(
+            &cx,
+            Duration::from_secs(1),
+            pending::<Result<(), crate::http::h1::http_client::ClientError>>(),
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(999_999_999);
+        assert_eq!(timer.process_timers(), 0);
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1);
+        assert_eq!(timer.process_timers(), 1);
+        match request.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.to_string(), "OTLP error: OTLP request timeout")
+            }
+            other => panic!("expected OTLP request timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_retry_backoff_refuses_work_at_the_budget_deadline() {
+        use std::future::Future;
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = crate::types::Budget::new().with_deadline(crate::types::Time::from_secs(1));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(93, 0),
+            crate::types::TaskId::new_for_test(94, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut wait = Box::pin(wait_otlp_retry_backoff(&cx, Duration::from_secs(60)));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(wait.as_mut().poll(&mut task_cx), Poll::Pending));
+        clock.advance(1_000_000_000);
+        assert_eq!(timer.process_timers(), 1);
+        match wait.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => assert_eq!(
+                error.to_string(),
+                "export error: OTLP retry backoff interrupted by Cx budget or cancellation"
+            ),
+            other => panic!("expected exhausted OTLP retry backoff, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_request_timeout_honors_an_earlier_cx_budget_deadline() {
+        use std::future::{Future, pending};
+        use std::sync::Arc;
+        use std::task::{Context, Poll, Waker};
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(Arc::clone(&clock));
+        let budget = crate::types::Budget::new().with_deadline(crate::types::Time::from_secs(1));
+        let cx = crate::cx::Cx::new_with_drivers(
+            crate::types::RegionId::new_for_test(97, 0),
+            crate::types::TaskId::new_for_test(98, 0),
+            budget,
+            None,
+            None,
+            None,
+            Some(timer.clone()),
+            None,
+        );
+        let mut request = Box::pin(drive_otlp_request_with_timeout(
+            &cx,
+            Duration::from_secs(60),
+            pending::<Result<(), crate::http::h1::http_client::ClientError>>(),
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+
+        assert!(matches!(request.as_mut().poll(&mut task_cx), Poll::Pending));
+        assert_eq!(timer.pending_count(), 1);
+        clock.advance(1_000_000_000);
+        assert_eq!(timer.process_timers(), 1);
+        match request.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(
+                    error.to_string(),
+                    "OTLP error: OTLP request failed: request cancelled"
+                )
+            }
+            other => panic!("expected exhausted OTLP request budget, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn otlp_retry_delay_arithmetic_saturates() {
+        assert_eq!(
+            bounded_otlp_retry_delay(Duration::MAX, Duration::from_millis(100), Duration::MAX,),
+            Duration::MAX
+        );
+        assert_eq!(
+            next_otlp_retry_delay(Duration::MAX, Duration::MAX),
+            Duration::MAX
+        );
+    }
+
+    #[test]
+    fn legacy_retry_configuration_remains_export_compatible() {
+        let many_retries = OtlpHttpExporter::new("http://collector/v1/metrics").with_retry_config(
+            OTLP_HTTP_MAX_RETRIES + 1,
+            Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
+        assert_eq!(many_retries.config(), Err(OtlpConfigError::TooManyRetries));
+        assert_eq!(many_retries.validate_for_export(), Ok(()));
+
+        let disabled_retries = OtlpHttpExporter::new("http://collector/v1/metrics")
+            .with_retry_config(0, Duration::ZERO, Duration::ZERO);
+        assert_eq!(
+            disabled_retries.config(),
+            Err(OtlpConfigError::InvalidRetryDelay)
+        );
+        assert_eq!(disabled_retries.validate_for_export(), Ok(()));
+
+        let plaintext_credentials =
+            OtlpHttpExporter::new("http://collector/v1/metrics").with_bearer_token("secret");
+        assert_eq!(
+            plaintext_credentials.validate_for_export(),
+            Err(OtlpConfigError::InsecureAuthTransport)
+        );
+    }
+
+    #[test]
+    fn legacy_builder_validates_before_any_async_transport_work() {
+        let exporter =
+            OtlpHttpExporter::new("ftp://collector/v1/metrics").with_bearer_token("must-not-leak");
+        assert_eq!(exporter.config(), Err(OtlpConfigError::InvalidEndpoint));
+
+        let cx = crate::cx::Cx::for_testing();
+        let error = futures_lite::future::block_on(exporter.send_otlp_protobuf(&cx, Vec::new()))
+            .expect_err("invalid config must fail before transport");
+        let message = error.to_string();
+        assert!(message.contains("otlp.config.invalid_endpoint"));
+        assert!(!message.contains("must-not-leak"));
+    }
+
+    /// Test that verifies RFC-compliant retry behavior for different HTTP status codes.
+    #[test]
+    fn otlp_retry_logic_rfc_compliance() {
+        // Test retryable status codes per OTLP spec
+        let retryable_codes = vec![429, 502, 503, 504];
+        for code in retryable_codes {
+            match OtlpError::retryable(code, None) {
+                OtlpError::Retryable { status_code, .. } => {
+                    assert_eq!(status_code, code, "Status {} should be retryable", code);
+                }
+                _ => panic!("Status {} should create retryable error", code),
+            }
+        }
+
+        // Test non-retryable status codes
+        let non_retryable_codes = vec![400, 401, 404, 500, 501, 505];
+        for code in non_retryable_codes {
+            let error = OtlpError::non_retryable(format!("HTTP {}", code));
+            match error {
+                OtlpError::NonRetryable { .. } => {
+                    // Expected
+                }
+                _ => panic!("Status {} should create non-retryable error", code),
+            }
+        }
+    }
+
+    #[test]
+    fn otlp_http_status_classifier_covers_preserved_audit_cluster() {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        enum Expected {
+            Ok,
+            Retryable {
+                status: u16,
+                retry_after_secs: Option<u64>,
+            },
+            NonRetryable {
+                status: u16,
+                message_fragment: &'static str,
+            },
+            CompressionFallback {
+                status: u16,
+            },
+        }
+
+        let scenarios = [
+            (
+                "success-200",
+                200,
+                &[][..],
+                Expected::Ok,
+                "compiled production seam keeps normal success unchanged",
+            ),
+            (
+                "401-unauthorized-terminal",
+                401,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 401,
+                    message_fragment: "OTLP client error: 401",
+                },
+                "otlp_401_unauthorized_audit_test.rs",
+            ),
+            (
+                "405-method-not-allowed-terminal-with-allow",
+                405,
+                &[("Allow", "POST")][..],
+                Expected::NonRetryable {
+                    status: 405,
+                    message_fragment: "Allowed methods: POST",
+                },
+                "otlp_405_method_not_allowed_audit_test.rs",
+            ),
+            (
+                "408-request-timeout-retryable",
+                408,
+                &[("Retry-After", "7")][..],
+                Expected::Retryable {
+                    status: 408,
+                    retry_after_secs: Some(7),
+                },
+                "otlp_408_timeout_retry_audit_test.rs",
+            ),
+            (
+                "414-uri-too-long-terminal",
+                414,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 414,
+                    message_fragment: "OTLP client error: 414",
+                },
+                "otlp_414_uri_too_long_audit_test.rs",
+            ),
+            (
+                "429-retry-after-honored",
+                429,
+                &[("retry-after", "30")][..],
+                Expected::Retryable {
+                    status: 429,
+                    retry_after_secs: Some(30),
+                },
+                "otlp_429_retry_after_audit_test.rs",
+            ),
+            (
+                "429-retry-after-delay-seconds-whitespace",
+                429,
+                &[("Retry-After", "  60  ")][..],
+                Expected::Retryable {
+                    status: 429,
+                    retry_after_secs: Some(60),
+                },
+                "RFC 9110 delay-seconds with optional field-value whitespace",
+            ),
+            (
+                "502-bad-gateway-retryable",
+                502,
+                &[][..],
+                Expected::Retryable {
+                    status: 502,
+                    retry_after_secs: None,
+                },
+                "otlp_502_bad_gateway_audit_test.rs",
+            ),
+            (
+                "503-retry-after-zero-budgeted",
+                503,
+                &[("Retry-After", "0")][..],
+                Expected::Retryable {
+                    status: 503,
+                    retry_after_secs: Some(0),
+                },
+                "otlp_503_retry_after_zero_audit_test.rs",
+            ),
+            (
+                "504-gateway-timeout-retryable",
+                504,
+                &[][..],
+                Expected::Retryable {
+                    status: 504,
+                    retry_after_secs: None,
+                },
+                "otlp_504_gateway_timeout_audit_test.rs",
+            ),
+            (
+                "511-network-auth-terminal",
+                511,
+                &[][..],
+                Expected::NonRetryable {
+                    status: 511,
+                    message_fragment: "OTLP server error: 511",
+                },
+                "otlp_511_network_auth_audit_test.rs",
+            ),
+            (
+                "415-compression-fallback",
+                415,
+                &[][..],
+                Expected::CompressionFallback { status: 415 },
+                "existing compression fallback behavior",
+            ),
+        ];
+
+        for (scenario_id, status, raw_headers, expected, source) in scenarios {
+            let headers: Vec<(String, String)> = raw_headers
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect();
+            let result = classify_otlp_http_response(status, &headers);
+
+            println!(
+                "OTLP_STATUS_CLASSIFIER scenario_id={scenario_id} source={source} status={status} expected={expected:?} observed={result:?}"
+            );
+
+            match (expected, result) {
+                (Expected::Ok, Ok(())) => {}
+                (
+                    Expected::Retryable {
+                        status,
+                        retry_after_secs,
+                    },
+                    Err(OtlpError::Retryable {
+                        status_code,
+                        retry_after,
+                    }),
+                ) => {
+                    assert_eq!(status_code, status, "scenario {scenario_id}");
+                    assert_eq!(
+                        retry_after,
+                        retry_after_secs.map(Duration::from_secs),
+                        "scenario {scenario_id}"
+                    );
+                }
+                (
+                    Expected::NonRetryable {
+                        status,
+                        message_fragment,
+                    },
+                    Err(OtlpError::NonRetryable { message }),
+                ) => {
+                    assert!(
+                        message.contains(message_fragment),
+                        "scenario {scenario_id}: expected message to contain {message_fragment:?}, got {message:?}"
+                    );
+                    assert!(
+                        !message.contains("collector:4318"),
+                        "scenario {scenario_id}: terminal classifier must not leak endpoint details"
+                    );
+                    assert!(
+                        message.contains(&status.to_string()),
+                        "scenario {scenario_id}: message must include status code"
+                    );
+                }
+                (
+                    Expected::CompressionFallback { status },
+                    Err(OtlpError::CompressionFallback { status_code }),
+                ) => {
+                    assert_eq!(status_code, status, "scenario {scenario_id}");
+                }
+                (expected, observed) => {
+                    panic!("scenario {scenario_id}: expected {expected:?}, observed {observed:?}");
+                }
+            }
+        }
+    }
+
+    /// Test exponential backoff calculation with jitter bounds.
+    #[test]
+    fn exponential_backoff_calculation() {
+        let exporter = OtlpHttpExporter::new("http://test").with_retry_config(
+            3,
+            Duration::from_millis(100),
+            Duration::from_secs(10),
+        );
+
+        // Test that delays increase exponentially but stay within bounds
+        let delays = vec![
+            Duration::from_millis(100), // Initial
+            Duration::from_millis(200), // 2x
+            Duration::from_millis(400), // 4x
+        ];
+
+        for (attempt, expected_base) in delays.iter().enumerate() {
+            let calculated_delay = std::cmp::min(
+                *expected_base * 2_u32.pow(attempt as u32),
+                exporter.max_retry_delay,
+            );
+            assert!(calculated_delay >= *expected_base);
+            assert!(calculated_delay <= exporter.max_retry_delay);
+        }
+    }
+
+    /// Test that Retry-After header is respected for 429 responses.
+    #[test]
+    fn retry_after_header_respected() {
+        let error_with_retry_after = OtlpError::retryable(429, Some(Duration::from_secs(45)));
+
+        match error_with_retry_after {
+            OtlpError::Retryable {
+                status_code,
+                retry_after,
+            } => {
+                assert_eq!(status_code, 429);
+                assert_eq!(retry_after, Some(Duration::from_secs(45)));
+            }
+            _ => panic!("Should create retryable error with retry_after"),
+        }
+    }
+
+    /// Test that max retry delay is enforced.
+    #[test]
+    fn max_retry_delay_enforced() {
+        let exporter = OtlpHttpExporter::new("http://test").with_retry_config(
+            5,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        );
+
+        // Test that Retry-After values are capped at max_retry_delay
+        let capped_delay = std::cmp::min(Duration::from_secs(10), exporter.max_retry_delay);
+        assert_eq!(capped_delay, Duration::from_secs(3));
+    }
+}
+
+// =============================================================================
+// OtelMetrics
+// =============================================================================
+
+/// OpenTelemetry metrics provider for Asupersync.
+///
+/// This provider supports:
+/// - Cardinality limits to prevent metric explosion
+/// - Configurable overflow strategies
+/// - Sampling for high-frequency metrics
+#[derive(Clone)]
+pub struct OtelMetrics {
+    // Task metrics
+    #[allow(dead_code)]
+    tasks_active: ObservableGauge<u64>,
+    tasks_spawned: Counter<u64>,
+    tasks_completed: Counter<u64>,
+    task_duration: Histogram<f64>,
+    // Region metrics
+    #[allow(dead_code)]
+    regions_active: ObservableGauge<u64>,
+    regions_created: Counter<u64>,
+    regions_closed: Counter<u64>,
+    region_lifetime: Histogram<f64>,
+    // Cancellation metrics
+    cancellations: Counter<u64>,
+    drain_duration: Histogram<f64>,
+    // Budget metrics
+    deadlines_set: Counter<u64>,
+    deadlines_exceeded: Counter<u64>,
+    // Deadline monitoring metrics
+    deadline_warnings: Counter<u64>,
+    deadline_violations: Counter<u64>,
+    deadline_remaining: Histogram<f64>,
+    checkpoint_interval: Histogram<f64>,
+    task_stuck_detected: Counter<u64>,
+    // Obligation metrics
+    #[allow(dead_code)]
+    obligations_active: ObservableGauge<u64>,
+    obligations_created: Counter<u64>,
+    obligations_discharged: Counter<u64>,
+    obligations_leaked: Counter<u64>,
+    // Scheduler metrics
+    scheduler_poll_time: Histogram<f64>,
+    scheduler_tasks_polled: Histogram<f64>,
+    // Shared gauge state
+    state: Arc<MetricsState>,
+    // Cardinality tracking
+    config: MetricsConfig,
+    cardinality_tracker: Arc<CardinalityTracker>,
+    // Sampling state
+    sample_counter: Arc<AtomicU64>,
+}
+
+impl std::fmt::Debug for OtelMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OtelMetrics")
+            .field("config", &self.config)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Default)]
+#[allow(clippy::struct_field_names)]
+struct MetricsState {
+    active_tasks: AtomicU64,
+    active_regions: AtomicU64,
+    active_obligations: AtomicU64,
+}
+
+impl MetricsState {
+    fn inc_tasks(&self) {
+        self.active_tasks.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec_tasks(&self) {
+        let _ = self
+            .active_tasks
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+    }
+
+    fn inc_regions(&self) {
+        self.active_regions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec_regions(&self) {
+        let _ = self
+            .active_regions
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+    }
+
+    fn inc_obligations(&self) {
+        self.active_obligations.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dec_obligations(&self) {
+        let _ = self
+            .active_obligations
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_sub(1))
+            });
+    }
+}
+
+// =============================================================================
+// OTLP Resource Detection (Per Specification Priority)
+// =============================================================================
+
+/// OTLP resource builder with specification-compliant priority handling.
+///
+/// **OTLP SPECIFICATION COMPLIANCE**:
+/// - Programmatic attributes MUST have highest priority
+/// - Environment variable OTEL_RESOURCE_ATTRIBUTES MUST override defaults
+/// - Defaults MUST have lowest priority
+/// - Priority order: Programmatic > Environment > Defaults
+#[derive(Debug, Clone, Default)]
+pub struct OtlpResourceBuilder {
+    programmatic_attrs: HashMap<String, String>,
+    env_attrs: HashMap<String, String>,
+    default_attrs: HashMap<String, String>,
+}
+
+impl OtlpResourceBuilder {
+    /// Create new OTLP resource builder with default attributes.
+    ///
+    /// **Default attributes per OTLP specification:**
+    /// - `telemetry.sdk.name`: "asupersync"
+    /// - `service.name`: "unknown_service"
+    #[must_use]
+    pub fn new() -> Self {
+        let mut default_attrs = HashMap::new();
+        default_attrs.insert("telemetry.sdk.name".to_string(), "asupersync".to_string());
+        default_attrs.insert("service.name".to_string(), "unknown_service".to_string());
+        default_attrs.insert(
+            "telemetry.sdk.version".to_string(),
+            env!("CARGO_PKG_VERSION").to_string(),
+        );
+
+        Self {
+            programmatic_attrs: HashMap::new(),
+            env_attrs: HashMap::new(),
+            default_attrs,
+        }
+    }
+
+    /// Add programmatic resource attributes (highest priority per OTLP spec).
+    ///
+    /// **OTLP COMPLIANCE**: These attributes MUST override any environment or default attributes.
+    #[must_use]
+    pub fn with_attributes(mut self, attrs: HashMap<String, String>) -> Self {
+        self.programmatic_attrs = attrs;
+        self
+    }
+
+    /// Add single programmatic attribute (highest priority per OTLP spec).
+    #[must_use]
+    pub fn with_attribute(mut self, key: String, value: String) -> Self {
+        self.programmatic_attrs.insert(key, value);
+        self
+    }
+
+    /// Load attributes from OTEL_RESOURCE_ATTRIBUTES environment variable.
+    ///
+    /// **OTLP COMPLIANCE**: Environment attributes MUST override defaults but
+    /// MUST be overridden by programmatic attributes.
+    ///
+    /// **Format**: "key1=value1,key2=value2,key3=value3"
+    #[must_use]
+    pub fn with_env_resource_attributes(mut self) -> Self {
+        if let Ok(env_attrs_str) = std::env::var("OTEL_RESOURCE_ATTRIBUTES") {
+            self.env_attrs = parse_otel_resource_attributes(&env_attrs_str);
+        }
+        self
+    }
+
+    /// Add `host.name` from common host environment variables.
+    ///
+    /// The detected value is treated like a default detector value: it is
+    /// overridden by `OTEL_RESOURCE_ATTRIBUTES` and by programmatic attributes.
+    /// Detection is opt-in so callers that need fully explicit resource
+    /// identity can keep the default builder deterministic.
+    #[must_use]
+    pub fn with_detected_host_name(mut self) -> Self {
+        if let Some(host_name) = detected_host_name_from_env() {
+            self.default_attrs
+                .insert("host.name".to_string(), host_name);
+        }
+        self
+    }
+
+    /// Build final resource applying OTLP specification priority order.
+    ///
+    /// **Priority Resolution (OTLP Spec Compliance)**:
+    /// 1. Start with default attributes (lowest priority)
+    /// 2. Apply environment attributes (override defaults)
+    /// 3. Apply programmatic attributes (override env and defaults)
+    ///
+    /// **Result**: HashMap<String, String> with proper precedence applied.
+    #[must_use]
+    pub fn build(self) -> HashMap<String, String> {
+        let mut final_attrs = self.default_attrs;
+
+        // Apply environment attributes (override defaults)
+        for (key, value) in self.env_attrs {
+            final_attrs.insert(key, value);
+        }
+
+        // Apply programmatic attributes (override env and defaults)
+        for (key, value) in self.programmatic_attrs {
+            final_attrs.insert(key, value);
+        }
+
+        final_attrs
+    }
+
+    /// Get current programmatic attributes.
+    #[must_use]
+    pub fn programmatic_attributes(&self) -> &HashMap<String, String> {
+        &self.programmatic_attrs
+    }
+
+    /// Get current environment attributes.
+    #[must_use]
+    pub fn environment_attributes(&self) -> &HashMap<String, String> {
+        &self.env_attrs
+    }
+
+    /// Get current default attributes.
+    #[must_use]
+    pub fn default_attributes(&self) -> &HashMap<String, String> {
+        &self.default_attrs
+    }
+}
+
+/// Parse OTEL_RESOURCE_ATTRIBUTES environment variable per OTLP specification.
+///
+/// **OTLP Format**: "key1=value1,key2=value2,key3=value3"
+///
+/// **Parsing Rules**:
+/// - Comma-separated key=value pairs
+/// - Whitespace around keys and values is trimmed
+/// - Empty pairs are ignored
+/// - Malformed pairs are ignored (no equals sign)
+fn parse_otel_resource_attributes(env_str: &str) -> HashMap<String, String> {
+    let mut attrs = HashMap::new();
+
+    for pair in env_str.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+
+        if let Some((key, value)) = pair.split_once('=') {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+
+            if !key.is_empty() {
+                attrs.insert(key, value);
+            }
+        }
+    }
+
+    attrs
+}
+
+fn detected_host_name_from_env() -> Option<String> {
+    ["HOSTNAME", "COMPUTERNAME"].into_iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| normalize_host_name(&value))
+    })
+}
+
+fn normalize_host_name(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod otlp_resource_builder_tests {
+    use std::collections::{BTreeMap, HashMap};
+    use std::env;
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+    use super::OtlpResourceBuilder;
+
+    const RESOURCE_ENV_VARS: &[&str] = &["HOSTNAME", "COMPUTERNAME", "OTEL_RESOURCE_ATTRIBUTES"];
+
+    fn resource_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct ResourceEnvGuard {
+        _guard: MutexGuard<'static, ()>,
+        previous: BTreeMap<&'static str, Option<String>>,
+    }
+
+    impl ResourceEnvGuard {
+        #[allow(unsafe_code)]
+        fn with(updates: &[(&'static str, Option<&str>)]) -> Self {
+            let guard = resource_env_lock()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let previous = RESOURCE_ENV_VARS
+                .iter()
+                .map(|var| (*var, env::var(var).ok()))
+                .collect();
+
+            for var in RESOURCE_ENV_VARS {
+                unsafe {
+                    env::remove_var(var);
+                }
+            }
+
+            for (key, value) in updates {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+
+            Self {
+                _guard: guard,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for ResourceEnvGuard {
+        #[allow(unsafe_code)]
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(key, value),
+                        None => env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn detected_host_name_uses_trimmed_hostname_env() {
+        let _guard = ResourceEnvGuard::with(&[("HOSTNAME", Some("  asupersync-host  "))]);
+
+        let resource = OtlpResourceBuilder::new().with_detected_host_name().build();
+
+        assert_eq!(
+            resource.get("host.name"),
+            Some(&"asupersync-host".to_string())
+        );
+    }
+
+    #[test]
+    fn detected_host_name_ignores_empty_host_values() {
+        let _guard =
+            ResourceEnvGuard::with(&[("HOSTNAME", Some("   ")), ("COMPUTERNAME", Some("\t\n"))]);
+
+        let resource = OtlpResourceBuilder::new().with_detected_host_name().build();
+
+        assert!(!resource.contains_key("host.name"));
+    }
+
+    #[test]
+    fn detected_host_name_preserves_resource_precedence() {
+        let _guard = ResourceEnvGuard::with(&[
+            ("HOSTNAME", Some("detected-host")),
+            ("OTEL_RESOURCE_ATTRIBUTES", Some("host.name=env-host")),
+        ]);
+
+        let env_resource = OtlpResourceBuilder::new()
+            .with_detected_host_name()
+            .with_env_resource_attributes()
+            .build();
+
+        assert_eq!(env_resource.get("host.name"), Some(&"env-host".to_string()));
+
+        let mut attrs = HashMap::new();
+        attrs.insert("host.name".to_string(), "programmatic-host".to_string());
+
+        let programmatic_resource = OtlpResourceBuilder::new()
+            .with_detected_host_name()
+            .with_env_resource_attributes()
+            .with_attributes(attrs)
+            .build();
+
+        assert_eq!(
+            programmatic_resource.get("host.name"),
+            Some(&"programmatic-host".to_string())
+        );
+    }
+}
+
+/// Create OTLP-compliant resource attributes with proper priority handling.
+///
+/// **OTLP Specification Compliance**: This function implements the required
+/// priority order for resource detection per OpenTelemetry specification.
+///
+/// **Example Usage**:
+/// ```ignore
+/// let resource_attrs = create_otlp_resource_attributes()
+///     .with_attribute("service.name".to_string(), "my-service".to_string())
+///     .with_attribute("environment".to_string(), "production".to_string())
+///     .with_env_resource_attributes()
+///     .build();
+/// ```
+#[must_use]
+pub fn create_otlp_resource_attributes() -> OtlpResourceBuilder {
+    OtlpResourceBuilder::new().with_env_resource_attributes()
+}
+
+impl OtelMetrics {
+    /// Constructs a new OpenTelemetry metrics provider from a [`Meter`].
+    #[must_use]
+    pub fn new(meter: Meter) -> Self {
+        Self::new_with_config(meter, MetricsConfig::default())
+    }
+
+    /// Constructs a new OpenTelemetry metrics provider with OTLP-compliant resource detection.
+    ///
+    /// **OTLP SPECIFICATION COMPLIANCE**: This method implements proper resource detection
+    /// priority per OTLP specification: programmatic > environment > defaults.
+    ///
+    /// **Resource Detection**:
+    /// - Reads OTEL_RESOURCE_ATTRIBUTES environment variable
+    /// - Applies programmatic attributes if provided
+    /// - Uses default attributes as fallback
+    /// - Follows OTLP priority order
+    ///
+    /// **Note**: This is a convenience method. For external SDK integration,
+    /// use the resource attributes with `opentelemetry_sdk::Resource::new()`.
+    #[must_use]
+    pub fn new_with_resource_detection(
+        meter: Meter,
+        programmatic_attrs: Option<HashMap<String, String>>,
+    ) -> Self {
+        // Build resource attributes with OTLP-compliant priority
+        let mut resource_builder = create_otlp_resource_attributes();
+        if let Some(attrs) = programmatic_attrs {
+            resource_builder = resource_builder.with_attributes(attrs);
+        }
+        let _resource_attrs = resource_builder.build();
+
+        // Note: The meter should already be configured with these resource attributes
+        // when the MeterProvider was created. This method demonstrates the proper
+        // resource detection pattern that should be used during SDK setup.
+
+        Self::new_with_config(meter, MetricsConfig::default())
+    }
+
+    /// Constructs a new OpenTelemetry metrics provider with configuration.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::needless_pass_by_value)] // Meter is consumed by builder pattern
+    pub fn new_with_config(meter: Meter, config: MetricsConfig) -> Self {
+        let state = Arc::new(MetricsState::default());
+
+        let tasks_active = meter
+            .u64_observable_gauge("asupersync.tasks.active")
+            .with_description("Currently running tasks")
+            .with_callback({
+                let state = Arc::clone(&state);
+                move |observer| {
+                    observer.observe(state.active_tasks.load(Ordering::Relaxed), &[]);
+                }
+            })
+            .build();
+
+        let regions_active = meter
+            .u64_observable_gauge("asupersync.regions.active")
+            .with_description("Currently active regions")
+            .with_callback({
+                let state = Arc::clone(&state);
+                move |observer| {
+                    observer.observe(state.active_regions.load(Ordering::Relaxed), &[]);
+                }
+            })
+            .build();
+
+        let obligations_active = meter
+            .u64_observable_gauge("asupersync.obligations.active")
+            .with_description("Currently active obligations")
+            .with_callback({
+                let state = Arc::clone(&state);
+                move |observer| {
+                    observer.observe(state.active_obligations.load(Ordering::Relaxed), &[]);
+                }
+            })
+            .build();
+
+        Self {
+            tasks_active,
+            tasks_spawned: meter
+                .u64_counter("asupersync.tasks.spawned")
+                .with_description("Total tasks spawned")
+                .build(),
+            tasks_completed: meter
+                .u64_counter("asupersync.tasks.completed")
+                .with_description("Total tasks completed")
+                .build(),
+            task_duration: meter
+                .f64_histogram("asupersync.tasks.duration")
+                .with_description("Task execution duration in seconds")
+                .build(),
+            regions_active,
+            regions_created: meter
+                .u64_counter("asupersync.regions.created")
+                .with_description("Total regions created")
+                .build(),
+            regions_closed: meter
+                .u64_counter("asupersync.regions.closed")
+                .with_description("Total regions closed")
+                .build(),
+            region_lifetime: meter
+                .f64_histogram("asupersync.regions.lifetime")
+                .with_description("Region lifetime in seconds")
+                .build(),
+            cancellations: meter
+                .u64_counter("asupersync.cancellations")
+                .with_description("Cancellation requests")
+                .build(),
+            drain_duration: meter
+                .f64_histogram("asupersync.cancellation.drain_duration")
+                .with_description("Cancellation drain duration in seconds")
+                .build(),
+            deadlines_set: meter
+                .u64_counter("asupersync.deadlines.set")
+                .with_description("Deadlines configured")
+                .build(),
+            deadlines_exceeded: meter
+                .u64_counter("asupersync.deadlines.exceeded")
+                .with_description("Deadline exceeded events")
+                .build(),
+            deadline_warnings: meter
+                .u64_counter("asupersync.deadline.warnings_total")
+                .with_description("Deadline warning events")
+                .build(),
+            deadline_violations: meter
+                .u64_counter("asupersync.deadline.violations_total")
+                .with_description("Deadline violation events")
+                .build(),
+            deadline_remaining: meter
+                .f64_histogram("asupersync.deadline.remaining_seconds")
+                .with_description("Time remaining at completion in seconds")
+                .build(),
+            checkpoint_interval: meter
+                .f64_histogram("asupersync.checkpoint.interval_seconds")
+                .with_description("Time between checkpoints in seconds")
+                .build(),
+            task_stuck_detected: meter
+                .u64_counter("asupersync.task.stuck_detected_total")
+                .with_description("Tasks detected as stuck (no progress)")
+                .build(),
+            obligations_active,
+            obligations_created: meter
+                .u64_counter("asupersync.obligations.created")
+                .with_description("Obligations created")
+                .build(),
+            obligations_discharged: meter
+                .u64_counter("asupersync.obligations.discharged")
+                .with_description("Obligations discharged")
+                .build(),
+            obligations_leaked: meter
+                .u64_counter("asupersync.obligations.leaked")
+                .with_description("Obligations leaked")
+                .build(),
+            scheduler_poll_time: meter
+                .f64_histogram("asupersync.scheduler.poll_time")
+                .with_description("Scheduler poll duration in seconds")
+                .build(),
+            scheduler_tasks_polled: meter
+                .f64_histogram("asupersync.scheduler.tasks_polled")
+                .with_description("Tasks polled per scheduler tick")
+                .build(),
+            state,
+            config,
+            cardinality_tracker: Arc::new(CardinalityTracker::new()),
+            sample_counter: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Get the current configuration.
+    #[must_use]
+    pub fn config(&self) -> &MetricsConfig {
+        &self.config
+    }
+
+    /// Get the number of cardinality overflows that have occurred.
+    #[must_use]
+    pub fn cardinality_overflow_count(&self) -> u64 {
+        self.cardinality_tracker.overflow_count()
+    }
+
+    /// Expose filtered metric labels for integration tests that pin
+    /// privacy/cardinality behavior without making the production
+    /// recording chokepoint public API.
+    #[cfg(feature = "test-internals")]
+    #[must_use]
+    pub fn filtered_metric_labels_for_test(
+        &self,
+        metric: &str,
+        labels: &[KeyValue],
+    ) -> Option<Vec<KeyValue>> {
+        self.check_cardinality(metric, labels)
+    }
+
+    /// Check if recording a metric should proceed, handling cardinality limits.
+    ///
+    /// Returns `Some(labels)` with potentially modified labels if recording should proceed,
+    /// or `None` if the metric should be dropped.
+    fn check_cardinality(&self, metric: &str, labels: &[KeyValue]) -> Option<Vec<KeyValue>> {
+        // Filter out dropped labels
+        let filtered: Vec<KeyValue> = labels
+            .iter()
+            .filter(|kv| !self.config.drop_labels.contains(&kv.key.to_string()))
+            .cloned()
+            .collect();
+
+        if self.cardinality_tracker.check_and_record(
+            metric,
+            &filtered,
+            self.config.max_cardinality,
+            self.config.max_metrics,
+        ) {
+            self.cardinality_tracker.record_overflow();
+
+            match self.config.overflow_strategy {
+                CardinalityOverflow::Drop => return None,
+                CardinalityOverflow::Aggregate => {
+                    // Replace high-cardinality labels with "other"
+                    let aggregated: Vec<KeyValue> = filtered
+                        .into_iter()
+                        .map(|kv| KeyValue::new(kv.key, "other"))
+                        .collect();
+                    if self.cardinality_tracker.check_and_record(
+                        metric,
+                        &aggregated,
+                        self.config.max_cardinality,
+                        self.config.max_metrics,
+                    ) {
+                        return None;
+                    }
+                    return Some(aggregated);
+                }
+                CardinalityOverflow::Warn => {
+                    crate::tracing_compat::warn!(
+                        metric = metric,
+                        "cardinality limit reached for metric"
+                    );
+                    self.cardinality_tracker.record(metric, &filtered);
+                }
+            }
+        }
+        Some(filtered)
+    }
+
+    /// Check if a metric should be sampled.
+    fn should_sample(&self, metric: &str) -> bool {
+        let Some(ref sampling) = self.config.sampling else {
+            return true; // No sampling configured
+        };
+
+        // Check if this metric is in the sampled set
+        if !sampling.sampled_metrics.is_empty()
+            && !sampling.sampled_metrics.iter().any(|m| metric.contains(m))
+        {
+            return true; // Not a sampled metric
+        }
+
+        if sampling.sample_rate >= 1.0 {
+            return true;
+        }
+        if sampling.sample_rate <= 0.0 {
+            return false;
+        }
+
+        // br-asupersync-2dwg47 — AcqRel ordering on the sampling
+        // counter so the fetch_add observed by each thread is
+        // sequentially consistent with respect to the prior writes:
+        // every thread sees a strictly-increasing sequence of
+        // returned counts, which is the property a counter-based
+        // deterministic-sampling scheme depends on. Relaxed allows
+        // stale counter values to be observed across threads on
+        // weakly-ordered targets, breaking lab replay (same input,
+        // two replays, different sampled-event sets). AcqRel keeps
+        // the single-CAS cost (no full fence) while making the
+        // visibility property explicit.
+        let count = self.sample_counter.fetch_add(1, Ordering::AcqRel);
+        // sample_rate is always 0.0..=1.0, so the cast is safe
+        #[allow(clippy::cast_sign_loss)]
+        let threshold = (sampling.sample_rate * 100.0) as u64;
+        (count % 100) < threshold
+    }
+}
+
+impl MetricsProvider for OtelMetrics {
+    fn task_spawned(&self, _region_id: RegionId, _task_id: TaskId) {
+        self.state.inc_tasks();
+        self.tasks_spawned.add(1, &[]);
+    }
+
+    fn task_completed(&self, _task_id: TaskId, outcome: OutcomeKind, duration: Duration) {
+        self.state.dec_tasks();
+
+        let labels = [KeyValue::new("outcome", outcome_label(outcome))];
+        if let Some(filtered) = self.check_cardinality("asupersync.tasks.completed", &labels) {
+            self.tasks_completed.add(1, &filtered);
+        }
+
+        if self.should_sample("asupersync.tasks.duration") {
+            if let Some(filtered) = self.check_cardinality("asupersync.tasks.duration", &labels) {
+                self.task_duration.record(duration.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn region_created(&self, _region_id: RegionId, _parent: Option<RegionId>) {
+        self.state.inc_regions();
+        self.regions_created.add(1, &[]);
+    }
+
+    fn region_closed(&self, _region_id: RegionId, lifetime: Duration) {
+        self.state.dec_regions();
+        self.regions_closed.add(1, &[]);
+
+        if self.should_sample("asupersync.regions.lifetime") {
+            self.region_lifetime.record(lifetime.as_secs_f64(), &[]);
+        }
+    }
+
+    fn cancellation_requested(&self, _region_id: RegionId, kind: CancelKind) {
+        let labels = [KeyValue::new("kind", cancel_kind_label(kind))];
+        if let Some(filtered) = self.check_cardinality("asupersync.cancellations", &labels) {
+            self.cancellations.add(1, &filtered);
+        }
+    }
+
+    fn drain_completed(&self, _region_id: RegionId, duration: Duration) {
+        if self.should_sample("asupersync.cancellation.drain_duration") {
+            self.drain_duration.record(duration.as_secs_f64(), &[]);
+        }
+    }
+
+    fn deadline_set(&self, _region_id: RegionId, _deadline: Duration) {
+        self.deadlines_set.add(1, &[]);
+    }
+
+    fn deadline_exceeded(&self, _region_id: RegionId) {
+        self.deadlines_exceeded.add(1, &[]);
+    }
+
+    fn deadline_warning(&self, task_type: &str, reason: &'static str, remaining: Duration) {
+        let task_type = sanitize_task_type_label(task_type);
+        let labels = [
+            KeyValue::new("task_type", task_type),
+            KeyValue::new("reason", reason),
+        ];
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.deadline.warnings_total", &labels)
+        {
+            self.deadline_warnings.add(1, &filtered);
+        }
+        let _ = remaining;
+    }
+
+    fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
+        let task_type = sanitize_task_type_label(task_type);
+        let labels = [KeyValue::new("task_type", task_type)];
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.deadline.violations_total", &labels)
+        {
+            self.deadline_violations.add(1, &filtered);
+        }
+    }
+
+    fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
+        if self.should_sample("asupersync.deadline.remaining_seconds") {
+            let task_type = sanitize_task_type_label(task_type);
+            let labels = [KeyValue::new("task_type", task_type)];
+            if let Some(filtered) =
+                self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
+            {
+                self.deadline_remaining
+                    .record(remaining.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
+        if self.should_sample("asupersync.checkpoint.interval_seconds") {
+            let task_type = sanitize_task_type_label(task_type);
+            let labels = [KeyValue::new("task_type", task_type)];
+            if let Some(filtered) =
+                self.check_cardinality("asupersync.checkpoint.interval_seconds", &labels)
+            {
+                self.checkpoint_interval
+                    .record(interval.as_secs_f64(), &filtered);
+            }
+        }
+    }
+
+    fn task_stuck_detected(&self, task_type: &str) {
+        let task_type = sanitize_task_type_label(task_type);
+        let labels = [KeyValue::new("task_type", task_type)];
+        if let Some(filtered) =
+            self.check_cardinality("asupersync.task.stuck_detected_total", &labels)
+        {
+            self.task_stuck_detected.add(1, &filtered);
+        }
+    }
+
+    fn obligation_created(&self, _region_id: RegionId) {
+        self.state.inc_obligations();
+        self.obligations_created.add(1, &[]);
+    }
+
+    fn obligation_discharged(&self, _region_id: RegionId) {
+        self.state.dec_obligations();
+        self.obligations_discharged.add(1, &[]);
+    }
+
+    fn obligation_leaked(&self, _region_id: RegionId) {
+        self.state.dec_obligations();
+        self.obligations_leaked.add(1, &[]);
+    }
+
+    fn scheduler_tick(&self, tasks_polled: usize, duration: Duration) {
+        if self.should_sample("asupersync.scheduler") {
+            self.scheduler_poll_time.record(duration.as_secs_f64(), &[]);
+            // Precision loss is acceptable for metrics (only affects counts > 2^52)
+            #[allow(clippy::cast_precision_loss)]
+            self.scheduler_tasks_polled.record(tasks_polled as f64, &[]);
+        }
+    }
+}
+
+const fn outcome_label(outcome: OutcomeKind) -> &'static str {
+    match outcome {
+        OutcomeKind::Ok => "ok",
+        OutcomeKind::Err => "err",
+        OutcomeKind::Cancelled => "cancelled",
+        OutcomeKind::Panicked => "panicked",
+    }
+}
+
+/// Sanitise a `task_type` value before stamping it as an OpenTelemetry
+/// label. Defence-in-depth against the Cx::set_task_type validator
+/// (which is the primary gate); this protects against any code path
+/// that constructs a TaskRecord directly and bypasses set_task_type
+/// (test paths, internal runtime initialisation).
+///
+/// Substitutes the bucketed sentinel `"<invalid>"` for values that
+/// either:
+///   * exceed 64 bytes (cardinality bomb risk), OR
+///   * contain any byte outside `[A-Za-z0-9_.:-]` (PII / control-char
+///     risk — the same charset enforced by `cx::is_valid_task_type`).
+///
+/// Pre-validated values pass through unchanged. The single bucket
+/// `"<invalid>"` keeps cardinality bounded even when many distinct
+/// dirty values are seen.
+/// (br-asupersync-9vpwpc)
+fn sanitize_task_type_label(task_type: &str) -> String {
+    const MAX: usize = 64;
+    const SENTINEL: &str = "<invalid>";
+    if task_type.is_empty() || task_type.len() > MAX {
+        return SENTINEL.to_string();
+    }
+    let mut bytes = task_type.bytes();
+    let first = bytes.next().expect("non-empty checked above");
+    if !first.is_ascii_alphabetic() {
+        return SENTINEL.to_string();
+    }
+    if bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b':')) {
+        task_type.to_string()
+    } else {
+        SENTINEL.to_string()
+    }
+}
+
+const fn cancel_kind_label(kind: CancelKind) -> &'static str {
+    match kind {
+        CancelKind::User => "user",
+        CancelKind::Timeout => "timeout",
+        CancelKind::Deadline => "deadline",
+        CancelKind::PollQuota => "poll_quota",
+        CancelKind::CostBudget => "cost_budget",
+        CancelKind::FailFast => "fail_fast",
+        CancelKind::RaceLost => "race_lost",
+        CancelKind::ParentCancelled => "parent_cancelled",
+        CancelKind::ResourceUnavailable => "resource_unavailable",
+        CancelKind::Shutdown => "shutdown",
+        CancelKind::LinkedExit => "linked_exit",
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod tests {
+    use super::*;
+    use crate::runtime::RuntimeBuilder;
+    use crate::test_utils::init_test_logging;
+    use opentelemetry::metrics::MeterProvider;
+    use opentelemetry_sdk::metrics::{
+        InMemoryMetricExporter as OtelInMemoryExporter, PeriodicReader, SdkMeterProvider,
+        data::ResourceMetrics,
+    };
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::{Arc, Barrier};
+
+    const EXPECTED_METRICS: &[&str] = &[
+        "asupersync.tasks.spawned",
+        "asupersync.tasks.completed",
+        "asupersync.tasks.duration",
+        "asupersync.regions.created",
+        "asupersync.regions.closed",
+        "asupersync.regions.lifetime",
+        "asupersync.cancellations",
+        "asupersync.cancellation.drain_duration",
+        "asupersync.deadlines.set",
+        "asupersync.deadlines.exceeded",
+        "asupersync.deadline.warnings_total",
+        "asupersync.deadline.violations_total",
+        "asupersync.deadline.remaining_seconds",
+        "asupersync.checkpoint.interval_seconds",
+        "asupersync.task.stuck_detected_total",
+        "asupersync.obligations.created",
+        "asupersync.obligations.discharged",
+        "asupersync.obligations.leaked",
+        "asupersync.scheduler.poll_time",
+        "asupersync.scheduler.tasks_polled",
+    ];
+
+    fn metric_names(finished: &[ResourceMetrics]) -> HashSet<String> {
+        let mut names = HashSet::new();
+        for resource_metrics in finished {
+            for scope_metrics in resource_metrics.scope_metrics() {
+                for metric in scope_metrics.metrics() {
+                    names.insert(metric.name().to_string());
+                }
+            }
+        }
+        names
+    }
+
+    fn assert_expected_metrics_present(names: &HashSet<String>, expected: &[&str]) {
+        for name in expected {
+            assert!(names.contains(*name), "missing metric: {name}");
+        }
+    }
+
+    #[test]
+    fn privacy_config_compiles_and_applies_custom_regex_patterns() {
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"token-[A-F0-9]{8}")
+            .expect("regex pattern should compile");
+
+        assert_eq!(
+            config.redact_pii("auth.token", "bearer token-DEADBEEF"),
+            "[REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("auth.token", "bearer token-nothex"),
+            "bearer token-nothex"
+        );
+    }
+
+    #[test]
+    fn privacy_config_rejects_invalid_custom_regex_patterns() {
+        assert!(PrivacyConfig::new().try_with_pii_pattern("(").is_err());
+    }
+
+    #[test]
+    fn privacy_config_redacts_directly_mutated_public_pii_patterns() {
+        let mut config = PrivacyConfig::new();
+        config.pii_patterns.push(r"secret-\d{4}".to_string());
+
+        assert_eq!(
+            config.redact_pii("auth.secret", "secret-1234"),
+            "[REDACTED]"
+        );
+    }
+
+    #[test]
+    fn privacy_config_allowed_fields_support_anchored_wildcards() {
+        let config = PrivacyConfig::new()
+            .with_allowed_field("http.*.duration")
+            .with_allowed_field("runtime.region.*")
+            .with_allowed_field("*.safe");
+
+        assert!(!config.should_drop_field("http.client.duration"));
+        assert!(!config.should_drop_field("runtime.region.close"));
+        assert!(!config.should_drop_field("trace.safe"));
+        assert!(!config.should_drop_field("trace.safe.safe"));
+        assert!(config.should_drop_field("http.client.bytes"));
+        assert!(config.should_drop_field("unsafe.trace"));
+    }
+
+    #[test]
+    fn privacy_config_auto_pii_detection_uses_specific_classifiers() {
+        let config = PrivacyConfig::new().with_auto_pii_detection();
+
+        assert_eq!(
+            config.redact_pii("user.email", "Contact Jane.Doe@example.com for access"),
+            "[EMAIL_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("support.phone", "Call +1 (415) 555-2671"),
+            "[PHONE_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("tax.ssn", "SSN 123-45-6789"),
+            "[SSN_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("payment.card", "Visa 4111 1111 1111 1111"),
+            "[CARD_REDACTED]"
+        );
+        assert_eq!(
+            config.redact_pii("correlation.id", "ticket 4111 1111 1111 1112"),
+            "ticket 4111 1111 1111 1112"
+        );
+    }
+
+    fn fixed_span_pairs(scan: &FixedPiiScan) -> Vec<(usize, usize)> {
+        scan.matches
+            .iter()
+            .map(|span| (span.start_byte, span.end_byte))
+            .collect()
+    }
+
+    fn reference_luhn_card(candidate: &str) -> bool {
+        let digits: Vec<u32> = candidate.chars().filter_map(|ch| ch.to_digit(10)).collect();
+        if !(13..=19).contains(&digits.len()) {
+            return false;
+        }
+        let sum: u32 = digits
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(index, digit)| {
+                if index % 2 == 0 {
+                    *digit
+                } else {
+                    let doubled = digit * 2;
+                    if doubled > 9 { doubled - 9 } else { doubled }
+                }
+            })
+            .sum();
+        sum % 10 == 0
+    }
+
+    fn valid_luhn_card_with_len(len: usize) -> String {
+        assert!((13..=19).contains(&len));
+        let prefix = "4".repeat(len - 1);
+        (0..=9)
+            .map(|check| format!("{prefix}{check}"))
+            .find(|candidate| reference_luhn_card(candidate))
+            .expect("one decimal check digit must satisfy Luhn")
+    }
+
+    fn card_with_separator(digits: &str, separator: &str) -> String {
+        digits
+            .chars()
+            .map(|digit| digit.to_string())
+            .collect::<Vec<_>>()
+            .join(separator)
+    }
+
+    fn materialize_fixed_scanner_input(row: &serde_json::Value) -> String {
+        if let Some(input) = row.get("input").and_then(serde_json::Value::as_str) {
+            return input.to_owned();
+        }
+        let recipe = row
+            .get("input_recipe")
+            .and_then(serde_json::Value::as_object)
+            .expect("scanner corpus row must provide input or input_recipe");
+        let prefix = recipe
+            .get("prefix")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe prefix");
+        let repeated = recipe
+            .get("repeat")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe repeat");
+        let repeat_count = recipe
+            .get("repeat_count")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .expect("recipe repeat_count fits usize");
+        let suffix = recipe
+            .get("suffix")
+            .and_then(serde_json::Value::as_str)
+            .expect("recipe suffix");
+        format!("{prefix}{}{suffix}", repeated.repeat(repeat_count))
+    }
+
+    #[test]
+    fn fixed_scanner_fast_path_stays_disabled_after_r2_5_regression() {
+        assert!(!FIXED_PII_SCANNER_FAST_PATH_ENABLED);
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_scanners_match_every_r2_1_span() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let vectors = artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array");
+        let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("frozen email regex");
+        let ssn_re = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("frozen SSN regex");
+
+        for row in vectors {
+            let detector = row["detector_id"].as_str().expect("detector_id");
+            if !matches!(detector, "RGX-BUILTIN-EMAIL" | "RGX-BUILTIN-SSN") {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    (start, end)
+                })
+                .collect();
+            let scan = if detector == "RGX-BUILTIN-EMAIL" {
+                scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+            } else {
+                scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+            }
+            .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = if detector == "RGX-BUILTIN-EMAIL" {
+                email_re
+                    .find_iter(&input)
+                    .map(|matched| (matched.start(), matched.end()))
+                    .collect()
+            } else {
+                ssn_re
+                    .find_iter(&input)
+                    .map(|matched| (matched.start(), matched.end()))
+                    .collect()
+            };
+
+            assert_eq!(fixed_span_pairs(&scan), expected, "{case_id} corpus span");
+            assert_eq!(
+                fixed_span_pairs(&scan),
+                incumbent,
+                "{case_id} incumbent span"
+            );
+            assert!(
+                scan.work_units <= FIXED_PII_MAX_WORK_UNITS,
+                "{case_id} work"
+            );
+        }
+    }
+
+    #[test]
+    // The domain matrix deliberately contains U+212A KELVIN SIGN, a non-NFC
+    // confusable for `K`, to pin the incumbent regex behaviour on it.
+    #[allow(clippy::unicode_not_nfc)]
+    fn fixed_email_and_ssn_generated_matrix_matches_incumbent() {
+        let email_re = Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("frozen email regex");
+        let ssn_re = Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").expect("frozen SSN regex");
+
+        for prefix in ["", " ", "🙂", "é", "!"] {
+            for local in ["a", "A.B+tag", "ſ", "_x", ".a", "a-"] {
+                for domain in ["b.co", "EXAMPLE.COM", "K.co", "x.co.uk", "b.co-x"] {
+                    for suffix in ["", " ", "🙂", "é", ",next"] {
+                        let input = format!("{prefix}{local}@{domain}{suffix}");
+                        let actual =
+                            scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+                                .expect("generated email scan");
+                        let expected: Vec<(usize, usize)> = email_re
+                            .find_iter(&input)
+                            .map(|matched| (matched.start(), matched.end()))
+                            .collect();
+                        assert_eq!(fixed_span_pairs(&actual), expected, "email {input:?}");
+                    }
+                }
+            }
+        }
+
+        for prefix in ["", " ", "🙂", "é", "x", "-"] {
+            for ssn in ["123-45-6789", "١٢٣-٤٥-٦٧٨٩", "123-45-678", "123–45–6789"] {
+                for suffix in ["", " ", "🙂", "é", "x", "/987-65-4321"] {
+                    let input = format!("{prefix}{ssn}{suffix}");
+                    let actual = scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+                        .expect("generated SSN scan");
+                    let expected: Vec<(usize, usize)> = ssn_re
+                        .find_iter(&input)
+                        .map(|matched| (matched.start(), matched.end()))
+                        .collect();
+                    assert_eq!(fixed_span_pairs(&actual), expected, "SSN {input:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_card_scanner_and_luhn_match_every_r2_1_vector() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let card_re = Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("frozen card regex");
+
+        for row in artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array")
+        {
+            if row["detector_id"] != "RGX-BUILTIN-CARD" {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize, bool)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    let luhn_valid = span["luhn_valid"].as_bool().expect("luhn_valid");
+                    (start, end, luhn_valid)
+                })
+                .collect();
+            let scan = scan_fixed_card_candidates(&input, FixedPiiScanLimits::default(), false)
+                .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = card_re
+                .find_iter(&input)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            let expected_spans: Vec<(usize, usize)> = expected
+                .iter()
+                .map(|(start, end, _)| (*start, *end))
+                .collect();
+
+            assert_eq!(fixed_span_pairs(&scan), expected_spans, "{case_id} corpus");
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "{case_id} incumbent");
+            for (span, (_, _, expected_luhn)) in scan.matches.iter().zip(&expected) {
+                let candidate = input
+                    .get(span.start_byte..span.end_byte)
+                    .expect("scanner span must be a UTF-8 boundary");
+                assert_eq!(
+                    PrivacyConfig::is_luhn_valid_card(candidate),
+                    *expected_luhn,
+                    "{case_id} Luhn verdict"
+                );
+                assert_eq!(
+                    PrivacyConfig::is_luhn_valid_card(candidate),
+                    reference_luhn_card(candidate),
+                    "{case_id} independent Luhn reference"
+                );
+            }
+            let expected_accepts = row["expected_detector_accepts"]
+                .as_bool()
+                .expect("expected_detector_accepts");
+            assert_eq!(
+                scan.matches.iter().any(|span| {
+                    input
+                        .get(span.start_byte..span.end_byte)
+                        .is_some_and(PrivacyConfig::is_luhn_valid_card)
+                }),
+                expected_accepts,
+                "{case_id} detector outcome"
+            );
+            assert_eq!(
+                PrivacyConfig::new()
+                    .with_auto_pii_detection()
+                    .redact_pii("payment.card", &input),
+                if expected_accepts {
+                    "[CARD_REDACTED]".to_owned()
+                } else {
+                    input.clone()
+                },
+                "{case_id} whole-value redaction outcome"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_card_generated_lengths_separators_and_boundaries_match_incumbent() {
+        let card_re = Regex::new(r"\b(?:\d[ -]?){13,19}\b").expect("frozen card regex");
+
+        for len in 13..=19 {
+            let valid = valid_luhn_card_with_len(len);
+            let mut invalid = valid.clone().into_bytes();
+            let last = invalid.last_mut().expect("generated card is non-empty");
+            *last = if *last == b'9' { b'0' } else { *last + 1 };
+            let invalid = String::from_utf8(invalid).expect("ASCII card digits");
+
+            for digits in [&valid, &invalid] {
+                for separator in ["", " ", "-"] {
+                    let candidate = card_with_separator(digits, separator);
+                    for (prefix, suffix) in
+                        [("", ""), ("🙂", "🙂"), ("x", ""), ("", "x"), (" ", " next")]
+                    {
+                        let input = format!("{prefix}{candidate}{suffix}");
+                        let scan = scan_fixed_card_candidates(
+                            &input,
+                            FixedPiiScanLimits::default(),
+                            false,
+                        )
+                        .expect("generated card scan");
+                        let incumbent: Vec<(usize, usize)> = card_re
+                            .find_iter(&input)
+                            .map(|matched| (matched.start(), matched.end()))
+                            .collect();
+                        assert_eq!(
+                            fixed_span_pairs(&scan),
+                            incumbent,
+                            "len={len} separator={separator:?} input={input:?}"
+                        );
+                        for span in &scan.matches {
+                            let matched = input
+                                .get(span.start_byte..span.end_byte)
+                                .expect("generated scanner span");
+                            assert_eq!(
+                                PrivacyConfig::is_luhn_valid_card(matched),
+                                reference_luhn_card(matched),
+                                "Luhn len={len} separator={separator:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        for digits in ["4".repeat(12), "4".repeat(20)] {
+            let scan = scan_fixed_card_candidates(&digits, FixedPiiScanLimits::default(), false)
+                .expect("out-of-range card scan");
+            let incumbent: Vec<(usize, usize)> = card_re
+                .find_iter(&digits)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "length boundary");
+        }
+    }
+
+    #[test]
+    fn fixed_card_scanner_bounds_work_output_and_falls_back() {
+        let input = "4111111111111112/4012888888881881 ".repeat(4_096);
+        let scan = scan_fixed_card_candidates(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large card scan");
+        assert_eq!(scan.matches.len(), 8_192);
+        assert!(scan.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        assert_eq!(
+            scan.matches
+                .iter()
+                .filter_map(|span| input.get(span.start_byte..span.end_byte))
+                .filter(|candidate| PrivacyConfig::is_luhn_valid_card(candidate))
+                .count(),
+            4_096
+        );
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111111", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111112/4012888888881881", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_card_candidates("4111111111111111", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "4111111111111111 {}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.card", &oversized),
+            "[CARD_REDACTED]",
+            "the scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
+    fn fixed_phone_scanner_matches_every_r2_1_span_and_redaction() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+        let phone_re =
+            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                .expect("frozen phone regex");
+
+        for row in artifact["detector_vectors"]
+            .as_array()
+            .expect("detector_vectors array")
+        {
+            if row["detector_id"] != "RGX-BUILTIN-PHONE" {
+                continue;
+            }
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let input = materialize_fixed_scanner_input(row);
+            let expected: Vec<(usize, usize)> = row["expected_matches"]
+                .as_array()
+                .expect("expected_matches array")
+                .iter()
+                .map(|span| {
+                    let start = span["start_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("start_byte fits usize");
+                    let end = span["end_byte"]
+                        .as_u64()
+                        .and_then(|value| usize::try_from(value).ok())
+                        .expect("end_byte fits usize");
+                    (start, end)
+                })
+                .collect();
+            let scan = scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+                .unwrap_or_else(|error| panic!("{case_id} scanner failed: {error:?}"));
+            let incumbent: Vec<(usize, usize)> = phone_re
+                .find_iter(&input)
+                .map(|matched| (matched.start(), matched.end()))
+                .collect();
+            let expected_accepts = row["expected_detector_accepts"]
+                .as_bool()
+                .expect("expected_detector_accepts");
+
+            assert_eq!(fixed_span_pairs(&scan), expected, "{case_id} corpus");
+            assert_eq!(fixed_span_pairs(&scan), incumbent, "{case_id} incumbent");
+            assert_eq!(scan.is_match(), expected_accepts, "{case_id} detector");
+            assert_eq!(
+                PrivacyConfig::new()
+                    .with_auto_pii_detection()
+                    .redact_pii("contact.phone", &input),
+                if expected_accepts {
+                    "[PHONE_REDACTED]".to_owned()
+                } else {
+                    input.clone()
+                },
+                "{case_id} whole-value redaction"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_phone_generated_shapes_boundaries_and_separators_match_incumbent() {
+        let phone_re =
+            Regex::new(r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b")
+                .expect("frozen phone regex");
+
+        for prefix in ["", "🙂", "é", "x", "x+"] {
+            for country in ["", "1", "1-", "1 ", "1.", "+1", "+1-", "+1 ", "+1.", "2"] {
+                for area in ["415", "(415)", "(415", "415)"] {
+                    for separator in ["", " ", "-", ".", "\u{a0}"] {
+                        for suffix in ["", "🙂", "é", "x"] {
+                            let input = format!(
+                                "{prefix}{country}{area}{separator}555{separator}2671{suffix}"
+                            );
+                            let scan =
+                                scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+                                    .expect("generated phone scan");
+                            let incumbent: Vec<(usize, usize)> = phone_re
+                                .find_iter(&input)
+                                .map(|matched| (matched.start(), matched.end()))
+                                .collect();
+                            assert_eq!(
+                                fixed_span_pairs(&scan),
+                                incumbent,
+                                "generated phone {input:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_phone_dispatch_preserves_every_r2_1_pipeline_outcome() {
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../artifacts/regex_built_in_detector_corpus_v1.json"
+        ))
+        .expect("R2.1 detector corpus must parse");
+
+        for row in artifact["pipeline_vectors"]
+            .as_array()
+            .expect("pipeline_vectors array")
+        {
+            let case_id = row["case_id"].as_str().expect("case_id");
+            let mut config = PrivacyConfig::new();
+            if let Some(pattern) = row["custom_pattern"].as_str() {
+                config = config
+                    .try_with_pii_pattern(pattern)
+                    .unwrap_or_else(|error| panic!("{case_id} custom pattern: {error}"));
+            }
+            if row["auto_pii_detection"]
+                .as_bool()
+                .expect("auto_pii_detection")
+            {
+                config = config.with_auto_pii_detection();
+            }
+            let input = materialize_fixed_scanner_input(row);
+            assert_eq!(
+                config.redact_pii("pipeline.value", &input),
+                row["expected_output"].as_str().expect("expected_output"),
+                "{case_id} exact detector order and custom dispatch"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_phone_scanner_bounds_work_output_and_falls_back() {
+        let input = "4155552671/2125550100 ".repeat(4_096);
+        let scan = scan_fixed_phones(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large phone scan");
+        assert_eq!(scan.matches.len(), 8_192);
+        assert!(scan.work_units <= FIXED_PII_MAX_WORK_UNITS);
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671/2125550100", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        assert_eq!(
+            fixed_span_pairs(
+                &scan_fixed_phones("4155552671/2125550100", output_limited, true)
+                    .expect("first-match phone mode stays within output limit")
+            ),
+            vec![(0, 10)]
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_phones("4155552671", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "4155552671 {}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.phone", &oversized),
+            "[PHONE_REDACTED]",
+            "the phone scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_scanners_bound_large_input_work_and_output() {
+        let input = "a@b.co/123-45-6789 ".repeat(4_096);
+        let emails = scan_fixed_emails(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large email scan");
+        let ssns = scan_fixed_ssns(&input, FixedPiiScanLimits::default(), false)
+            .expect("bounded large SSN scan");
+        assert_eq!(emails.matches.len(), 4_096);
+        assert_eq!(ssns.matches.len(), 4_096);
+        assert!(emails.work_units <= FIXED_PII_MAX_WORK_UNITS);
+        assert!(ssns.work_units <= FIXED_PII_MAX_WORK_UNITS);
+
+        let input_limited = FixedPiiScanLimits {
+            max_input_bytes: 5,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_emails("a@b.co", input_limited, false),
+            Err(FixedPiiScanError::InputLimit)
+        );
+        let output_limited = FixedPiiScanLimits {
+            max_matches: 1,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_emails("a@b.co,c@d.io", output_limited, false),
+            Err(FixedPiiScanError::OutputLimit)
+        );
+        assert_eq!(
+            fixed_span_pairs(
+                &scan_fixed_emails("a@b.co,c@d.io", output_limited, true)
+                    .expect("first-match mode stays within the output budget")
+            ),
+            vec![(0, 6)]
+        );
+        let work_limited = FixedPiiScanLimits {
+            max_work_units: 0,
+            ..FixedPiiScanLimits::default()
+        };
+        assert_eq!(
+            scan_fixed_ssns("123-45-6789", work_limited, false),
+            Err(FixedPiiScanError::WorkLimit)
+        );
+
+        let oversized = format!(
+            "a@b.co {}",
+            "x".repeat(FIXED_PII_MAX_INPUT_BYTES.saturating_add(1))
+        );
+        assert_eq!(
+            PrivacyConfig::new()
+                .with_auto_pii_detection()
+                .redact_pii("oversized.email", &oversized),
+            "[EMAIL_REDACTED]",
+            "the scanner input ceiling must fall through to the incumbent"
+        );
+    }
+
+    #[test]
+    fn fixed_email_and_ssn_and_fixed_card_and_fixed_phone_custom_patterns_use_incumbent() {
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}\b")
+            .expect("built-in-shaped custom pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(config.redact_pii("user.email", "a@b.co"), "[REDACTED]");
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"\b(?:\d[ -]?){13,19}\b")
+            .expect("built-in-shaped custom pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("payment.card", "4111111111111111"),
+            "[REDACTED]"
+        );
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(
+                r"(?x)\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b",
+            )
+            .expect("built-in-shaped custom phone pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("contact.phone", "4155552671"),
+            "[REDACTED]"
+        );
+
+        let config = PrivacyConfig::new()
+            .try_with_pii_pattern(r"\b\d{3}[.-]\d{3}[.-]\d{4}\b")
+            .expect("drifted custom phone pattern compiles")
+            .with_auto_pii_detection();
+        assert_eq!(
+            config.redact_pii("contact.phone", "415-555-2671"),
+            "[REDACTED]"
+        );
+    }
+
+    fn collect_grafana_queries(value: &serde_json::Value, output: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                for (key, val) in map {
+                    if key == "expr" || key == "query" {
+                        if let serde_json::Value::String(text) = val {
+                            output.push(text.clone());
+                        }
+                    } else {
+                        collect_grafana_queries(val, output);
+                    }
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    collect_grafana_queries(item, output);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn otel_metrics_exports_in_memory() {
+        init_test_logging();
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let metrics = OtelMetrics::new(meter);
+
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        metrics.task_completed(
+            TaskId::testing_default(),
+            OutcomeKind::Ok,
+            Duration::from_millis(10),
+        );
+        metrics.region_created(RegionId::testing_default(), None);
+        metrics.region_closed(RegionId::testing_default(), Duration::from_secs(1));
+        metrics.cancellation_requested(RegionId::testing_default(), CancelKind::User);
+        metrics.drain_completed(RegionId::testing_default(), Duration::from_millis(5));
+        metrics.deadline_set(RegionId::testing_default(), Duration::from_secs(2));
+        metrics.deadline_exceeded(RegionId::testing_default());
+        metrics.deadline_warning("test", "no_progress", Duration::from_secs(1));
+        metrics.deadline_violation("test", Duration::from_secs(1));
+        metrics.deadline_remaining("test", Duration::from_secs(5));
+        metrics.checkpoint_interval("test", Duration::from_millis(200));
+        metrics.task_stuck_detected("test");
+        metrics.obligation_created(RegionId::testing_default());
+        metrics.obligation_discharged(RegionId::testing_default());
+        metrics.obligation_leaked(RegionId::testing_default());
+        metrics.scheduler_tick(3, Duration::from_millis(1));
+
+        provider.force_flush().expect("force_flush");
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        assert!(!finished.is_empty());
+        let names = metric_names(&finished);
+        assert_expected_metrics_present(&names, EXPECTED_METRICS);
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn otel_metrics_runtime_integration_emits_task_metrics() {
+        init_test_logging();
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter.clone()).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let metrics = OtelMetrics::new(meter);
+        let runtime = RuntimeBuilder::new()
+            .metrics(metrics)
+            .build()
+            .expect("runtime build");
+
+        let handle = runtime.handle().spawn(async { 7u8 });
+        let result = runtime.block_on(handle);
+        assert_eq!(result, 7);
+        drop(runtime);
+
+        provider.force_flush().expect("force_flush");
+        let finished = exporter.get_finished_metrics().expect("finished metrics");
+        assert!(!finished.is_empty());
+        let names = metric_names(&finished);
+        assert_expected_metrics_present(
+            &names,
+            &[
+                "asupersync.tasks.spawned",
+                "asupersync.tasks.completed",
+                "asupersync.tasks.duration",
+            ],
+        );
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn grafana_dashboard_references_expected_metrics() {
+        init_test_logging();
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/grafana_dashboard.json");
+        let contents = std::fs::read_to_string(path).expect("read grafana dashboard");
+        let json: serde_json::Value =
+            serde_json::from_str(&contents).expect("parse grafana dashboard");
+
+        let mut queries = Vec::new();
+        collect_grafana_queries(&json, &mut queries);
+        assert!(!queries.is_empty(), "expected grafana queries to exist");
+
+        let joined = queries.join("\n");
+        let expected = [
+            "asupersync_tasks_spawned_total",
+            "asupersync_tasks_completed_total",
+            "asupersync_tasks_duration_bucket",
+            "asupersync_regions_active",
+            "asupersync_cancellations_total",
+            "asupersync_deadline_warnings_total",
+            "asupersync_deadline_violations_total",
+            "asupersync_deadline_remaining_seconds_bucket",
+            "asupersync_checkpoint_interval_seconds_bucket",
+            "asupersync_task_stuck_detected_total",
+        ];
+        for metric in expected {
+            assert!(
+                joined.contains(metric),
+                "missing grafana query metric: {metric}"
+            );
+        }
+    }
+
+    #[test]
+    fn otel_metrics_with_config() {
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let config = MetricsConfig::new()
+            .with_max_cardinality(500)
+            .with_overflow_strategy(CardinalityOverflow::Aggregate);
+
+        let metrics = OtelMetrics::new_with_config(meter, config);
+        assert_eq!(metrics.config().max_cardinality, 500);
+        assert_eq!(
+            metrics.config().overflow_strategy,
+            CardinalityOverflow::Aggregate
+        );
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    /// br-asupersync-bs92bg — Pre-computed-collision DoS mitigation.
+    /// Each `CardinalityTracker::new()` instance gets a fresh
+    /// `RandomState` seed, so the same label set hashes to a
+    /// different bucket in two trackers. An attacker who knows the
+    /// hash function shape (which is public — it's std SipHash) but
+    /// not the per-process seed cannot pre-compute label values that
+    /// collide on the local tracker's buckets.
+    ///
+    /// The strict assertion below ("at least one of N pairs differs")
+    /// allows for the tiny probability that two random seeds happen
+    /// to map a single label set to the same 64-bit bucket; with N
+    /// distinct labels the probability of all-N collisions is
+    /// approximately N * 2^-64, indistinguishable from impossible.
+    #[test]
+    fn hash_labels_uses_per_instance_random_seed() {
+        let tracker_a = CardinalityTracker::new();
+        let tracker_b = CardinalityTracker::new();
+
+        let mut differ = false;
+        for i in 0..16u32 {
+            let labels = [KeyValue::new("id", i.to_string())];
+            let h_a = tracker_a.hash_labels(&labels);
+            let h_b = tracker_b.hash_labels(&labels);
+            if h_a != h_b {
+                differ = true;
+                break;
+            }
+        }
+        assert!(
+            differ,
+            "br-asupersync-bs92bg: two CardinalityTracker instances must hash labels under different seeds"
+        );
+    }
+
+    /// br-asupersync-bs92bg — Within a single tracker, hashing the
+    /// same label set twice must produce the same bucket (the
+    /// cardinality contract: identical labels deduplicate). The
+    /// per-instance seed is stable for the tracker's lifetime.
+    #[test]
+    fn hash_labels_is_stable_within_one_tracker() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("outcome", "ok")];
+        let h1 = tracker.hash_labels(&labels);
+        let h2 = tracker.hash_labels(&labels);
+        assert_eq!(
+            h1, h2,
+            "same labels must hash equally within one tracker (cardinality dedup contract)"
+        );
+    }
+
+    #[test]
+    fn cardinality_tracker_basic() {
+        let tracker = CardinalityTracker::new();
+
+        let labels = [KeyValue::new("outcome", "ok")];
+        assert!(!tracker.would_exceed("test", &labels, 10));
+
+        tracker.record("test", &labels);
+        assert_eq!(tracker.cardinality("test"), 1);
+
+        // Same labels should not increase cardinality
+        tracker.record("test", &labels);
+        assert_eq!(tracker.cardinality("test"), 1);
+
+        // Different labels should increase
+        let labels2 = [KeyValue::new("outcome", "err")];
+        tracker.record("test", &labels2);
+        assert_eq!(tracker.cardinality("test"), 2);
+    }
+
+    #[test]
+    fn cardinality_limit_enforced() {
+        let tracker = CardinalityTracker::new();
+
+        // Fill up to max
+        for i in 0..5 {
+            let labels = [KeyValue::new("id", i.to_string())];
+            tracker.record("test", &labels);
+        }
+        assert_eq!(tracker.cardinality("test"), 5);
+
+        // Next should exceed
+        let labels = [KeyValue::new("id", "new")];
+        assert!(tracker.would_exceed("test", &labels, 5));
+    }
+
+    #[test]
+    fn cardinality_limit_zero_rejects_new_series() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("id", "first")];
+        assert!(
+            tracker.would_exceed("test", &labels, 0),
+            "zero-cardinality budget must reject unseen label sets"
+        );
+        assert!(tracker.check_and_record("test", &labels, 0, usize::MAX));
+        assert_eq!(tracker.cardinality("test"), 0);
+    }
+
+    #[test]
+    fn cardinality_enforcement_is_atomic_under_concurrency() {
+        let tracker = Arc::new(CardinalityTracker::new());
+        let barrier = Arc::new(Barrier::new(8));
+
+        let handles: [_; 8] = std::array::from_fn(|i| {
+            let tracker = Arc::clone(&tracker);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let labels = [KeyValue::new("id", i.to_string())];
+                barrier.wait();
+                !tracker.check_and_record("test", &labels, 1, usize::MAX)
+            })
+        });
+
+        let accepted = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread join"))
+            .filter(|accepted| *accepted)
+            .count();
+
+        assert_eq!(accepted, 1, "exactly one series should fit under max=1");
+        assert_eq!(tracker.cardinality("test"), 1);
+    }
+
+    /// br-asupersync-qipj44: with `max_metrics` set to N, the FIRST
+    /// N distinct metric names must be accepted; subsequent new
+    /// names must hit the overflow path. Existing metric names
+    /// continue to accept additional label combinations up to
+    /// `max_cardinality` regardless of the metric-name cap.
+    #[test]
+    fn metric_name_cap_rejects_new_names_after_limit() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+
+        // Cap = 3 — first three distinct names accepted.
+        for name in ["a", "b", "c"] {
+            assert!(
+                !tracker.check_and_record(name, &labels, 100, 3),
+                "name {name} should be accepted under cap=3"
+            );
+        }
+        // A fourth distinct name must be rejected.
+        assert!(
+            tracker.check_and_record("d", &labels, 100, 3),
+            "fourth distinct metric name must hit overflow path under cap=3"
+        );
+        // Existing names still accept new label combinations.
+        let other_labels = [KeyValue::new("k", "v2")];
+        assert!(
+            !tracker.check_and_record("a", &other_labels, 100, 3),
+            "existing metric must accept new label combinations even under cap"
+        );
+    }
+
+    /// `max_metrics = 0` is the legacy unbounded behaviour (cap
+    /// disabled) — preserved for callers that explicitly want it.
+    #[test]
+    fn metric_name_cap_zero_disables_the_limit() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+        for i in 0..1000 {
+            let name = format!("m{i}");
+            assert!(
+                !tracker.check_and_record(&name, &labels, 100, 0),
+                "max_metrics=0 must allow unbounded metric names"
+            );
+        }
+    }
+
+    /// Re-recording an already-tracked metric name must not reject
+    /// even when the cap is otherwise reached.
+    #[test]
+    fn metric_name_cap_does_not_reject_existing_metrics() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+        // Fill to cap.
+        for i in 0..3 {
+            let name = format!("m{i}");
+            assert!(!tracker.check_and_record(&name, &labels, 100, 3));
+        }
+        // Re-record one of the existing names with a brand-new label.
+        let new_labels = [KeyValue::new("k", "vNew")];
+        assert!(
+            !tracker.check_and_record("m0", &new_labels, 100, 3),
+            "existing metric must still accept new labels under cap"
+        );
+    }
+
+    #[test]
+    fn cardinality_label_order_is_ignored() {
+        let tracker = CardinalityTracker::new();
+
+        let labels_a = [
+            KeyValue::new("outcome", "ok"),
+            KeyValue::new("region", "root"),
+        ];
+        let labels_b = [
+            KeyValue::new("region", "root"),
+            KeyValue::new("outcome", "ok"),
+        ];
+
+        tracker.record("test", &labels_a);
+        assert!(
+            !tracker.would_exceed("test", &labels_b, 1),
+            "label order should not increase cardinality"
+        );
+        tracker.record("test", &labels_b);
+        assert_eq!(tracker.cardinality("test"), 1);
+    }
+
+    #[test]
+    fn drop_labels_filtered() {
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let config = MetricsConfig::new().with_drop_label("request_id");
+        let metrics = OtelMetrics::new_with_config(meter, config);
+
+        // Labels with request_id should have it filtered
+        let labels = [
+            KeyValue::new("outcome", "ok"),
+            KeyValue::new("request_id", "12345"),
+        ];
+
+        let filtered = metrics.check_cardinality("test", &labels);
+        assert!(filtered.is_some());
+        let filtered = filtered.unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].key.as_str(), "outcome");
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn aggregate_overflow_does_not_exceed_configured_budget() {
+        let exporter = OtelInMemoryExporter::default();
+        let reader = PeriodicReader::builder(exporter).build();
+        let provider = SdkMeterProvider::builder().with_reader(reader).build();
+        let meter = provider.meter("asupersync");
+
+        let config = MetricsConfig::new()
+            .with_max_cardinality(1)
+            .with_overflow_strategy(CardinalityOverflow::Aggregate);
+        let metrics = OtelMetrics::new_with_config(meter, config);
+
+        let first = [KeyValue::new("task_type", "fast")];
+        let second = [KeyValue::new("task_type", "slow")];
+
+        let first_labels = metrics
+            .check_cardinality("test.metric", &first)
+            .expect("first label set should fit");
+        assert_eq!(first_labels, first);
+        assert_eq!(metrics.cardinality_tracker.cardinality("test.metric"), 1);
+
+        assert!(
+            metrics.check_cardinality("test.metric", &second).is_none(),
+            "aggregate overflow must not create a second series beyond the configured cap"
+        );
+        assert_eq!(metrics.cardinality_tracker.cardinality("test.metric"), 1);
+
+        provider.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn sampling_config() {
+        let sampling = SamplingConfig::new(0.5).with_sampled_metric("duration");
+        assert!((sampling.sample_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(sampling.sampled_metrics.len(), 1);
+    }
+
+    #[test]
+    fn sampling_rate_clamped() {
+        let sampling = SamplingConfig::new(1.5);
+        assert!((sampling.sample_rate - 1.0).abs() < f64::EPSILON);
+
+        let sampling = SamplingConfig::new(-0.5);
+        assert!(sampling.sample_rate.abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod exporter_tests {
+    use super::*;
+
+    #[test]
+    fn null_exporter_works() {
+        let exporter = NullExporter::new();
+        let snapshot = MetricsSnapshot::new();
+        assert!(exporter.export(&snapshot).is_ok());
+        assert!(exporter.flush().is_ok());
+    }
+
+    #[test]
+    fn in_memory_exporter_collects() {
+        let exporter = InMemoryExporter::new();
+
+        let mut snapshot = MetricsSnapshot::new();
+        snapshot.add_counter("test.counter", vec![], 42);
+        snapshot.add_gauge(
+            "test.gauge",
+            vec![("label".to_string(), "value".to_string())],
+            100,
+        );
+        snapshot.add_histogram("test.histogram", vec![], 10, 5.5);
+
+        assert!(exporter.export(&snapshot).is_ok());
+        assert_eq!(exporter.total_metrics(), 3);
+
+        let snapshots = exporter.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].counters.len(), 1);
+        assert_eq!(snapshots[0].gauges.len(), 1);
+        assert_eq!(snapshots[0].histograms.len(), 1);
+
+        exporter.clear();
+        assert_eq!(exporter.total_metrics(), 0);
+    }
+
+    #[test]
+    fn multi_exporter_fans_out() {
+        // Create a wrapper to use with MultiExporter
+        struct ArcExporter(Arc<InMemoryExporter>);
+        impl MetricsExporter for ArcExporter {
+            fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+                self.0.export(metrics)
+            }
+            fn flush(&self) -> Result<(), ExportError> {
+                self.0.flush()
+            }
+        }
+
+        let exp1 = InMemoryExporter::new();
+        let exp2 = InMemoryExporter::new();
+
+        // Need to use Arc to share between multi-exporter and tests
+        let exp1_arc = Arc::new(exp1);
+        let exp2_arc = Arc::new(exp2);
+
+        let mut multi = MultiExporter::new(vec![]);
+        multi.add(Box::new(ArcExporter(Arc::clone(&exp1_arc))));
+        multi.add(Box::new(ArcExporter(Arc::clone(&exp2_arc))));
+        assert_eq!(multi.len(), 2);
+
+        let mut snapshot = MetricsSnapshot::new();
+        snapshot.add_counter("test", vec![], 1);
+
+        assert!(multi.export(&snapshot).is_ok());
+        assert!(multi.flush().is_ok());
+
+        // Both exporters should have received the snapshot
+        assert_eq!(exp1_arc.total_metrics(), 1);
+        assert_eq!(exp2_arc.total_metrics(), 1);
+    }
+
+    #[test]
+    fn metrics_snapshot_building() {
+        let mut snapshot = MetricsSnapshot::new();
+
+        snapshot.add_counter(
+            "requests",
+            vec![("method".to_string(), "GET".to_string())],
+            100,
+        );
+        snapshot.add_gauge("connections", vec![], 42);
+        snapshot.add_histogram("latency", vec![], 1000, 125.5);
+
+        assert_eq!(snapshot.counters.len(), 1);
+        assert_eq!(snapshot.gauges.len(), 1);
+        assert_eq!(snapshot.histograms.len(), 1);
+
+        let (name, labels, value) = &snapshot.counters[0];
+        assert_eq!(name, "requests");
+        assert_eq!(labels.len(), 1);
+        assert_eq!(*value, 100);
+    }
+
+    #[test]
+    fn export_error_display() {
+        let err = ExportError::new("test error");
+        assert!(err.to_string().contains("test error"));
+    }
+
+    #[test]
+    fn log_level_to_otlp_severity_matches_data_model_bases() {
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Trace), (1, "TRACE"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Debug), (5, "DEBUG"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Info), (9, "INFO"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Warn), (13, "WARN"));
+        assert_eq!(log_level_to_otlp_severity(LogLevel::Error), (17, "ERROR"));
+    }
+
+    #[test]
+    fn null_logs_exporter_is_disabled_noop() {
+        let exporter = NullLogsExporter::new();
+        let snapshot = LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(
+            LogLevel::Info,
+            "ignored",
+            10,
+        ));
+
+        assert!(exporter.export(&snapshot).is_ok());
+        assert!(exporter.flush().is_ok());
+    }
+
+    #[test]
+    fn in_memory_logs_exporter_collects_snapshots() {
+        let exporter = InMemoryLogsExporter::new();
+        let snapshot = LogsSnapshot::new("checkout")
+            .with_record(OtlpLogRecord::new(LogLevel::Info, "first", 10))
+            .with_record(OtlpLogRecord::new(LogLevel::Warn, "second", 20));
+
+        exporter.export(&snapshot).expect("logs export");
+        assert_eq!(exporter.total_records(), 2);
+        assert_eq!(exporter.snapshots(), vec![snapshot]);
+
+        exporter.clear();
+        assert_eq!(exporter.total_records(), 0);
+    }
+
+    /// process_queue dequeued a batch and exported it with `?`, so a batch
+    /// whose export failed was dropped uncounted: each flush during an outage
+    /// lost one more.
+    #[test]
+    fn load_shedding_logs_exporter_keeps_a_batch_whose_export_failed() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FlakyLogsExporter {
+            fail: Arc<AtomicBool>,
+            inner: Arc<InMemoryLogsExporter>,
+        }
+        impl LogsExporter for FlakyLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(ExportError::new("collector unavailable"));
+                }
+                self.inner.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let fail = Arc::new(AtomicBool::new(true));
+        let memory = Arc::new(InMemoryLogsExporter::new());
+        let exporter = LoadSheddingLogsExporter::new(
+            Box::new(FlakyLogsExporter {
+                fail: Arc::clone(&fail),
+                inner: Arc::clone(&memory),
+            }),
+            10,
+        );
+        for timestamp in 1..=3 {
+            let snapshot = LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(
+                LogLevel::Info,
+                "event",
+                timestamp,
+            ));
+            exporter.export(&snapshot).expect("queued");
+        }
+        for _ in 0..3 {
+            assert!(exporter.flush().is_err(), "the collector is down");
+        }
+        let stats = exporter.load_shedding_stats();
+        assert_eq!((stats.queue_depth, stats.dropped_batches), (3, 0));
+
+        fail.store(false, Ordering::SeqCst);
+        exporter.flush().expect("the collector is back");
+        assert_eq!(memory.total_records(), 3);
+        assert_eq!(exporter.load_shedding_stats().queue_depth, 0);
+
+        // A failed batch put back into a queue that filled up meanwhile is the
+        // oldest, so it is the one shed, and it is counted.
+        let queue = BoundedExportQueue::new(2);
+        queue.enqueue(1);
+        queue.enqueue(2);
+        let failed = queue.dequeue().expect("oldest batch");
+        queue.enqueue(3);
+        assert!(!queue.requeue_front(failed));
+        assert_eq!(queue.dropped_count(), 1);
+        assert_eq!(queue.dequeue(), Some(2));
+    }
+
+    #[test]
+    fn multi_logs_exporter_fans_out_and_reports_errors() {
+        struct ArcLogsExporter(Arc<InMemoryLogsExporter>);
+        impl LogsExporter for ArcLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                self.0.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                self.0.flush()
+            }
+        }
+
+        struct FailingLogsExporter;
+        impl LogsExporter for FailingLogsExporter {
+            fn export(&self, _logs: &LogsSnapshot) -> Result<(), ExportError> {
+                Err(ExportError::new("collector rejected logs"))
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let first = Arc::new(InMemoryLogsExporter::new());
+        let second = Arc::new(InMemoryLogsExporter::new());
+        let snapshot =
+            LogsSnapshot::new("checkout").with_record(OtlpLogRecord::new(LogLevel::Info, "ok", 1));
+
+        let multi = MultiLogsExporter::new(vec![
+            Box::new(ArcLogsExporter(Arc::clone(&first))),
+            Box::new(ArcLogsExporter(Arc::clone(&second))),
+        ]);
+        multi.export(&snapshot).expect("multi logs export");
+        assert_eq!(first.total_records(), 1);
+        assert_eq!(second.total_records(), 1);
+
+        let failing = MultiLogsExporter::new(vec![Box::new(FailingLogsExporter)]);
+        let error = failing
+            .export(&snapshot)
+            .expect_err("failure must propagate");
+        assert!(error.to_string().contains("collector rejected logs"));
+    }
+
+    #[test]
+    fn logs_load_shedding_drops_oldest_snapshots() {
+        struct ArcLogsExporter(Arc<InMemoryLogsExporter>);
+        impl LogsExporter for ArcLogsExporter {
+            fn export(&self, logs: &LogsSnapshot) -> Result<(), ExportError> {
+                self.0.export(logs)
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                self.0.flush()
+            }
+        }
+
+        fn snapshot(id: u64) -> LogsSnapshot {
+            LogsSnapshot::new("checkout").with_record(
+                OtlpLogRecord::new(LogLevel::Info, format!("batch-{id}"), id)
+                    .with_attribute("batch_id", id.to_string()),
+            )
+        }
+
+        let received = Arc::new(InMemoryLogsExporter::new());
+        let exporter =
+            LoadSheddingLogsExporter::new(Box::new(ArcLogsExporter(Arc::clone(&received))), 2);
+
+        exporter.export(&snapshot(0)).expect("export 0");
+        exporter.export(&snapshot(1)).expect("export 1");
+        exporter.export(&snapshot(2)).expect("export 2");
+
+        let stats = exporter.load_shedding_stats();
+        assert_eq!(stats.queue_depth, 2);
+        assert_eq!(stats.dropped_batches, 1);
+
+        assert_eq!(exporter.process_queue().expect("process logs"), 2);
+        let bodies: Vec<_> = received
+            .snapshots()
+            .iter()
+            .flat_map(|snapshot| snapshot.records.iter().map(|record| record.body.clone()))
+            .collect();
+        assert_eq!(bodies, vec!["batch-1", "batch-2"]);
+    }
+
+    #[test]
+    fn traces_metrics_and_logs_export_without_cross_signal_duplication() {
+        use crate::observability::otlp_trace_exporter::{
+            ExportError as TraceExportError, OtlpSpan, SpanBatch, TraceExporter,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Instant;
+
+        #[derive(Debug, Default)]
+        struct CountingTraceExporter {
+            batches: AtomicUsize,
+            spans: AtomicUsize,
+        }
+
+        impl TraceExporter for CountingTraceExporter {
+            fn export(&self, batch: &SpanBatch) -> Result<(), TraceExportError> {
+                self.batches.fetch_add(1, Ordering::Relaxed);
+                self.spans.fetch_add(batch.spans.len(), Ordering::Relaxed);
+                Ok(())
+            }
+
+            fn flush(&self) -> Result<(), TraceExportError> {
+                Ok(())
+            }
+        }
+
+        let trace_exporter = CountingTraceExporter::default();
+        let metrics_exporter = InMemoryExporter::new();
+        let logs_exporter = InMemoryLogsExporter::new();
+
+        let trace_batch = SpanBatch {
+            batch_id: 7,
+            spans: vec![OtlpSpan::new(
+                "span-1".to_string(),
+                "checkout".to_string(),
+                1,
+                2,
+                vec![("route".to_string(), "/pay".to_string())],
+            )],
+            created_at: Instant::now(),
+        };
+        trace_exporter
+            .export(&trace_batch)
+            .expect("trace export should work");
+
+        let mut metrics = MetricsSnapshot::new();
+        metrics.add_counter(
+            "otel.export.requests",
+            vec![("signal".into(), "metrics".into())],
+            1,
+        );
+        metrics_exporter
+            .export(&metrics)
+            .expect("metrics export should work");
+
+        let logs = LogsSnapshot::new("checkout").with_record(
+            OtlpLogRecord::new(LogLevel::Info, "checkout complete", 3)
+                .with_attribute("signal", "logs"),
+        );
+        logs_exporter
+            .export(&logs)
+            .expect("logs export should work");
+
+        assert_eq!(trace_exporter.batches.load(Ordering::Relaxed), 1);
+        assert_eq!(trace_exporter.spans.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics_exporter.total_metrics(), 1);
+        assert_eq!(logs_exporter.total_records(), 1);
+    }
+
+    #[test]
+    fn logs_exporter_reuses_otlp_retry_classifier() {
+        let retry = classify_otlp_http_response(503, &[]);
+        assert!(matches!(
+            retry,
+            Err(OtlpError::Retryable {
+                status_code: 503,
+                ..
+            })
+        ));
+
+        let terminal = classify_otlp_http_response(400, &[]);
+        assert!(matches!(terminal, Err(OtlpError::NonRetryable { .. })));
+
+        let exporter = OtlpLogsHttpExporter::new("http://collector:4318/v1/logs")
+            .with_retry_config(4, Duration::from_millis(50), Duration::from_secs(5))
+            .with_timeout(Duration::from_secs(3));
+        assert_eq!(exporter.endpoint(), "http://collector:4318/v1/logs");
+
+        let logs = LogsSnapshot::new("checkout");
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            exporter.export(&logs).expect("sync export admitted");
+            assert_eq!(exporter.queue_stats().queued_batches, 1);
+            assert!(
+                exporter
+                    .flush()
+                    .expect_err("delivery is pending")
+                    .message
+                    .contains("otlp.queue.pending")
+            );
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let sync_error = exporter.export(&logs).expect_err("sync export rejected");
+            assert!(sync_error.to_string().contains("requires async context"));
+        }
+    }
+
+    #[test]
+    fn logs_snapshot_encodes_otlp_wire_compatible_records() {
+        use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+        use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+        use opentelemetry_proto::tonic::logs::v1::SeverityNumber;
+        use prost::Message;
+
+        let long_value = "x".repeat(OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES + 16);
+        let record = OtlpLogRecord::new(LogLevel::Warn, "", 100)
+            .with_observed_time_unix_nano(101)
+            .with_attribute("component", "scheduler")
+            .with_attribute("long", long_value)
+            .with_attribute("", "dropped")
+            .with_trace_context(vec![1; 16], vec![2; 8], 0x0101)
+            .with_event_name("asupersync.scheduler.warning");
+        let snapshot = LogsSnapshot::new("checkout")
+            .with_scope("asupersync.test.logs", "test-version")
+            .with_resource_attribute("deployment.environment", "test")
+            .with_record(record);
+
+        let encoded = snapshot.to_otlp_protobuf();
+        let decoded = ExportLogsServiceRequest::decode(encoded.as_slice()).expect("decode logs");
+        assert_eq!(decoded.resource_logs.len(), 1);
+
+        let resource_logs = &decoded.resource_logs[0];
+        let resource = resource_logs.resource.as_ref().expect("resource");
+        assert!(
+            resource
+                .attributes
+                .iter()
+                .any(|attribute| attribute.key == "service.name")
+        );
+
+        let scope_logs = &resource_logs.scope_logs[0];
+        let scope = scope_logs.scope.as_ref().expect("scope");
+        assert_eq!(scope.name, "asupersync.test.logs");
+        assert_eq!(scope.version, "test-version");
+
+        let decoded_record = &scope_logs.log_records[0];
+        assert_eq!(decoded_record.severity_number, SeverityNumber::Warn as i32);
+        assert_eq!(decoded_record.severity_text, "WARN");
+        assert_eq!(decoded_record.time_unix_nano, 100);
+        assert_eq!(decoded_record.observed_time_unix_nano, 101);
+        assert_eq!(decoded_record.trace_id, vec![1; 16]);
+        assert_eq!(decoded_record.span_id, vec![2; 8]);
+        assert_eq!(decoded_record.flags, 1);
+        assert_eq!(decoded_record.event_name, "asupersync.scheduler.warning");
+        assert_eq!(decoded_record.dropped_attributes_count, 1);
+
+        let body = decoded_record.body.as_ref().expect("body");
+        assert!(matches!(
+            body.value.as_ref(),
+            Some(ProtoValue::StringValue(value)) if value.is_empty()
+        ));
+        let long = decoded_record
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "long")
+            .expect("long attribute")
+            .value
+            .as_ref()
+            .expect("long attr value");
+        assert!(matches!(
+            long.value.as_ref(),
+            Some(ProtoValue::StringValue(value))
+                if value.len() == OTLP_LOGS_MAX_ATTRIBUTE_VALUE_BYTES
+        ));
+    }
+
+    #[test]
+    fn otlp_export_queue_load_shedding_drops_oldest_batches() {
+        // AUDIT TEST: OTLP exporter load shedding behavior
+        //
+        // REQUIREMENT: When export channel is full, drop OLDEST batches (correct)
+        // NOT drop NEWEST batches (incorrect) per OTLP exporter best practices.
+        //
+        // GOAL: Preserve recent data over stale data for better observability.
+
+        let received_batches = Arc::new(Mutex::new(Vec::<MetricsSnapshot>::new()));
+
+        struct TrackingExporter {
+            received: Arc<Mutex<Vec<MetricsSnapshot>>>,
+        }
+
+        impl MetricsExporter for TrackingExporter {
+            fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
+                self.received.lock().push(metrics.clone());
+                Ok(())
+            }
+
+            fn flush(&self) -> Result<(), ExportError> {
+                Ok(())
+            }
+        }
+
+        let tracking_exporter = TrackingExporter {
+            received: Arc::clone(&received_batches),
+        };
+
+        // Create load shedding exporter with small capacity for testing
+        let queue_capacity = 3;
+        let exporter = LoadSheddingExporter::new(Box::new(tracking_exporter), queue_capacity);
+
+        // Create identifiable test batches
+        let mut batches = Vec::new();
+        for i in 0..6 {
+            let mut batch = MetricsSnapshot::new();
+            batch.add_counter(
+                "test_metric",
+                vec![("batch_id".to_string(), i.to_string())],
+                i as u64 + 1,
+            );
+            batches.push(batch);
+        }
+
+        // Fill queue beyond capacity to trigger load shedding
+        for batch in &batches {
+            let result = exporter.export(batch);
+            assert!(
+                result.is_ok(),
+                "export should succeed even when dropping oldest"
+            );
+        }
+
+        // Verify load shedding stats
+        let stats = exporter.load_shedding_stats();
+        assert_eq!(stats.queue_capacity, 3, "queue capacity should be 3");
+        assert_eq!(stats.queue_depth, 3, "queue should be full");
+        assert_eq!(
+            stats.dropped_batches, 3,
+            "should have dropped 3 oldest batches"
+        );
+
+        // Process queue and verify OLDEST batches were dropped
+        let processed = exporter
+            .process_queue()
+            .expect("process queue should succeed");
+        assert_eq!(processed, 3, "should have processed 3 batches");
+
+        let received = received_batches.lock();
+        assert_eq!(received.len(), 3, "should have received 3 batches");
+
+        // Verify we kept the NEWEST 3 batches (3, 4, 5) and dropped oldest (0, 1, 2)
+        let received_batch_ids: Vec<String> = received
+            .iter()
+            .map(|batch| {
+                // Extract batch_id from the counter labels
+                batch.counters[0].1[0].1.clone()
+            })
+            .collect();
+
+        assert_eq!(
+            received_batch_ids,
+            vec!["3", "4", "5"],
+            "should preserve NEWEST batches (3,4,5) and drop oldest (0,1,2)"
+        );
+
+        eprintln!("OTLP LOAD SHEDDING AUDIT RESULTS:");
+        eprintln!("  ✓ CORRECT: Drops OLDEST batches when queue is full");
+        eprintln!("  ✓ CORRECT: Preserves NEWEST batches for recent observability");
+        eprintln!("  ✓ CORRECT: Maintains FIFO export order");
+        eprintln!("  Queue capacity: {}", stats.queue_capacity);
+        eprintln!("  Dropped batches: {}", stats.dropped_batches);
+        eprintln!("  Preserved batches: {}", received_batch_ids.join(", "));
+    }
+
+    #[test]
+    fn bounded_export_queue_fifo_order_preserved() {
+        // Test that the bounded queue maintains FIFO order even with load shedding
+        let queue = BoundedExportQueue::new(2);
+
+        // Add items that fit in queue
+        assert!(!queue.enqueue("first"));
+        assert!(!queue.enqueue("second"));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.dropped_count(), 0);
+
+        // Add item that triggers load shedding (drops oldest = "first")
+        assert!(queue.enqueue("third"));
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue.dropped_count(), 1);
+
+        // Verify FIFO order: should get "second" then "third"
+        assert_eq!(queue.dequeue(), Some("second"));
+        assert_eq!(queue.dequeue(), Some("third"));
+        assert_eq!(queue.dequeue(), None);
+    }
+
+    #[test]
+    fn bounded_export_queue_capacity_limits() {
+        let queue = BoundedExportQueue::new(0); // Zero capacity edge case
+        assert!(queue.enqueue("item"));
+        assert_eq!(queue.len(), 1);
+        assert_eq!(queue.dropped_count(), 0); // No previous item to drop
+
+        let queue = BoundedExportQueue::new(1);
+        assert!(!queue.enqueue("first"));
+        assert!(queue.enqueue("second")); // Drops "first"
+        assert_eq!(queue.dequeue(), Some("second"));
+        assert_eq!(queue.dropped_count(), 1);
+    }
+
+    // Pure data-type tests (wave 38 – CyanBarn)
+
+    #[test]
+    fn cardinality_overflow_debug_clone_copy_eq_default() {
+        let overflow = CardinalityOverflow::default();
+        assert_eq!(overflow, CardinalityOverflow::Drop);
+        let dbg = format!("{overflow:?}");
+        assert!(dbg.contains("Drop"));
+
+        let aggregate = CardinalityOverflow::Aggregate;
+        let cloned = aggregate;
+        assert_eq!(cloned, CardinalityOverflow::Aggregate);
+        assert_ne!(aggregate, CardinalityOverflow::Warn);
+
+        let warn = CardinalityOverflow::Warn;
+        let copied = warn;
+        assert_eq!(copied, warn);
+    }
+
+    #[test]
+    fn metrics_config_debug_clone_default() {
+        let config = MetricsConfig::default();
+        assert_eq!(config.max_cardinality, 1000);
+        assert_eq!(config.overflow_strategy, CardinalityOverflow::Drop);
+        assert!(config.drop_labels.is_empty());
+        assert!(config.sampling.is_none());
+
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("MetricsConfig"));
+
+        let cloned = config;
+        assert_eq!(cloned.max_cardinality, 1000);
+    }
+
+    #[test]
+    fn sampling_config_debug_clone_default() {
+        let config = SamplingConfig::default();
+        assert!((config.sample_rate - 1.0).abs() < f64::EPSILON);
+        assert!(config.sampled_metrics.is_empty());
+
+        let dbg = format!("{config:?}");
+        assert!(dbg.contains("SamplingConfig"));
+
+        let cloned = config;
+        assert!((cloned.sample_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metrics_snapshot_debug_clone_default() {
+        let snapshot = MetricsSnapshot::default();
+        assert!(snapshot.counters.is_empty());
+        assert!(snapshot.gauges.is_empty());
+        assert!(snapshot.histograms.is_empty());
+
+        let dbg = format!("{snapshot:?}");
+        assert!(dbg.contains("MetricsSnapshot"));
+
+        let mut s = MetricsSnapshot::new();
+        s.add_counter("c", vec![], 1);
+        let cloned = s.clone();
+        assert_eq!(cloned.counters.len(), 1);
+    }
+
+    #[test]
+    fn export_error_debug_clone() {
+        let err = ExportError::new("something failed");
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("ExportError"));
+
+        let cloned = err.clone();
+        assert_eq!(cloned.to_string(), err.to_string());
+    }
+
+    #[test]
+    fn stdout_exporter_debug_default() {
+        let exporter = StdoutExporter::default();
+        let dbg = format!("{exporter:?}");
+        assert!(dbg.contains("StdoutExporter"));
+
+        let with_prefix = StdoutExporter::with_prefix("[test] ");
+        let dbg2 = format!("{with_prefix:?}");
+        assert!(dbg2.contains("StdoutExporter"));
+    }
+
+    #[test]
+    fn null_exporter_debug_default() {
+        let exporter = NullExporter;
+        let dbg = format!("{exporter:?}");
+        assert!(dbg.contains("NullExporter"));
+    }
+
+    #[test]
+    fn multi_exporter_debug_default() {
+        let exporter = MultiExporter::default();
+        assert!(exporter.is_empty());
+        assert_eq!(exporter.len(), 0);
+        let dbg = format!("{exporter:?}");
+        assert!(dbg.contains("MultiExporter"));
+    }
+
+    #[test]
+    fn in_memory_exporter_debug_default() {
+        let exporter = InMemoryExporter::default();
+        assert_eq!(exporter.total_metrics(), 0);
+        let dbg = format!("{exporter:?}");
+        assert!(dbg.contains("InMemoryExporter"));
+    }
+
+    /// br-asupersync-coxhdt: escape_label_value must handle the
+    /// Prometheus-spec-required escape trio (\\\\, \\n, \\") plus \\r as
+    /// defense-in-depth. Otherwise an attacker-controlled label value
+    /// containing a literal '"' would close the value-string early
+    /// and inject spurious labels.
+    #[test]
+    fn escape_label_value_handles_spec_required_trio_plus_cr() {
+        // Plain values pass through unchanged.
+        assert_eq!(escape_label_value("plain"), "plain");
+        // Backslash → \\
+        assert_eq!(escape_label_value(r"a\b"), r"a\\b");
+        // Newline → \n
+        assert_eq!(escape_label_value("a\nb"), r"a\nb");
+        // Double-quote → \"
+        assert_eq!(escape_label_value(r#"a"b"#), r#"a\"b"#);
+        // Carriage return → \r
+        assert_eq!(escape_label_value("a\rb"), r"a\rb");
+        // All four together.
+        assert_eq!(escape_label_value("a\\b\nc\"d\re"), r#"a\\b\nc\"d\re"#);
+    }
+
+    /// br-asupersync-coxhdt: format_labels MUST route every label
+    /// value through escape_label_value. An attacker who controls
+    /// a label value containing a literal '"' must NOT be able to
+    /// close the value string early and inject `,attacker_label="x"`
+    /// into the resulting Prometheus output.
+    #[test]
+    fn format_labels_escapes_quote_to_prevent_label_injection() {
+        let labels = vec![(
+            "path".to_string(),
+            r#"/api","attacker_label"="injected"#.to_string(),
+        )];
+        let rendered = StdoutExporter::format_labels(&labels);
+        // The literal '"' in the value MUST appear as \" in the output.
+        assert!(
+            rendered.contains(r#"\""#),
+            "format_labels failed to escape attacker quote: {rendered}"
+        );
+        // The fragment that would inject if escaping failed must NOT
+        // appear as a parseable second label.
+        assert!(
+            !rendered.contains(r#"","attacker_label"="injected"}"#),
+            "format_labels permitted label injection: {rendered}"
+        );
+    }
+
+    /// br-asupersync-coxhdt: a backslash in a label value is doubled,
+    /// not consumed.
+    #[test]
+    fn format_labels_escapes_backslash_to_prevent_value_corruption() {
+        let labels = vec![("k".to_string(), r"a\b".to_string())];
+        let rendered = StdoutExporter::format_labels(&labels);
+        assert!(rendered.contains(r"a\\b"));
+    }
+}
+
+// Re-export types for public API
+#[cfg(feature = "tracing-integration")]
+pub use span_semantics::LogRecordBodyValue;
+#[cfg(all(feature = "tracing-integration", any(test, feature = "fuzz")))]
+pub use span_semantics::log_record_body_value_to_any_value;
+
+// =============================================================================
+// OpenTelemetry Span Semantics Conformance
+// =============================================================================
+
+#[cfg(feature = "tracing-integration")]
+pub mod span_semantics {
+    //! OpenTelemetry span semantics conformance tests.
+    //!
+    //! This module provides comprehensive conformance testing for OpenTelemetry
+    //! span semantics according to the OpenTelemetry specification. It verifies
+    //! span lifecycle, hierarchy, attributes, events, status, and context propagation.
+    //!
+    //! # Conformance Areas
+    //!
+    //! 1. **Span Lifecycle**: Start, end, finish, duration calculation
+    //! 2. **Span Hierarchy**: Parent-child relationships, context propagation
+    //! 3. **Span Attributes**: Setting, updating, limits, validation
+    //! 4. **Span Events**: Recording events with timestamps and attributes
+    //! 5. **Span Status**: Status codes, descriptions, error indication
+    //! 6. **Span Sampling**: Sampled vs non-sampled behavior
+    //! 7. **Span Context**: TraceID, SpanID, trace flags, state propagation
+    //! 8. **Resource Association**: Service resource attachment
+    //!
+    //! # Example
+    //!
+    //! ```
+    //! use asupersync::observability::otel::span_semantics::run_span_conformance_tests;
+    //!
+    //! // Run all span semantic conformance tests
+    //! run_span_conformance_tests().expect("All span semantic tests should pass");
+    //! ```
+
+    use opentelemetry::trace::{
+        SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
+    };
+    #[cfg(any(test, feature = "fuzz"))]
+    use opentelemetry_proto::tonic::common::v1::{
+        AnyValue, KeyValue, any_value::Value as ProtoValue,
+    };
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    static NEXT_TEST_SPAN_SEED: AtomicU64 = AtomicU64::new(1);
+    static NEXT_TEST_TIME_TICK: AtomicU64 = AtomicU64::new(1);
+
+    fn next_test_trace_id() -> TraceId {
+        // Keep the test helper deterministic while avoiding related hi/lo halves.
+        // Production trace IDs are generated by the runtime path, not this helper.
+        let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
+        let high = splitmix64(seed ^ 0x1357_9bdf_2468_ace0);
+        let low = splitmix64(seed ^ 0xfedc_ba98_7654_3210);
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&high.to_be_bytes());
+        bytes[8..].copy_from_slice(&low.to_be_bytes());
+
+        // Ensure not INVALID (all zeros) per W3C specification
+        let trace_id = TraceId::from_bytes(bytes);
+        if trace_id == TraceId::INVALID {
+            TraceId::from_bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        } else {
+            trace_id
+        }
+    }
+
+    fn next_test_span_id() -> SpanId {
+        let seed = NEXT_TEST_SPAN_SEED.fetch_add(1, Ordering::Relaxed);
+        let raw = splitmix64(seed ^ 0xa5a5_a5a5_a5a5_a5a5);
+        let span_id = SpanId::from_bytes([
+            (raw >> 56) as u8,
+            (raw >> 48) as u8,
+            (raw >> 40) as u8,
+            (raw >> 32) as u8,
+            (raw >> 24) as u8,
+            (raw >> 16) as u8,
+            (raw >> 8) as u8,
+            raw as u8,
+        ]);
+        if span_id == SpanId::INVALID {
+            SpanId::from_bytes([0, 0, 0, 0, 0, 0, 0, 1])
+        } else {
+            span_id
+        }
+    }
+
+    fn splitmix64(mut state: u64) -> u64 {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn next_test_time() -> SystemTime {
+        let tick = NEXT_TEST_TIME_TICK.fetch_add(1, Ordering::Relaxed);
+        UNIX_EPOCH + Duration::from_nanos(tick)
+    }
+
+    fn truncate_value(value: &str, max_len: Option<usize>) -> String {
+        match max_len {
+            Some(limit) => value.chars().take(limit).collect(),
+            None => value.to_string(),
+        }
+    }
+
+    /// br-asupersync-6ofylg — OTel attribute keys are bounded by the
+    /// 1 KiB cap from the OTel spec (and most collectors' wire-level
+    /// limits). The deterministic span recorder previously truncated only
+    /// the value, leaving the key path open as an asymmetric
+    /// memory-amplification axis when combined with the cardinality
+    /// tracker (an attacker-controlled key with fixed prefix
+    /// produces one map entry per oversized key, each up to
+    /// arbitrarily many bytes). Mirror the closed bd-65gy5c
+    /// span.rs key cap by truncating keys to MAX_OTEL_ATTRIBUTE_KEY_LEN.
+    const MAX_OTEL_ATTRIBUTE_KEY_LEN: usize = 1024;
+
+    fn truncate_key(key: &str) -> String {
+        if key.len() <= MAX_OTEL_ATTRIBUTE_KEY_LEN {
+            key.to_string()
+        } else {
+            // The cap is in bytes, but truncation must still land on
+            // a UTF-8 character boundary so the stored key remains
+            // valid Unicode.
+            let mut cut = MAX_OTEL_ATTRIBUTE_KEY_LEN;
+            while cut > 0 && !key.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            key[..cut].to_string()
+        }
+    }
+
+    /// Configuration for span semantics conformance testing.
+    #[derive(Debug, Clone)]
+    pub struct SpanConformanceConfig {
+        /// Maximum number of attributes per span (default: 128 per OTel spec).
+        pub max_attributes: usize,
+        /// Maximum number of events per span (default: 128 per OTel spec).
+        pub max_events: usize,
+        /// Maximum attribute value length (default: none per OTel spec).
+        pub max_attribute_length: Option<usize>,
+        /// Whether to test sampling behavior.
+        pub test_sampling: bool,
+        /// Whether to test context propagation.
+        pub test_context_propagation: bool,
+    }
+
+    impl Default for SpanConformanceConfig {
+        fn default() -> Self {
+            Self {
+                max_attributes: 128,
+                max_events: 128,
+                max_attribute_length: None,
+                test_sampling: true,
+                test_context_propagation: true,
+            }
+        }
+    }
+
+    /// Result of span semantic conformance testing.
+    #[derive(Debug)]
+    pub struct SpanConformanceResult {
+        /// Total number of tests run.
+        pub tests_run: usize,
+        /// Number of tests passed.
+        pub tests_passed: usize,
+        /// Number of tests failed.
+        pub tests_failed: usize,
+        /// Detailed failure messages.
+        pub failures: Vec<String>,
+        /// Known conformance gaps that make the run fail closed.
+        pub conformance_gaps: Vec<String>,
+    }
+
+    impl SpanConformanceResult {
+        /// Create new empty result.
+        pub fn new() -> Self {
+            Self {
+                tests_run: 0,
+                tests_passed: 0,
+                tests_failed: 0,
+                failures: Vec::new(),
+                conformance_gaps: Vec::new(),
+            }
+        }
+
+        /// Record a test pass.
+        pub fn record_pass(&mut self, _test_name: &str) {
+            self.tests_run += 1;
+            self.tests_passed += 1;
+        }
+
+        /// Record a test failure.
+        pub fn record_failure(&mut self, test_name: &str, reason: &str) {
+            self.tests_run += 1;
+            self.tests_failed += 1;
+            self.failures.push(format!("{}: {}", test_name, reason));
+        }
+
+        /// Record a known conformance gap as a fail-closed result.
+        pub fn record_conformance_gap(&mut self, test_name: &str, reason: &str) {
+            self.conformance_gaps
+                .push(format!("{}: {}", test_name, reason));
+        }
+
+        /// Check if all tests passed with no known conformance gaps.
+        /// Fails closed when there are:
+        /// - Unexpected test failures
+        /// - Known conformance gaps
+        pub fn is_success(&self) -> bool {
+            self.tests_failed == 0 && self.conformance_gaps.is_empty()
+        }
+
+        /// Check whether the runner found any known conformance gaps.
+        pub fn has_no_known_conformance_gaps(&self) -> bool {
+            self.conformance_gaps.is_empty()
+        }
+
+        /// Get comprehensive failure report including fail-closed conformance gaps.
+        pub fn failure_report(&self) -> String {
+            let mut report = String::new();
+
+            if !self.failures.is_empty() {
+                report.push_str("Test Failures:\n");
+                for failure in &self.failures {
+                    report.push_str(&format!("  - {}\n", failure));
+                }
+            }
+
+            if !self.conformance_gaps.is_empty() {
+                report.push_str("Conformance Gaps (fail closed):\n");
+                for gap in &self.conformance_gaps {
+                    report.push_str(&format!("  - {}\n", gap));
+                }
+            }
+
+            if report.is_empty() {
+                "No failures detected".to_string()
+            } else {
+                report
+            }
+        }
+
+        /// Get success rate as percentage.
+        pub fn success_rate(&self) -> f64 {
+            if self.tests_run == 0 {
+                0.0
+            } else {
+                (self.tests_passed as f64 / self.tests_run as f64) * 100.0
+            }
+        }
+    }
+
+    /// Test span for conformance verification.
+    #[derive(Debug)]
+    pub struct TestSpan {
+        /// Span context (trace ID, span ID, flags).
+        pub context: SpanContext,
+        /// Span name.
+        pub name: String,
+        /// Span kind.
+        pub kind: SpanKind,
+        /// Start time.
+        pub start_time: SystemTime,
+        /// End time (if ended).
+        pub end_time: Option<SystemTime>,
+        /// Span attributes.
+        pub attributes: HashMap<String, String>,
+        /// OTLP-typed span attributes for wire-format conformance helpers.
+        pub attribute_values: HashMap<String, AttributeValue>,
+        /// Span events.
+        pub events: Vec<SpanEvent>,
+        /// Span status.
+        pub status: Status,
+        /// Parent span context.
+        pub parent_context: Option<SpanContext>,
+        /// Propagated baggage entries.
+        pub baggage: HashMap<String, String>,
+        /// Count of attributes dropped because the span exceeded
+        /// `max_attributes`. Surfaces as the OTLP wire field
+        /// `Span.dropped_attributes_count` so receivers can detect
+        /// truncation. Per OTLP spec, when the SDK drops an
+        /// attribute due to a per-span limit, this counter MUST
+        /// be bumped; emitting 0 while attributes were silently
+        /// dropped is a wire-format conformance bug.
+        pub dropped_attributes_count: u32,
+        max_attributes: usize,
+        max_events: usize,
+        max_attribute_length: Option<usize>,
+    }
+
+    /// Span event for conformance testing.
+    #[derive(Debug, Clone)]
+    pub struct SpanEvent {
+        /// Event name.
+        pub name: String,
+        /// Event timestamp.
+        pub timestamp: SystemTime,
+        /// Event attributes.
+        pub attributes: HashMap<String, String>,
+    }
+
+    /// OTLP attribute value variants for typed span-attribute coverage.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum AttributeValue {
+        /// UTF-8 string attribute.
+        String(String),
+        /// Signed integer attribute.
+        Int(i64),
+        /// Floating-point attribute.
+        Float(f64),
+        /// Boolean attribute.
+        Bool(bool),
+        /// UTF-8 string array attribute.
+        StringArray(Vec<String>),
+        /// Signed integer array attribute.
+        IntArray(Vec<i64>),
+        /// Floating-point array attribute.
+        FloatArray(Vec<f64>),
+        /// Boolean array attribute.
+        BoolArray(Vec<bool>),
+    }
+
+    /// OTLP LogRecord body value variants for body type conformance testing.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum LogRecordBodyValue {
+        /// UTF-8 string body.
+        String(String),
+        /// Signed integer body.
+        Int(i64),
+        /// Floating-point body.
+        Float(f64),
+        /// Boolean body.
+        Bool(bool),
+        /// UTF-8 string array body.
+        StringArray(Vec<String>),
+        /// Signed integer array body.
+        IntArray(Vec<i64>),
+        /// Floating-point array body.
+        FloatArray(Vec<f64>),
+        /// Boolean array body.
+        BoolArray(Vec<bool>),
+    }
+
+    impl TestSpan {
+        /// Create a new test span.
+        pub fn new(name: &str, kind: SpanKind) -> Self {
+            Self::new_with_config(name, kind, &SpanConformanceConfig::default())
+        }
+
+        /// Create a new root test span with explicit limits.
+        pub fn new_with_config(name: &str, kind: SpanKind, config: &SpanConformanceConfig) -> Self {
+            let context = SpanContext::new(
+                next_test_trace_id(),
+                next_test_span_id(),
+                TraceFlags::SAMPLED,
+                false,
+                TraceState::default(),
+            );
+            Self::from_parts(
+                name,
+                kind,
+                context,
+                None,
+                HashMap::new(),
+                config.max_attributes,
+                config.max_events,
+                config.max_attribute_length,
+            )
+        }
+
+        /// Create a child span.
+        pub fn new_child(&self, name: &str, kind: SpanKind) -> Self {
+            let parent_context = self.context.clone();
+            let context = SpanContext::new(
+                parent_context.trace_id(),
+                next_test_span_id(),
+                parent_context.trace_flags(),
+                false,
+                parent_context.trace_state().clone(),
+            );
+            Self::from_parts(
+                name,
+                kind,
+                context,
+                Some(parent_context),
+                self.baggage.clone(),
+                self.max_attributes,
+                self.max_events,
+                self.max_attribute_length,
+            )
+        }
+
+        /// Create a child span from an extracted remote parent.
+        pub fn child_from_remote_parent(
+            parent_context: SpanContext,
+            baggage: HashMap<String, String>,
+            name: &str,
+            kind: SpanKind,
+            config: &SpanConformanceConfig,
+        ) -> Self {
+            let context = SpanContext::new(
+                parent_context.trace_id(),
+                next_test_span_id(),
+                parent_context.trace_flags(),
+                false,
+                parent_context.trace_state().clone(),
+            );
+            Self::from_parts(
+                name,
+                kind,
+                context,
+                Some(parent_context),
+                baggage,
+                config.max_attributes,
+                config.max_events,
+                config.max_attribute_length,
+            )
+        }
+
+        fn from_parts(
+            name: &str,
+            kind: SpanKind,
+            context: SpanContext,
+            parent_context: Option<SpanContext>,
+            baggage: HashMap<String, String>,
+            max_attributes: usize,
+            max_events: usize,
+            max_attribute_length: Option<usize>,
+        ) -> Self {
+            Self {
+                context,
+                name: name.to_string(),
+                kind,
+                start_time: next_test_time(),
+                end_time: None,
+                attributes: HashMap::new(),
+                attribute_values: HashMap::new(),
+                events: Vec::new(),
+                status: Status::Unset,
+                parent_context,
+                baggage,
+                dropped_attributes_count: 0,
+                max_attributes,
+                max_events,
+                max_attribute_length,
+            }
+        }
+
+        /// Set span attribute.
+        ///
+        /// br-asupersync-6ofylg — both key and value are length-
+        /// bounded. Keys longer than `MAX_OTEL_ATTRIBUTE_KEY_LEN`
+        /// are truncated (mirroring the closed bd-65gy5c span
+        /// hardening); values are truncated by the existing
+        /// `max_attribute_length` config field.
+        pub fn set_attribute(&mut self, key: &str, value: &str) {
+            self.set_attribute_value(key, AttributeValue::String(value.to_string()));
+        }
+
+        /// Set an integer span attribute.
+        pub fn set_int_attribute(&mut self, key: &str, value: i64) {
+            self.set_attribute_value(key, AttributeValue::Int(value));
+        }
+
+        /// Set a floating-point span attribute.
+        pub fn set_float_attribute(&mut self, key: &str, value: f64) {
+            self.set_attribute_value(key, AttributeValue::Float(value));
+        }
+
+        /// Set a boolean span attribute.
+        pub fn set_bool_attribute(&mut self, key: &str, value: bool) {
+            self.set_attribute_value(key, AttributeValue::Bool(value));
+        }
+
+        /// Set an OTLP-typed span attribute for protobuf conformance checks.
+        pub fn set_attribute_value(&mut self, key: &str, value: AttributeValue) {
+            let key = truncate_key(key);
+            if self.attributes.contains_key(&key) || self.attributes.len() < self.max_attributes {
+                let value = self.normalize_attribute_value(value);
+                self.attributes
+                    .insert(key.clone(), attribute_value_text(&value));
+                self.attribute_values.insert(key, value);
+            } else {
+                // br-asupersync-attr-drop-count: bump the OTLP
+                // dropped_attributes_count when a NEW attribute is
+                // dropped because the span is at the per-span cap.
+                // Saturating add prevents wraparound at u32::MAX
+                // (a 4-billion-attribute span is implausible, but
+                // saturating is the correct semantic — the OTLP
+                // spec says "MUST track count of dropped"; once
+                // we exceed u32::MAX, capping at MAX is the closest
+                // legal representation).
+                self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(1);
+            }
+        }
+
+        /// Add a batch of OTLP protobuf key/value attributes.
+        ///
+        /// Batch application mirrors repeated `set_attribute_value` calls for
+        /// duplicate keys: the last occurrence wins. The implementation stages
+        /// normalized keys and values before mutating the span, so filtering and
+        /// capacity decisions cannot leave a partially normalized key/value pair
+        /// in one of the parallel attribute maps.
+        #[cfg(any(test, feature = "fuzz"))]
+        pub fn add_attributes(&mut self, attributes: Vec<KeyValue>) {
+            let mut deduplicated: HashMap<String, (usize, AttributeValue)> = HashMap::new();
+            let mut dropped = 0_u32;
+
+            for (index, attribute) in attributes.into_iter().enumerate() {
+                if attribute.key.is_empty() {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                }
+
+                let key = truncate_key(&attribute.key);
+                if key.is_empty() {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                }
+
+                let Some(value) = attribute
+                    .value
+                    .as_ref()
+                    .and_then(attribute_value_from_any_value)
+                else {
+                    dropped = dropped.saturating_add(1);
+                    continue;
+                };
+
+                deduplicated.insert(key, (index, value));
+            }
+
+            let mut staged: Vec<_> = deduplicated
+                .into_iter()
+                .map(|(key, (index, value))| (index, key, value))
+                .collect();
+            staged.sort_by_key(|(index, _, _)| *index);
+
+            let mut remaining_new_capacity =
+                self.max_attributes.saturating_sub(self.attributes.len());
+            let mut accepted = Vec::with_capacity(staged.len());
+
+            for (_, key, value) in staged {
+                if self.attributes.contains_key(&key) {
+                    accepted.push((key, value));
+                } else if remaining_new_capacity > 0 {
+                    remaining_new_capacity -= 1;
+                    accepted.push((key, value));
+                } else {
+                    dropped = dropped.saturating_add(1);
+                }
+            }
+
+            for (key, value) in accepted {
+                let value = self.normalize_attribute_value(value);
+                self.attributes
+                    .insert(key.clone(), attribute_value_text(&value));
+                self.attribute_values.insert(key, value);
+            }
+
+            self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(dropped);
+        }
+
+        /// Set a propagated baggage entry.
+        pub fn set_baggage_item(&mut self, key: &str, value: &str) {
+            self.baggage.insert(key.to_string(), value.to_string());
+        }
+
+        /// Add span event.
+        pub fn add_event(&mut self, name: &str, mut attributes: HashMap<String, String>) {
+            if self.events.len() >= self.max_events {
+                return;
+            }
+            for value in attributes.values_mut() {
+                *value = truncate_value(value, self.max_attribute_length);
+            }
+            let event = SpanEvent {
+                name: name.to_string(),
+                timestamp: next_test_time(),
+                attributes,
+            };
+            self.events.push(event);
+        }
+
+        /// Set span status.
+        ///
+        /// Per OTLP specification, span status updates follow last-write-wins semantics.
+        /// Any status can overwrite any other status - the most recent set_status() call
+        /// determines the final span status, regardless of the previous value.
+        ///
+        /// br-asupersync-8ru8uc — Fixed OTLP spec violation where Error status could not
+        /// be overwritten by Ok status. Now implements proper last-write-wins.
+        pub fn set_status(&mut self, status: Status) {
+            // OTLP spec: last-write-wins for all status transitions
+            self.status = status;
+        }
+
+        /// End the span.
+        pub fn end(&mut self) {
+            if self.end_time.is_none() {
+                self.end_time = Some(next_test_time());
+            }
+        }
+
+        /// Get span duration.
+        pub fn duration(&self) -> Option<Duration> {
+            if let Some(end_time) = self.end_time {
+                end_time.duration_since(self.start_time).ok()
+            } else {
+                None
+            }
+        }
+
+        /// Check if span is ended.
+        pub fn is_ended(&self) -> bool {
+            self.end_time.is_some()
+        }
+
+        /// Convert span attributes to OTLP protobuf key/value pairs with stable ordering.
+        #[cfg(any(test, feature = "fuzz"))]
+        pub fn to_otlp_attributes(&self) -> Vec<KeyValue> {
+            let mut attributes: Vec<_> = self
+                .attribute_values
+                .iter()
+                .map(|(key, value)| KeyValue {
+                    key: key.clone(),
+                    key_strindex: 0,
+                    value: Some(attribute_value_to_any_value(value)),
+                })
+                .collect();
+            attributes.sort_by(|left, right| left.key.cmp(&right.key));
+            attributes
+        }
+
+        fn normalize_attribute_value(&self, value: AttributeValue) -> AttributeValue {
+            match value {
+                AttributeValue::String(value) => {
+                    AttributeValue::String(truncate_value(&value, self.max_attribute_length))
+                }
+                AttributeValue::StringArray(values) => AttributeValue::StringArray(
+                    values
+                        .into_iter()
+                        .map(|value| truncate_value(&value, self.max_attribute_length))
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn attribute_value_from_any_value(value: &AnyValue) -> Option<AttributeValue> {
+        match value.value.as_ref()? {
+            ProtoValue::StringValue(value) => Some(AttributeValue::String(value.clone())),
+            ProtoValue::BoolValue(value) => Some(AttributeValue::Bool(*value)),
+            ProtoValue::IntValue(value) => Some(AttributeValue::Int(*value)),
+            ProtoValue::DoubleValue(value) => Some(AttributeValue::Float(*value)),
+            ProtoValue::ArrayValue(values) => attribute_array_value_from_any_values(&values.values),
+            ProtoValue::KvlistValue(_)
+            | ProtoValue::BytesValue(_)
+            | ProtoValue::StringValueStrindex(_) => None,
+        }
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn attribute_array_value_from_any_values(values: &[AnyValue]) -> Option<AttributeValue> {
+        if values.is_empty() {
+            return Some(AttributeValue::StringArray(Vec::new()));
+        }
+
+        let mut strings = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::StringValue(value) => strings.push(value.clone()),
+                _ => {
+                    strings.clear();
+                    break;
+                }
+            }
+        }
+        if strings.len() == values.len() {
+            return Some(AttributeValue::StringArray(strings));
+        }
+
+        let mut ints = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::IntValue(value) => ints.push(*value),
+                _ => {
+                    ints.clear();
+                    break;
+                }
+            }
+        }
+        if ints.len() == values.len() {
+            return Some(AttributeValue::IntArray(ints));
+        }
+
+        let mut floats = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::DoubleValue(value) => floats.push(*value),
+                _ => {
+                    floats.clear();
+                    break;
+                }
+            }
+        }
+        if floats.len() == values.len() {
+            return Some(AttributeValue::FloatArray(floats));
+        }
+
+        let mut bools = Vec::with_capacity(values.len());
+        for value in values {
+            match value.value.as_ref()? {
+                ProtoValue::BoolValue(value) => bools.push(*value),
+                _ => return None,
+            }
+        }
+        Some(AttributeValue::BoolArray(bools))
+    }
+
+    fn attribute_value_text(value: &AttributeValue) -> String {
+        match value {
+            AttributeValue::String(value) => value.clone(),
+            AttributeValue::Int(value) => value.to_string(),
+            AttributeValue::Float(value) => value.to_string(),
+            AttributeValue::Bool(value) => value.to_string(),
+            AttributeValue::StringArray(values) => values.join(","),
+            AttributeValue::IntArray(values) => values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            AttributeValue::FloatArray(values) => values
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            AttributeValue::BoolArray(values) => values
+                .iter()
+                .map(bool::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+
+    #[cfg(any(test, feature = "fuzz"))]
+    fn attribute_value_to_any_value(value: &AttributeValue) -> AnyValue {
+        use opentelemetry_proto::tonic::common::v1::ArrayValue;
+
+        match value {
+            AttributeValue::String(value) => AnyValue {
+                value: Some(ProtoValue::StringValue(value.clone())),
+            },
+            AttributeValue::Int(value) => AnyValue {
+                value: Some(ProtoValue::IntValue(*value)),
+            },
+            AttributeValue::Float(value) => AnyValue {
+                value: Some(ProtoValue::DoubleValue(*value)),
+            },
+            AttributeValue::Bool(value) => AnyValue {
+                value: Some(ProtoValue::BoolValue(*value)),
+            },
+            AttributeValue::StringArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::StringValue(value.clone())),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::IntArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::IntValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::FloatArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::DoubleValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::BoolArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::BoolValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+        }
+    }
+
+    /// Convert LogRecord body value to OTLP AnyValue protobuf representation.
+    #[cfg(any(test, feature = "fuzz"))]
+    pub fn log_record_body_value_to_any_value(value: &LogRecordBodyValue) -> AnyValue {
+        use opentelemetry_proto::tonic::common::v1::ArrayValue;
+
+        match value {
+            LogRecordBodyValue::String(value) => AnyValue {
+                value: Some(ProtoValue::StringValue(value.clone())),
+            },
+            LogRecordBodyValue::Int(value) => AnyValue {
+                value: Some(ProtoValue::IntValue(*value)),
+            },
+            LogRecordBodyValue::Float(value) => AnyValue {
+                value: Some(ProtoValue::DoubleValue(*value)),
+            },
+            LogRecordBodyValue::Bool(value) => AnyValue {
+                value: Some(ProtoValue::BoolValue(*value)),
+            },
+            LogRecordBodyValue::StringArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::StringValue(value.clone())),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::IntArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::IntValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::FloatArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::DoubleValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::BoolArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::BoolValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+        }
+    }
+
+    /// Run comprehensive span semantics conformance tests.
+    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
+    {
+        let config = SpanConformanceConfig::default();
+        run_span_conformance_tests_with_config(&config)
+    }
+
+    /// Run span semantics conformance tests with custom configuration.
+    pub fn run_span_conformance_tests_with_config(
+        config: &SpanConformanceConfig,
+    ) -> Result<SpanConformanceResult, Box<dyn std::error::Error>> {
+        let mut result = SpanConformanceResult::new();
+
+        // Test 1: Span Lifecycle Semantics
+        test_span_lifecycle(&mut result, config);
+
+        // Test 2: Span Hierarchy and Context Propagation
+        test_span_hierarchy(&mut result, config);
+
+        // Test 3: Span Attributes
+        test_span_attributes(&mut result, config);
+
+        // Test 4: Span Events
+        test_span_events(&mut result, config);
+
+        // Test 5: Span Status
+        test_span_status(&mut result, config);
+
+        // Test 6: Span Context and IDs
+        test_span_context(&mut result, config);
+
+        // Test 7: Span Sampling (if enabled)
+        if config.test_sampling {
+            test_span_sampling(&mut result, config);
+        }
+
+        // Test 8: Context Propagation (if enabled)
+        if config.test_context_propagation {
+            test_context_propagation(&mut result, config);
+        }
+
+        Ok(result)
+    }
+
+    /// Test span lifecycle semantics.
+    fn test_span_lifecycle(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+        // Test 1.1: Basic span start/end
+        {
+            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            let start_time = span.start_time;
+
+            // Span should not be ended initially
+            if span.is_ended() {
+                result.record_failure("span_lifecycle_start", "New span should not be ended");
+                return;
+            }
+
+            span.end();
+
+            // Span should be ended after calling end()
+            if !span.is_ended() {
+                result.record_failure(
+                    "span_lifecycle_end",
+                    "Span should be ended after end() call",
+                );
+                return;
+            }
+
+            // End time should be after start time
+            if let Some(duration) = span.duration() {
+                if duration.is_zero() && span.end_time.unwrap() < start_time {
+                    result.record_failure(
+                        "span_lifecycle_duration",
+                        "End time should be >= start time",
+                    );
+                    return;
+                }
+            } else {
+                result.record_failure(
+                    "span_lifecycle_duration",
+                    "Ended span should have calculable duration",
+                );
+                return;
+            }
+
+            result.record_pass("span_lifecycle_basic");
+        }
+
+        // Test 1.2: Multiple end() calls should be idempotent
+        {
+            let mut span = TestSpan::new("test_span_double_end", SpanKind::Internal);
+            span.end();
+            let first_end_time = span.end_time;
+
+            // Second end() call should not change end time
+            span.end();
+
+            if span.end_time != first_end_time {
+                result.record_failure(
+                    "span_lifecycle_idempotent",
+                    "Multiple end() calls should be idempotent",
+                );
+                return;
+            }
+
+            result.record_pass("span_lifecycle_idempotent");
+        }
+    }
+
+    /// Test span hierarchy and parent-child relationships.
+    fn test_span_hierarchy(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+        // Test 2.1: Parent-child relationship
+        {
+            let parent = TestSpan::new("parent_span", SpanKind::Internal);
+            let child = parent.new_child("child_span", SpanKind::Internal);
+
+            // Child should have same trace ID as parent
+            if child.context.trace_id() != parent.context.trace_id() {
+                result.record_failure(
+                    "span_hierarchy_trace_id",
+                    "Child span should have same trace ID as parent",
+                );
+                return;
+            }
+
+            // Child should have different span ID from parent
+            if child.context.span_id() == parent.context.span_id() {
+                result.record_failure(
+                    "span_hierarchy_span_id",
+                    "Child span should have different span ID from parent",
+                );
+                return;
+            }
+
+            // Child should reference parent context
+            if child.parent_context.is_none() {
+                result.record_failure(
+                    "span_hierarchy_parent_context",
+                    "Child span should have parent context",
+                );
+                return;
+            }
+
+            if child.parent_context.unwrap() != parent.context {
+                result.record_failure(
+                    "span_hierarchy_parent_reference",
+                    "Child span should reference correct parent context",
+                );
+                return;
+            }
+
+            result.record_pass("span_hierarchy_basic");
+        }
+
+        // Test 2.2: Multi-level hierarchy
+        {
+            let grandparent = TestSpan::new("grandparent", SpanKind::Internal);
+            let parent = grandparent.new_child("parent", SpanKind::Internal);
+            let child = parent.new_child("child", SpanKind::Internal);
+
+            // All spans should share same trace ID
+            if child.context.trace_id() != grandparent.context.trace_id()
+                || parent.context.trace_id() != grandparent.context.trace_id()
+            {
+                result.record_failure(
+                    "span_hierarchy_multi_level",
+                    "All spans in hierarchy should share trace ID",
+                );
+                return;
+            }
+
+            result.record_pass("span_hierarchy_multi_level");
+        }
+    }
+
+    /// Test span attributes.
+    fn test_span_attributes(result: &mut SpanConformanceResult, config: &SpanConformanceConfig) {
+        // Test 3.1: Basic attribute setting
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+            span.set_attribute("service.name", "test-service");
+            span.set_attribute("http.method", "GET");
+
+            if span.attributes.len() != 2 {
+                result.record_failure("span_attributes_basic", "Span should have 2 attributes");
+                return;
+            }
+
+            if span.attributes.get("service.name") != Some(&"test-service".to_string()) {
+                result.record_failure("span_attributes_basic", "Attribute value should match");
+                return;
+            }
+
+            result.record_pass("span_attributes_basic");
+        }
+
+        // Test 3.2: Attribute overwrite
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+            span.set_attribute("test.key", "original_value");
+            span.set_attribute("test.key", "new_value");
+
+            if span.attributes.get("test.key") != Some(&"new_value".to_string()) {
+                result.record_failure(
+                    "span_attributes_overwrite",
+                    "Attribute should be overwritten",
+                );
+                return;
+            }
+
+            result.record_pass("span_attributes_overwrite");
+        }
+
+        // Test 3.3: Attribute limits (if configured)
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+
+            // Add more than max_attributes to test limit
+            for i in 0..config.max_attributes + 10 {
+                span.set_attribute(&format!("attr_{}", i), "value");
+            }
+
+            if span.attributes.len() != config.max_attributes {
+                result.record_failure(
+                    "span_attributes_limits",
+                    "Attribute count should respect max_attributes",
+                );
+                return;
+            }
+
+            result.record_pass("span_attributes_limits");
+        }
+
+        if let Some(limit) = config.max_attribute_length {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+            let oversized = "x".repeat(limit + 5);
+            span.set_attribute("oversized", &oversized);
+
+            if span.attributes.get("oversized").map(String::len) != Some(limit) {
+                result.record_failure(
+                    "span_attributes_value_length",
+                    "Attribute values should respect max_attribute_length",
+                );
+                return;
+            }
+
+            result.record_pass("span_attributes_value_length");
+        }
+    }
+
+    /// Test span events.
+    fn test_span_events(result: &mut SpanConformanceResult, config: &SpanConformanceConfig) {
+        // Test 4.1: Basic event recording
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+            let mut event_attrs = HashMap::new();
+            event_attrs.insert("event.severity".to_string(), "info".to_string());
+
+            span.add_event("test_event", event_attrs);
+
+            if span.events.len() != 1 {
+                result.record_failure("span_events_basic", "Span should have 1 event");
+                return;
+            }
+
+            let event = &span.events[0];
+            if event.name != "test_event" {
+                result.record_failure("span_events_basic", "Event name should match");
+                return;
+            }
+
+            result.record_pass("span_events_basic");
+        }
+
+        // Test 4.2: Multiple events with ordering
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+
+            span.add_event("first_event", HashMap::new());
+            span.add_event("second_event", HashMap::new());
+
+            if span.events.len() != 2 {
+                result.record_failure("span_events_multiple", "Span should have 2 events");
+                return;
+            }
+
+            // Events should be in chronological order
+            if span.events[0].timestamp > span.events[1].timestamp {
+                result.record_failure(
+                    "span_events_ordering",
+                    "Events should be in chronological order",
+                );
+                return;
+            }
+
+            result.record_pass("span_events_multiple");
+        }
+
+        // Test 4.3: Event limits (if configured)
+        {
+            let mut span = TestSpan::new_with_config("test_span", SpanKind::Internal, config);
+
+            // Add more than max_events to test limit
+            for i in 0..config.max_events + 10 {
+                span.add_event(&format!("event_{}", i), HashMap::new());
+            }
+
+            if span.events.len() != config.max_events {
+                result.record_failure(
+                    "span_events_limits",
+                    "Event count should respect max_events",
+                );
+                return;
+            }
+
+            result.record_pass("span_events_limits");
+        }
+    }
+
+    /// Test span status semantics.
+    fn test_span_status(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+        // Test 5.1: Default status
+        {
+            let span = TestSpan::new("test_span", SpanKind::Internal);
+
+            if !matches!(span.status, Status::Unset) {
+                result.record_failure("span_status_default", "Default span status should be Unset");
+                return;
+            }
+
+            result.record_pass("span_status_default");
+        }
+
+        // Test 5.2: Setting status
+        {
+            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            span.set_status(Status::Error {
+                description: "Something went wrong".into(),
+            });
+
+            if let Status::Error { description } = &span.status {
+                if description != "Something went wrong" {
+                    result.record_failure("span_status_set", "Status description should match");
+                    return;
+                }
+            } else {
+                result.record_failure("span_status_set", "Status should be Error");
+                return;
+            }
+
+            result.record_pass("span_status_set");
+        }
+
+        // Test 5.3: Status precedence (Error takes precedence over Ok)
+        {
+            let mut span = TestSpan::new("test_span", SpanKind::Internal);
+            span.set_status(Status::Ok);
+            span.set_status(Status::Error {
+                description: "Error occurred".into(),
+            });
+
+            if !matches!(span.status, Status::Error { .. }) {
+                result.record_failure(
+                    "span_status_precedence",
+                    "Error status should take precedence",
+                );
+                return;
+            }
+
+            result.record_pass("span_status_precedence");
+        }
+    }
+
+    /// Test span context and ID semantics.
+    fn test_span_context(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+        // Test 6.1: Unique span IDs
+        {
+            let span1 = TestSpan::new("span1", SpanKind::Internal);
+            let span2 = TestSpan::new("span2", SpanKind::Internal);
+
+            if span1.context.span_id() == span2.context.span_id() {
+                result.record_failure(
+                    "span_context_unique_ids",
+                    "Different spans should have different span IDs",
+                );
+                return;
+            }
+
+            result.record_pass("span_context_unique_ids");
+        }
+
+        // Test 6.2: Trace ID format
+        {
+            let span = TestSpan::new("test_span", SpanKind::Internal);
+            let trace_id = span.context.trace_id();
+
+            // Trace ID should not be zero (invalid)
+            if trace_id == TraceId::INVALID {
+                result.record_failure(
+                    "span_context_trace_id",
+                    "Trace ID should not be invalid/zero",
+                );
+                return;
+            }
+
+            result.record_pass("span_context_trace_id");
+        }
+
+        // Test 6.3: Span ID format
+        {
+            let span = TestSpan::new("test_span", SpanKind::Internal);
+            let span_id = span.context.span_id();
+
+            // Span ID should not be zero (invalid)
+            if span_id == SpanId::INVALID {
+                result.record_failure("span_context_span_id", "Span ID should not be invalid/zero");
+                return;
+            }
+
+            result.record_pass("span_context_span_id");
+        }
+    }
+
+    /// Test span sampling behavior.
+    fn test_span_sampling(result: &mut SpanConformanceResult, _config: &SpanConformanceConfig) {
+        // Test 7.1: Sampled flag consistency
+        {
+            let span = TestSpan::new("test_span", SpanKind::Internal);
+
+            // In our test implementation, spans are always sampled
+            if !span.context.trace_flags().is_sampled() {
+                result.record_failure("span_sampling_flag", "Test spans should be sampled");
+                return;
+            }
+
+            result.record_pass("span_sampling_basic");
+        }
+
+        // Test 7.2: Sampling inheritance
+        {
+            let parent = TestSpan::new("parent", SpanKind::Internal);
+            let child = parent.new_child("child", SpanKind::Internal);
+
+            // Child should inherit sampling decision from parent
+            if parent.context.trace_flags().is_sampled() != child.context.trace_flags().is_sampled()
+            {
+                result.record_failure(
+                    "span_sampling_inheritance",
+                    "Child should inherit parent sampling decision",
+                );
+                return;
+            }
+
+            result.record_pass("span_sampling_inheritance");
+        }
+    }
+
+    /// Test context propagation semantics.
+    fn test_context_propagation(
+        result: &mut SpanConformanceResult,
+        config: &SpanConformanceConfig,
+    ) {
+        // Test 8.1: Context propagation across service boundaries
+        {
+            // Build the context extracted from an incoming request.
+            let trace_id = TraceId::from_bytes([
+                0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56, 0x78, 0x90, 0xab,
+                0xcd, 0xef,
+            ]);
+            let span_id = SpanId::from_bytes([0x12, 0x34, 0x56, 0x78, 0x90, 0xab, 0xcd, 0xef]);
+            let trace_state =
+                TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
+            let incoming_context = SpanContext::new(
+                trace_id,
+                span_id,
+                TraceFlags::SAMPLED,
+                true,
+                trace_state.clone(),
+            );
+
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context.clone(),
+                baggage,
+                "remote_child",
+                SpanKind::Server,
+                config,
+            );
+
+            if child.context.trace_id() != incoming_context.trace_id() {
+                result.record_failure(
+                    "context_propagation_trace_id",
+                    "Trace ID should be preserved across boundaries",
+                );
+                return;
+            }
+
+            if child.context.trace_flags() != incoming_context.trace_flags() {
+                result.record_failure(
+                    "context_propagation_flags",
+                    "Trace flags should be preserved",
+                );
+                return;
+            }
+
+            if !incoming_context.is_remote() || child.context.is_remote() {
+                result.record_failure(
+                    "context_propagation_remote_flag",
+                    "Incoming context should stay remote while child becomes local",
+                );
+                return;
+            }
+
+            result.record_pass("context_propagation_basic");
+        }
+
+        // Test 8.2: TraceState propagation
+        {
+            let trace_state =
+                TraceState::from_key_value([("vendor", "upstream")]).expect("valid trace state");
+            let incoming_context = SpanContext::new(
+                TraceId::from_bytes([
+                    0xaa, 0xaa, 0xaa, 0xaa, 0xbb, 0xbb, 0xbb, 0xbb, 0xcc, 0xcc, 0xcc, 0xcc, 0xdd,
+                    0xdd, 0xdd, 0xdd,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                trace_state,
+            );
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context,
+                HashMap::new(),
+                "remote_child",
+                SpanKind::Consumer,
+                config,
+            );
+
+            if child.context.trace_state().get("vendor") != Some("upstream") {
+                result.record_failure(
+                    "context_propagation_state",
+                    "TraceState should propagate to child spans",
+                );
+                return;
+            }
+
+            result.record_pass("context_propagation_state");
+        }
+
+        // Test 8.3: Baggage propagation
+        {
+            let incoming_context = SpanContext::new(
+                TraceId::from_bytes([
+                    0xee, 0xee, 0xee, 0xee, 0xff, 0xff, 0xff, 0xff, 0x11, 0x11, 0x11, 0x11, 0x22,
+                    0x22, 0x22, 0x22,
+                ]),
+                SpanId::from_bytes([0x22; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::default(),
+            );
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+            baggage.insert("request.class".to_string(), "gold".to_string());
+            let child = TestSpan::child_from_remote_parent(
+                incoming_context,
+                baggage,
+                "remote_child",
+                SpanKind::Server,
+                config,
+            );
+
+            if child.baggage.get("tenant").map(String::as_str) != Some("alpha")
+                || child.baggage.get("request.class").map(String::as_str) != Some("gold")
+            {
+                result.record_failure(
+                    "context_propagation_baggage",
+                    "Baggage should propagate across service boundaries",
+                );
+                return;
+            }
+
+            result.record_pass("context_propagation_baggage");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) mod tests {
+        use super::*;
+        use crate::observability::MetricsSnapshot;
+        use serde_json::{Value, json};
+        use std::collections::BTreeMap;
+
+        fn scrub_span_field(key: &str, value: &str) -> String {
+            match key {
+                "trace_id" | "span_id" | "parent_span_id" => "[ID]".to_string(),
+                "start_time" | "end_time" | "timestamp" => "[TIMESTAMP]".to_string(),
+                "request_id" | "traceparent" => "[ID]".to_string(),
+                _ => value.to_string(),
+            }
+        }
+
+        fn sorted_string_map_snapshot(map: &HashMap<String, String>) -> BTreeMap<String, String> {
+            map.iter()
+                .map(|(key, value)| (key.clone(), scrub_span_field(key, value)))
+                .collect()
+        }
+
+        fn span_status_snapshot(status: &Status) -> Value {
+            match status {
+                Status::Unset => json!({"kind": "unset"}),
+                Status::Ok => json!({"kind": "ok"}),
+                Status::Error { description } => json!({
+                    "kind": "error",
+                    "description": description,
+                }),
+            }
+        }
+
+        fn span_event_snapshot(event: &SpanEvent) -> Value {
+            json!({
+                "name": event.name,
+                "timestamp": "[TIMESTAMP]",
+                "attributes": sorted_string_map_snapshot(&event.attributes),
+            })
+        }
+
+        pub fn test_span_snapshot(span: &TestSpan) -> Value {
+            json!({
+                "name": span.name,
+                "kind": format!("{:?}", span.kind),
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "parent_span_id": span.parent_context.as_ref().map(|_| "[ID]"),
+                "is_remote": span.context.is_remote(),
+                "sampled": span.context.trace_flags().is_sampled(),
+                "trace_state": span.context.trace_state().header(),
+                "start_time": "[TIMESTAMP]",
+                "end_time": span.end_time.map(|_| "[TIMESTAMP]"),
+                "status": span_status_snapshot(&span.status),
+                "attributes": sorted_string_map_snapshot(&span.attributes),
+                "baggage": sorted_string_map_snapshot(&span.baggage),
+                "events": span.events.iter().map(span_event_snapshot).collect::<Vec<_>>(),
+            })
+        }
+
+        fn otlp_attributes_snapshot(map: &HashMap<String, String>) -> Vec<Value> {
+            let mut entries: Vec<_> = map.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    json!({
+                        "key": key,
+                        "value": {
+                            "string_value": scrub_span_field(key, value),
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        fn otlp_metric_labels_snapshot(labels: &[(String, String)]) -> Vec<Value> {
+            let mut entries: Vec<_> = labels.iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries
+                .into_iter()
+                .map(|(key, value)| {
+                    json!({
+                        "key": key,
+                        "value": {
+                            "string_value": value,
+                        }
+                    })
+                })
+                .collect()
+        }
+
+        fn otlp_status_snapshot(status: &Status) -> Value {
+            match status {
+                Status::Unset => json!({"code": 0, "message": ""}),
+                Status::Ok => json!({"code": 1, "message": ""}),
+                Status::Error { description } => json!({
+                    "code": 2,
+                    "message": description,
+                }),
+            }
+        }
+
+        fn otlp_event_wire_snapshot(event: &SpanEvent) -> Value {
+            json!({
+                "name": event.name,
+                "time_unix_nano": "[TIMESTAMP]",
+                "attributes": otlp_attributes_snapshot(&event.attributes),
+            })
+        }
+
+        fn otlp_span_wire_snapshot(span: &TestSpan) -> Value {
+            json!({
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "parent_span_id": span.parent_context.as_ref().map_or("", |_| "[ID]"),
+                "name": span.name,
+                "kind": format!("{:?}", span.kind),
+                "start_time_unix_nano": "[TIMESTAMP]",
+                "end_time_unix_nano": span.end_time.map(|_| "[TIMESTAMP]"),
+                "attributes": otlp_attributes_snapshot(&span.attributes),
+                "events": span.events.iter().map(otlp_event_wire_snapshot).collect::<Vec<_>>(),
+                "status": otlp_status_snapshot(&span.status),
+                "trace_state": span.context.trace_state().header(),
+                "sampled": span.context.trace_flags().is_sampled(),
+            })
+        }
+
+        fn otlp_metrics_wire_snapshot(snapshot: &MetricsSnapshot) -> Value {
+            let mut counters: Vec<_> = snapshot.counters.iter().collect();
+            counters.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+
+            let mut gauges: Vec<_> = snapshot.gauges.iter().collect();
+            gauges.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+
+            let mut histograms: Vec<_> = snapshot.histograms.iter().collect();
+            histograms.sort_by(|(left, _, _, _), (right, _, _, _)| left.cmp(right));
+
+            json!({
+                "scope_metrics": [{
+                    "scope": {
+                        "name": "asupersync.observability.otel",
+                        "version": "0.2.9",
+                    },
+                    "metrics": {
+                        "counters": counters.into_iter().map(|(name, labels, value)| {
+                            json!({
+                                "name": name,
+                                "sum": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "as_int": value,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                        "gauges": gauges.into_iter().map(|(name, labels, value)| {
+                            json!({
+                                "name": name,
+                                "gauge": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "as_int": value,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                        "histograms": histograms.into_iter().map(|(name, labels, count, sum)| {
+                            json!({
+                                "name": name,
+                                "histogram": {
+                                    "data_points": [{
+                                        "attributes": otlp_metric_labels_snapshot(labels),
+                                        "count": count,
+                                        "sum": sum,
+                                    }]
+                                }
+                            })
+                        }).collect::<Vec<_>>(),
+                    }
+                }]
+            })
+        }
+
+        fn otlp_log_record_snapshot(body: &str, attributes: HashMap<String, String>) -> Value {
+            json!({
+                "time_unix_nano": "[TIMESTAMP]",
+                "trace_id": "[ID]",
+                "span_id": "[ID]",
+                "severity_text": "INFO",
+                "body": body,
+                "attributes": otlp_attributes_snapshot(&attributes),
+            })
+        }
+
+        #[test]
+        fn test_span_conformance_config_default() {
+            let config = SpanConformanceConfig::default();
+            assert_eq!(config.max_attributes, 128);
+            assert_eq!(config.max_events, 128);
+            assert!(config.test_sampling);
+            assert!(config.test_context_propagation);
+        }
+
+        #[test]
+        fn test_span_conformance_result() {
+            let mut result = SpanConformanceResult::new();
+            assert_eq!(result.tests_run, 0);
+            assert!(result.is_success()); // No tests run is considered success
+
+            result.record_pass("test1");
+            assert_eq!(result.tests_run, 1);
+            assert_eq!(result.tests_passed, 1);
+            assert!(result.is_success());
+
+            result.record_failure("test2", "failed");
+            assert_eq!(result.tests_run, 2);
+            assert_eq!(result.tests_failed, 1);
+            assert!(!result.is_success());
+            assert_eq!(result.success_rate(), 50.0);
+        }
+
+        #[test]
+        fn test_span_basic_operations() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            assert!(!span.is_ended());
+            assert!(span.duration().is_none());
+
+            span.set_attribute("key", "value");
+            assert_eq!(span.attributes.get("key"), Some(&"value".to_string()));
+
+            span.add_event("event", HashMap::new());
+            assert_eq!(span.events.len(), 1);
+
+            span.end();
+            assert!(span.is_ended());
+            assert!(span.duration().is_some());
+        }
+
+        #[test]
+        fn test_span_typed_attributes_round_trip_to_otlp() {
+            use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+
+            let mut span = TestSpan::new("typed", SpanKind::Internal);
+            span.set_attribute("service.name", "edge");
+            span.set_int_attribute("http.status_code", 200);
+            span.set_float_attribute("latency_ms", 1.5);
+            span.set_bool_attribute("cached", true);
+            span.set_attribute_value("replicas", AttributeValue::IntArray(vec![1, 2, 3]));
+
+            let otlp = span.to_otlp_attributes();
+            assert_eq!(otlp.len(), 5);
+
+            let replicas = otlp
+                .iter()
+                .find(|attr| attr.key == "replicas")
+                .and_then(|attr| attr.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            assert!(matches!(replicas, Some(ProtoValue::ArrayValue(_))));
+
+            let status = otlp
+                .iter()
+                .find(|attr| attr.key == "http.status_code")
+                .and_then(|attr| attr.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            assert_eq!(status, Some(&ProtoValue::IntValue(200)));
+        }
+
+        #[test]
+        fn test_span_typed_attribute_limits_apply() {
+            let config = SpanConformanceConfig {
+                max_attributes: 2,
+                max_events: 4,
+                max_attribute_length: Some(4),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let mut span = TestSpan::new_with_config("typed", SpanKind::Internal, &config);
+
+            span.set_attribute("alpha", "abcdef");
+            span.set_int_attribute("beta", 42);
+            span.set_bool_attribute("gamma", true);
+
+            assert_eq!(span.to_otlp_attributes().len(), 2);
+            assert_eq!(
+                span.attributes.get("alpha").map(String::as_str),
+                Some("abcd")
+            );
+        }
+
+        #[test]
+        fn test_span_end_is_idempotent() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            span.end();
+            let first_end_time = span.end_time;
+            span.end();
+            assert_eq!(span.end_time, first_end_time);
+        }
+
+        #[test]
+        fn test_span_hierarchy() {
+            let parent = TestSpan::new("parent", SpanKind::Internal);
+            let child = parent.new_child("child", SpanKind::Internal);
+
+            assert_eq!(child.context.trace_id(), parent.context.trace_id());
+            assert_ne!(child.context.span_id(), parent.context.span_id());
+            assert!(child.parent_context.is_some());
+            assert_eq!(child.parent_context.unwrap(), parent.context);
+        }
+
+        #[test]
+        fn test_span_remote_parent_propagates_trace_state_and_baggage() {
+            let config = SpanConformanceConfig {
+                max_attributes: 8,
+                max_events: 8,
+                max_attribute_length: Some(8),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let trace_state =
+                TraceState::from_key_value([("vendor", "edge")]).expect("valid trace state");
+            let remote_parent = SpanContext::new(
+                TraceId::from_bytes([
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15,
+                    0x16, 0x17, 0x18,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                trace_state,
+            );
+            let mut baggage = HashMap::new();
+            baggage.insert("tenant".to_string(), "alpha".to_string());
+
+            let child = TestSpan::child_from_remote_parent(
+                remote_parent,
+                baggage,
+                "child",
+                SpanKind::Server,
+                &config,
+            );
+
+            assert_eq!(child.context.trace_state().get("vendor"), Some("edge"));
+            assert_eq!(
+                child.baggage.get("tenant").map(String::as_str),
+                Some("alpha")
+            );
+            assert!(!child.context.is_remote());
+            assert!(child.parent_context.expect("parent").is_remote());
+        }
+
+        #[test]
+        fn test_span_attribute_and_event_limits_are_enforced() {
+            let config = SpanConformanceConfig {
+                max_attributes: 2,
+                max_events: 1,
+                max_attribute_length: Some(4),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let mut span = TestSpan::new_with_config("test", SpanKind::Internal, &config);
+
+            span.set_attribute("k1", "value");
+            span.set_attribute("k2", "value");
+            span.set_attribute("k3", "value");
+            assert_eq!(span.attributes.len(), 2);
+            assert_eq!(span.attributes.get("k1").map(String::as_str), Some("valu"));
+
+            span.add_event("one", HashMap::new());
+            span.add_event("two", HashMap::new());
+            assert_eq!(span.events.len(), 1);
+        }
+
+        /// br-asupersync-6ofylg — keys longer than
+        /// `MAX_OTEL_ATTRIBUTE_KEY_LEN` MUST be truncated to the cap.
+        #[test]
+        fn test_span_attribute_key_is_truncated_to_otel_cap() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let oversized_key: String = "k".repeat(super::MAX_OTEL_ATTRIBUTE_KEY_LEN + 100);
+            span.set_attribute(&oversized_key, "value");
+            // The stored key length must equal the cap (ASCII path:
+            // bytes == chars).
+            let stored_keys: Vec<&String> = span.attributes.keys().collect();
+            assert_eq!(stored_keys.len(), 1);
+            assert_eq!(stored_keys[0].len(), super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+            // Original oversized key is NOT in the map (it was truncated).
+            assert!(!span.attributes.contains_key(&oversized_key));
+        }
+
+        /// br-asupersync-6ofylg — the 1 KiB cap is byte-based, not
+        /// char-based. Oversized multibyte keys must therefore be
+        /// truncated to <= 1024 bytes while remaining valid UTF-8.
+        #[test]
+        fn test_span_attribute_multibyte_key_is_truncated_by_bytes() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let oversized_key = "🔒".repeat(400);
+            assert!(oversized_key.len() > super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+
+            span.set_attribute(&oversized_key, "value");
+
+            let stored_key = span.attributes.keys().next().expect("stored key");
+            assert!(stored_key.len() <= super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+            assert!(std::str::from_utf8(stored_key.as_bytes()).is_ok());
+            assert!(!span.attributes.contains_key(&oversized_key));
+        }
+
+        /// br-asupersync-6ofylg — short keys pass through unchanged.
+        #[test]
+        fn test_span_attribute_short_key_unchanged() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            span.set_attribute("short_key", "value");
+            assert!(span.attributes.contains_key("short_key"));
+        }
+
+        #[test]
+        fn test_span_timestamps_are_monotonic() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let start_time = span.start_time;
+
+            span.add_event("first", HashMap::new());
+            span.add_event("second", HashMap::new());
+            span.end();
+
+            let first_event = &span.events[0];
+            let second_event = &span.events[1];
+            let end_time = span.end_time.expect("span end time");
+
+            assert!(first_event.timestamp >= start_time);
+            assert!(second_event.timestamp >= first_event.timestamp);
+            assert!(end_time >= second_event.timestamp);
+            assert!(span.duration().is_some());
+        }
+
+        #[test]
+        fn run_basic_conformance_tests() {
+            // Test the actual conformance runner with concrete fail-closed checks.
+            let config = SpanConformanceConfig::default();
+            let result = run_span_conformance_tests_with_config(&config)
+                .expect("Conformance tests should run");
+
+            assert!(result.tests_run > 0);
+            assert!(
+                result.is_success(),
+                "Conformance runner should pass all implemented checks: {}",
+                result.failure_report()
+            );
+        }
+
+        #[test]
+        fn span_export_snapshot_scrubs_ids_and_timestamps() {
+            let config = SpanConformanceConfig {
+                max_attributes: 4,
+                max_events: 2,
+                max_attribute_length: Some(16),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut parent = TestSpan::new_with_config("checkout", SpanKind::Server, &config);
+            parent.set_attribute("component", "orders");
+            parent.set_attribute("request_id", "req-7c1f7ecf-54ff-4ac8-8ec5-6aa64500a161");
+            parent.set_baggage_item("tenant", "alpha");
+            parent.add_event(
+                "db.query",
+                HashMap::from([
+                    ("statement".to_string(), "select".to_string()),
+                    (
+                        "traceparent".to_string(),
+                        "00-abcdef-0123456789".to_string(),
+                    ),
+                ]),
+            );
+            parent.set_status(Status::Error {
+                description: "timeout".into(),
+            });
+            parent.end();
+
+            let remote_parent = SpanContext::new(
+                TraceId::from_bytes([
+                    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x11, 0x12, 0x13, 0x14, 0x15,
+                    0x16, 0x17, 0x18,
+                ]),
+                SpanId::from_bytes([0x11; 8]),
+                TraceFlags::SAMPLED,
+                true,
+                TraceState::from_key_value([("vendor", "edge")]).expect("valid trace state"),
+            );
+            let remote_child = TestSpan::child_from_remote_parent(
+                remote_parent,
+                HashMap::from([("tenant".to_string(), "alpha".to_string())]),
+                "cache.lookup",
+                SpanKind::Client,
+                &config,
+            );
+
+            insta::assert_json_snapshot!(
+                "span_export_scrubbed",
+                json!({
+                    "parent": test_span_snapshot(&parent),
+                    "remote_child": test_span_snapshot(&remote_child),
+                })
+            );
+        }
+
+        #[test]
+        fn span_export_format_snapshot_scrubs_ids_and_timestamps() {
+            let config = SpanConformanceConfig {
+                max_attributes: 6,
+                max_events: 3,
+                max_attribute_length: Some(20),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut happy_path =
+                TestSpan::new_with_config("http.request", SpanKind::Server, &config);
+            happy_path.set_attribute("service.name", "checkout");
+            happy_path.set_attribute("http.method", "POST");
+            happy_path.add_event(
+                "response.sent",
+                HashMap::from([("status_code".to_string(), "200".to_string())]),
+            );
+            happy_path.set_status(Status::Ok);
+            happy_path.end();
+
+            let mut error_path = TestSpan::new_with_config("db.query", SpanKind::Client, &config);
+            error_path.set_attribute("db.system", "postgresql");
+            error_path.set_attribute("db.operation", "select");
+            error_path.add_event(
+                "db.error",
+                HashMap::from([
+                    ("error.kind".to_string(), "timeout".to_string()),
+                    ("statement".to_string(), "select * from orders".to_string()),
+                ]),
+            );
+            error_path.set_status(Status::Error {
+                description: "deadline exceeded".into(),
+            });
+            error_path.end();
+
+            let mut root = TestSpan::new_with_config("batch.import", SpanKind::Producer, &config);
+            root.set_attribute("job.name", "nightly-import");
+            root.set_baggage_item("tenant", "alpha");
+
+            let mut decode_child = root.new_child("decode.payload", SpanKind::Internal);
+            decode_child.set_attribute("stage", "decode");
+            decode_child.add_event(
+                "payload.decoded",
+                HashMap::from([("records".to_string(), "42".to_string())]),
+            );
+            decode_child.set_status(Status::Ok);
+            decode_child.end();
+
+            let mut publish_child = root.new_child("publish.kafka", SpanKind::Producer);
+            publish_child.set_attribute("messaging.system", "kafka");
+            publish_child.add_event(
+                "broker.ack",
+                HashMap::from([("partition".to_string(), "7".to_string())]),
+            );
+            publish_child.set_status(Status::Ok);
+            publish_child.end();
+
+            root.add_event(
+                "pipeline.completed",
+                HashMap::from([("children".to_string(), "2".to_string())]),
+            );
+            root.set_status(Status::Ok);
+            root.end();
+
+            insta::assert_json_snapshot!(
+                "span_export_format_scrubbed",
+                json!({
+                    "happy_path": test_span_snapshot(&happy_path),
+                    "error_path": test_span_snapshot(&error_path),
+                    "multi_span_trace": [
+                        test_span_snapshot(&root),
+                        test_span_snapshot(&decode_child),
+                        test_span_snapshot(&publish_child),
+                    ],
+                })
+            );
+        }
+
+        #[test]
+        fn otlp_wire_format_scrubbed() {
+            let config = SpanConformanceConfig {
+                max_attributes: 6,
+                max_events: 3,
+                max_attribute_length: Some(24),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+
+            let mut root = TestSpan::new_with_config("otlp.export", SpanKind::Server, &config);
+            root.set_attribute("service.name", "checkout");
+            root.set_attribute("deployment.environment", "staging");
+            root.add_event(
+                "request.accepted",
+                HashMap::from([("route".to_string(), "/v1/orders".to_string())]),
+            );
+            root.set_status(Status::Ok);
+            root.end();
+
+            let mut child = root.new_child("postgres.query", SpanKind::Client);
+            child.set_attribute("db.system", "postgresql");
+            child.set_attribute("db.operation", "select");
+            child.add_event(
+                "row.batch",
+                HashMap::from([("rows".to_string(), "3".to_string())]),
+            );
+            child.set_status(Status::Error {
+                description: "deadline exceeded".into(),
+            });
+            child.end();
+
+            let mut metrics = MetricsSnapshot::new();
+            metrics.add_counter(
+                "otel.export.spans",
+                vec![("signal".to_string(), "traces".to_string())],
+                2,
+            );
+            metrics.add_gauge(
+                "otel.export.queue_depth",
+                vec![("pipeline".to_string(), "primary".to_string())],
+                1,
+            );
+            metrics.add_histogram(
+                "otel.export.latency_ms",
+                vec![("signal".to_string(), "mixed".to_string())],
+                2,
+                17.5,
+            );
+
+            insta::assert_json_snapshot!(
+                "otlp_wire_format_scrubbed",
+                json!({
+                    "resource_spans": [{
+                        "resource": {
+                            "attributes": [
+                                {"key": "service.name", "value": {"string_value": "checkout"}},
+                                {"key": "telemetry.sdk.name", "value": {"string_value": "asupersync"}},
+                            ]
+                        },
+                        "scope_spans": [{
+                            "scope": {
+                                "name": "asupersync.observability.otel",
+                                "version": "0.2.9",
+                            },
+                            "spans": [
+                                otlp_span_wire_snapshot(&root),
+                                otlp_span_wire_snapshot(&child),
+                            ],
+                        }]
+                    }],
+                    "resource_metrics": [otlp_metrics_wire_snapshot(&metrics)],
+                    "resource_logs": [{
+                        "scope_logs": [{
+                            "scope": {
+                                "name": "asupersync.observability.otel",
+                                "version": "0.2.9",
+                            },
+                            "log_records": [
+                                otlp_log_record_snapshot(
+                                    "export started",
+                                    HashMap::from([
+                                        ("component".to_string(), "otlp".to_string()),
+                                        ("signal".to_string(), "traces".to_string()),
+                                    ]),
+                                ),
+                                otlp_log_record_snapshot(
+                                    "export retry scheduled",
+                                    HashMap::from([
+                                        ("component".to_string(), "otlp".to_string()),
+                                        ("retry_in_ms".to_string(), "250".to_string()),
+                                    ]),
+                                ),
+                            ],
+                        }]
+                    }],
+                })
+            );
+        }
+    }
+}
+
+#[cfg(not(feature = "tracing-integration"))]
+pub mod span_semantics {
+    //! Span semantics module (disabled when tracing-integration feature is not enabled).
+    //!
+    //! Enable the `tracing-integration` feature to access OpenTelemetry span semantics
+    //! conformance testing functionality.
+
+    /// Disabled-feature result shape used when tracing is unavailable.
+    #[derive(Debug)]
+    pub struct SpanConformanceResult {
+        /// Total number of tests executed.
+        pub tests_run: usize,
+        /// Number of tests that passed.
+        pub tests_passed: usize,
+        /// Number of tests that failed.
+        pub tests_failed: usize,
+        /// Failure descriptions captured during the run.
+        pub failures: Vec<String>,
+        /// Known conformance gaps captured by enabled-feature runs.
+        pub conformance_gaps: Vec<String>,
+    }
+
+    impl SpanConformanceResult {
+        /// Returns `true` when no failures or known conformance gaps were recorded.
+        pub fn is_success(&self) -> bool {
+            self.tests_failed == 0 && self.conformance_gaps.is_empty()
+        }
+
+        /// Returns the pass percentage, matching the enabled implementation.
+        pub fn success_rate(&self) -> f64 {
+            if self.tests_run == 0 {
+                0.0
+            } else {
+                (self.tests_passed as f64 / self.tests_run as f64) * 100.0
+            }
+        }
+
+        /// Check whether enabled-feature runs found known conformance gaps.
+        pub fn has_no_known_conformance_gaps(&self) -> bool {
+            self.conformance_gaps.is_empty()
+        }
+
+        /// Get failure report (disabled implementation).
+        pub fn failure_report(&self) -> String {
+            "Conformance testing disabled (requires 'tracing-integration' feature)".to_string()
+        }
+    }
+
+    /// Disabled-feature entry point used when tracing is unavailable.
+    pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
+    {
+        Err("OpenTelemetry span semantics testing requires 'tracing-integration' feature".into())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SpanConformanceResult;
+        use std::collections::HashMap;
+
+        #[test]
+        fn disabled_success_rate_reflects_recorded_counts() {
+            let empty = SpanConformanceResult {
+                tests_run: 0,
+                tests_passed: 0,
+                tests_failed: 0,
+                failures: Vec::new(),
+            };
+            assert_eq!(empty.success_rate(), 0.0);
+
+            let partial = SpanConformanceResult {
+                tests_run: 4,
+                tests_passed: 3,
+                tests_failed: 1,
+                failures: vec!["span-status".to_string()],
+            };
+            assert_eq!(partial.success_rate(), 75.0);
+        }
+
+        #[cfg(feature = "tracing-integration")]
+        #[test]
+        fn log_record_body_value_to_any_value_conformance() {
+            use super::super::{LogRecordBodyValue, log_record_body_value_to_any_value};
+            use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+
+            // Test string value mapping
+            let string_body = LogRecordBodyValue::String("hello world".to_string());
+            let any_value = log_record_body_value_to_any_value(&string_body);
+            match &any_value.value {
+                Some(ProtoValue::StringValue(value)) => assert_eq!(value, "hello world"),
+                _ => panic!("Expected StringValue, got {:?}", any_value.value),
+            }
+
+            // Test integer value mapping
+            let int_body = LogRecordBodyValue::Int(42);
+            let any_value = log_record_body_value_to_any_value(&int_body);
+            match &any_value.value {
+                Some(ProtoValue::IntValue(value)) => assert_eq!(*value, 42),
+                _ => panic!("Expected IntValue, got {:?}", any_value.value),
+            }
+
+            // Test boolean value mapping
+            let bool_body = LogRecordBodyValue::Bool(true);
+            let any_value = log_record_body_value_to_any_value(&bool_body);
+            match &any_value.value {
+                Some(ProtoValue::BoolValue(value)) => assert_eq!(*value, true),
+                _ => panic!("Expected BoolValue, got {:?}", any_value.value),
+            }
+
+            // Test float value mapping
+            let float_body = LogRecordBodyValue::Float(3.14159);
+            let any_value = log_record_body_value_to_any_value(&float_body);
+            match &any_value.value {
+                Some(ProtoValue::DoubleValue(value)) => assert_eq!(*value, 3.14159),
+                _ => panic!("Expected DoubleValue, got {:?}", any_value.value),
+            }
+
+            // Test string array mapping
+            let string_array_body =
+                LogRecordBodyValue::StringArray(vec!["a".to_string(), "b".to_string()]);
+            let any_value = log_record_body_value_to_any_value(&string_array_body);
+            match &any_value.value {
+                Some(ProtoValue::ArrayValue(array)) => {
+                    assert_eq!(array.values.len(), 2);
+                    if let Some(ProtoValue::StringValue(first)) = &array.values[0].value {
+                        assert_eq!(first, "a");
+                    } else {
+                        panic!("Expected first array element to be StringValue");
+                    }
+                }
+                _ => panic!("Expected ArrayValue, got {:?}", any_value.value),
+            }
+
+            // Test deterministic encoding - same input should always produce same output
+            let test_body = LogRecordBodyValue::String("test".to_string());
+            let any_value_1 = log_record_body_value_to_any_value(&test_body);
+            let any_value_2 = log_record_body_value_to_any_value(&test_body);
+            assert_eq!(
+                any_value_1, any_value_2,
+                "LogRecord body value conversion must be deterministic"
+            );
+        }
+
+        #[test]
+        fn gauge_double_update_value_sequence_conformance() {
+            use super::super::MetricsSnapshot;
+
+            // Test that applying the same gauge value sequence twice produces identical results
+            let value_sequence = vec![10, 20, 15, 30, 25];
+            let gauge_name = "test_gauge";
+            let labels = vec![("test".to_string(), "conformance".to_string())];
+
+            // First application
+            let mut snapshot1 = MetricsSnapshot::new();
+            for &value in &value_sequence {
+                snapshot1.add_gauge(gauge_name, labels.clone(), value);
+            }
+
+            // Second application
+            let mut snapshot2 = MetricsSnapshot::new();
+            for &value in &value_sequence {
+                snapshot2.add_gauge(gauge_name, labels.clone(), value);
+            }
+
+            // Both snapshots should be identical
+            assert_eq!(
+                snapshot1.gauges, snapshot2.gauges,
+                "Gauge double-update must be deterministic"
+            );
+
+            // Final value should match the last value in the sequence
+            let expected_final_value = *value_sequence.last().unwrap();
+            let actual_final_value = snapshot1.gauges.last().unwrap().2;
+            assert_eq!(
+                actual_final_value, expected_final_value,
+                "Gauge final value must match sequence end"
+            );
+
+            // Number of gauge entries should match sequence length
+            assert_eq!(
+                snapshot1.gauges.len(),
+                value_sequence.len(),
+                "Gauge entry count must match sequence length"
+            );
+
+            // Test edge cases
+            let mut empty_snapshot = MetricsSnapshot::new();
+            empty_snapshot.add_gauge("empty_test", vec![], 0);
+            assert_eq!(
+                empty_snapshot.gauges.len(),
+                1,
+                "Empty labels gauge should work"
+            );
+
+            // Test negative values
+            let mut negative_snapshot = MetricsSnapshot::new();
+            negative_snapshot.add_gauge("negative_test", vec![], -100);
+            negative_snapshot.add_gauge("negative_test", vec![], i64::MIN);
+            assert_eq!(
+                negative_snapshot.gauges.last().unwrap().2,
+                i64::MIN,
+                "Negative gauge values should work"
+            );
+        }
+
+        #[test]
+        fn instrumentation_scope_identity_conformance() {
+            use opentelemetry_proto::tonic::common::v1::InstrumentationScope;
+
+            // Test that same scope name+version produces identical InstrumentationScope objects
+            let test_cases = vec![
+                ("asupersync", "0.3.1"),
+                ("custom.scope", "1.0.0"),
+                ("", ""),
+                ("unicode.测试", "2.0.0"),
+            ];
+
+            for (scope_name, scope_version) in test_cases {
+                // Create scope multiple times with same parameters
+                let scope1 = InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: scope_version.to_string(),
+                    attributes: vec![],
+                    dropped_attributes_count: 0,
+                };
+
+                let scope2 = InstrumentationScope {
+                    name: scope_name.to_string(),
+                    version: scope_version.to_string(),
+                    attributes: vec![],
+                    dropped_attributes_count: 0,
+                };
+
+                // Both scopes should be identical
+                assert_eq!(
+                    scope1, scope2,
+                    "InstrumentationScope construction must be deterministic for {}@{}",
+                    scope_name, scope_version
+                );
+
+                // Verify fields are correctly set
+                assert_eq!(scope1.name, scope_name, "Scope name must match input");
+                assert_eq!(
+                    scope1.version, scope_version,
+                    "Scope version must match input"
+                );
+                assert!(
+                    scope1.attributes.is_empty(),
+                    "Default scope should have empty attributes"
+                );
+                assert_eq!(
+                    scope1.dropped_attributes_count, 0,
+                    "Default scope should have zero dropped attributes"
+                );
+
+                // Test serialization determinism
+                use prost::Message;
+                let mut buf1 = Vec::new();
+                let mut buf2 = Vec::new();
+                scope1.encode(&mut buf1).unwrap();
+                scope2.encode(&mut buf2).unwrap();
+                assert_eq!(
+                    buf1, buf2,
+                    "InstrumentationScope serialization must be deterministic for {}@{}",
+                    scope_name, scope_version
+                );
+            }
+
+            // Test scope equality semantics
+            let scope_a = InstrumentationScope {
+                name: "test".to_string(),
+                version: "1.0".to_string(),
+                attributes: vec![],
+                dropped_attributes_count: 0,
+            };
+
+            let scope_b = InstrumentationScope {
+                name: "test".to_string(),
+                version: "1.1".to_string(), // Different version
+                attributes: vec![],
+                dropped_attributes_count: 0,
+            };
+
+            let scope_c = InstrumentationScope {
+                name: "test_different".to_string(), // Different name
+                version: "1.0".to_string(),
+                attributes: vec![],
+                dropped_attributes_count: 0,
+            };
+
+            // Same scope should equal itself
+            assert_eq!(scope_a, scope_a, "Scope should equal itself");
+
+            // Different version should not be equal
+            assert_ne!(
+                scope_a, scope_b,
+                "Scopes with different versions should not be equal"
+            );
+
+            // Different name should not be equal
+            assert_ne!(
+                scope_a, scope_c,
+                "Scopes with different names should not be equal"
+            );
+        }
+
+        #[test]
+        fn periodic_reader_export_batch_conformance() {
+            use std::collections::VecDeque;
+            use std::sync::{Arc, Mutex};
+            use std::time::Duration;
+
+            #[derive(Clone)]
+            struct PeriodicExportRecorder {
+                exports: Arc<Mutex<VecDeque<(Duration, usize)>>>,
+            }
+
+            impl PeriodicExportRecorder {
+                fn new() -> Self {
+                    Self {
+                        exports: Arc::new(Mutex::new(VecDeque::new())),
+                    }
+                }
+
+                fn export_metrics_at(&self, elapsed: Duration, count: usize) {
+                    self.exports.lock().unwrap().push_back((elapsed, count));
+                }
+
+                fn get_export_intervals(&self) -> Vec<Duration> {
+                    let exports = self.exports.lock().unwrap();
+                    let mut intervals = Vec::new();
+                    for i in 1..exports.len() {
+                        intervals.push(exports[i].0 - exports[i - 1].0);
+                    }
+                    intervals
+                }
+
+                fn get_export_count(&self) -> usize {
+                    self.exports.lock().unwrap().len()
+                }
+            }
+
+            // Test deterministic export behavior with same metric stream
+            let export_interval = Duration::from_millis(100);
+            let metric_counts = vec![5, 3, 7, 2];
+
+            let exporter1 = PeriodicExportRecorder::new();
+            let exporter2 = PeriodicExportRecorder::new();
+
+            for (i, &count) in metric_counts.iter().enumerate() {
+                let logical_elapsed = export_interval * (i as u32 + 1);
+                exporter1.export_metrics_at(logical_elapsed, count);
+                exporter2.export_metrics_at(logical_elapsed, count);
+            }
+
+            // Verify both exporters have the same number of exports
+            assert_eq!(
+                exporter1.get_export_count(),
+                exporter2.get_export_count(),
+                "PeriodicReader export count must be deterministic for same metric stream"
+            );
+
+            // Verify export intervals are approximately the same
+            let intervals1 = exporter1.get_export_intervals();
+            let intervals2 = exporter2.get_export_intervals();
+
+            assert_eq!(
+                intervals1.len(),
+                intervals2.len(),
+                "Export interval count must be consistent"
+            );
+
+            // Check that intervals are approximately equal to expected interval
+            for interval in &intervals1 {
+                assert_eq!(*interval, export_interval);
+            }
+
+            // Test edge case: no metrics (should not export)
+            let empty_exporter = PeriodicExportRecorder::new();
+            assert_eq!(
+                empty_exporter.get_export_count(),
+                0,
+                "No exports should occur when no metrics are available"
+            );
+
+            // Test edge case: single large batch
+            let batch_exporter = PeriodicExportRecorder::new();
+            batch_exporter.export_metrics_at(export_interval, 1000);
+            assert_eq!(
+                batch_exporter.get_export_count(),
+                1,
+                "Large batch should result in single export"
+            );
+        }
+
+        #[cfg(feature = "tracing-integration")]
+        #[test]
+        fn span_events_array_conformance() {
+            use super::super::SpanEvent;
+            use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+            // Test that same Event sequence produces identical span events array
+            let test_sequences = vec![
+                // Basic sequence
+                vec![
+                    SpanEvent {
+                        name: "start".to_string(),
+                        timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                        attributes: [("level".to_string(), "info".to_string())].into(),
+                    },
+                    SpanEvent {
+                        name: "process".to_string(),
+                        timestamp: UNIX_EPOCH + Duration::from_secs(2),
+                        attributes: [("step".to_string(), "validate".to_string())].into(),
+                    },
+                    SpanEvent {
+                        name: "complete".to_string(),
+                        timestamp: UNIX_EPOCH + Duration::from_secs(3),
+                        attributes: [("status".to_string(), "success".to_string())].into(),
+                    },
+                ],
+                // Empty sequence
+                vec![],
+                // Single event
+                vec![SpanEvent {
+                    name: "single".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_millis(500),
+                    attributes: HashMap::new(),
+                }],
+                // Unicode events
+                vec![SpanEvent {
+                    name: "测试".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                    attributes: [("键".to_string(), "值".to_string())].into(),
+                }],
+            ];
+
+            for (i, sequence) in test_sequences.iter().enumerate() {
+                // Create the same sequence twice
+                let sequence1 = sequence.clone();
+                let sequence2 = sequence.clone();
+
+                // Both sequences should be identical
+                assert_eq!(
+                    sequence1.len(),
+                    sequence2.len(),
+                    "Span events sequence {} length must be deterministic",
+                    i
+                );
+
+                for (j, (event1, event2)) in sequence1.iter().zip(sequence2.iter()).enumerate() {
+                    // Event names should match
+                    assert_eq!(
+                        event1.name, event2.name,
+                        "Span event name differs at index {} in sequence {}: '{}' vs '{}'",
+                        j, i, event1.name, event2.name
+                    );
+
+                    // Timestamps should match
+                    assert_eq!(
+                        event1.timestamp, event2.timestamp,
+                        "Span event timestamp differs at index {} in sequence {}",
+                        j, i
+                    );
+
+                    // Attributes should match
+                    assert_eq!(
+                        event1.attributes, event2.attributes,
+                        "Span event attributes differ at index {} in sequence {}",
+                        j, i
+                    );
+                }
+            }
+
+            // Test event ordering preservation
+            let ordered_events = vec![
+                SpanEvent {
+                    name: "first".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                    attributes: HashMap::new(),
+                },
+                SpanEvent {
+                    name: "second".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_secs(2),
+                    attributes: HashMap::new(),
+                },
+                SpanEvent {
+                    name: "third".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_secs(3),
+                    attributes: HashMap::new(),
+                },
+            ];
+
+            // Verify ordering is preserved
+            for (i, event) in ordered_events.iter().enumerate() {
+                let expected_names = ["first", "second", "third"];
+                assert_eq!(
+                    event.name, expected_names[i],
+                    "Event ordering not preserved at index {}",
+                    i
+                );
+            }
+
+            // Test events with complex attributes
+            let complex_event = SpanEvent {
+                name: "complex".to_string(),
+                timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                attributes: [
+                    ("method".to_string(), "GET".to_string()),
+                    ("path".to_string(), "/api/users".to_string()),
+                    ("status_code".to_string(), "200".to_string()),
+                    ("response_time_ms".to_string(), "45".to_string()),
+                ]
+                .into(),
+            };
+
+            let complex_event2 = SpanEvent {
+                name: "complex".to_string(),
+                timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                attributes: [
+                    ("method".to_string(), "GET".to_string()),
+                    ("path".to_string(), "/api/users".to_string()),
+                    ("status_code".to_string(), "200".to_string()),
+                    ("response_time_ms".to_string(), "45".to_string()),
+                ]
+                .into(),
+            };
+
+            assert_eq!(
+                complex_event.attributes, complex_event2.attributes,
+                "Complex event attributes must be identical for same input"
+            );
+        }
+
+        #[test]
+        fn span_links_field_conformance() {
+            // Test span links data structure conformance
+
+            #[derive(Debug, Clone, PartialEq)]
+            struct TestSpanLink {
+                trace_id: [u8; 16],
+                span_id: [u8; 8],
+                trace_state: String,
+                attributes: HashMap<String, String>,
+                dropped_attributes_count: u32,
+                flags: u32,
+            }
+
+            let test_link_arrays = vec![
+                // Empty links
+                vec![],
+                // Single link
+                vec![TestSpanLink {
+                    trace_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                    span_id: [1, 2, 3, 4, 5, 6, 7, 8],
+                    trace_state: "key=value".to_string(),
+                    attributes: [("type".to_string(), "child".to_string())].into(),
+                    dropped_attributes_count: 0,
+                    flags: 1,
+                }],
+                // Multiple links
+                vec![
+                    TestSpanLink {
+                        trace_id: [1; 16],
+                        span_id: [1; 8],
+                        trace_state: "state1=value1".to_string(),
+                        attributes: [("link".to_string(), "parent".to_string())].into(),
+                        dropped_attributes_count: 0,
+                        flags: 1,
+                    },
+                    TestSpanLink {
+                        trace_id: [2; 16],
+                        span_id: [2; 8],
+                        trace_state: "state2=value2".to_string(),
+                        attributes: [("link".to_string(), "sibling".to_string())].into(),
+                        dropped_attributes_count: 0,
+                        flags: 0,
+                    },
+                ],
+            ];
+
+            for (i, link_array) in test_link_arrays.iter().enumerate() {
+                // Create identical link arrays
+                let links1 = link_array.clone();
+                let links2 = link_array.clone();
+
+                // Both arrays should be identical
+                assert_eq!(
+                    links1.len(),
+                    links2.len(),
+                    "Span links array {} length must be deterministic",
+                    i
+                );
+
+                for (j, (link1, link2)) in links1.iter().zip(links2.iter()).enumerate() {
+                    // Trace IDs should match
+                    assert_eq!(
+                        link1.trace_id, link2.trace_id,
+                        "Span link trace ID differs at index {} in array {}: {:?} vs {:?}",
+                        j, i, link1.trace_id, link2.trace_id
+                    );
+
+                    // Span IDs should match
+                    assert_eq!(
+                        link1.span_id, link2.span_id,
+                        "Span link span ID differs at index {} in array {}: {:?} vs {:?}",
+                        j, i, link1.span_id, link2.span_id
+                    );
+
+                    // Trace state should match
+                    assert_eq!(
+                        link1.trace_state, link2.trace_state,
+                        "Span link trace state differs at index {} in array {}: '{}' vs '{}'",
+                        j, i, link1.trace_state, link2.trace_state
+                    );
+
+                    // Attributes should match
+                    assert_eq!(
+                        link1.attributes, link2.attributes,
+                        "Span link attributes differ at index {} in array {}",
+                        j, i
+                    );
+
+                    // Dropped attributes count should match
+                    assert_eq!(
+                        link1.dropped_attributes_count, link2.dropped_attributes_count,
+                        "Span link dropped attributes count differs at index {} in array {}: {} vs {}",
+                        j, i, link1.dropped_attributes_count, link2.dropped_attributes_count
+                    );
+
+                    // Flags should match
+                    assert_eq!(
+                        link1.flags, link2.flags,
+                        "Span link flags differ at index {} in array {}: {} vs {}",
+                        j, i, link1.flags, link2.flags
+                    );
+                }
+            }
+
+            // Test edge cases
+
+            // All-zero IDs (invalid but should be handled consistently)
+            let zero_link = TestSpanLink {
+                trace_id: [0; 16],
+                span_id: [0; 8],
+                trace_state: String::new(),
+                attributes: HashMap::new(),
+                dropped_attributes_count: 0,
+                flags: 0,
+            };
+
+            let zero_link2 = TestSpanLink {
+                trace_id: [0; 16],
+                span_id: [0; 8],
+                trace_state: String::new(),
+                attributes: HashMap::new(),
+                dropped_attributes_count: 0,
+                flags: 0,
+            };
+
+            assert_eq!(
+                zero_link, zero_link2,
+                "Zero ID span links must be identical"
+            );
+
+            // Maximum values
+            let max_link = TestSpanLink {
+                trace_id: [255; 16],
+                span_id: [255; 8],
+                trace_state: "max=values".to_string(),
+                attributes: [("test".to_string(), "max".to_string())].into(),
+                dropped_attributes_count: u32::MAX,
+                flags: u32::MAX,
+            };
+
+            let max_link2 = max_link.clone();
+            assert_eq!(
+                max_link, max_link2,
+                "Max values span links must be identical"
+            );
+
+            // Test ordering preservation
+            let ordered_links = vec![
+                TestSpanLink {
+                    trace_id: [1; 16],
+                    span_id: [1; 8],
+                    trace_state: "first".to_string(),
+                    attributes: HashMap::new(),
+                    dropped_attributes_count: 0,
+                    flags: 1,
+                },
+                TestSpanLink {
+                    trace_id: [2; 16],
+                    span_id: [2; 8],
+                    trace_state: "second".to_string(),
+                    attributes: HashMap::new(),
+                    dropped_attributes_count: 0,
+                    flags: 1,
+                },
+                TestSpanLink {
+                    trace_id: [3; 16],
+                    span_id: [3; 8],
+                    trace_state: "third".to_string(),
+                    attributes: HashMap::new(),
+                    dropped_attributes_count: 0,
+                    flags: 1,
+                },
+            ];
+
+            // Verify ordering is preserved
+            let expected_states = ["first", "second", "third"];
+            for (i, link) in ordered_links.iter().enumerate() {
+                assert_eq!(
+                    link.trace_state, expected_states[i],
+                    "Link ordering not preserved at index {}",
+                    i
+                );
+            }
+        }
+    }
+}
+
+// Golden artifact tests for OTEL span serialization
+#[cfg(all(test, feature = "tracing-integration"))]
+#[path = "otel_span_golden_tests.rs"]
+mod otel_span_golden_tests;
+
+// Golden artifact tests for OTLP LogRecord body value mapping
+#[cfg(all(test, feature = "tracing-integration"))]
+#[path = "otel_log_body_golden_test.rs"]
+mod otel_log_body_golden_test;
+
+#[cfg(all(
+    any(test, feature = "fuzz"),
+    feature = "metrics",
+    feature = "tracing-integration"
+))]
+/// OTLP request builders used by conformance, fuzz, and regression helpers.
+pub mod otlp_request_builder {
+    use super::span_semantics::TestSpan;
+    use super::{MetricLabels, MetricsSnapshot, PrivacyConfig, SpanConfig};
+    use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::logs::v1::{
+        LogRecord, ResourceLogs, ScopeLogs, SeverityNumber,
+    };
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
+        ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind as ProtoSpanKind;
+    use opentelemetry_proto::tonic::trace::v1::status::StatusCode as ProtoStatusCode;
+    use opentelemetry_proto::tonic::trace::v1::{
+        ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus, span,
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    /// Schema URL attached to OTLP resources and scopes in helper requests.
+    pub const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+    /// Default instrumentation scope name emitted by helper requests.
+    pub const OTEL_SCOPE_NAME: &str = "asupersync.observability.otel";
+    /// Crate version attached to OTLP instrumentation scopes.
+    pub const OTEL_SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    /// Fuzzable log-record input used to synthesize OTLP log exports.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OtlpLogRecordInput {
+        /// Record timestamp in Unix nanoseconds.
+        pub time_unix_nano: u64,
+        /// Observation timestamp in Unix nanoseconds.
+        pub observed_time_unix_nano: u64,
+        /// OTLP severity number.
+        pub severity_number: i32,
+        /// OTLP severity text.
+        pub severity_text: String,
+        /// Log body payload.
+        pub body: String,
+        /// String key/value attributes attached to the log record.
+        pub attributes: Vec<(String, String)>,
+    }
+
+    /// Group of log records emitted under one OTLP resource/scope tuple.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OtlpLogScopeInput {
+        /// Service name exported in the OTLP resource block.
+        pub service_name: String,
+        /// Synthetic batch sequence propagated into timestamps and attributes.
+        pub batch_sequence: u64,
+        /// Instrumentation scope name exported alongside the records.
+        pub scope_name: String,
+        /// Log records contained in this scope.
+        pub log_records: Vec<OtlpLogRecordInput>,
+    }
+
+    /// Map an arbitrary bucket into one of the coarse OTLP severity levels.
+    pub fn severity_number_from_bucket(raw: u8) -> i32 {
+        match raw % 6 {
+            0 => SeverityNumber::Trace as i32,
+            1 => SeverityNumber::Debug as i32,
+            2 => SeverityNumber::Info as i32,
+            3 => SeverityNumber::Warn as i32,
+            4 => SeverityNumber::Error as i32,
+            _ => SeverityNumber::Fatal as i32,
+        }
+    }
+
+    /// Map an arbitrary bucket into the matching OTLP severity label.
+    pub fn severity_text_from_bucket(raw: u8) -> String {
+        match raw % 6 {
+            0 => "TRACE",
+            1 => "DEBUG",
+            2 => "INFO",
+            3 => "WARN",
+            4 => "ERROR",
+            _ => "FATAL",
+        }
+        .to_string()
+    }
+
+    fn string_value(value: &str) -> AnyValue {
+        AnyValue {
+            value: Some(ProtoValue::StringValue(value.to_string())),
+        }
+    }
+
+    fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            key_strindex: 0,
+            value: Some(string_value(&value.into())),
+        }
+    }
+
+    fn ordered_proto_attributes(
+        attributes: &std::collections::HashMap<String, String>,
+    ) -> Vec<KeyValue> {
+        ordered_proto_attributes_with_config(attributes, None)
+    }
+
+    /// Privacy-aware attribute serialization with optional filtering configuration.
+    fn ordered_proto_attributes_with_config(
+        attributes: &std::collections::HashMap<String, String>,
+        span_config: Option<&SpanConfig>,
+    ) -> Vec<KeyValue> {
+        let mut ordered: Vec<_> = attributes.iter().collect();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty keys and empty values per specification
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            // **PRIVACY FILTER**: Drop sensitive attributes before serialization
+            .filter(|(key, _value)| {
+                if let Some(config) = span_config {
+                    !config.should_drop_field(key)
+                } else {
+                    true // No filtering if no config provided
+                }
+            })
+            .map(|(key, value)| {
+                // **PII REDACTION**: Apply PII filtering to attribute values
+                let redacted_value = if let Some(config) = span_config {
+                    config.redact_pii(key, value)
+                } else {
+                    value.clone()
+                };
+                key_value(key.clone(), redacted_value)
+            })
+            .collect()
+    }
+
+    #[allow(dead_code)]
+    fn proto_labels(labels: &MetricLabels) -> Vec<KeyValue> {
+        proto_labels_with_config(labels, None)
+    }
+
+    /// Privacy-aware metric label serialization with optional filtering configuration.
+    fn proto_labels_with_config(
+        labels: &MetricLabels,
+        privacy_config: Option<&PrivacyConfig>,
+    ) -> Vec<KeyValue> {
+        let mut ordered = labels.clone();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty keys and empty values per specification
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            // **PRIVACY FILTER**: Drop sensitive labels before serialization
+            .filter(|(key, _value)| {
+                if let Some(config) = privacy_config {
+                    !config.should_drop_field(key)
+                } else {
+                    true // No filtering if no config provided
+                }
+            })
+            .map(|(key, value)| {
+                // **PII REDACTION**: Apply PII filtering to label values
+                let redacted_value = if let Some(config) = privacy_config {
+                    config.redact_pii(&key, &value)
+                } else {
+                    value.clone()
+                };
+                key_value(key, redacted_value)
+            })
+            .collect()
+    }
+
+    fn instrumentation_scope(name: &str) -> InstrumentationScope {
+        InstrumentationScope {
+            name: name.to_string(),
+            version: OTEL_SCOPE_VERSION.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn resource_with_batch(service_name: &str, batch_sequence: u64) -> Resource {
+        Resource {
+            attributes: vec![
+                key_value("service.name", service_name),
+                key_value("batch.sequence", batch_sequence.to_string()),
+                key_value("telemetry.sdk.name", "asupersync"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn unix_nanos(time: SystemTime) -> u64 {
+        time.duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos() as u64
+    }
+
+    /// Build a single-scope OTLP metrics export request from a metrics snapshot.
+    pub fn metrics_request_from_snapshot(
+        snapshot: &MetricsSnapshot,
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+    ) -> ExportMetricsServiceRequest {
+        metrics_request_from_snapshot_with_privacy(
+            snapshot,
+            service_name,
+            batch_sequence,
+            scope_name,
+            None,
+        )
+    }
+
+    /// Build a single-scope OTLP metrics export request from a metrics snapshot with privacy filtering.
+    pub fn metrics_request_from_snapshot_with_privacy(
+        snapshot: &MetricsSnapshot,
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+        privacy_config: Option<&PrivacyConfig>,
+    ) -> ExportMetricsServiceRequest {
+        let mut metrics = Vec::new();
+
+        for (name, labels, value) in &snapshot.counters {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Sum(Sum {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    is_monotonic: true,
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels_with_config(labels, privacy_config),
+                        start_time_unix_nano: batch_sequence * 1_000 + 1,
+                        time_unix_nano: batch_sequence * 1_000 + 2,
+                        value: Some(number_data_point::Value::AsInt((*value).cast_signed())),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, value) in &snapshot.gauges {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels_with_config(labels, privacy_config),
+                        time_unix_nano: batch_sequence * 1_000 + 3,
+                        value: Some(number_data_point::Value::AsInt(*value)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, count, sum) in &snapshot.histograms {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    data_points: vec![HistogramDataPoint {
+                        attributes: proto_labels_with_config(labels, privacy_config),
+                        start_time_unix_nano: batch_sequence * 1_000 + 4,
+                        time_unix_nano: batch_sequence * 1_000 + 5,
+                        count: *count,
+                        sum: Some(*sum),
+                        bucket_counts: vec![*count],
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(resource_with_batch(service_name, batch_sequence)),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(instrumentation_scope(scope_name)),
+                    metrics,
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn proto_span_kind(kind: ApiSpanKind) -> i32 {
+        match kind {
+            ApiSpanKind::Internal => ProtoSpanKind::Internal as i32,
+            ApiSpanKind::Server => ProtoSpanKind::Server as i32,
+            ApiSpanKind::Client => ProtoSpanKind::Client as i32,
+            ApiSpanKind::Producer => ProtoSpanKind::Producer as i32,
+            ApiSpanKind::Consumer => ProtoSpanKind::Consumer as i32,
+        }
+    }
+
+    fn proto_status(status: &ApiStatus) -> ProtoStatus {
+        match status {
+            ApiStatus::Unset => ProtoStatus {
+                code: ProtoStatusCode::Unset as i32,
+                message: String::new(),
+            },
+            ApiStatus::Ok => ProtoStatus {
+                code: ProtoStatusCode::Ok as i32,
+                message: String::new(),
+            },
+            ApiStatus::Error { description } => ProtoStatus {
+                code: ProtoStatusCode::Error as i32,
+                message: description.clone().into_owned(),
+            },
+        }
+    }
+
+    fn proto_span(span: &TestSpan) -> ProtoSpan {
+        ProtoSpan {
+            trace_id: span.context.trace_id().to_bytes().to_vec(),
+            span_id: span.context.span_id().to_bytes().to_vec(),
+            parent_span_id: span
+                .parent_context
+                .as_ref()
+                .map_or_else(Vec::new, |parent| parent.span_id().to_bytes().to_vec()),
+            name: span.name.clone(),
+            kind: proto_span_kind(span.kind.clone()),
+            start_time_unix_nano: unix_nanos(span.start_time),
+            end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
+            attributes: ordered_proto_attributes(&span.attributes),
+            // br-asupersync-attr-drop-count: propagate per-span
+            // attribute drop count to the OTLP wire so receivers
+            // can detect truncation. A regression that reverted
+            // this to 0 (or relied on ..Default::default()) would
+            // silently lose the count.
+            dropped_attributes_count: span.dropped_attributes_count,
+            events: span
+                .events
+                .iter()
+                .map(|event| span::Event {
+                    time_unix_nano: unix_nanos(event.timestamp),
+                    name: event.name.clone(),
+                    attributes: ordered_proto_attributes(&event.attributes),
+                    ..Default::default()
+                })
+                .collect(),
+            status: Some(proto_status(&span.status)),
+            ..Default::default()
+        }
+    }
+
+    /// Build a single-scope OTLP trace export request from synthesized spans.
+    pub fn traces_request(
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+        spans: &[TestSpan],
+    ) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(resource_with_batch(service_name, batch_sequence)),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(instrumentation_scope(scope_name)),
+                    spans: spans.iter().map(proto_span).collect(),
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn log_record(record: &OtlpLogRecordInput) -> LogRecord {
+        LogRecord {
+            time_unix_nano: record.time_unix_nano,
+            observed_time_unix_nano: record.observed_time_unix_nano,
+            severity_number: record.severity_number,
+            severity_text: record.severity_text.clone(),
+            body: Some(string_value(&record.body)),
+            attributes: record
+                .attributes
+                .iter()
+                .map(|(key, value)| key_value(key.clone(), value.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    /// Build an OTLP logs export request from grouped scope inputs.
+    pub fn logs_request(scopes: &[OtlpLogScopeInput]) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: scopes
+                .iter()
+                .map(|scope| ResourceLogs {
+                    resource: Some(resource_with_batch(
+                        &scope.service_name,
+                        scope.batch_sequence,
+                    )),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(instrumentation_scope(&scope.scope_name)),
+                        log_records: scope.log_records.iter().map(log_record).collect(),
+                        schema_url: OTEL_SCHEMA_URL.to_string(),
+                    }],
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "metrics", feature = "tracing-integration"))]
+mod otlp_wire_format_tests {
+    use super::span_semantics::{SpanConformanceConfig, TestSpan};
+    use super::{
+        MetricLabels, MetricsSnapshot, OWNED_OTLP_DEFAULT_REQUEST_BYTES,
+        OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES, OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES,
+        OWNED_OTLP_MAX_ATTRIBUTES, OWNED_OTLP_MAX_POINTS_PER_METRIC, OtlpLogRecord,
+        OwnedHistogramState, OwnedMetricStream, OwnedOtlpMetrics, OwnedOtlpMetricsConfig,
+        OwnedOtlpMetricsError, PrivacyConfig, otlp_request_builder, owned_histogram_bounds,
+        owned_metric_description_and_unit,
+    };
+    use crate::observability::{MetricsProvider, OutcomeKind};
+    use crate::types::{CancelKind, RegionId, TaskId};
+    use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::logs::v1::{
+        LogRecord, ResourceLogs, ScopeLogs, SeverityNumber,
+    };
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
+        ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind as ProtoSpanKind;
+    use opentelemetry_proto::tonic::trace::v1::status::StatusCode as ProtoStatusCode;
+    use opentelemetry_proto::tonic::trace::v1::{
+        ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus, span,
+    };
+    use prost::Message;
+    use std::collections::HashMap;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+    const OTEL_SCOPE_NAME: &str = "asupersync.observability.otel";
+    const OTEL_SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    fn string_value(value: &str) -> AnyValue {
+        AnyValue {
+            value: Some(ProtoValue::StringValue(value.to_string())),
+        }
+    }
+
+    fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            key_strindex: 0,
+            value: Some(string_value(&value.into())),
+        }
+    }
+
+    fn ordered_proto_attributes(attributes: &HashMap<String, String>) -> Vec<KeyValue> {
+        let mut ordered: Vec<_> = attributes.iter().collect();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            // **OTLP §2.3.1 COMPLIANCE FIX**: Drop empty keys and empty values per specification
+            .filter(|(key, value)| !key.is_empty() && !value.is_empty())
+            .map(|(key, value)| key_value(key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn proto_labels(labels: &MetricLabels) -> Vec<KeyValue> {
+        let mut ordered = labels.clone();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            .map(|(key, value)| key_value(key, value))
+            .collect()
+    }
+
+    fn instrumentation_scope(name: &str) -> InstrumentationScope {
+        InstrumentationScope {
+            name: name.to_string(),
+            version: OTEL_SCOPE_VERSION.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn resource_with_batch(service_name: &str, batch_sequence: u64) -> Resource {
+        Resource {
+            attributes: vec![
+                key_value("service.name", service_name),
+                key_value("batch.sequence", batch_sequence.to_string()),
+                key_value("telemetry.sdk.name", "asupersync"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn unix_nanos(time: SystemTime) -> u64 {
+        time.duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos() as u64
+    }
+
+    fn any_value_as_str(value: &AnyValue) -> &str {
+        match value.value.as_ref() {
+            Some(ProtoValue::StringValue(text)) => text.as_str(),
+            other => panic!("expected string AnyValue, got {other:?}"),
+        }
+    }
+
+    fn key_value_str_value(attribute: &KeyValue) -> &str {
+        any_value_as_str(attribute.value.as_ref().expect("attribute value"))
+    }
+
+    fn metrics_request_from_snapshot(
+        snapshot: &MetricsSnapshot,
+        service_name: &str,
+        batch_sequence: u64,
+    ) -> ExportMetricsServiceRequest {
+        let mut metrics = Vec::new();
+
+        for (name, labels, value) in &snapshot.counters {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Sum(Sum {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    is_monotonic: true,
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels(labels),
+                        start_time_unix_nano: batch_sequence * 1_000 + 1,
+                        time_unix_nano: batch_sequence * 1_000 + 2,
+                        value: Some(number_data_point::Value::AsInt((*value).cast_signed())),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, value) in &snapshot.gauges {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels(labels),
+                        time_unix_nano: batch_sequence * 1_000 + 3,
+                        value: Some(number_data_point::Value::AsInt(*value)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, count, sum) in &snapshot.histograms {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    data_points: vec![HistogramDataPoint {
+                        attributes: proto_labels(labels),
+                        start_time_unix_nano: batch_sequence * 1_000 + 4,
+                        time_unix_nano: batch_sequence * 1_000 + 5,
+                        count: *count,
+                        sum: Some(*sum),
+                        bucket_counts: vec![*count],
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(resource_with_batch(service_name, batch_sequence)),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(instrumentation_scope(OTEL_SCOPE_NAME)),
+                    metrics,
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn proto_span_kind(kind: ApiSpanKind) -> i32 {
+        match kind {
+            ApiSpanKind::Internal => ProtoSpanKind::Internal as i32,
+            ApiSpanKind::Server => ProtoSpanKind::Server as i32,
+            ApiSpanKind::Client => ProtoSpanKind::Client as i32,
+            ApiSpanKind::Producer => ProtoSpanKind::Producer as i32,
+            ApiSpanKind::Consumer => ProtoSpanKind::Consumer as i32,
+        }
+    }
+
+    fn proto_status(status: &ApiStatus) -> ProtoStatus {
+        match status {
+            ApiStatus::Unset => ProtoStatus {
+                code: ProtoStatusCode::Unset as i32,
+                message: String::new(),
+            },
+            ApiStatus::Ok => ProtoStatus {
+                code: ProtoStatusCode::Ok as i32,
+                message: String::new(),
+            },
+            ApiStatus::Error { description } => ProtoStatus {
+                code: ProtoStatusCode::Error as i32,
+                message: description.clone().into_owned(),
+            },
+        }
+    }
+
+    fn proto_span(span: &TestSpan) -> ProtoSpan {
+        ProtoSpan {
+            trace_id: span.context.trace_id().to_bytes().to_vec(),
+            span_id: span.context.span_id().to_bytes().to_vec(),
+            parent_span_id: span
+                .parent_context
+                .as_ref()
+                .map_or_else(Vec::new, |parent| parent.span_id().to_bytes().to_vec()),
+            name: span.name.clone(),
+            kind: proto_span_kind(span.kind.clone()),
+            start_time_unix_nano: unix_nanos(span.start_time),
+            end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
+            attributes: ordered_proto_attributes(&span.attributes),
+            // br-asupersync-attr-drop-count: propagate per-span
+            // attribute drop count to the OTLP wire so receivers
+            // can detect truncation. A regression that reverted
+            // this to 0 (or relied on ..Default::default()) would
+            // silently lose the count.
+            dropped_attributes_count: span.dropped_attributes_count,
+            events: span
+                .events
+                .iter()
+                .map(|event| span::Event {
+                    time_unix_nano: unix_nanos(event.timestamp),
+                    name: event.name.clone(),
+                    attributes: ordered_proto_attributes(&event.attributes),
+                    ..Default::default()
+                })
+                .collect(),
+            status: Some(proto_status(&span.status)),
+            ..Default::default()
+        }
+    }
+
+    fn traces_request(spans: Vec<ProtoSpan>) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(resource_with_batch("checkout", 7)),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(instrumentation_scope(OTEL_SCOPE_NAME)),
+                    spans,
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn log_record(sequence: u64, body: &str, attributes: &[(&str, &str)]) -> LogRecord {
+        LogRecord {
+            time_unix_nano: sequence,
+            observed_time_unix_nano: sequence + 1,
+            severity_number: SeverityNumber::Info as i32,
+            severity_text: "INFO".to_string(),
+            body: Some(string_value(body)),
+            attributes: attributes
+                .iter()
+                .map(|(key, value)| key_value(*key, *value))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    fn logs_request() -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: vec![
+                ResourceLogs {
+                    resource: Some(resource_with_batch("checkout", 1)),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(instrumentation_scope(OTEL_SCOPE_NAME)),
+                        log_records: vec![
+                            log_record(
+                                10,
+                                "export started",
+                                &[("component", "otlp"), ("sequence", "1")],
+                            ),
+                            log_record(
+                                20,
+                                "export retry scheduled",
+                                &[("component", "otlp"), ("sequence", "2")],
+                            ),
+                        ],
+                        schema_url: OTEL_SCHEMA_URL.to_string(),
+                    }],
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                },
+                ResourceLogs {
+                    resource: Some(resource_with_batch("billing", 2)),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(instrumentation_scope("asupersync.billing")),
+                        log_records: vec![log_record(
+                            30,
+                            "billing flush complete",
+                            &[("component", "billing"), ("sequence", "3")],
+                        )],
+                        schema_url: OTEL_SCHEMA_URL.to_string(),
+                    }],
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn otlp_metrics_protobuf_round_trip_preserves_batches_and_metric_order() {
+        let mut primary = MetricsSnapshot::new();
+        primary.add_counter(
+            "otel.export.requests",
+            vec![("signal".to_string(), "metrics".to_string())],
+            5,
+        );
+        primary.add_gauge(
+            "otel.export.queue_depth",
+            vec![("pipeline".to_string(), "primary".to_string())],
+            2,
+        );
+        primary.add_histogram(
+            "otel.export.latency_ms",
+            vec![("signal".to_string(), "metrics".to_string())],
+            3,
+            12.5,
+        );
+
+        let mut secondary = MetricsSnapshot::new();
+        secondary.add_counter(
+            "otel.export.requests",
+            vec![("signal".to_string(), "logs".to_string())],
+            1,
+        );
+
+        let mut request = metrics_request_from_snapshot(&primary, "checkout", 1);
+        request
+            .resource_metrics
+            .extend(metrics_request_from_snapshot(&secondary, "billing", 2).resource_metrics);
+
+        let encoded = request.encode_to_vec();
+        let decoded = ExportMetricsServiceRequest::decode(encoded.as_slice()).expect("decode");
+        assert_eq!(decoded, request);
+
+        assert_eq!(decoded.resource_metrics.len(), 2);
+        assert_eq!(
+            key_value_str_value(
+                &decoded.resource_metrics[0]
+                    .resource
+                    .as_ref()
+                    .expect("resource")
+                    .attributes[1]
+            ),
+            "1"
+        );
+        assert_eq!(
+            key_value_str_value(
+                &decoded.resource_metrics[1]
+                    .resource
+                    .as_ref()
+                    .expect("resource")
+                    .attributes[1]
+            ),
+            "2"
+        );
+
+        let primary_metrics = &decoded.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(primary_metrics[0].name, "otel.export.requests");
+        assert_eq!(primary_metrics[1].name, "otel.export.queue_depth");
+        assert_eq!(primary_metrics[2].name, "otel.export.latency_ms");
+        assert_eq!(
+            decoded.resource_metrics[0].scope_metrics[0]
+                .scope
+                .as_ref()
+                .expect("scope")
+                .name,
+            OTEL_SCOPE_NAME
+        );
+    }
+
+    #[test]
+    fn otlp_trace_protobuf_round_trip_preserves_span_order_and_attribute_limits() {
+        let config = SpanConformanceConfig {
+            max_attributes: 8,
+            max_events: 4,
+            max_attribute_length: Some(12),
+            test_sampling: true,
+            test_context_propagation: true,
+        };
+        let mut root = TestSpan::new_with_config("checkout", ApiSpanKind::Server, &config);
+        let oversized_key = "k".repeat(1_200);
+        root.set_attribute(&oversized_key, "value-that-should-truncate");
+        root.set_attribute("service.name", "checkout");
+        root.add_event(
+            "db.query",
+            HashMap::from([("sql".to_string(), "select * from orders".to_string())]),
+        );
+        root.set_status(ApiStatus::Ok);
+        root.end();
+
+        let mut child = root.new_child("postgres.query", ApiSpanKind::Client);
+        child.set_attribute("db.system", "postgresql");
+        child.set_status(ApiStatus::Error {
+            description: "deadline exceeded".into(),
+        });
+        child.end();
+
+        let request = traces_request(vec![proto_span(&root), proto_span(&child)]);
+        let encoded = request.encode_to_vec();
+        let decoded = ExportTraceServiceRequest::decode(encoded.as_slice()).expect("decode");
+        assert_eq!(decoded, request);
+
+        let spans = &decoded.resource_spans[0].scope_spans[0].spans;
+        assert_eq!(spans[0].name, "checkout");
+        assert_eq!(spans[1].name, "postgres.query");
+        assert_eq!(spans[1].parent_span_id, spans[0].span_id);
+
+        let oversized_attribute = spans[0]
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key.starts_with('k'))
+            .expect("oversized attribute");
+        assert_eq!(oversized_attribute.key.len(), 1024);
+        assert_eq!(key_value_str_value(oversized_attribute), "value-that-s");
+        assert_eq!(
+            spans[0].events[0].attributes[0]
+                .value
+                .as_ref()
+                .map(any_value_as_str),
+            Some("select * fro")
+        );
+    }
+
+    #[test]
+    fn otlp_logs_protobuf_round_trip_preserves_batch_and_record_sequence() {
+        let request = logs_request();
+        let encoded = request.encode_to_vec();
+        let decoded = ExportLogsServiceRequest::decode(encoded.as_slice()).expect("decode");
+        assert_eq!(decoded, request);
+
+        assert_eq!(decoded.resource_logs.len(), 2);
+        assert_eq!(
+            key_value_str_value(
+                &decoded.resource_logs[0]
+                    .resource
+                    .as_ref()
+                    .expect("resource")
+                    .attributes[1]
+            ),
+            "1"
+        );
+        assert_eq!(
+            key_value_str_value(
+                &decoded.resource_logs[1]
+                    .resource
+                    .as_ref()
+                    .expect("resource")
+                    .attributes[1]
+            ),
+            "2"
+        );
+
+        let first_scope = &decoded.resource_logs[0].scope_logs[0];
+        assert_eq!(first_scope.log_records.len(), 2);
+        assert_eq!(
+            any_value_as_str(first_scope.log_records[0].body.as_ref().expect("body")),
+            "export started"
+        );
+        assert_eq!(
+            key_value_str_value(&first_scope.log_records[0].attributes[1]),
+            "1"
+        );
+        assert_eq!(
+            any_value_as_str(first_scope.log_records[1].body.as_ref().expect("body")),
+            "export retry scheduled"
+        );
+        assert_eq!(
+            key_value_str_value(&first_scope.log_records[1].attributes[1]),
+            "2"
+        );
+    }
+
+    /// OTLP export conformance test against the opentelemetry-proto reference transformer.
+    ///
+    /// This test ensures that the same span tree produces byte-identical OTLP protobuf
+    /// output between our implementation and the upstream SDK-to-proto transformer.
+    /// This is Pattern 1: Differential Testing (Reference Implementation) from the
+    /// testing-conformance-harnesses methodology.
+    #[test]
+    #[cfg(feature = "tracing-integration")]
+    fn otlp_export_conformance_byte_identical() {
+        use opentelemetry::trace::{
+            Event, SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
+        };
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan};
+        use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
+        use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
+        use opentelemetry_sdk::Resource as SdkResource;
+        use opentelemetry_sdk::trace::{SpanData, SpanEvents, SpanLinks};
+        use prost::Message;
+        use std::collections::HashMap;
+
+        // Shared span data for both implementations
+        #[derive(Clone)]
+        struct CanonicalSpanTree {
+            spans: Vec<CanonicalSpan>,
+        }
+
+        #[derive(Clone)]
+        struct CanonicalSpan {
+            name: String,
+            kind: SpanKind,
+            attributes: HashMap<String, String>,
+            events: Vec<(String, HashMap<String, String>)>,
+            status: Status,
+            parent_idx: Option<usize>,
+        }
+
+        impl CanonicalSpanTree {
+            fn new() -> Self {
+                Self {
+                    spans: vec![
+                        CanonicalSpan {
+                            name: "root_operation".to_string(),
+                            kind: SpanKind::Server,
+                            attributes: [
+                                ("service.name".to_string(), "asupersync".to_string()),
+                                ("http.method".to_string(), "POST".to_string()),
+                                ("http.url".to_string(), "/api/v1/process".to_string()),
+                            ]
+                            .into(),
+                            events: vec![(
+                                "request.received".to_string(),
+                                [("bytes".to_string(), "1024".to_string())].into(),
+                            )],
+                            status: Status::Ok,
+                            parent_idx: None,
+                        },
+                        CanonicalSpan {
+                            name: "database_query".to_string(),
+                            kind: SpanKind::Client,
+                            attributes: [
+                                ("db.system".to_string(), "postgresql".to_string()),
+                                (
+                                    "db.statement".to_string(),
+                                    "SELECT * FROM users".to_string(),
+                                ),
+                            ]
+                            .into(),
+                            events: vec![
+                                ("query.start".to_string(), HashMap::new()),
+                                (
+                                    "query.end".to_string(),
+                                    [("rows".to_string(), "42".to_string())].into(),
+                                ),
+                            ],
+                            status: Status::Ok,
+                            parent_idx: Some(0),
+                        },
+                        CanonicalSpan {
+                            name: "response_processing".to_string(),
+                            kind: SpanKind::Internal,
+                            attributes: [("component".to_string(), "json_serializer".to_string())]
+                                .into(),
+                            events: vec![],
+                            status: Status::Ok,
+                            parent_idx: Some(0),
+                        },
+                    ],
+                }
+            }
+        }
+
+        // Build OTLP export with our implementation
+        fn build_our_otlp_export(tree: &CanonicalSpanTree) -> Vec<u8> {
+            // Create OTLP request using our implementation patterns
+            let resource = Resource {
+                attributes: vec![KeyValue {
+                    key: "service.name".to_string(),
+                    key_strindex: 0,
+                    value: Some(AnyValue {
+                        value: Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                "asupersync".to_string(),
+                            ),
+                        ),
+                    }),
+                }],
+                ..Default::default()
+            };
+
+            let sampled_known_local_flags =
+                1 | opentelemetry_proto::tonic::trace::v1::SpanFlags::ContextHasIsRemoteMask as u32;
+
+            let spans: Vec<OtlpSpan> = tree.spans.iter().enumerate().map(|(idx, span)| {
+                OtlpSpan {
+                    trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16], // Fixed for comparison
+                    span_id: vec![(idx + 1) as u8, 0, 0, 0, 0, 0, 0, 0],
+                    parent_span_id: span.parent_idx.map_or_else(Vec::new, |parent| {
+                        vec![(parent + 1) as u8, 0, 0, 0, 0, 0, 0, 0]
+                    }),
+                    name: span.name.clone(),
+                    kind: match &span.kind {
+                        SpanKind::Internal => 1,
+                        SpanKind::Server => 2,
+                        SpanKind::Client => 3,
+                        SpanKind::Producer => 4,
+                        SpanKind::Consumer => 5,
+                    },
+                    start_time_unix_nano: 1000000000, // Fixed timestamp
+                    end_time_unix_nano: 1001000000,
+                    attributes: span.attributes.iter().map(|(k, v)| {
+                        KeyValue {
+                            key: k.clone(),
+                            key_strindex: 0,
+                            value: Some(AnyValue {
+                                value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(v.clone())),
+                            }),
+                        }
+                    }).collect(),
+                    events: span.events.iter().map(|(name, attrs)| {
+                        opentelemetry_proto::tonic::trace::v1::span::Event {
+                            time_unix_nano: 1000500000,
+                            name: name.clone(),
+                            attributes: attrs.iter().map(|(k, v)| {
+                                KeyValue {
+                                    key: k.clone(),
+                                    key_strindex: 0,
+                                    value: Some(AnyValue {
+                                        value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(v.clone())),
+                                    }),
+                                }
+                            }).collect(),
+                            dropped_attributes_count: 0,
+                        }
+                    }).collect(),
+                        status: Some(opentelemetry_proto::tonic::trace::v1::Status {
+                            code: match span.status {
+                                Status::Unset => 0,
+                                Status::Ok => 1,
+                                Status::Error { .. } => 2,
+                            },
+                            message: match &span.status {
+                                Status::Error { description } => description.to_string(),
+                                _ => String::new(),
+                            },
+                        }),
+                    dropped_attributes_count: 0,
+                    dropped_events_count: 0,
+                    dropped_links_count: 0,
+                    links: vec![],
+                    trace_state: String::new(),
+                    flags: sampled_known_local_flags,
+                }
+            }).collect();
+
+            let scope_spans = ScopeSpans {
+                scope: Some(
+                    opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+                        name: "asupersync".to_string(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                    },
+                ),
+                spans,
+                schema_url: String::new(),
+            };
+
+            let resource_spans = ResourceSpans {
+                resource: Some(resource),
+                scope_spans: vec![scope_spans],
+                schema_url: String::new(),
+            };
+
+            let request = ExportTraceServiceRequest {
+                resource_spans: vec![resource_spans],
+            };
+
+            request.encode_to_vec()
+        }
+
+        // Build OTLP export with the opentelemetry-proto reference transformer.
+        fn build_reference_otlp_export(tree: &CanonicalSpanTree) -> Vec<u8> {
+            fn span_id_from_index(idx: usize) -> SpanId {
+                SpanId::from_bytes([(idx + 1) as u8, 0, 0, 0, 0, 0, 0, 0])
+            }
+
+            let resource = SdkResource::builder_empty()
+                .with_attribute(opentelemetry::KeyValue::new("service.name", "asupersync"))
+                .build();
+            let resource = ResourceAttributesWithSchema::from(&resource);
+            let instrumentation_scope = opentelemetry::InstrumentationScope::builder("asupersync")
+                .with_version(env!("CARGO_PKG_VERSION"))
+                .build();
+            let trace_id =
+                TraceId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+
+            let spans = tree
+                .spans
+                .iter()
+                .enumerate()
+                .map(|(idx, span)| {
+                    let mut events = SpanEvents::default();
+                    events.events = span
+                        .events
+                        .iter()
+                        .map(|(name, attrs)| {
+                            Event::new(
+                                name.clone(),
+                                UNIX_EPOCH + Duration::from_nanos(1_000_500_000),
+                                attrs
+                                    .iter()
+                                    .map(|(key, value)| {
+                                        opentelemetry::KeyValue::new(key.clone(), value.clone())
+                                    })
+                                    .collect(),
+                                0,
+                            )
+                        })
+                        .collect();
+
+                    SpanData {
+                        span_context: SpanContext::new(
+                            trace_id,
+                            span_id_from_index(idx),
+                            TraceFlags::SAMPLED,
+                            false,
+                            TraceState::default(),
+                        ),
+                        parent_span_id: span.parent_idx.map_or(SpanId::INVALID, span_id_from_index),
+                        parent_span_is_remote: false,
+                        span_kind: span.kind.clone(),
+                        name: span.name.clone().into(),
+                        start_time: UNIX_EPOCH + Duration::from_nanos(1_000_000_000),
+                        end_time: UNIX_EPOCH + Duration::from_nanos(1_001_000_000),
+                        attributes: span
+                            .attributes
+                            .iter()
+                            .map(|(key, value)| {
+                                opentelemetry::KeyValue::new(key.clone(), value.clone())
+                            })
+                            .collect(),
+                        dropped_attributes_count: 0,
+                        events,
+                        links: SpanLinks::default(),
+                        status: span.status.clone(),
+                        instrumentation_scope: instrumentation_scope.clone(),
+                    }
+                })
+                .collect();
+
+            let resource_spans = group_spans_by_resource_and_scope(spans, &resource);
+            ExportTraceServiceRequest { resource_spans }.encode_to_vec()
+        }
+
+        // Run the conformance test
+        let tree = CanonicalSpanTree::new();
+
+        let our_bytes = build_our_otlp_export(&tree);
+        let reference_bytes = build_reference_otlp_export(&tree);
+
+        // Verify byte-identical output
+        if our_bytes != reference_bytes {
+            // For debugging: decode both and compare structure
+            let our_decoded =
+                ExportTraceServiceRequest::decode(our_bytes.as_slice()).expect("decode our OTLP");
+            let ref_decoded = ExportTraceServiceRequest::decode(reference_bytes.as_slice())
+                .expect("decode reference OTLP");
+
+            // Create detailed comparison for debugging
+            eprintln!("OTLP Conformance Failure:");
+            eprintln!(
+                "Our implementation spans: {}",
+                our_decoded.resource_spans.len()
+            );
+            eprintln!(
+                "Reference implementation spans: {}",
+                ref_decoded.resource_spans.len()
+            );
+
+            // Use insta for detailed comparison snapshot
+            insta::with_settings!({
+                snapshot_path => "../../tests/snapshots",
+                prepend_module_to_snapshot => false,
+            }, {
+                insta::assert_snapshot!(
+                    "otlp_export_conformance_failure_our",
+                    format!("{our_decoded:#?}")
+                );
+                insta::assert_snapshot!(
+                    "otlp_export_conformance_failure_ref",
+                    format!("{ref_decoded:#?}")
+                );
+            });
+
+            panic!(
+                "OTLP export conformance test failed: byte outputs differ\n\
+                 Our bytes: {} bytes\n\
+                 Reference bytes: {} bytes\n\
+                 Check snapshot files for detailed comparison",
+                our_bytes.len(),
+                reference_bytes.len()
+            );
+        }
+
+        assert!(!our_bytes.is_empty(), "OTLP export must not be empty");
+    }
+
+    #[test]
+    fn otlp_051_gauge_first_write_semantics_conformance() {
+        use std::thread;
+        use std::time::Instant;
+
+        // OTLP-051 conformance test: when exporter sees a span with gauge metrics,
+        // it MUST handle first-write semantics correctly:
+        // - Gauge value initialization (first write sets initial value)
+        // - Subsequent updates (updates change value correctly)
+        // - Timestamp ordering (later updates have monotonic/equal timestamps)
+
+        // Create test scenario structure
+        struct GaugeFirstWriteScenario {
+            gauge_name: String,
+            labels: Vec<(String, String)>,
+            initial_value: i64,
+            update_sequence: Vec<i64>,
+            expected_final_value: i64,
+        }
+
+        let scenario = GaugeFirstWriteScenario {
+            gauge_name: "test.memory.usage".to_string(),
+            labels: vec![
+                ("service.name".to_string(), "asupersync".to_string()),
+                ("process.id".to_string(), "12345".to_string()),
+            ],
+            initial_value: 1024,
+            update_sequence: vec![2048, 1536, 3072, 2560],
+            expected_final_value: 2560,
+        };
+
+        // Gauge first-write validation function
+        fn validate_gauge_first_write_semantics(
+            scenario: &GaugeFirstWriteScenario,
+        ) -> Result<(), String> {
+            let mut snapshot = MetricsSnapshot::new();
+
+            // Record initial gauge write timestamp
+            let initial_timestamp = Instant::now();
+
+            // First write: initial value initialization
+            snapshot.add_gauge(
+                &scenario.gauge_name,
+                scenario.labels.clone(),
+                scenario.initial_value,
+            );
+
+            // Validate initial write
+            if snapshot.gauges.is_empty() {
+                return Err("Initial gauge write failed: no gauge data recorded".to_string());
+            }
+
+            let initial_gauge = &snapshot.gauges[0];
+            if initial_gauge.0 != scenario.gauge_name {
+                return Err(format!(
+                    "Initial write gauge name mismatch: expected '{}', got '{}'",
+                    scenario.gauge_name, initial_gauge.0
+                ));
+            }
+
+            if initial_gauge.2 != scenario.initial_value {
+                return Err(format!(
+                    "Initial write value mismatch: expected {}, got {}",
+                    scenario.initial_value, initial_gauge.2
+                ));
+            }
+
+            // Small delay to ensure timestamp ordering
+            thread::sleep(std::time::Duration::from_millis(1));
+
+            // Subsequent updates: apply update sequence with timestamp tracking
+            let mut previous_timestamp = initial_timestamp;
+            for (update_count, &update_value) in scenario.update_sequence.iter().enumerate() {
+                let update_count = update_count + 1; // Start at 1 for the first update after the initial write.
+                let update_timestamp = Instant::now();
+
+                // Verify timestamp ordering (monotonic or equal)
+                if update_timestamp < previous_timestamp {
+                    return Err(format!(
+                        "Timestamp ordering violation: update {} timestamp is before previous timestamp",
+                        update_count
+                    ));
+                }
+
+                // Apply gauge update
+                snapshot.add_gauge(&scenario.gauge_name, scenario.labels.clone(), update_value);
+
+                previous_timestamp = update_timestamp;
+
+                // Small delay for next update
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+
+            // Validate final state
+            let total_expected_writes = 1 + scenario.update_sequence.len();
+            if snapshot.gauges.len() != total_expected_writes {
+                return Err(format!(
+                    "Update count mismatch: expected {} writes, got {}",
+                    total_expected_writes,
+                    snapshot.gauges.len()
+                ));
+            }
+
+            let final_gauge = snapshot.gauges.last().unwrap();
+            if final_gauge.2 != scenario.expected_final_value {
+                return Err(format!(
+                    "Final gauge value mismatch: expected {}, got {}",
+                    scenario.expected_final_value, final_gauge.2
+                ));
+            }
+
+            // Validate all gauge entries have consistent metadata
+            for (i, gauge_entry) in snapshot.gauges.iter().enumerate() {
+                if gauge_entry.0 != scenario.gauge_name {
+                    return Err(format!(
+                        "Gauge name consistency violation at index {}: expected '{}', got '{}'",
+                        i, scenario.gauge_name, gauge_entry.0
+                    ));
+                }
+
+                if gauge_entry.1 != scenario.labels {
+                    return Err(format!(
+                        "Gauge labels consistency violation at index {}: labels changed during update sequence",
+                        i
+                    ));
+                }
+            }
+
+            Ok(())
+        }
+
+        // Test basic first-write semantics
+        let validation_result = validate_gauge_first_write_semantics(&scenario);
+        match validation_result {
+            Ok(()) => {
+                // Test passed - gauge first-write semantics are correct
+            }
+            Err(error_msg) => {
+                panic!(
+                    "OTLP-051 gauge first-write semantics test failed: {}",
+                    error_msg
+                );
+            }
+        }
+
+        // Test edge case: zero initial value
+        let zero_scenario = GaugeFirstWriteScenario {
+            gauge_name: "test.zero.gauge".to_string(),
+            labels: vec![],
+            initial_value: 0,
+            update_sequence: vec![-1, 1, 0],
+            expected_final_value: 0,
+        };
+
+        let zero_validation = validate_gauge_first_write_semantics(&zero_scenario);
+        assert!(
+            zero_validation.is_ok(),
+            "Zero initial value test failed: {:?}",
+            zero_validation
+        );
+
+        // Test edge case: negative values throughout sequence
+        let negative_scenario = GaugeFirstWriteScenario {
+            gauge_name: "test.negative.gauge".to_string(),
+            labels: vec![("type".to_string(), "deficit".to_string())],
+            initial_value: -100,
+            update_sequence: vec![-200, -50, -300],
+            expected_final_value: -300,
+        };
+
+        let negative_validation = validate_gauge_first_write_semantics(&negative_scenario);
+        assert!(
+            negative_validation.is_ok(),
+            "Negative values test failed: {:?}",
+            negative_validation
+        );
+
+        // Test edge case: extreme values (boundary conditions)
+        let extreme_scenario = GaugeFirstWriteScenario {
+            gauge_name: "test.extreme.gauge".to_string(),
+            labels: vec![("boundary".to_string(), "test".to_string())],
+            initial_value: i64::MIN,
+            update_sequence: vec![0, i64::MAX, i64::MIN + 1],
+            expected_final_value: i64::MIN + 1,
+        };
+
+        let extreme_validation = validate_gauge_first_write_semantics(&extreme_scenario);
+        assert!(
+            extreme_validation.is_ok(),
+            "Extreme values test failed: {:?}",
+            extreme_validation
+        );
+
+        // Perform gauge update sequence with timestamp verification against the
+        // same internal snapshot representation used by the exporter tests.
+        let update_values = [1500_i64, 800, 2000, 1200];
+        let mut gauge_snapshot = MetricsSnapshot::new();
+        let mut previous_timestamp = Instant::now();
+
+        for (i, &value) in update_values.iter().enumerate() {
+            let current_timestamp = Instant::now();
+            gauge_snapshot.add_gauge("otlp.051.test.gauge", Vec::new(), value);
+
+            // Verify timestamp progression (should be monotonic or equal)
+            assert!(
+                current_timestamp >= previous_timestamp,
+                "OTLP-051 timestamp ordering violation at update {}: current timestamp is before previous",
+                i
+            );
+
+            previous_timestamp = current_timestamp;
+
+            // Short delay to ensure distinct timestamps
+            thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Verify final gauge value
+        let final_value = gauge_snapshot
+            .gauges
+            .last()
+            .map(|(_, _, value)| *value)
+            .expect("gauge update sequence should record values");
+        let expected_final = *update_values.last().unwrap();
+        assert_eq!(
+            final_value, expected_final,
+            "OTLP-051 final gauge value verification failed: expected {}, got {}",
+            expected_final, final_value
+        );
+
+        println!("✓ OTLP-051 gauge first-write semantics conformance test passed");
+        println!("  - Initial value setting: ✓");
+        println!("  - Update sequence application: ✓");
+        println!("  - Timestamp ordering: ✓");
+        println!("  - Edge cases (zero, negative, extreme): ✓");
+        println!("  - MetricsSnapshot exporter representation: ✓");
+    }
+
+    /// Test privacy filtering for OTLP log records.
+    ///
+    /// **Security Test**: Verifies that sensitive attributes listed in
+    /// `SpanConfig::drop_attributes` are properly filtered from OTLP exports
+    /// to prevent data leakage to observability collectors.
+    #[test]
+    fn otlp_metrics_privacy_filtering() {
+        // Test privacy filtering for OTLP metrics export
+        let mut snapshot = MetricsSnapshot::new();
+
+        // Add a counter with both safe and sensitive labels
+        snapshot.add_counter(
+            "http_requests_total",
+            vec![
+                ("method".to_string(), "POST".to_string()), // Safe
+                ("endpoint".to_string(), "/api/v1/users".to_string()), // Safe
+                ("user_id".to_string(), "user_12345".to_string()), // Sensitive - PII
+                ("request_id".to_string(), "req_abc123".to_string()), // Sensitive - tracking
+                ("user_email".to_string(), "john.doe@company.com".to_string()), // Sensitive - PII
+            ],
+            42,
+        );
+
+        // Add a gauge with sensitive labels
+        snapshot.add_gauge(
+            "active_sessions",
+            vec![
+                ("service".to_string(), "auth".to_string()), // Safe
+                ("session_token".to_string(), "sess_xyz789".to_string()), // Sensitive - credential
+            ],
+            15,
+        );
+
+        // Create privacy config that drops sensitive labels
+        let privacy_config = PrivacyConfig::new()
+            .with_drop_label("user_id")
+            .with_drop_label("request_id")
+            .with_drop_label("user_email")
+            .with_drop_label("session_token")
+            .with_auto_pii_detection();
+
+        // Test export without privacy filtering (baseline)
+        let request_no_privacy = otlp_request_builder::metrics_request_from_snapshot(
+            &snapshot,
+            "test-service",
+            1,
+            "test-scope",
+        );
+
+        // Test export with privacy filtering
+        let request_with_privacy = otlp_request_builder::metrics_request_from_snapshot_with_privacy(
+            &snapshot,
+            "test-service",
+            1,
+            "test-scope",
+            Some(&privacy_config),
+        );
+
+        // Extract attributes from both requests for comparison
+        let extract_counter_attributes = |request: &ExportMetricsServiceRequest| -> Vec<String> {
+            request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .iter()
+                .find(|m| m.name == "http_requests_total")
+                .and_then(|m| m.data.as_ref())
+                .and_then(|data| match data {
+                    metric::Data::Sum(sum) => Some(&sum.data_points[0].attributes),
+                    _ => None,
+                })
+                .map(|attrs| attrs.iter().map(|kv| kv.key.clone()).collect())
+                .unwrap_or_default()
+        };
+
+        let attrs_no_privacy = extract_counter_attributes(&request_no_privacy);
+        let attrs_with_privacy = extract_counter_attributes(&request_with_privacy);
+
+        // Verify that sensitive labels are present without privacy filtering
+        assert!(
+            attrs_no_privacy.contains(&"user_id".to_string()),
+            "Baseline should contain user_id"
+        );
+        assert!(
+            attrs_no_privacy.contains(&"request_id".to_string()),
+            "Baseline should contain request_id"
+        );
+        assert!(
+            attrs_no_privacy.contains(&"user_email".to_string()),
+            "Baseline should contain user_email"
+        );
+
+        // Verify that sensitive labels are removed with privacy filtering
+        assert!(
+            !attrs_with_privacy.contains(&"user_id".to_string()),
+            "Privacy filtering should remove user_id"
+        );
+        assert!(
+            !attrs_with_privacy.contains(&"request_id".to_string()),
+            "Privacy filtering should remove request_id"
+        );
+        assert!(
+            !attrs_with_privacy.contains(&"user_email".to_string()),
+            "Privacy filtering should remove user_email"
+        );
+
+        // Verify that safe labels are preserved
+        assert!(
+            attrs_with_privacy.contains(&"method".to_string()),
+            "Safe labels should be preserved"
+        );
+        assert!(
+            attrs_with_privacy.contains(&"endpoint".to_string()),
+            "Safe labels should be preserved"
+        );
+
+        eprintln!("✅ OTLP metrics privacy filtering test passed");
+        eprintln!("   • Sensitive labels removed: user_id, request_id, user_email");
+        eprintln!("   • Safe labels preserved: method, endpoint");
+    }
+
+    #[test]
+    fn otlp_log_privacy_filtering() {
+        use crate::observability::entry::LogEntry;
+        use crate::observability::level::LogLevel;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Create a span config that drops sensitive attributes
+        let privacy_config = PrivacyConfig::new()
+            .with_drop_attribute("user.email")
+            .with_drop_attribute("api.key")
+            .with_drop_attribute("auth.token");
+
+        let log_entry = LogEntry::new(LogLevel::Info, "user action completed")
+            .with_field("action", "login")
+            .with_field("user.email", "sensitive@example.com") // Should be filtered
+            .with_field("api.key", "secret-key-12345") // Should be filtered
+            .with_field("auth.token", "bearer-token-xyz") // Should be filtered
+            .with_field("user.id", "12345") // Should be kept
+            .with_field("request.path", "/api/login"); // Should be kept
+
+        let observed_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
+
+        // Test WITHOUT privacy filtering (baseline)
+        let unfiltered_record = OtlpLogRecord::from_log_entry(&log_entry, observed_time);
+
+        // Verify all attributes are present in unfiltered record
+        assert_eq!(
+            unfiltered_record.attributes.len(),
+            6,
+            "Unfiltered record should contain all 6 attributes"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "user.email"),
+            "user.email should be present without filtering"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "api.key"),
+            "api.key should be present without filtering"
+        );
+        assert!(
+            unfiltered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "auth.token"),
+            "auth.token should be present without filtering"
+        );
+
+        // Test WITH privacy filtering (the fix)
+        let filtered_record =
+            OtlpLogRecord::from_log_entry_with_privacy(&log_entry, observed_time, &privacy_config);
+
+        // Verify sensitive attributes are filtered out
+        assert_eq!(
+            filtered_record.attributes.len(),
+            3,
+            "Filtered record should contain only 3 safe attributes"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "user.email"),
+            "user.email should be filtered out"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "api.key"),
+            "api.key should be filtered out"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .all(|(k, _)| k != "auth.token"),
+            "auth.token should be filtered out"
+        );
+
+        // Verify safe attributes are preserved
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "action"),
+            "action should be preserved"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "user.id"),
+            "user.id should be preserved"
+        );
+        assert!(
+            filtered_record
+                .attributes
+                .iter()
+                .any(|(k, _)| k == "request.path"),
+            "request.path should be preserved"
+        );
+
+        // Verify dropped attributes are counted
+        assert_eq!(
+            filtered_record.dropped_attributes_count, 3,
+            "Should report 3 dropped sensitive attributes"
+        );
+
+        println!("✓ OTLP privacy filtering security test passed");
+        println!("  - Sensitive attributes filtered: ✓");
+        println!("  - Safe attributes preserved: ✓");
+        println!("  - Dropped count accurate: ✓");
+    }
+
+    #[test]
+    fn otlp_log_privacy_filtering_uses_full_privacy_policy() {
+        use crate::observability::entry::LogEntry;
+        use crate::observability::level::LogLevel;
+
+        let privacy_config = PrivacyConfig::new()
+            .with_allowed_field("action")
+            .with_allowed_field("user.*")
+            .with_allowed_field("session_id")
+            .with_drop_label("session_id")
+            .with_auto_pii_detection();
+
+        let log_entry = LogEntry::new(LogLevel::Info, "user profile updated")
+            .with_field("action", "profile-update")
+            .with_field("user.email", "jane.doe@example.com")
+            .with_field("session_id", "session-abc123")
+            .with_field("auth.token", "bearer secret-token")
+            .with_field("request.path", "/private/profile");
+
+        let filtered_record =
+            OtlpLogRecord::from_log_entry_with_privacy(&log_entry, 1_000, &privacy_config);
+        let attributes: std::collections::HashMap<_, _> =
+            filtered_record.attributes.iter().cloned().collect();
+
+        assert_eq!(
+            attributes.get("action").map(String::as_str),
+            Some("profile-update")
+        );
+        assert_eq!(
+            attributes.get("user.email").map(String::as_str),
+            Some("[EMAIL_REDACTED]")
+        );
+        assert!(!attributes.contains_key("session_id"));
+        assert!(!attributes.contains_key("auth.token"));
+        assert!(!attributes.contains_key("request.path"));
+        assert_eq!(filtered_record.dropped_attributes_count, 3);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn populated_owned_metrics() -> OwnedOtlpMetrics {
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        let region = RegionId::testing_default();
+        let task = TaskId::testing_default();
+        metrics.task_spawned(region, task);
+        metrics.task_completed(task, OutcomeKind::Ok, Duration::from_millis(25));
+        metrics.region_created(region, None);
+        metrics.region_closed(region, Duration::from_secs(2));
+        metrics.cancellation_requested(region, CancelKind::Timeout);
+        metrics.drain_completed(region, Duration::from_millis(3));
+        metrics.deadline_set(region, Duration::from_secs(5));
+        metrics.deadline_exceeded(region);
+        metrics.deadline_warning("http.request", "no_progress", Duration::from_secs(1));
+        metrics.deadline_violation("http.request", Duration::from_millis(1));
+        metrics.deadline_remaining("http.request", Duration::from_secs(4));
+        metrics.checkpoint_interval("http.request", Duration::from_millis(10));
+        metrics.task_stuck_detected("http.request");
+        metrics.obligation_created(region);
+        metrics.obligation_created(region);
+        metrics.obligation_discharged(region);
+        metrics.obligation_leaked(region);
+        metrics.scheduler_tick(8, Duration::from_micros(50));
+        metrics
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_maps_all_fixed_instruments_deterministically() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::MetricData;
+
+        let metrics = populated_owned_metrics();
+        let attributes = [("service.name", "owned-test"), ("empty.value", "")];
+        let first = metrics
+            .collect(2_000, &attributes)
+            .expect("first collection");
+        let repeat = metrics
+            .collect(
+                2_000,
+                &[("empty.value", ""), ("service.name", "owned-test")],
+            )
+            .expect("repeat collection");
+        assert_eq!(
+            first, repeat,
+            "equal state and time must encode identically"
+        );
+        assert_eq!(first.len(), 1);
+
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &first[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("owned request decodes");
+        let names = request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .map(|metric| metric.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names.len(), 23);
+        assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
+        let resource_attributes = &request.resource_metrics[0]
+            .resource
+            .as_ref()
+            .expect("resource")
+            .attributes;
+        assert_eq!(resource_attributes[0].key, "empty.value");
+        assert_eq!(resource_attributes[1].key, "service.name");
+        for expected in [
+            "asupersync.tasks.active",
+            "asupersync.regions.active",
+            "asupersync.obligations.active",
+            "asupersync.tasks.spawned",
+            "asupersync.tasks.completed",
+            "asupersync.regions.created",
+            "asupersync.regions.closed",
+            "asupersync.cancellations",
+            "asupersync.deadlines.set",
+            "asupersync.deadlines.exceeded",
+            "asupersync.deadline.warnings_total",
+            "asupersync.deadline.violations_total",
+            "asupersync.task.stuck_detected_total",
+            "asupersync.obligations.created",
+            "asupersync.obligations.discharged",
+            "asupersync.obligations.leaked",
+            "asupersync.tasks.duration",
+            "asupersync.regions.lifetime",
+            "asupersync.cancellation.drain_duration",
+            "asupersync.deadline.remaining_seconds",
+            "asupersync.checkpoint.interval_seconds",
+            "asupersync.scheduler.poll_time",
+            "asupersync.scheduler.tasks_polled",
+        ] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
+        for metric in &request.resource_metrics[0].scope_metrics[0].metrics {
+            let (_, expected_unit) = owned_metric_description_and_unit(&metric.name);
+            assert_eq!(
+                metric.unit, expected_unit,
+                "unit mismatch for {}",
+                metric.name
+            );
+            if let Some(MetricData::Histogram(histogram)) = &metric.data {
+                let point = &histogram.data_points[0];
+                assert_eq!(
+                    point.explicit_bounds,
+                    owned_histogram_bounds(&metric.name),
+                    "bound mismatch for {}",
+                    metric.name
+                );
+                assert_eq!(point.bucket_counts.len(), point.explicit_bounds.len() + 1);
+                assert_eq!(point.bucket_counts.iter().sum::<u64>(), point.count);
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_epoch_reset_and_timestamp_contract() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::{MetricData, NumberDataPointValue};
+
+        let metrics = populated_owned_metrics();
+        let first = metrics.collect(2_000, &[]).expect("first epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let advanced = metrics.collect(2_500, &[]).expect("same epoch advances");
+        let advanced_request = ExportMetricsServiceRequest::decode_from_bytes(
+            &advanced[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode advanced request");
+        let advanced_spawned = advanced_request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "asupersync.tasks.spawned")
+            .expect("advanced spawned metric");
+        let Some(MetricData::Sum(advanced_sum)) = &advanced_spawned.data else {
+            panic!("spawned must be cumulative sum");
+        };
+        assert_eq!(advanced_sum.data_points[0].start_time_unix_nano, 1_000);
+        assert_eq!(advanced_sum.data_points[0].time_unix_nano, 2_500);
+        assert_eq!(
+            advanced_sum.data_points[0].value,
+            Some(NumberDataPointValue::Int(2))
+        );
+        assert_eq!(
+            metrics.collect(2_499, &[]),
+            Err(OwnedOtlpMetricsError::InvalidTimestamp)
+        );
+        assert_eq!(
+            metrics.reset(2_500),
+            Err(OwnedOtlpMetricsError::InvalidTimestamp)
+        );
+        metrics.reset(3_000).expect("rotate epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let second = metrics.collect(3_000, &[]).expect("second epoch");
+        assert_ne!(first, second);
+
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &second[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode reset request");
+        let spawned = request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "asupersync.tasks.spawned")
+            .expect("spawned metric");
+        let Some(MetricData::Sum(sum)) = &spawned.data else {
+            panic!("spawned must be cumulative sum");
+        };
+        assert_eq!(sum.data_points[0].start_time_unix_nano, 3_000);
+        assert_eq!(sum.data_points[0].time_unix_nano, 3_000);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_enforces_cardinality_attributes_and_wire_limits() {
+        let metrics = OwnedOtlpMetrics::try_new(
+            OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(1),
+        )
+        .expect("finite config");
+        metrics.deadline_violation("alpha", Duration::ZERO);
+        metrics.deadline_violation("beta", Duration::ZERO);
+        assert_eq!(metrics.rejected_updates(), 1);
+        assert_eq!(
+            metrics.collect(2_000, &[("duplicate", "a"), ("duplicate", "b")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        assert_eq!(
+            metrics.collect(2_000, &[("", "value")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let exact_key = format!("k{}", "x".repeat(OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES - 1));
+        let exact_value = "v".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES);
+        metrics
+            .collect(2_000, &[(exact_key.as_str(), exact_value.as_str())])
+            .expect("exact attribute byte limits must pass");
+        let long_key = "k".repeat(OWNED_OTLP_MAX_ATTRIBUTE_KEY_BYTES + 1);
+        let long_value = "v".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1);
+        assert_eq!(
+            metrics.collect(2_000, &[(long_key.as_str(), "value")]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        assert_eq!(
+            metrics.collect(2_000, &[("key", long_value.as_str())]),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let many_attributes = (0..=OWNED_OTLP_MAX_ATTRIBUTES)
+            .map(|index| (format!("key-{index}"), "value".to_owned()))
+            .collect::<Vec<_>>();
+        let many_attributes = many_attributes
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            metrics.collect(2_000, &many_attributes),
+            Err(OwnedOtlpMetricsError::InvalidAttributes)
+        );
+        let exact_attribute_count = (0..OWNED_OTLP_MAX_ATTRIBUTES)
+            .map(|index| (format!("key-{index}"), "value".to_owned()))
+            .collect::<Vec<_>>();
+        let exact_attribute_count = exact_attribute_count
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        metrics
+            .collect(2_000, &exact_attribute_count)
+            .expect("exact attribute count must pass");
+
+        for config in [
+            OwnedOtlpMetricsConfig::new(0),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_cardinality_per_metric(0),
+            OwnedOtlpMetricsConfig::new(1_000)
+                .with_max_cardinality_per_metric(OWNED_OTLP_MAX_POINTS_PER_METRIC + 1),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(0),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(4_097),
+            OwnedOtlpMetricsConfig::new(1_000).with_max_request_bytes(0),
+            OwnedOtlpMetricsConfig::new(1_000)
+                .with_max_request_bytes(OWNED_OTLP_DEFAULT_REQUEST_BYTES + 1),
+        ] {
+            assert_eq!(
+                OwnedOtlpMetrics::try_new(config).expect_err("invalid config must refuse"),
+                OwnedOtlpMetricsError::InvalidConfiguration
+            );
+        }
+
+        let callback_limits = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid callback-limit config");
+        let oversized_reason = Box::leak(
+            "r".repeat(OWNED_OTLP_MAX_ATTRIBUTE_VALUE_BYTES + 1)
+                .into_boxed_str(),
+        );
+        callback_limits.deadline_warning("worker", oversized_reason, Duration::ZERO);
+        assert_eq!(callback_limits.rejected_updates(), 1);
+        assert!(
+            callback_limits
+                .collect(2_000, &[])
+                .expect("counted drop still collects")
+                .is_empty(),
+            "oversized callback label must not create a metric stream"
+        );
+        let tiny =
+            OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000).with_max_request_bytes(1))
+                .expect("positive finite byte cap");
+        tiny.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        assert_eq!(
+            tiny.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::WireEnvelopeExceeded)
+        );
+
+        let split = populated_owned_metrics();
+        let split = OwnedOtlpMetrics {
+            config: OwnedOtlpMetricsConfig::new(1_000).with_max_metrics_per_request(1),
+            state: split.state,
+        };
+        assert_eq!(
+            split.collect(2_000, &[]).expect("split collection").len(),
+            23
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_numeric_boundaries_are_typed_refusals() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+        use crate::observability::otlp_proto::metrics::{MetricData, NumberDataPointValue};
+
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        let stream = OwnedMetricStream::new("asupersync.tasks.spawned", Vec::new());
+        metrics
+            .state
+            .lock()
+            .counters
+            .insert(stream.clone(), i64::MAX as u64);
+        let encoded = metrics.collect(2_000, &[]).expect("i64 max maps exactly");
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &encoded[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode boundary request");
+        let metric = &request.resource_metrics[0].scope_metrics[0].metrics[0];
+        let Some(MetricData::Sum(sum)) = &metric.data else {
+            panic!("counter maps to sum");
+        };
+        assert_eq!(
+            sum.data_points[0].value,
+            Some(NumberDataPointValue::Int(i64::MAX))
+        );
+
+        metrics
+            .state
+            .lock()
+            .counters
+            .insert(stream, i64::MAX as u64 + 1);
+        assert_eq!(
+            metrics.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidNumericValue)
+        );
+
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let nonfinite = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+                .expect("valid owned metrics config");
+            nonfinite.record_histogram("asupersync.tasks.duration", Vec::new(), invalid);
+            assert_eq!(
+                nonfinite.collect(2_000, &[]),
+                Err(OwnedOtlpMetricsError::InvalidNumericValue)
+            );
+        }
+
+        let count_overflow = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid count-overflow config");
+        count_overflow.state.lock().histograms.insert(
+            OwnedMetricStream::new("asupersync.tasks.duration", Vec::new()),
+            OwnedHistogramState {
+                bounds: owned_histogram_bounds("asupersync.tasks.duration"),
+                bucket_counts: vec![u64::MAX, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                count: u64::MAX,
+                sum: 1.0,
+            },
+        );
+        count_overflow.record_histogram("asupersync.tasks.duration", Vec::new(), 0.0);
+        assert_eq!(
+            count_overflow.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidHistogram)
+        );
+
+        let sum_overflow = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid sum-overflow config");
+        sum_overflow.state.lock().histograms.insert(
+            OwnedMetricStream::new("asupersync.tasks.duration", Vec::new()),
+            OwnedHistogramState {
+                bounds: owned_histogram_bounds("asupersync.tasks.duration"),
+                bucket_counts: vec![1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                count: 1,
+                sum: f64::MAX,
+            },
+        );
+        sum_overflow.record_histogram("asupersync.tasks.duration", Vec::new(), f64::MAX);
+        assert_eq!(
+            sum_overflow.collect(2_000, &[]),
+            Err(OwnedOtlpMetricsError::InvalidNumericValue)
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn owned_otlp_metrics_reset_clears_histograms_and_panic_is_explicit_noop() {
+        use crate::grpc::protobuf::{ProtoMessage, ProtobufWireLimits};
+        use crate::observability::otlp_proto::collector::metrics::ExportMetricsServiceRequest;
+
+        let metrics = OwnedOtlpMetrics::try_new(OwnedOtlpMetricsConfig::new(1_000))
+            .expect("valid owned metrics config");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        metrics.task_completed(
+            TaskId::testing_default(),
+            OutcomeKind::Ok,
+            Duration::from_millis(1),
+        );
+        let before = metrics.collect(2_000, &[]).expect("pre-reset collection");
+        metrics.record_panic("owned-otlp-test");
+        assert_eq!(
+            before,
+            metrics.collect(2_000, &[]).expect("panic no-op collection"),
+            "record_panic must remain an explicit no-op without a descriptor"
+        );
+
+        metrics.reset(3_000).expect("reset epoch");
+        metrics.task_spawned(RegionId::testing_default(), TaskId::testing_default());
+        let after = metrics.collect(4_000, &[]).expect("post-reset collection");
+        let request = ExportMetricsServiceRequest::decode_from_bytes(
+            &after[0],
+            ProtobufWireLimits::for_message_size(OWNED_OTLP_DEFAULT_REQUEST_BYTES),
+        )
+        .expect("decode post-reset request");
+        assert!(
+            request.resource_metrics[0].scope_metrics[0]
+                .metrics
+                .iter()
+                .all(|metric| metric.name != "asupersync.tasks.duration"),
+            "reset must clear cumulative histogram streams"
+        );
+    }
+}

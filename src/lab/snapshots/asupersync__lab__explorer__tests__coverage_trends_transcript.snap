@@ -1,0 +1,32 @@
+---
+source: src/lab/explorer.rs
+assertion_line: 2097
+expression: transcript
+---
+{
+  "class_run_counts": {
+    "[FINGERPRINT_0]": 5,
+    "[FINGERPRINT_1]": 2,
+    "[FINGERPRINT_2]": 4,
+    "[FINGERPRINT_3]": 3,
+    "[FINGERPRINT_4]": 3,
+    "[FINGERPRINT_5]": 2,
+    "[FINGERPRINT_6]": 2,
+    "[FINGERPRINT_7]": 2,
+    "[FINGERPRINT_8]": 1,
+    "[FINGERPRINT_9]": 1
+  },
+  "equivalence_classes": 8,
+  "new_class_discoveries": 8,
+  "novelty_histogram": {
+    "0": 17,
+    "1": 8
+  },
+  "saturation": {
+    "existing_class_hits": 17,
+    "runs_since_last_new_class": 5,
+    "saturated": true,
+    "window": 10
+  },
+  "total_runs": 25
+}

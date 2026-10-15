@@ -1,0 +1,1238 @@
+{
+  "contract_version": "runtime-workload-corpus-v1",
+  "bundle_schema_version": "runtime-workload-bundle-v1",
+  "runner_schema_version": "runtime-workload-run-report-v1",
+  "bead_id": "asupersync-1508v.1.5",
+  "description": "Canonical replayable workload corpus and reproducibility bundle for runtime ascension baseline tracks.",
+  "runner_script": "scripts/run_runtime_workload_corpus.sh",
+  "structured_log_fields_required": [
+    "workload_id",
+    "scenario_id",
+    "seed",
+    "runtime_profile",
+    "workload_config_ref",
+    "artifact_path",
+    "replay_command"
+  ],
+  "runtime_profiles": [
+    {
+      "profile_id": "bench-release",
+      "description": "Release-mode benchmark runners with criterion output and perf gate artifacts."
+    },
+    {
+      "profile_id": "native-e2e",
+      "description": "Host integration suites that exercise runtime, protocol, and cancellation surfaces."
+    },
+    {
+      "profile_id": "lab-deterministic",
+      "description": "Pure deterministic lab or oracle-driven replay anchors."
+    },
+    {
+      "profile_id": "distributed-shadow",
+      "description": "Deterministic distributed harness and fault-script preview runs."
+    }
+  ],
+  "default_core_set": [
+    "AA01-WL-CPU-001",
+    "AA01-WL-CANCEL-001",
+    "AA01-WL-IO-001",
+    "AA01-WL-BURST-001",
+    "AA01-WL-TIMER-001",
+    "AA01-WL-FANIO-001",
+    "AA01-WL-DIST-001"
+  ],
+  "expansion_packs": [
+    {
+      "pack_id": "http-application-io",
+      "description": "Optional HTTP application-layer workload that extends the core I/O surface without changing the baseline denominator.",
+      "workload_ids": [
+        "AA01-WL-IO-HTTP-EX1"
+      ]
+    },
+    {
+      "pack_id": "agent-swarm-coordination-pressure",
+      "description": "Optional real multi-agent coordination pressure pack synthesized from redacted Agent Mail, Beads, bv, rch, git-frontier, and proof-artifact workload bundles without changing the baseline denominator.",
+      "baseline_denominator": false,
+      "source_contract": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+      "workload_ids": [
+        "ASWARM-WL-LOCK-001",
+        "ASWARM-WL-RCH-001",
+        "ASWARM-WL-DIRTY-001",
+        "ASWARM-WL-ARTIFACT-001",
+        "ASWARM-WL-FANOUT-001",
+        "ASWARM-WL-STALE-001",
+        "ASWARM-WL-LATENCY-001"
+      ]
+    }
+  ],
+  "coordination_workload_synthesis": {
+    "schema_version": "runtime-workload-coordination-synthesis-v1",
+    "pack_id": "agent-swarm-coordination-pressure",
+    "source_contract": "artifacts/agent_swarm_coordination_workload_contract_v1.json",
+    "source_schema_version": "agent-swarm-coordination-workload-bundle-v1",
+    "runner_mode": "scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack",
+    "rch_pressure_summary_fields": [
+      "queue_depth_bucket",
+      "max_queue_depth",
+      "proof_fanout_count",
+      "artifact_retrieval_tail_bucket",
+      "timeout_or_refusal_reasons",
+      "command_class_hashes"
+    ],
+    "baseline_denominator": false,
+    "required_scenario_families": [
+      "tracker_lock_contention",
+      "concurrent_rch_proofs",
+      "fail_closed_dirty_frontier",
+      "artifact_retrieval_tail",
+      "proof_runner_fanout",
+      "stale_in_progress_reclaim",
+      "coordination_latency_burst"
+    ],
+    "scenario_family_mapping": [
+      {
+        "family": "tracker_lock_contention",
+        "workload_id": "ASWARM-WL-LOCK-001",
+        "scenario_id": "agent-swarm.tracker-lock-contention",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-tracker-lock-contention",
+        "semantic_pressure": [
+          "metadata-lock-waiters",
+          "ready-backlog-from-serialized-claims",
+          "queue-residency-tail"
+        ],
+        "provenance_only_context": [
+          "hashed-lock-path",
+          "pseudonymized-holder-agent",
+          "thread-or-bead-id"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-LOCK-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "concurrent_rch_proofs",
+        "workload_id": "ASWARM-WL-RCH-001",
+        "scenario_id": "agent-swarm.concurrent-rch-proofs",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-concurrent-rch-proofs",
+        "semantic_pressure": [
+          "validation-fanout",
+          "remote-proof-queue-depth",
+          "artifact-retrieval-tail"
+        ],
+        "provenance_only_context": [
+          "redacted-worker-pool",
+          "hashed-proof-command",
+          "bead-id"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-RCH-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "fail_closed_dirty_frontier",
+        "workload_id": "ASWARM-WL-DIRTY-001",
+        "scenario_id": "agent-swarm.fail-closed-dirty-frontier",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-fail-closed-dirty-frontier",
+        "semantic_pressure": [
+          "admission-refusal",
+          "unsupported-dirty-frontier-count",
+          "operator-retry-pressure"
+        ],
+        "provenance_only_context": [
+          "path-hashes",
+          "dirty-path-count",
+          "redaction-verdict"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-DIRTY-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "artifact_retrieval_tail",
+        "workload_id": "ASWARM-WL-ARTIFACT-001",
+        "scenario_id": "agent-swarm.artifact-retrieval-tail",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-artifact-retrieval-tail",
+        "semantic_pressure": [
+          "artifact-fetch-fanout",
+          "result-materialization-tail",
+          "summary-index-pressure"
+        ],
+        "provenance_only_context": [
+          "artifact-kind",
+          "artifact-path-hash",
+          "source-bead-id"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-ARTIFACT-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "proof_runner_fanout",
+        "workload_id": "ASWARM-WL-FANOUT-001",
+        "scenario_id": "agent-swarm.proof-runner-fanout",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-proof-runner-fanout",
+        "semantic_pressure": [
+          "parallel-proof-launch",
+          "ack-free-notification-burst",
+          "ready-queue-burst"
+        ],
+        "provenance_only_context": [
+          "message-subject-hash",
+          "pseudonymized-sender",
+          "thread-id"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-FANOUT-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "stale_in_progress_reclaim",
+        "workload_id": "ASWARM-WL-STALE-001",
+        "scenario_id": "agent-swarm.stale-in-progress-reclaim",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-stale-in-progress-reclaim",
+        "semantic_pressure": [
+          "stale-work-requeue",
+          "tracker-priority-rebalance",
+          "operator-recovery-loop"
+        ],
+        "provenance_only_context": [
+          "pseudonymized-assignee",
+          "updated-at-bucket",
+          "dependency-count"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-STALE-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      },
+      {
+        "family": "coordination_latency_burst",
+        "workload_id": "ASWARM-WL-LATENCY-001",
+        "scenario_id": "agent-swarm.coordination-latency-burst",
+        "runtime_profile": "lab-deterministic",
+        "scheduler_evidence_input_id": "coordination-evidence-coordination-latency-burst",
+        "semantic_pressure": [
+          "ack-required-message-burst",
+          "coordination-round-trip-tail",
+          "operator-latency-amplification"
+        ],
+        "provenance_only_context": [
+          "message-id",
+          "thread-id",
+          "ack-required-flag"
+        ],
+        "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-LATENCY-001",
+        "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+        "expected_artifact_globs": [
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "target/workload-corpus/coordination-expansion/*/coordination-workload-synthesis-report.json"
+        ]
+      }
+    ],
+    "fixture_bundles": [
+      {
+        "fixture_id": "accepted-all-families",
+        "expected_status": "passed",
+        "bundle": {
+          "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+          "run_id": "coordination-runtime-fixture-accepted-all-families",
+          "event_schema_version": "agent-swarm-coordination-event-v1",
+          "generated_at": "2026-05-05T05:00:00Z",
+          "source_bundle_hash": "sha256:coordination-runtime-fixture-accepted-all-families",
+          "events": [
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "agent_mail",
+              "source_agent": "agent:fixture-alpha",
+              "source_thread_or_bead": "asupersync-qn8i0p.3",
+              "event_ts": "2026-05-05T05:00:01Z",
+              "stable_sequence": "000001",
+              "event_kind": "reservation_conflict",
+              "correlation_id": "fixture:tracker-lock",
+              "command_class": "coordination",
+              "workload_family": "tracker_lock_contention",
+              "queue_depth_or_lock_state": {
+                "holder_count": 2,
+                "state": "exclusive_conflict"
+              },
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "pseudonymized",
+              "source_hash": "sha256:fixture-tracker-lock",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "rch",
+              "source_agent": "agent:fixture-beta",
+              "source_thread_or_bead": "asupersync-qn8i0p.3",
+              "event_ts": "2026-05-05T05:00:02Z",
+              "stable_sequence": "000002",
+              "event_kind": "rch_job_queued",
+              "correlation_id": "fixture:rch-proof",
+              "command_class": "validation",
+              "workload_family": "concurrent_rch_proofs",
+              "queue_depth_or_lock_state": {
+                "queue_depth": 5,
+                "worker_pool": "redacted"
+              },
+              "file_frontier": {
+                "changed_paths_count": 1,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": [
+                  "sha256:path-proof"
+                ]
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "redacted",
+              "source_hash": "sha256:fixture-rch-proof",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "git_dirty_frontier",
+              "source_agent": "agent:fixture-git",
+              "source_thread_or_bead": "dirty-frontier",
+              "event_ts": "2026-05-05T05:00:03Z",
+              "stable_sequence": "000003",
+              "event_kind": "dirty_frontier_observed",
+              "correlation_id": "fixture:dirty-frontier",
+              "command_class": "git_state",
+              "workload_family": "fail_closed_dirty_frontier",
+              "queue_depth_or_lock_state": {},
+              "file_frontier": {
+                "changed_paths_count": 3,
+                "unsupported_dirty_paths_count": 1,
+                "path_hashes": [
+                  "sha256:path-a",
+                  "sha256:path-b",
+                  "sha256:path-c"
+                ]
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "pseudonymized",
+              "source_hash": "sha256:fixture-dirty-frontier",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "artifact_store",
+              "source_agent": "agent:fixture-artifact",
+              "source_thread_or_bead": "asupersync-qn8i0p.3",
+              "event_ts": "2026-05-05T05:00:04Z",
+              "stable_sequence": "000004",
+              "event_kind": "artifact_published",
+              "correlation_id": "fixture:artifact-tail",
+              "command_class": "artifact",
+              "workload_family": "artifact_retrieval_tail",
+              "queue_depth_or_lock_state": {},
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [
+                {
+                  "artifact_id": "fixture-summary",
+                  "path_hash": "sha256:artifact-summary",
+                  "kind": "json"
+                }
+              ],
+              "redaction_verdict": "metadata_only",
+              "source_hash": "sha256:fixture-artifact-tail",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "bv",
+              "source_agent": "agent:fixture-bv",
+              "source_thread_or_bead": "swarm-ops",
+              "event_ts": "2026-05-05T05:00:05Z",
+              "stable_sequence": "000005",
+              "event_kind": "robot_plan_snapshot",
+              "correlation_id": "fixture:proof-runner-fanout",
+              "command_class": "tracker",
+              "workload_family": "proof_runner_fanout",
+              "queue_depth_or_lock_state": {
+                "highest_impact": "asupersync-qn8i0p.3",
+                "total_actionable": 4
+              },
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "metadata_only",
+              "source_hash": "sha256:fixture-proof-runner-fanout",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "beads",
+              "source_agent": "agent:fixture-beads",
+              "source_thread_or_bead": "asupersync-stale-fixture",
+              "event_ts": "2026-05-05T05:00:06Z",
+              "stable_sequence": "000006",
+              "event_kind": "bead_status_changed",
+              "correlation_id": "fixture:stale-in-progress",
+              "command_class": "tracker",
+              "workload_family": "stale_in_progress_reclaim",
+              "queue_depth_or_lock_state": {
+                "dependency_count": 3,
+                "priority": 1,
+                "status": "in_progress"
+              },
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "pseudonymized",
+              "source_hash": "sha256:fixture-stale-in-progress",
+              "refusal_reason": ""
+            },
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-accepted-all-families",
+              "source_kind": "agent_mail",
+              "source_agent": "agent:fixture-latency",
+              "source_thread_or_bead": "asupersync-qn8i0p.3",
+              "event_ts": "2026-05-05T05:00:07Z",
+              "stable_sequence": "000007",
+              "event_kind": "message_acknowledged",
+              "correlation_id": "fixture:coordination-latency",
+              "command_class": "coordination",
+              "workload_family": "coordination_latency_burst",
+              "queue_depth_or_lock_state": {
+                "ack_required": true,
+                "body_retained": false
+              },
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "metadata_only",
+              "source_hash": "sha256:fixture-coordination-latency",
+              "refusal_reason": ""
+            }
+          ],
+          "duplicate_policy": {
+            "duplicate_count": 0,
+            "action": "dedupe_then_sort"
+          },
+          "redaction_report": {
+            "redacted_field_count": 1,
+            "pseudonymized_field_count": 3,
+            "metadata_only_field_count": 3,
+            "refused_event_count": 0,
+            "retained_field_summary": [
+              "event timing",
+              "queue depth",
+              "artifact kind",
+              "path hashes"
+            ]
+          },
+          "runtime_workload_expansion_pack": {
+            "pack_id": "agent-swarm-coordination-pressure",
+            "baseline_denominator": false,
+            "covered_families": [
+              "tracker_lock_contention",
+              "concurrent_rch_proofs",
+              "fail_closed_dirty_frontier",
+              "artifact_retrieval_tail",
+              "proof_runner_fanout",
+              "stale_in_progress_reclaim",
+              "coordination_latency_burst"
+            ]
+          }
+        }
+      },
+      {
+        "fixture_id": "refused-missing-scenario-dimensions",
+        "expected_status": "refused",
+        "bundle": {
+          "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+          "run_id": "coordination-runtime-fixture-missing-dimensions",
+          "event_schema_version": "agent-swarm-coordination-event-v1",
+          "generated_at": "2026-05-05T05:00:00Z",
+          "source_bundle_hash": "sha256:coordination-runtime-fixture-missing-dimensions",
+          "events": [
+            {
+              "schema_version": "agent-swarm-coordination-event-v1",
+              "run_id": "coordination-runtime-fixture-missing-dimensions",
+              "source_kind": "agent_mail",
+              "source_agent": "agent:fixture-alpha",
+              "source_thread_or_bead": "asupersync-qn8i0p.3",
+              "event_ts": "2026-05-05T05:00:01Z",
+              "stable_sequence": "000001",
+              "event_kind": "reservation_conflict",
+              "correlation_id": "fixture:tracker-lock-only",
+              "command_class": "coordination",
+              "workload_family": "tracker_lock_contention",
+              "queue_depth_or_lock_state": {
+                "holder_count": 1,
+                "state": "exclusive_conflict"
+              },
+              "file_frontier": {
+                "changed_paths_count": 0,
+                "unsupported_dirty_paths_count": 0,
+                "path_hashes": []
+              },
+              "artifact_refs": [],
+              "redaction_verdict": "pseudonymized",
+              "source_hash": "sha256:fixture-tracker-lock-only",
+              "refusal_reason": ""
+            }
+          ],
+          "duplicate_policy": {
+            "duplicate_count": 0,
+            "action": "dedupe_then_sort"
+          },
+          "redaction_report": {
+            "redacted_field_count": 0,
+            "pseudonymized_field_count": 1,
+            "metadata_only_field_count": 0,
+            "refused_event_count": 0,
+            "retained_field_summary": [
+              "lock state"
+            ]
+          },
+          "runtime_workload_expansion_pack": {
+            "pack_id": "agent-swarm-coordination-pressure",
+            "baseline_denominator": false,
+            "covered_families": [
+              "tracker_lock_contention"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "workloads": [
+    {
+      "workload_id": "AA01-WL-CPU-001",
+      "family": "cpu-heavy",
+      "scenario_id": "cpu-heavy.scheduler-capacity-baseline",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "bench-release",
+      "seed": "0xAA010201",
+      "config_ref": "scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/run_perf_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-CPU-001 RUNTIME_PROFILE=bench-release WORKLOAD_CONFIG_REF='scripts/run_perf_e2e.sh::phase0_baseline,scheduler_benchmark' ASUPERSYNC_SEED=0xAA010201 RCH_BIN=rch bash ./scripts/run_perf_e2e.sh --bench phase0_baseline --bench scheduler_benchmark --no-compare",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CPU-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CPU-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CPU-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "perf_report",
+          "kind": "json",
+          "path_glob": "target/perf-results/perf_*/report.json",
+          "required": true
+        },
+        {
+          "artifact_id": "perf_gate_events",
+          "kind": "ndjson",
+          "path_glob": "target/perf-results/perf_*/artifacts/gate_events.ndjson",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "criterion perf report",
+        "gate event log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-CANCEL-001",
+      "family": "cancellation-heavy",
+      "scenario_id": "cancel-heavy.single-region-storm",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xAA010202",
+      "config_ref": "tests/cancellation_stress_e2e.rs::cancel_storm_single_region",
+      "entrypoint_kind": "cargo-test",
+      "entrypoint_path": "tests/cancellation_stress_e2e.rs",
+      "entry_command": "WORKLOAD_ID=AA01-WL-CANCEL-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/cancellation_stress_e2e.rs::cancel_storm_single_region' TEST_SEED=0xAA010202 ASUPERSYNC_SEED=0xAA010202 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_cancel cargo test --test cancellation_stress_e2e cancel_storm_single_region -- --nocapture",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-CANCEL-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CANCEL-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-CANCEL-001/run.log",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "deterministic cancel-storm test log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-IO-001",
+      "family": "io-heavy",
+      "scenario_id": "io-heavy.transport-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010203",
+      "config_ref": "scripts/test_transport_e2e.sh::e2e_transport/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_transport_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-IO-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_transport_e2e.sh::e2e_transport/all_features' TEST_SEED=0xAA010203 RCH_BIN=rch bash ./scripts/test_transport_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "transport_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/transport/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "transport suite summary",
+        "transport suite log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-BURST-001",
+      "family": "bursty",
+      "scenario_id": "bursty.scheduler-wakeup-stress",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010204",
+      "config_ref": "scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+stress_tests",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_scheduler_wakeup_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-BURST-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_scheduler_wakeup_e2e.sh::scheduler_backoff+scheduler_lane_fairness+stress_tests' TEST_SEED=0xAA010204 SKIP_LOOM=1 RCH_BIN=rch bash ./scripts/test_scheduler_wakeup_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-BURST-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-BURST-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-BURST-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "scheduler_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/scheduler/*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "scheduler burst summary",
+        "stress log set",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-TIMER-001",
+      "family": "timer-heavy",
+      "scenario_id": "timer-heavy.timer-wheel-anchor",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xAA010205",
+      "config_ref": "tests/time_e2e.rs::test_timer_wheel_basic_operations",
+      "entrypoint_kind": "cargo-test",
+      "entrypoint_path": "tests/time_e2e.rs",
+      "entry_command": "WORKLOAD_ID=AA01-WL-TIMER-001 RUNTIME_PROFILE=lab-deterministic WORKLOAD_CONFIG_REF='tests/time_e2e.rs::test_timer_wheel_basic_operations' TEST_SEED=0xAA010205 ASUPERSYNC_SEED=0xAA010205 RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_workload_corpus_timer cargo test --test time_e2e test_timer_wheel_basic_operations -- --nocapture",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-TIMER-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-TIMER-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-TIMER-001/run.log",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "timer wheel replay log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-FANIO-001",
+      "family": "fan-out/fan-in",
+      "scenario_id": "fanio.messaging-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010206",
+      "config_ref": "scripts/test_messaging_e2e.sh::e2e_messaging/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_messaging_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-FANIO-001 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_messaging_e2e.sh::e2e_messaging/all_features' TEST_SEED=0xAA010206 RCH_BIN=rch bash ./scripts/test_messaging_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-FANIO-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-FANIO-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-FANIO-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "messaging_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/messaging/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "messaging suite summary",
+        "messaging suite log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-DIST-001",
+      "family": "distributed-preview",
+      "scenario_id": "distributed-preview.remote-trace-invariants",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "distributed-shadow",
+      "seed": "0xAA010207",
+      "config_ref": "scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_distributed_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-DIST-001 RUNTIME_PROFILE=distributed-shadow WORKLOAD_CONFIG_REF='scripts/test_distributed_e2e.sh::e2e_distributed+distributed_trace_remote_invariants' TEST_SEED=0xAA010207 RCH_BIN=rch bash ./scripts/test_distributed_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-DIST-001",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-DIST-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-DIST-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "distributed_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/distributed/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "distributed suite summary",
+        "distributed invariant log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "AA01-WL-IO-HTTP-EX1",
+      "family": "io-heavy",
+      "scenario_id": "io-heavy.http-suite",
+      "regime": "happy_path_throughput",
+      "runtime_profile": "native-e2e",
+      "seed": "0xAA010208",
+      "config_ref": "scripts/test_http_e2e.sh::http_e2e/all_features",
+      "entrypoint_kind": "script",
+      "entrypoint_path": "scripts/test_http_e2e.sh",
+      "entry_command": "WORKLOAD_ID=AA01-WL-IO-HTTP-EX1 RUNTIME_PROFILE=native-e2e WORKLOAD_CONFIG_REF='scripts/test_http_e2e.sh::http_e2e/all_features' TEST_SEED=0xAA010208 RCH_BIN=rch bash ./scripts/test_http_e2e.sh",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload AA01-WL-IO-HTTP-EX1",
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-HTTP-EX1/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/AA01-WL-IO-HTTP-EX1/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "http_summary",
+          "kind": "json",
+          "path_glob": "target/e2e-results/http/artifacts_*/summary.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "http suite summary",
+        "http suite log",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-LOCK-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "tracker_lock_contention",
+      "scenario_id": "agent-swarm.tracker-lock-contention",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00101",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::tracker_lock_contention",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-LOCK-001",
+      "semantic_pressure": [
+        "metadata-lock-waiters",
+        "ready-backlog-from-serialized-claims",
+        "queue-residency-tail"
+      ],
+      "provenance_only_context": [
+        "hashed-lock-path",
+        "pseudonymized-holder-agent",
+        "thread-or-bead-id"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-LOCK-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-LOCK-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle lock-conflict event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-RCH-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "concurrent_rch_proofs",
+      "scenario_id": "agent-swarm.concurrent-rch-proofs",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00102",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::concurrent_rch_proofs",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-RCH-001",
+      "semantic_pressure": [
+        "validation-fanout",
+        "remote-proof-queue-depth",
+        "artifact-retrieval-tail"
+      ],
+      "provenance_only_context": [
+        "redacted-worker-pool",
+        "hashed-proof-command",
+        "bead-id"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-RCH-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-RCH-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle rch queue event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-DIRTY-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "fail_closed_dirty_frontier",
+      "scenario_id": "agent-swarm.fail-closed-dirty-frontier",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00103",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::fail_closed_dirty_frontier",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-DIRTY-001",
+      "semantic_pressure": [
+        "admission-refusal",
+        "unsupported-dirty-frontier-count",
+        "operator-retry-pressure"
+      ],
+      "provenance_only_context": [
+        "path-hashes",
+        "dirty-path-count",
+        "redaction-verdict"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-DIRTY-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-DIRTY-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle dirty-frontier event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-ARTIFACT-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "artifact_retrieval_tail",
+      "scenario_id": "agent-swarm.artifact-retrieval-tail",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00104",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::artifact_retrieval_tail",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-ARTIFACT-001",
+      "semantic_pressure": [
+        "artifact-fetch-fanout",
+        "result-materialization-tail",
+        "summary-index-pressure"
+      ],
+      "provenance_only_context": [
+        "artifact-kind",
+        "artifact-path-hash",
+        "source-bead-id"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-ARTIFACT-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-ARTIFACT-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle artifact event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-FANOUT-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "proof_runner_fanout",
+      "scenario_id": "agent-swarm.proof-runner-fanout",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00105",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::proof_runner_fanout",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-FANOUT-001",
+      "semantic_pressure": [
+        "parallel-proof-launch",
+        "ack-free-notification-burst",
+        "ready-queue-burst"
+      ],
+      "provenance_only_context": [
+        "message-subject-hash",
+        "pseudonymized-sender",
+        "thread-id"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-FANOUT-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-FANOUT-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle proof-runner fanout event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-STALE-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "stale_in_progress_reclaim",
+      "scenario_id": "agent-swarm.stale-in-progress-reclaim",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00106",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::stale_in_progress_reclaim",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-STALE-001",
+      "semantic_pressure": [
+        "stale-work-requeue",
+        "tracker-priority-rebalance",
+        "operator-recovery-loop"
+      ],
+      "provenance_only_context": [
+        "pseudonymized-assignee",
+        "updated-at-bucket",
+        "dependency-count"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-STALE-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-STALE-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle stale-reclaim event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    },
+    {
+      "workload_id": "ASWARM-WL-LATENCY-001",
+      "family": "agent-swarm-coordination",
+      "coordination_family": "coordination_latency_burst",
+      "scenario_id": "agent-swarm.coordination-latency-burst",
+      "regime": "pathological_tail_or_failure",
+      "runtime_profile": "lab-deterministic",
+      "seed": "0xA5A00107",
+      "config_ref": "agent_swarm_coordination_workload_contract_v1::coordination_latency_burst",
+      "entrypoint_kind": "coordination-bundle-synthesis",
+      "entrypoint_path": "scripts/run_runtime_workload_corpus.sh",
+      "entry_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --synthesize-coordination-pack --coordination-fixture-id accepted-all-families --output-root target/workload-corpus --generated-at 2026-05-05T05:00:00Z",
+      "replay_command": "RCH_BIN=rch bash ./scripts/run_runtime_workload_corpus.sh --workload ASWARM-WL-LATENCY-001",
+      "semantic_pressure": [
+        "ack-required-message-burst",
+        "coordination-round-trip-tail",
+        "operator-latency-amplification"
+      ],
+      "provenance_only_context": [
+        "message-id",
+        "thread-id",
+        "ack-required-flag"
+      ],
+      "expected_artifacts": [
+        {
+          "artifact_id": "bundle_manifest",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-LATENCY-001/bundle_manifest.json",
+          "required": true
+        },
+        {
+          "artifact_id": "bundle_log",
+          "kind": "text",
+          "path_glob": "target/workload-corpus/run_*/ASWARM-WL-LATENCY-001/run.log",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_expansion_pack",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-workload-expansion-pack.json",
+          "required": true
+        },
+        {
+          "artifact_id": "coordination_scheduler_evidence_inputs",
+          "kind": "json",
+          "path_glob": "target/workload-corpus/coordination-expansion/*/coordination-scheduler-evidence-inputs.json",
+          "required": true
+        }
+      ],
+      "expected_evidence": [
+        "coordination bundle latency event",
+        "synthesized scheduler evidence input",
+        "bundle manifest"
+      ]
+    }
+  ]
+}

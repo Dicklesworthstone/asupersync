@@ -1,0 +1,27 @@
+{
+  "schema_version": "semantic-golden-fixture-v1",
+  "fixture_id": "golden-cancel-severity-map",
+  "rule_ids": ["def.cancel.reason_kinds", "def.cancel.severity_ordering"],
+  "description": "Expected severity for all 11 CancelKind variants",
+  "entries": [
+    { "kind": "User", "severity": 0, "tier": "graceful" },
+    { "kind": "Timeout", "severity": 1, "tier": "time-driven" },
+    { "kind": "Deadline", "severity": 1, "tier": "time-driven" },
+    { "kind": "PollQuota", "severity": 2, "tier": "budget-violation" },
+    { "kind": "CostBudget", "severity": 2, "tier": "budget-violation" },
+    { "kind": "FailFast", "severity": 3, "tier": "cascading" },
+    { "kind": "RaceLost", "severity": 3, "tier": "cascading" },
+    { "kind": "LinkedExit", "severity": 3, "tier": "cascading" },
+    { "kind": "ParentCancelled", "severity": 4, "tier": "cascading" },
+    { "kind": "ResourceUnavailable", "severity": 4, "tier": "cascading" },
+    { "kind": "Shutdown", "severity": 5, "tier": "urgent" }
+  ],
+  "invariants": [
+    "11 CancelKind variants are exhaustive",
+    "Severity range is 0..=5",
+    "Severity is monotone: strengthen(a, b) where b.severity > a.severity yields b",
+    "User is least severe; Shutdown is most severe",
+    "Timeout and Deadline share the same severity tier",
+    "PollQuota and CostBudget share the same severity tier"
+  ]
+}

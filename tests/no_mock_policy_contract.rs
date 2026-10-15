@@ -1,0 +1,518 @@
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn repo_path(path: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
+}
+
+fn term_mock() -> &'static str {
+    concat!("mo", "ck")
+}
+
+fn term_stub() -> &'static str {
+    concat!("st", "ub")
+}
+
+fn no_mock_text(suffix: &str) -> String {
+    format!("no-{}{}", term_mock(), suffix)
+}
+
+fn mock_code_finder_schema() -> String {
+    format!("{}-code-finder-evidence-jsonl-schema-v1", term_mock())
+}
+
+fn scenario_id(tail: &str) -> String {
+    format!("NO-{}-{tail}", term_mock().to_ascii_uppercase())
+}
+
+fn json_file(path: &str) -> Value {
+    let text = fs::read_to_string(repo_path(path)).expect("read json artifact");
+    serde_json::from_str(&text).expect("parse json artifact")
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("missing array field {key}"))
+}
+
+fn str_field<'a>(value: &'a Value, key: &str) -> &'a str {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("missing string field {key}"))
+}
+
+fn command_output(mut command: Command, label: &str) -> std::process::Output {
+    let output = command.output().unwrap_or_else(|error| {
+        panic!("run {label}: {error}");
+    });
+    assert!(
+        output.status.success(),
+        "{label} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+#[test]
+fn no_mock_policy_contract_records_before_after_intent() {
+    let contract = json_file("artifacts/no_mock_policy_contract_v1.json");
+    assert_eq!(
+        str_field(&contract, "contract_version"),
+        no_mock_text("-policy-contract-v1")
+    );
+    assert_eq!(str_field(&contract, "bead_id"), "asupersync-a45");
+    assert_eq!(
+        str_field(&contract, "schema_version"),
+        mock_code_finder_schema()
+    );
+    assert_eq!(
+        str_field(&contract, "aggregate_runner_bead"),
+        "asupersync-oelvq2"
+    );
+    assert_eq!(str_field(&contract, "final_ratchet_bead"), "asupersync-u7y");
+
+    assert_eq!(
+        contract.pointer("/baseline_before_counts/scan_counts/violating_paths"),
+        Some(&Value::from(294))
+    );
+    assert_eq!(
+        contract.pointer("/required_after_invariants/violating_paths"),
+        Some(&Value::from(0))
+    );
+
+    let scenario_ids: BTreeSet<String> = array(&contract, "required_scenarios")
+        .iter()
+        .map(|scenario| str_field(scenario, "scenario_id").to_owned())
+        .collect();
+    assert_eq!(
+        scenario_ids,
+        BTreeSet::from([
+            scenario_id("NEGATIVE-CONFORMANCE-LIVE"),
+            scenario_id("POLICY-FIXTURES-LIVE"),
+            scenario_id("POLICY-GATE-LIVE"),
+            format!(
+                "NO-{}-{}-SCAN-RATCHET-LIVE",
+                term_mock().to_ascii_uppercase(),
+                term_stub().to_ascii_uppercase()
+            ),
+        ])
+    );
+}
+
+#[test]
+fn no_mock_policy_metadata_is_actionable_and_not_overbroad() {
+    let policy = json_file(".github/no_mock_policy.json");
+    let contract = json_file("artifacts/no_mock_policy_contract_v1.json");
+    let forbidden: BTreeSet<(&str, &str)> = contract
+        .pointer("/required_after_invariants/forbidden_broad_allowlist_patterns")
+        .and_then(Value::as_array)
+        .expect("forbidden pattern list")
+        .iter()
+        .map(|row| (str_field(row, "category"), str_field(row, "pattern")))
+        .collect();
+
+    for section in ["allowlist_entries", "allowlist_groups", "waivers"] {
+        for entry in array(&policy, section) {
+            let category = str_field(entry, "category");
+            let patterns: Vec<&str> = if section == "allowlist_groups" {
+                array(entry, "patterns")
+                    .iter()
+                    .map(|value| value.as_str().expect("pattern is string"))
+                    .collect()
+            } else {
+                vec![
+                    entry
+                        .get("pattern")
+                        .or_else(|| entry.get("path"))
+                        .and_then(Value::as_str)
+                        .expect("entry pattern/path"),
+                ]
+            };
+
+            assert!(
+                entry
+                    .get("owner")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+                "{section} entry must include owner: {entry:?}"
+            );
+            assert!(
+                entry
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+                "{section} entry must include reason: {entry:?}"
+            );
+            assert!(
+                entry
+                    .get("expires_at_utc")
+                    .and_then(Value::as_str)
+                    .is_some()
+                    || entry
+                        .get("revisit_condition")
+                        .and_then(Value::as_str)
+                        .is_some(),
+                "{section} entry must include expiration or revisit condition: {entry:?}"
+            );
+            if matches!(
+                category,
+                "production_stub" | "conformance_placeholder" | "stale_audit_prose"
+            ) {
+                assert!(
+                    entry
+                        .get("replacement_issue")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.starts_with("asupersync-")),
+                    "{section} entry {category} must include replacement_issue: {entry:?}"
+                );
+            }
+            // Optional narrowing field (asupersync-pzfwf5): when present it must
+            // be a non-empty list of non-empty strings. A malformed value that
+            // was silently ignored would restore whole-file coverage without
+            // anything saying so, which is the exact failure this field exists
+            // to prevent. Regex validity is checked by the Python loader.
+            if let Some(justified) = entry.get("justified_text") {
+                let justified_patterns = justified.as_array().unwrap_or_else(|| {
+                    panic!("{section} justified_text must be an array: {entry:?}")
+                });
+                assert!(
+                    !justified_patterns.is_empty(),
+                    "{section} justified_text must be non-empty: {entry:?}"
+                );
+                for value in justified_patterns {
+                    assert!(
+                        value.as_str().is_some_and(|text| !text.is_empty()),
+                        "{section} justified_text entries must be non-empty strings: {entry:?}"
+                    );
+                }
+            }
+
+            for pattern in patterns {
+                assert!(
+                    !forbidden.contains(&(category, pattern)),
+                    "{section} contains forbidden broad coverage for {category} {pattern}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn no_mock_policy_lexical_exceptions_preserve_uncovered_production_hits() {
+    // Exercise the scanner's real coverage decision with the current source
+    // lines and an extra bad line on each path. The whole-tree gate below
+    // remains independent. PBFT warning markers retain an explicit unfinished
+    // production classification and owning issue; new gaps remain uncovered.
+    command_output(
+        {
+            let mut command = Command::new("python3");
+            command
+                .arg("-c")
+                .arg(
+                    r#"
+import datetime as dt
+import pathlib
+import runpy
+
+scanner = runpy.run_path("scripts/check_no_mock_policy.py")
+policy = scanner["load_policy"](pathlib.Path(".github/no_mock_policy.json"))
+paths = [
+    "src/grpc/client.rs",
+    "src/grpc/service.rs",
+    "src/net/atp/transport_rq/mod.rs",
+]
+pbft = "src/distributed/consensus/pbft.rs"
+scanned = scanner["run_scan"](paths + [pbft], policy["scan"]["terms"])
+hits, _, undetermined = scanner["partition_test_gated_hits"](scanned, pathlib.Path.cwd())
+for path in undetermined:
+    # An unresolved test boundary must retain every hit as production.
+    assert [hit for hit in hits if hit.path == path] == [
+        hit for hit in scanned if hit.path == path
+    ], path
+now = dt.datetime.now(dt.timezone.utc)
+
+def coverage(path, path_hits, selected_policy=policy):
+    category = scanner["classify_path"](path, selected_policy)
+    return scanner["coverage_for_path"](path, category, selected_policy, now, path_hits)
+
+without_exceptions = dict(policy)
+without_exceptions["allowlist_entries"] = [
+    entry for entry in policy["allowlist_entries"] if entry.get("pattern") not in paths
+]
+for path in paths:
+    path_hits = [hit for hit in hits if hit.path == path]
+    assert path_hits, path
+    status, entry = coverage(path, path_hits)
+    assert status == "allowlist" and entry.get("justified_text"), (path, status)
+    assert coverage(path, path_hits, without_exceptions)[0] == "violation", path
+    invented = scanner["Hit"](path, 0, 'return Ok("fake success");', ("fake",))
+    assert coverage(path, path_hits + [invented])[0] == "violation", path
+
+pbft_hits = [hit for hit in hits if hit.path == pbft]
+assert pbft_hits, "the documented unfinished PBFT path must remain visible"
+status, entry = coverage(pbft, pbft_hits)
+assert status == "allowlist" and entry.get("justified_text"), (pbft, status)
+assert entry["category"] == "production_stub", "PBFT is still unfinished production code"
+assert entry["replacement_issue"] == "asupersync-gap-snapshot-transport-swim-pbft-e6drlx"
+without_pbft = dict(policy)
+without_pbft["allowlist_entries"] = [
+    row for row in policy["allowlist_entries"] if row.get("pattern") != pbft
+]
+assert coverage(pbft, pbft_hits, without_pbft)[0] == "violation"
+invented_pbft = scanner["Hit"](pbft, 0, 'return Ok("fake success");', ("fake",))
+assert coverage(pbft, [invented_pbft])[0] == "violation", "new PBFT gaps must fail"
+assert coverage(pbft, pbft_hits + [invented_pbft])[0] == "violation"
+print(f"three lexical exceptions stay narrow; {len(pbft_hits)} live PBFT hits retain an unfinished-code owner")
+"#,
+                )
+                .current_dir(repo_path(""));
+            command
+        },
+        "lexical exception coverage and production negatives",
+    );
+}
+
+#[test]
+fn no_mock_policy_report_passes_and_keeps_categories_visible() {
+    let report_path = repo_path(&format!(
+        "target/{}-code-finder/asupersync-a45-contract-test",
+        term_mock()
+    ))
+    .join(std::process::id().to_string())
+    .join("policy-report.json");
+    command_output(
+        {
+            let mut command = Command::new("python3");
+            command
+                .arg("scripts/check_no_mock_policy.py")
+                .arg("--report-json")
+                .arg(&report_path)
+                .arg("--max-errors")
+                .arg("5")
+                .current_dir(repo_path(""));
+            command
+        },
+        "check_no_mock_policy.py",
+    );
+
+    let report_text = fs::read_to_string(&report_path).expect("read policy report");
+    let report: Value = serde_json::from_str(&report_text).expect("parse policy report");
+    assert_eq!(str_field(&report, "status"), "pass");
+    assert_eq!(str_field(&report, "first_failure_line"), "");
+    assert_eq!(
+        report.pointer("/scan_counts/violating_paths"),
+        Some(&Value::from(0))
+    );
+    assert_eq!(
+        report.pointer("/scan_counts/expired_entries"),
+        Some(&Value::from(0))
+    );
+    assert_eq!(
+        report.pointer("/scan_counts/expired_waivers"),
+        Some(&Value::from(0))
+    );
+
+    for category in [
+        "conformance_placeholder",
+        "fixture_reference_implementation",
+        "intentional_test_double",
+        "production_stub",
+        "stale_audit_prose",
+    ] {
+        let counts = report
+            .pointer(&format!("/category_counts/{category}"))
+            .unwrap_or_else(|| panic!("missing category counts for {category}"));
+        assert_eq!(
+            counts["violations"],
+            Value::from(0),
+            "{category} should have no undocumented paths"
+        );
+    }
+
+    // Every `.rs` file under `src/` must resolve unambiguously, because the
+    // scanner falls back to "treat the whole file as production" when it cannot
+    // determine a `#[cfg(test)]` region's extent. That fallback is the safe
+    // direction, but a file sitting in it is a file whose test doubles will keep
+    // being reported as production stubs. Fix the scanner, don't allowlist the
+    // file. Offending paths are listed by name in the report.
+    assert_eq!(
+        report.pointer("/scan_counts/test_gated_undetermined_paths"),
+        Some(&Value::from(0)),
+        "unresolved cfg(test) extents: {:?}",
+        report.pointer("/test_gated_undetermined_paths")
+    );
+    // Proves the cfg(test) classification is actually engaged on the real tree
+    // rather than silently short-circuiting to zero (asupersync-pzfwf5).
+    assert!(
+        report
+            .pointer("/scan_counts/test_gated_hits")
+            .and_then(Value::as_u64)
+            .is_some_and(|count| count > 0),
+        "cfg(test)-gated hits should be recognised and excluded from production categories"
+    );
+
+    let remaining = array(&report, "remaining_allowlist_entries");
+    // Was >= 250 before `#[cfg(test)]` awareness landed. Roughly 55 files whose
+    // only flagged lines lived in test modules stopped needing an allowlist
+    // entry at all, so the list shrank because the gate got more precise, not
+    // less covered. This bound is a smoke test that the accountability list is
+    // populated -- `violating_paths == 0` above is what proves coverage.
+    assert!(
+        remaining.len() >= 150,
+        "report should enumerate remaining intentional allowlist entries, got {}",
+        remaining.len()
+    );
+    for row in remaining {
+        assert!(
+            row.get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty()),
+            "allowlist row should carry reason: {row:?}"
+        );
+        assert!(
+            row.get("owner")
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.is_empty()),
+            "allowlist row should carry owner: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn no_mock_policy_self_tests_reject_new_fake_paths() {
+    command_output(
+        {
+            let mut command = Command::new("python3");
+            command
+                .arg("scripts/check_no_mock_policy.py")
+                .arg("--self-test-negative-fixture")
+                .current_dir(repo_path(""));
+            command
+        },
+        "negative conformance fixture",
+    );
+    command_output(
+        {
+            let mut command = Command::new("python3");
+            command
+                .arg("scripts/check_no_mock_policy.py")
+                .arg("--self-test-policy-fixtures")
+                .current_dir(repo_path(""));
+            command
+        },
+        "policy parser/classifier fixtures",
+    );
+}
+
+#[test]
+fn no_mock_policy_evidence_runner_emits_valid_jsonl_and_logs() {
+    let artifact_root = repo_path(&format!(
+        "target/{}-code-finder/asupersync-a45-contract-test",
+        term_mock()
+    ))
+    .join(std::process::id().to_string())
+    .join("evidence");
+    let output = command_output(
+        {
+            let mut command = Command::new("bash");
+            command
+                .arg("scripts/run_no_mock_policy_evidence.sh")
+                .env("STUB_SCAN_ARTIFACT_ROOT", &artifact_root)
+                .current_dir(repo_path(""));
+            command
+        },
+        "run_no_mock_policy_evidence.sh",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("NO_MOCK_POLICY_EVIDENCE jsonl="));
+    assert!(stderr.contains("NO_MOCK_POLICY_EVIDENCE summary="));
+
+    let jsonl_path = artifact_root.join(no_mock_text("-policy.jsonl"));
+    let jsonl = fs::read_to_string(&jsonl_path).expect("read evidence jsonl");
+    let mut scenario_ids = BTreeSet::new();
+    for line in jsonl.lines().filter(|line| !line.trim().is_empty()) {
+        let record: Value = serde_json::from_str(line).expect("parse evidence record");
+        assert_eq!(
+            str_field(&record, "schema_version"),
+            mock_code_finder_schema()
+        );
+        assert_eq!(str_field(&record, "bead_id"), "asupersync-a45");
+        assert_eq!(str_field(&record, "support_class"), "production_live");
+        assert_eq!(str_field(&record, "verdict"), "pass");
+        assert_eq!(str_field(&record, "evidence_quality"), "live");
+        assert_eq!(str_field(&record, "blocker_bead_id"), "");
+        // Provenance must be stated, never fabricated. RCH's synced worker tree
+        // is not a git repository, so the runner degrades to an explicit marker
+        // instead of aborting (br-asupersync-bq3c9g). Either form is acceptable;
+        // an empty or absent stamp is not.
+        let git_state = str_field(&record, "git_sha_or_tree_state");
+        assert!(
+            !git_state.is_empty(),
+            "record must state its provenance: {record:?}"
+        );
+        assert!(
+            git_state == "unavailable-not-a-git-repository"
+                || git_state
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_hexdigit()),
+            "provenance should be a git sha or the explicit unavailable marker, got {git_state:?}"
+        );
+        assert!(scenario_ids.insert(str_field(&record, "scenario_id").to_string()));
+        let output_artifact = str_field(&record, "output_artifact");
+        assert!(
+            Path::new(output_artifact).exists(),
+            "output artifact should exist: {output_artifact}"
+        );
+    }
+    assert_eq!(
+        scenario_ids,
+        BTreeSet::from([
+            scenario_id("NEGATIVE-CONFORMANCE-LIVE"),
+            scenario_id("POLICY-FIXTURES-LIVE"),
+            scenario_id("POLICY-GATE-LIVE"),
+            format!(
+                "NO-{}-{}-SCAN-RATCHET-LIVE",
+                term_mock().to_ascii_uppercase(),
+                term_stub().to_ascii_uppercase()
+            ),
+        ])
+    );
+
+    let summary_path = artifact_root.join(no_mock_text("-policy.summary.json"));
+    let summary_text = fs::read_to_string(summary_path).expect("read evidence summary");
+    let summary: Value = serde_json::from_str(&summary_text).expect("parse evidence summary");
+    let row = summary
+        .get(jsonl_path.to_string_lossy().as_ref())
+        .unwrap_or_else(|| panic!("summary missing row for {}", jsonl_path.display()));
+    assert_eq!(row["records"], 4);
+    assert_eq!(row["verdicts"]["pass"], 4);
+    assert_eq!(row["support_class"]["production_live"], 4);
+    assert_eq!(row["evidence_quality"]["live"], 4);
+
+    for log in [
+        no_mock_text("-policy.log"),
+        no_mock_text("-negative-fixture.log"),
+        no_mock_text("-policy-fixtures.log"),
+        format!("no-{}-{}-scan.log", term_mock(), term_stub()),
+    ] {
+        let path = artifact_root.join(log);
+        let metadata = fs::metadata(&path).unwrap_or_else(|error| {
+            panic!("read log metadata for {}: {error}", path.display());
+        });
+        assert!(
+            metadata.len() > 0,
+            "log should be nonempty: {}",
+            path.display()
+        );
+    }
+}

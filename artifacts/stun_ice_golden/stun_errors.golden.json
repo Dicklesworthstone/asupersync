@@ -1,0 +1,18 @@
+[
+  {
+    "error_type": "Timeout",
+    "message": "STUN server timeout"
+  },
+  {
+    "error_type": "InvalidResponse",
+    "message": "Invalid STUN response"
+  },
+  {
+    "error_type": "Protocol",
+    "message": "STUN protocol error: Binding error response"
+  },
+  {
+    "error_type": "Network",
+    "message": "Network error: Connection refused"
+  }
+]

@@ -1,0 +1,604 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://asupersync.local/schemas/appspec_v1_schema.json",
+  "schema_version": "asupersync.appspec.v1",
+  "title": "Asupersync Declarative AppSpec v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "name",
+    "services",
+    "resources",
+    "budgets",
+    "slo_hooks",
+    "supervision",
+    "observability",
+    "compatibility"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "asupersync.appspec.v1",
+      "description": "Fail-closed schema discriminator for AppSpec v1."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "services": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/service"
+      }
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/resource"
+      }
+    },
+    "budgets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/budget"
+      }
+    },
+    "slo_hooks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/slo_hook"
+      }
+    },
+    "supervision": {
+      "$ref": "#/$defs/supervision"
+    },
+    "observability": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/observability_sink"
+      }
+    },
+    "compatibility": {
+      "$ref": "#/$defs/compatibility"
+    }
+  },
+  "$defs": {
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "routes",
+        "actors",
+        "background_jobs",
+        "resources",
+        "budget",
+        "supervision_group"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "routes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/route"
+          }
+        },
+        "actors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/actor"
+          }
+        },
+        "background_jobs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/background_job"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "budget": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "supervision_group": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "method",
+        "path",
+        "handler",
+        "required_capabilities",
+        "budget",
+        "slo_hook"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "method": {
+          "enum": [
+            "GET",
+            "POST",
+            "PUT",
+            "PATCH",
+            "DELETE",
+            "HEAD",
+            "OPTIONS"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "handler": {
+          "type": "string",
+          "minLength": 1
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/required_capabilities"
+        },
+        "budget": {
+          "$ref": "#/$defs/nullable_name"
+        },
+        "slo_hook": {
+          "$ref": "#/$defs/nullable_name"
+        }
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "entrypoint",
+        "mailbox_capacity",
+        "required_capabilities",
+        "budget"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mailbox_capacity": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/required_capabilities"
+        },
+        "budget": {
+          "$ref": "#/$defs/nullable_name"
+        }
+      }
+    },
+    "background_job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "entrypoint",
+        "trigger",
+        "required_capabilities",
+        "budget",
+        "slo_hook"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "entrypoint": {
+          "type": "string",
+          "minLength": 1
+        },
+        "trigger": {
+          "$ref": "#/$defs/job_trigger"
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/required_capabilities"
+        },
+        "budget": {
+          "$ref": "#/$defs/nullable_name"
+        },
+        "slo_hook": {
+          "$ref": "#/$defs/nullable_name"
+        }
+      }
+    },
+    "job_trigger": {
+      "oneOf": [
+        {
+          "const": "startup"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "interval"
+          ],
+          "properties": {
+            "interval": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "every_ms"
+              ],
+              "properties": {
+                "every_ms": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "signal"
+          ],
+          "properties": {
+            "signal": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source"
+              ],
+              "properties": {
+                "source": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "capability",
+        "feature_flag"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "cpu",
+            "memory",
+            "timer",
+            "file_system",
+            "socket",
+            "database",
+            "message_bus",
+            "remote_node",
+            "browser_host"
+          ]
+        },
+        "capability": {
+          "$ref": "#/$defs/cx_capability"
+        },
+        "feature_flag": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/feature_flag"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "poll_quota",
+        "deadline_ms",
+        "io_bytes",
+        "memory_bytes"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "poll_quota": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "deadline_ms": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "io_bytes": {
+          "$ref": "#/$defs/nullable_u64"
+        },
+        "memory_bytes": {
+          "$ref": "#/$defs/nullable_u64"
+        }
+      },
+      "description": "At least one limit must be non-null; the Rust validator enforces this cross-field rule."
+    },
+    "slo_hook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "target",
+        "budget"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "latency",
+            "error_rate",
+            "throughput",
+            "saturation"
+          ]
+        },
+        "target": {
+          "type": "string",
+          "minLength": 1
+        },
+        "budget": {
+          "$ref": "#/$defs/nullable_name"
+        }
+      }
+    },
+    "supervision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_group",
+        "groups"
+      ],
+      "properties": {
+        "root_group": {
+          "type": "string",
+          "minLength": 1
+        },
+        "groups": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/supervision_group"
+          }
+        }
+      }
+    },
+    "supervision_group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "services",
+        "restart_policy"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "services": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "restart_policy": {
+          "enum": [
+            "stop",
+            "one_for_one",
+            "one_for_all"
+          ]
+        }
+      }
+    },
+    "observability_sink": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "kind",
+        "required_capabilities"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "trace",
+            "metrics",
+            "evidence"
+          ]
+        },
+        "required_capabilities": {
+          "$ref": "#/$defs/required_capabilities"
+        }
+      }
+    },
+    "required_capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cx_capabilities",
+        "feature_flags",
+        "resources"
+      ],
+      "properties": {
+        "cx_capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/cx_capability"
+          }
+        },
+        "feature_flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/feature_flag"
+          }
+        },
+        "resources": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "description": "Every route, actor, job, and sink must declare authority. Use cx_capabilities=[\"pure\"] only for explicitly effect-free code; Rust validation rejects pure combined with feature flags, resources, or other capabilities."
+    },
+    "cx_capability": {
+      "enum": [
+        "pure",
+        "spawn",
+        "time",
+        "io",
+        "net",
+        "trace",
+        "entropy",
+        "registry",
+        "remote",
+        "blocking",
+        "database",
+        "messaging",
+        "tls",
+        "quic",
+        "browser_host"
+      ]
+    },
+    "feature_flag": {
+      "enum": [
+        "native-runtime",
+        "wasm-runtime",
+        "browser-io",
+        "browser-trace",
+        "deterministic-mode",
+        "messaging-fabric",
+        "metrics",
+        "tracing-integration",
+        "sqlite",
+        "postgres",
+        "mysql",
+        "tls",
+        "tls-native-roots",
+        "tls-webpki-roots",
+        "quic",
+        "http3",
+        "kafka",
+        "io-uring",
+        "tokio-compat"
+      ]
+    },
+    "compatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fail_closed_unknown_fields",
+        "fail_closed_unknown_capabilities",
+        "future_schema_requires_new_version"
+      ],
+      "properties": {
+        "fail_closed_unknown_fields": {
+          "const": true
+        },
+        "fail_closed_unknown_capabilities": {
+          "const": true
+        },
+        "future_schema_requires_new_version": {
+          "const": true
+        }
+      }
+    },
+    "nullable_name": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullable_u64": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "no_claim_boundaries": [
+    "This schema does not compile AppSpec v1 into runtime regions; that belongs to the A2 compiler bead.",
+    "This schema does not prove any service handler exists or is cancel-correct.",
+    "This schema does not widen the existing AppSpec builder API or create a backwards-compatibility promise."
+  ]
+}

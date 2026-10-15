@@ -1,0 +1,64 @@
+---
+source: tests/raptorq_encoder_stability.rs
+assertion_line: 155
+expression: output1
+---
+EncoderOutput {
+    config: EncoderTestCase {
+        k: 50,
+        symbol_size: 64,
+        seed: 1111638594,
+        repair_count: 8,
+    },
+    source_symbols_hash: "b07ccaf76690a7df",
+    repair_symbols: [
+        RepairSymbolData {
+            esi: 50,
+            symbol_data_hex: "d393c1689223b58259953c4b343d53011e9e38cb0b129b07bbdcd3191ddd3825e0e49031586c1bd825b2fe4066fd802914dfffed19efaeef5e3b574c61d9bac3",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 51,
+            symbol_data_hex: "5da07a9314bc7a9b6fc5107affb74827bc047be34a53bd6b1ba3a1ae6072af736c655822bd3fa9ab5f359742574c3c9c2421a4d48e105a63e638d8bddf44b22b",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 52,
+            symbol_data_hex: "7419b487a7322d78e2b1cfad65215951458e93c7b5ae667f9c500b36f3c6ef5519bb360f8ebf0f4fedd6d3a291a877f7461d7d82c2a0294773a3f486df37dd0e",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 53,
+            symbol_data_hex: "7f89486b1c4178ead85138f6ed430389911a3fd123c62948eb6ed431291256aa8d8126e76c1159c5c39f3ca38ad4fd2f37493b185b768cc4016ef1c24727183f",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 54,
+            symbol_data_hex: "f2059dd2246e3eaecdae1afeab73fcabe12a17c69d17734e07a1693f57a7f32694dbe8df749bdc20c6ca2d9d29e0628e54399a8bbc226528561f0934525449d7",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 55,
+            symbol_data_hex: "a85abbe0d32cf2a524f724786dcae1a33e814c1c9118c4b3a2611f0590ba3eed4193d5289f52511940378d214bfbe74998418087a8c5d91a1fd24945360db61b",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 56,
+            symbol_data_hex: "5b47008ad191e46db921a9bdb8754383d93f6d166ce1f56076fe3b4e0d2695100dc5cfa5d20770c409bb8cf458d973fe50e05f73d7af5ec0ffebd64c8d8a1ce6",
+            symbol_length: 64,
+        },
+        RepairSymbolData {
+            esi: 57,
+            symbol_data_hex: "5efc8b4e33eeb3ec84a9a0ef9656367c51f456c73b5a196009fd7e03fe29734f487013039808bd9f429212d09c89919fe156eb087c96b90a36004d2f4fff960d",
+            symbol_length: 64,
+        },
+    ],
+    params_summary: {
+        "h": 10,
+        "k": 50,
+        "k_prime": 55,
+        "l": 78,
+        "s": 13,
+        "w": 67,
+    },
+}

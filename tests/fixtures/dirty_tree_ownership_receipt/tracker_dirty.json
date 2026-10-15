@@ -1,0 +1,29 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "BoldPlateau",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:56:00Z",
+        "path_pattern": ".beads/issues.jsonl",
+        "reason": "tracker closeout"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": ".beads/issues.jsonl",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  }
+}

@@ -1,0 +1,493 @@
+{
+  "schema_version": "browser-consumer-compatibility-matrix-v1",
+  "matrix_id": "browser_consumer_compatibility_matrix",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.3",
+  "reviewed_date": "2026-06-12",
+  "status": "browser_consumer_fixture_matrix_declared",
+  "source_artifacts": {
+    "readiness_matrix": "artifacts/browser_edition_readiness_matrix_v1.json",
+    "package_integrity_gate": "artifacts/browser_package_integrity_gate_v1.json",
+    "e2e_log_schema": "artifacts/wasm_e2e_log_schema_v1.json",
+    "human_report": "docs/browser_consumer_compatibility_matrix.md"
+  },
+  "decision_rules": {
+    "candidate_window_required": true,
+    "unsupported_skip_is_never_green": true,
+    "bridge_broker_and_preview_rows_do_not_promote_direct_runtime": true,
+    "required_failure_bundle_on_non_pass": true,
+    "promotion_effect": "block_browser_ga_on_required_consumer_failure"
+  },
+  "required_consumer_ids": [
+    "vite_vanilla_consumer",
+    "webpack_consumer",
+    "react_client_consumer",
+    "next_client_consumer",
+    "next_server_edge_bridge",
+    "dedicated_worker_consumer",
+    "service_worker_broker_consumer",
+    "shared_worker_coordinator_consumer",
+    "browser_native_message_stream_consumer",
+    "rust_browser_consumer_preview",
+    "unsupported_native_only_surfaces_guard"
+  ],
+  "consumer_matrix": [
+    {
+      "consumer_id": "vite_vanilla_consumer",
+      "display_name": "Vanilla / Vite browser consumer",
+      "readiness_surface_id": "vite_vanilla_consumer",
+      "package_name": "@asupersync/browser",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/vite-vanilla-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_vite_vanilla_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/vite_vanilla_consumer",
+        "summary_pattern": "target/e2e-results/vite_vanilla_consumer/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh"
+      ],
+      "no_claims": [
+        "does not prove service-worker direct runtime support",
+        "does not prove shared-worker direct runtime support"
+      ]
+    },
+    {
+      "consumer_id": "webpack_consumer",
+      "display_name": "Webpack browser consumer",
+      "readiness_surface_id": "webpack_consumer",
+      "package_name": "@asupersync/browser",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/webpack-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_webpack_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_webpack_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/webpack_consumer",
+        "summary_pattern": "target/e2e-results/webpack_consumer/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_webpack_consumer.sh"
+      ],
+      "no_claims": [
+        "does not prove Vite or React adapter behavior",
+        "does not prove browser host APIs outside the bundled fixture"
+      ]
+    },
+    {
+      "consumer_id": "react_client_consumer",
+      "display_name": "React client adapter consumer",
+      "readiness_surface_id": "react_client_adapter",
+      "package_name": "@asupersync/react",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/react-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_react_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_react_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/react_consumer",
+        "summary_pattern": "target/e2e-results/react_consumer/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_react_consumer.sh"
+      ],
+      "no_claims": [
+        "does not certify server rendering",
+        "does not promote non-browser React hosts"
+      ]
+    },
+    {
+      "consumer_id": "next_client_consumer",
+      "display_name": "Next client adapter consumer",
+      "readiness_surface_id": "next_client_adapter",
+      "package_name": "@asupersync/next",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/next-turbopack-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_next_turbopack_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/next_turbopack_consumer",
+        "summary_pattern": "target/e2e-results/next_turbopack_consumer/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh"
+      ],
+      "no_claims": [
+        "does not claim direct runtime in Next server components",
+        "does not claim direct runtime in Next edge route handlers"
+      ]
+    },
+    {
+      "consumer_id": "next_server_edge_bridge",
+      "display_name": "Next server and edge bridge guard",
+      "readiness_surface_id": "next_server_edge_bridge",
+      "package_name": "@asupersync/next",
+      "support_class": "bridge_only",
+      "direct_runtime_allowed": false,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/next-turbopack-consumer/app/api"
+      },
+      "runner": {
+        "script": "scripts/validate_next_turbopack_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/next_turbopack_consumer",
+        "summary_pattern": "target/e2e-results/next_turbopack_consumer/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "bridge_pass_no_direct_runtime",
+        "support_class_outcome": "bridge_only",
+        "promotion_effect": "bridge_claim_only_no_direct_runtime_promotion",
+        "green_for_ga": false
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh"
+      ],
+      "no_claims": [
+        "does not tunnel Browser Edition handles through server or edge routes",
+        "does not promote server or edge direct runtime support"
+      ]
+    },
+    {
+      "consumer_id": "dedicated_worker_consumer",
+      "display_name": "Dedicated worker browser consumer",
+      "readiness_surface_id": "dedicated_worker_runtime",
+      "package_name": "@asupersync/browser",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/dedicated-worker-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_dedicated_worker_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/dedicated_worker_consumer",
+        "summary_pattern": "target/e2e-results/dedicated_worker_consumer/<run_id>/summary.json",
+        "browser_run_pattern": "target/e2e-results/dedicated_worker_consumer/<run_id>/browser-run.json"
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+      ],
+      "no_claims": [
+        "does not prove service-worker direct runtime support",
+        "does not prove shared-worker direct runtime support"
+      ]
+    },
+    {
+      "consumer_id": "service_worker_broker_consumer",
+      "display_name": "Service-worker broker consumer",
+      "readiness_surface_id": "service_worker_broker",
+      "package_name": "@asupersync/browser",
+      "support_class": "broker_coordinator_only",
+      "direct_runtime_allowed": false,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/service-worker-broker-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_service_worker_broker_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_service_worker_broker_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/service_worker_broker_consumer",
+        "summary_pattern": "target/e2e-results/service_worker_broker_consumer/<run_id>/summary.json",
+        "browser_run_pattern": "target/e2e-results/service_worker_broker_consumer/<run_id>/browser-run.json"
+      },
+      "expected_outcome": {
+        "verdict": "broker_pass_no_direct_runtime",
+        "support_class_outcome": "broker_coordinator_only",
+        "promotion_effect": "broker_claim_only_no_direct_runtime_promotion",
+        "green_for_ga": false
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_service_worker_broker_consumer.sh"
+      ],
+      "no_claims": [
+        "does not promote service-worker direct runtime support",
+        "does not claim persistent host lifetime parity"
+      ]
+    },
+    {
+      "consumer_id": "shared_worker_coordinator_consumer",
+      "display_name": "SharedWorker coordinator consumer",
+      "readiness_surface_id": "shared_worker_coordinator",
+      "package_name": "@asupersync/browser",
+      "support_class": "broker_coordinator_only",
+      "direct_runtime_allowed": false,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/shared-worker-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_shared_worker_consumer.sh",
+        "command": "PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh",
+        "requires_rch": false,
+        "result_root": "target/e2e-results/shared_worker_consumer",
+        "summary_pattern": "target/e2e-results/shared_worker_consumer/<run_id>/summary.json",
+        "browser_run_pattern": "target/e2e-results/shared_worker_consumer/<run_id>/browser-run.json"
+      },
+      "expected_outcome": {
+        "verdict": "broker_pass_no_direct_runtime",
+        "support_class_outcome": "broker_coordinator_only",
+        "promotion_effect": "coordinator_claim_only_no_direct_runtime_promotion",
+        "green_for_ga": false
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "repro_commands": [
+        "PATH=/usr/bin:$PATH bash scripts/validate_shared_worker_consumer.sh"
+      ],
+      "no_claims": [
+        "does not promote shared-worker direct runtime support",
+        "does not claim durable shared host lifetime parity"
+      ]
+    },
+    {
+      "consumer_id": "browser_native_message_stream_consumer",
+      "display_name": "Browser-native message and stream helper consumer",
+      "readiness_surface_id": "browser_package_main_thread",
+      "package_name": "@asupersync/browser",
+      "support_class": "direct_runtime_supported",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/browser-native-message-stream-consumer"
+      },
+      "runner": {
+        "script": "scripts/run_browser_native_message_stream_evidence.sh",
+        "command": "bash scripts/run_browser_native_message_stream_evidence.sh",
+        "requires_rch": true,
+        "result_root": "target/browser-native-message-stream-evidence",
+        "summary_pattern": "target/browser-native-message-stream-evidence/run_<run_id>/run_report.json",
+        "browser_run_pattern": "target/browser-native-message-stream-evidence/run_<run_id>/browser-run.json"
+      },
+      "expected_outcome": {
+        "verdict": "pass",
+        "support_class_outcome": "direct_runtime_supported",
+        "promotion_effect": "eligible_for_browser_ga_when_b1_b2_b3_same_window_pass",
+        "green_for_ga": true
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["schema_version", "status", "commands", "artifacts"]
+      },
+      "repro_commands": [
+        "bash scripts/run_browser_native_message_stream_evidence.sh --dry-run",
+        "bash scripts/run_browser_native_message_stream_evidence.sh"
+      ],
+      "no_claims": [
+        "does not prove native TCP, filesystem, process, or signal support",
+        "does not replace package integrity or ABI gates"
+      ]
+    },
+    {
+      "consumer_id": "rust_browser_consumer_preview",
+      "display_name": "Rust browser RuntimeBuilder preview consumer",
+      "readiness_surface_id": "rust_runtime_builder_browser_preview",
+      "package_name": "asupersync",
+      "support_class": "preview_public_lane",
+      "direct_runtime_allowed": true,
+      "fixture": {
+        "kind": "consumer_fixture",
+        "path": "tests/fixtures/rust-browser-consumer"
+      },
+      "runner": {
+        "script": "scripts/validate_rust_browser_consumer.sh",
+        "command": "RCH_REQUIRE_REMOTE=1 bash scripts/validate_rust_browser_consumer.sh",
+        "requires_rch": true,
+        "result_root": "target/e2e-results/rust_browser_consumer",
+        "summary_pattern": "target/e2e-results/rust_browser_consumer/<run_id>/summary.json",
+        "browser_run_pattern": "target/e2e-results/rust_browser_consumer/<run_id>/browser-run.json"
+      },
+      "expected_outcome": {
+        "verdict": "preview_pass_no_stable_promotion",
+        "support_class_outcome": "preview_public_lane",
+        "promotion_effect": "preview_evidence_only_no_js_ts_ga_promotion",
+        "green_for_ga": false
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["schema_version", "scenario_id", "run_id", "status", "checks"]
+      },
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 bash scripts/validate_rust_browser_consumer.sh"
+      ],
+      "no_claims": [
+        "does not promote the Rust browser runtime lane from preview to stable",
+        "does not claim native-thread runtime semantics on wasm32"
+      ]
+    },
+    {
+      "consumer_id": "unsupported_native_only_surfaces_guard",
+      "display_name": "Unsupported native-only browser surface guard",
+      "readiness_surface_id": "unsupported_native_only_surfaces",
+      "package_name": "native asupersync or explicit bridge only",
+      "support_class": "impossible_unsupported",
+      "direct_runtime_allowed": false,
+      "fixture": {
+        "kind": "contract_fixture",
+        "path": "tests/wasm_browser_support_boundary_contract.rs"
+      },
+      "runner": {
+        "script": "tests/wasm_browser_support_boundary_contract.rs",
+        "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_support_boundary cargo test -p asupersync --test wasm_browser_support_boundary_contract -- --nocapture",
+        "requires_rch": true,
+        "result_root": "target/e2e-results/browser_support_boundary",
+        "summary_pattern": "target/e2e-results/browser_support_boundary/<run_id>/summary.json",
+        "browser_run_pattern": null
+      },
+      "expected_outcome": {
+        "verdict": "skip_fail_closed",
+        "support_class_outcome": "impossible_unsupported",
+        "promotion_effect": "unsupported_capability_remains_blocked",
+        "green_for_ga": false
+      },
+      "structured_outputs": {
+        "summary_json_required": true,
+        "event_log_schema": "wasm-e2e-log-schema-v1",
+        "failure_bundle_required_on_non_pass": true,
+        "required_summary_fields": ["scenario_id", "timestamp", "fixture", "status", "checks"]
+      },
+      "skip_policy": {
+        "skip_allowed": true,
+        "skip_reason_code": "unsupported_native_only_surface",
+        "skip_is_green": false
+      },
+      "repro_commands": [
+        "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_support_boundary cargo test -p asupersync --test wasm_browser_support_boundary_contract -- --nocapture"
+      ],
+      "no_claims": [
+        "does not claim browser raw TCP, filesystem, process, signal, or native DB parity",
+        "does not hide unsupported capabilities behind compatibility shims"
+      ]
+    }
+  ],
+  "failure_bundle_fixture": "tests/fixtures/browser_consumer_compatibility_matrix/failure_bundles.json",
+  "validation_commands": [
+    {
+      "id": "browser-consumer-compatibility-matrix-contract",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_consumer_compatibility_matrix cargo test -p asupersync --test browser_consumer_compatibility_matrix_contract -- --nocapture",
+      "resource_envelope": "remote-required",
+      "proves": "B3 matrix schema, readiness-matrix alignment, fixture/script path resolution, failure-bundle shape, skip semantics, and no-claim boundaries"
+    },
+    {
+      "id": "browser-consumer-fixture-execution-window",
+      "command": "Run each row's repro_commands in the same candidate window after package artifacts are built; collect each row's summary_pattern and failure bundle on non-pass.",
+      "resource_envelope": "mixed_browser_and_package_tooling",
+      "proves": "actual consumer fixtures executed for the same Browser Edition candidate; skipped unsupported capabilities stay fail-closed instead of green"
+    }
+  ],
+  "no_claim_boundaries": [
+    "does_not_execute_npm_publish",
+    "does_not_prove_broad_workspace_health",
+    "does_not_promote_preview_rust_browser_runtime_to_stable",
+    "does_not_promote_service_worker_or_shared_worker_direct_runtime",
+    "does_not_claim_native_only_browser_capability_parity",
+    "does_not_replace_b1_readiness_or_b2_package_integrity_gates"
+  ]
+}

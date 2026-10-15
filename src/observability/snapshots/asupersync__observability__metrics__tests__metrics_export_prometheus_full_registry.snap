@@ -1,0 +1,21 @@
+---
+source: src/observability/metrics.rs
+expression: metrics.export_prometheus()
+---
+# TYPE requests_total counter
+requests_total 11
+# TYPE memory_usage_bytes gauge
+memory_usage_bytes 4096
+# TYPE latency_seconds histogram
+latency_seconds_bucket{le="0.5"} 1
+latency_seconds_bucket{le="1"} 2
+latency_seconds_bucket{le="5"} 3
+latency_seconds_bucket{le="+Inf"} 3
+latency_seconds_sum 4.5
+latency_seconds_count 3
+# TYPE request_size_bytes summary
+request_size_bytes{quantile="0.5"} 512
+request_size_bytes{quantile="0.9"} 2048
+request_size_bytes{quantile="0.99"} 2048
+request_size_bytes_sum 3968
+request_size_bytes_count 5

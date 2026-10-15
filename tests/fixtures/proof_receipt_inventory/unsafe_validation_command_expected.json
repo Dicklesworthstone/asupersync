@@ -1,0 +1,139 @@
+{
+  "agent": "CoralGorge",
+  "capabilities": [
+    {
+      "active_helper_count": 1,
+      "canonical_helper": "local-cargo-proof-receipt",
+      "capability_id": "proof-lane-routing",
+      "draft_helper_count": 0,
+      "duplicate_active_count": 0,
+      "helper_count": 1,
+      "needs_review": true,
+      "superseded_helper_count": 0
+    }
+  ],
+  "classification_counts": {
+    "canonical": 1
+  },
+  "current_date": "2026-05-08",
+  "generated_at": "2026-05-08T05:45:00Z",
+  "helpers": [
+    {
+      "bead_id": "",
+      "capability_id": "proof-lane-routing",
+      "classification": "canonical",
+      "commit": "6acfc0012345",
+      "fixture_root": "tests/fixtures/proof_runner",
+      "helper_id": "local-cargo-proof-receipt",
+      "owner": "CoralGorge",
+      "script_path": "scripts/proof_runner.py",
+      "status": "shipped",
+      "summary": "Proof helper advertises a local Cargo validation command that must not be cited by swarm agents.",
+      "superseded_by": "",
+      "test_path": "tests/proof_runner_contract.rs",
+      "validation": [
+        "cargo test -p asupersync --test proof_runner_contract",
+        "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_remote_required cargo test -p asupersync --test proof_receipt_inventory_contract",
+        "RCH_REQUIRE_REMOTE=1 RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_receipt_inventory cargo test -p asupersync --test proof_receipt_inventory_contract",
+        "echo rch exec --; cargo clippy -p asupersync --test proof_receipt_inventory_contract -- -D warnings",
+        "rch exec -- sh -c 'cargo test -p asupersync --test proof_receipt_inventory_contract'",
+        "rm -rf /tmp/asupersync-proof-cache",
+        "git reset --hard",
+        "git worktree add ../asupersync-proof-scratch"
+      ]
+    }
+  ],
+  "redaction_counts": {
+    "long_token": 0,
+    "secret": 0,
+    "token": 0,
+    "total": 0,
+    "url_query": 0
+  },
+  "repo_path": "/repo",
+  "review_cues": [
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "rm -rf /tmp/asupersync-proof-cache",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "forbidden-validation-command",
+      "recommendation": "remove forbidden destructive operations from validation commands and record a proof blocker instead",
+      "severity": "high",
+      "violation": "rm -rf"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "git reset --hard",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "forbidden-validation-command",
+      "recommendation": "remove forbidden destructive operations from validation commands and record a proof blocker instead",
+      "severity": "high",
+      "violation": "git reset --hard"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "git worktree add ../asupersync-proof-scratch",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "forbidden-validation-command",
+      "recommendation": "remove forbidden destructive operations from validation commands and record a proof blocker instead",
+      "severity": "high",
+      "violation": "git worktree add"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "RCH_ENV_ALLOWLIST=CARGO_TARGET_DIR rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_remote_required cargo test -p asupersync --test proof_receipt_inventory_contract",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "missing-remote-required-validation",
+      "recommendation": "prefix rch Cargo validation with RCH_REQUIRE_REMOTE=1 before citing this helper",
+      "severity": "high"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "cargo test -p asupersync --test proof_runner_contract",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "unsafe-validation-command",
+      "recommendation": "route Cargo validation through rch exec before citing this helper",
+      "severity": "high"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "echo rch exec --; cargo clippy -p asupersync --test proof_receipt_inventory_contract -- -D warnings",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "unsafe-validation-command",
+      "recommendation": "route Cargo validation through rch exec before citing this helper",
+      "severity": "high"
+    },
+    {
+      "capability_id": "proof-lane-routing",
+      "command": "rch exec -- sh -c 'cargo test -p asupersync --test proof_receipt_inventory_contract'",
+      "helper_id": "local-cargo-proof-receipt",
+      "kind": "unsafe-validation-command",
+      "recommendation": "route Cargo validation through rch exec before citing this helper",
+      "severity": "high"
+    }
+  ],
+  "safety": {
+    "agent_mail_mutated": false,
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "files_deleted": false,
+    "git_mutated": false,
+    "live_probe_performed": false,
+    "non_mutating": true,
+    "reads_fixture_only": true
+  },
+  "safety_notes": [
+    "fixture mode reads only the supplied inventory JSON",
+    "receipt does not inspect live Agent Mail, Beads, git, rch, or cargo state",
+    "review cues are advisory and require human or agent coordination before action"
+  ],
+  "schema_version": "proof-receipt-inventory-v1",
+  "source_counts": {
+    "capabilities": 1,
+    "duplicate_capabilities": 0,
+    "helpers": 1,
+    "review_cues": 7,
+    "superseded_helpers": 0
+  }
+}

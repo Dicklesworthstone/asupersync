@@ -1,0 +1,94 @@
+{
+  "schema_version": "wasm-typescript-type-model-policy-v1",
+  "description": "Deterministic TypeScript type-model contract for Browser Edition runtime semantics.",
+  "type_surface": {
+    "outcome_variants": ["ok", "err", "cancelled", "panicked"],
+    "cancellation_phase_order": ["requested", "cancelling", "finalizing", "completed"],
+    "required_types": [
+      "Outcome<T, E>",
+      "Budget",
+      "CancellationToken",
+      "CancellationPhase",
+      "RegionHandle",
+      "TaskHandle"
+    ]
+  },
+  "budget_contract": {
+    "required_fields": ["pollQuota", "deadlineMs", "priority", "cleanupQuota"],
+    "bounds": {
+      "pollQuota": {
+        "min": 1,
+        "max": 1000000
+      },
+      "deadlineMs": {
+        "min": 0,
+        "max": 86400000
+      },
+      "priority": {
+        "min": 0,
+        "max": 255
+      },
+      "cleanupQuota": {
+        "min": 0,
+        "max": 1000000
+      }
+    }
+  },
+  "ownership_contract": {
+    "required_handle_kinds": ["runtime", "scope", "task", "channel", "obligation"],
+    "required_invariants": [
+      "single_region_owner",
+      "no_orphan_tasks",
+      "region_close_implies_quiescence",
+      "no_obligation_leaks"
+    ]
+  },
+  "resolution_matrix": {
+    "required_frameworks": ["vanilla-ts", "react", "next"],
+    "scenarios": [
+      {
+        "id": "TS-TYPE-VANILLA",
+        "framework": "vanilla-ts",
+        "package_entrypoint": "@asupersync/browser",
+        "adapter_path": "none",
+        "runtime_profile": "FP-BR-DEV",
+        "repro_command": "pnpm --dir examples/browser/vanilla-ts typecheck",
+        "diagnostic_category": "type_model"
+      },
+      {
+        "id": "TS-TYPE-REACT",
+        "framework": "react",
+        "package_entrypoint": "@asupersync/react",
+        "adapter_path": "react/provider",
+        "runtime_profile": "FP-BR-DEV",
+        "repro_command": "pnpm --dir examples/browser/react typecheck",
+        "diagnostic_category": "type_model"
+      },
+      {
+        "id": "TS-TYPE-NEXT",
+        "framework": "next",
+        "package_entrypoint": "@asupersync/next",
+        "adapter_path": "next/app-router",
+        "runtime_profile": "FP-BR-DEV",
+        "repro_command": "pnpm --dir examples/browser/next typecheck",
+        "diagnostic_category": "type_model"
+      }
+    ]
+  },
+  "logging": {
+    "required_fields": [
+      "scenario_id",
+      "step_id",
+      "package_entrypoint",
+      "adapter_path",
+      "runtime_profile",
+      "diagnostic_category",
+      "repro_command",
+      "outcome"
+    ]
+  },
+  "output": {
+    "summary_path": "artifacts/wasm_typescript_type_model_summary.json",
+    "log_path": "artifacts/wasm_typescript_type_model_log.ndjson"
+  }
+}

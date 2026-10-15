@@ -1,0 +1,22 @@
+---
+source: src/record/task.rs
+expression: |-
+  scrub_task_record_ids(serde_json::to_value(record.cancel_witness().expect("cancel witness"))
+      .expect("serialize witness"))
+---
+{
+  "epoch": 1,
+  "phase": "Requested",
+  "reason": {
+    "cause": null,
+    "kind": "LinkedExit",
+    "message": "peer closed",
+    "origin_region": "[REGION_ID]",
+    "origin_task": "[TASK_ID]",
+    "timestamp": 44,
+    "truncated": false,
+    "truncated_at_depth": null
+  },
+  "region_id": "[REGION_ID]",
+  "task_id": "[TASK_ID]"
+}

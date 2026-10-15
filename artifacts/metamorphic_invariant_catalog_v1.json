@@ -1,0 +1,398 @@
+{
+  "contract_version": "metamorphic-invariant-catalog-v1",
+  "bead_id": "asupersync-pn8jzv",
+  "description": "Grep-able catalog of existing metamorphic invariants and their TransformFamily tags.",
+  "source_of_truth": {
+    "artifact": "artifacts/metamorphic_invariant_catalog_v1.json",
+    "contract_test": "tests/metamorphic_invariant_catalog_contract.rs",
+    "proof_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_metamorphic_invariant_catalog CARGO_BUILD_JOBS=2 cargo test -p asupersync --test metamorphic_invariant_catalog_contract -- --nocapture"
+  },
+  "catalog_rules": {
+    "transform_family_tag_prefix": "TransformFamily::",
+    "source_paths_are_repo_relative": true,
+    "source_markers_must_exist": true,
+    "risk_focus_must_be_nonempty": true
+  },
+  "transform_families": [
+    {
+      "tag": "TransformFamily::Backpressure",
+      "description": "Input pressure changes preserve explicit capacity and blocking semantics."
+    },
+    {
+      "tag": "TransformFamily::CancellationSafety",
+      "description": "Cancellation timing changes do not leak obligations, consume notifications, or lose committed values."
+    },
+    {
+      "tag": "TransformFamily::Equivalence",
+      "description": "Alternative API paths or operation orders produce equivalent externally visible results."
+    },
+    {
+      "tag": "TransformFamily::Causality",
+      "description": "Earlier lifecycle events constrain later observations, such as receiver subscription or channel closure."
+    },
+    {
+      "tag": "TransformFamily::Quiescence",
+      "description": "Closing scopes or regions implies all owned work has reached a terminal state."
+    },
+    {
+      "tag": "TransformFamily::Ordering",
+      "description": "Parent-child, FIFO, insertion, or priority ordering relationships remain stable under valid transforms."
+    },
+    {
+      "tag": "TransformFamily::LoserDrain",
+      "description": "Race or timeout losers are cancelled and drained before the winner surface returns."
+    },
+    {
+      "tag": "TransformFamily::Deadline",
+      "description": "Deadline placement changes preserve timeout/cancel precedence and boundary behavior."
+    },
+    {
+      "tag": "TransformFamily::Fairness",
+      "description": "Scheduler or lock contention transforms preserve bounded access and starvation freedom."
+    },
+    {
+      "tag": "TransformFamily::ResourceLeak",
+      "description": "Dropped or cancelled waiters do not remain in queues or affect later operations."
+    },
+    {
+      "tag": "TransformFamily::Exclusion",
+      "description": "Mutual exclusion and writer-preference properties hold under reader/writer contention transforms."
+    },
+    {
+      "tag": "TransformFamily::TemporalCoverage",
+      "description": "Virtual-time advancement transforms preserve due-work coverage and timer migration."
+    },
+    {
+      "tag": "TransformFamily::Replay",
+      "description": "Recording, replay, minimization, and compression preserve trace behavior or failure class."
+    },
+    {
+      "tag": "TransformFamily::Permutation",
+      "description": "Reordering independent events preserves analysis results while exposing dependence when present."
+    },
+    {
+      "tag": "TransformFamily::Priority",
+      "description": "Priority-lane transforms preserve relative throughput and admission guarantees."
+    },
+    {
+      "tag": "TransformFamily::CapabilityAttenuation",
+      "description": "Capability restriction transforms only reduce authority and preserve parent-child bounds."
+    },
+    {
+      "tag": "TransformFamily::Monotonicity",
+      "description": "State transitions such as generation or budget progression move in one direction."
+    },
+    {
+      "tag": "TransformFamily::Reversibility",
+      "description": "Acquire/release or encode/decode pairs return observable state to the original projection."
+    }
+  ],
+  "invariants": [
+    {
+      "invariant_id": "metamorphic.channel.mpsc.backpressure",
+      "transform_family": "TransformFamily::Backpressure",
+      "property": "Bounded MPSC channels reject overflow and block reservations when full, while unbounded channels avoid spurious blocking.",
+      "source_paths": [
+        "tests/metamorphic/channel_mpsc.rs"
+      ],
+      "relation_markers": [
+        "mr1_bounded_channel_blocks_when_full",
+        "MR1: Bounded Channel Backpressure"
+      ],
+      "risk_focus": [
+        "missing backpressure",
+        "capacity violations"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.channel.mpsc.two_phase_cancel",
+      "transform_family": "TransformFamily::CancellationSafety",
+      "property": "Two-phase reserve/send preserves committed values when cancellation is injected around reservation boundaries.",
+      "source_paths": [
+        "tests/metamorphic/channel_mpsc.rs"
+      ],
+      "relation_markers": [
+        "mr2_two_phase_cancel_safety",
+        "Two-Phase Cancel Safety"
+      ],
+      "risk_focus": [
+        "data loss on cancellation",
+        "obligation leak"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.channel.oneshot.reserve_send_equivalence",
+      "transform_family": "TransformFamily::Equivalence",
+      "property": "Oneshot direct send and reserve-send paths produce equivalent receiver observations and disconnection values.",
+      "source_paths": [
+        "tests/metamorphic/channel_oneshot.rs"
+      ],
+      "relation_markers": [
+        "mr6_reserve_send_equivalence",
+        "Reserve-Send vs Direct-Send Equivalence"
+      ],
+      "risk_focus": [
+        "reserve/direct API drift",
+        "returned value mismatch"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.channel.broadcast.subscribe_after_send",
+      "transform_family": "TransformFamily::Causality",
+      "property": "Receivers that subscribe after a send observe only subsequent values, while active receivers keep prior delivery guarantees.",
+      "source_paths": [
+        "tests/metamorphic/channel_broadcast.rs"
+      ],
+      "relation_markers": [
+        "mr5_subscribe_after_send_sees_only_subsequent_values",
+        "Subscribe-after-send sees only subsequent values"
+      ],
+      "risk_focus": [
+        "history leak to late subscribers",
+        "subscription boundary drift"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.region.close.blocks_until_children_complete",
+      "transform_family": "TransformFamily::Quiescence",
+      "property": "Region close waits for all spawned children to complete before close returns.",
+      "source_paths": [
+        "tests/metamorphic/region_quiescence.rs"
+      ],
+      "relation_markers": [
+        "mr1_region_close_blocks_until_children_complete",
+        "Orphan Prevention"
+      ],
+      "risk_focus": [
+        "orphan task",
+        "premature region close"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.region.nested_close_bottom_up",
+      "transform_family": "TransformFamily::Ordering",
+      "property": "Nested region closure is bottom-up: children close before parents complete.",
+      "source_paths": [
+        "tests/metamorphic/region_quiescence.rs"
+      ],
+      "relation_markers": [
+        "mr5_nested_regions_close_bottom_up",
+        "Bottom-Up Closure"
+      ],
+      "risk_focus": [
+        "parent closes before child",
+        "hierarchical quiescence drift"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.combinator.race.loser_drain",
+      "transform_family": "TransformFamily::LoserDrain",
+      "property": "Race losers are cancelled and drained before the race surface returns.",
+      "source_paths": [
+        "tests/metamorphic/combinator_race.rs"
+      ],
+      "relation_markers": [
+        "MR2: Loser drain",
+        "losers cancelled AND drained before race returns"
+      ],
+      "risk_focus": [
+        "undrained loser",
+        "region close hang"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.combinator.timeout.expiry_drains_inner",
+      "transform_family": "TransformFamily::Deadline",
+      "property": "Timeout expiry cancels and fully drains the inner future before reporting timeout.",
+      "source_paths": [
+        "tests/metamorphic/combinator_timeout.rs"
+      ],
+      "relation_markers": [
+        "mr2_timeout_expiry_cancels_and_drains_future",
+        "On timeout expiry"
+      ],
+      "risk_focus": [
+        "deadline race",
+        "inner future leak"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.sync.mutex.fifo_waiters",
+      "transform_family": "TransformFamily::Fairness",
+      "property": "Mutex waiter order is honored within a priority class under contention transforms.",
+      "source_paths": [
+        "tests/metamorphic/sync_mutex.rs"
+      ],
+      "relation_markers": [
+        "MR4: FIFO waiter ordering",
+        "waiter order honored within priority class"
+      ],
+      "risk_focus": [
+        "waiter starvation",
+        "queue reordering"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.sync.notify.dropped_futures_no_leak",
+      "transform_family": "TransformFamily::ResourceLeak",
+      "property": "Dropped Notify futures do not remain active waiters or consume later notifications.",
+      "source_paths": [
+        "tests/metamorphic/sync_notify.rs"
+      ],
+      "relation_markers": [
+        "mr5_dropped_futures_no_leak",
+        "dropped Notify futures do not leak"
+      ],
+      "risk_focus": [
+        "waiter leak",
+        "notification loss"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.sync.rwlock.writer_waiter_preference",
+      "transform_family": "TransformFamily::Exclusion",
+      "property": "A waiting writer blocks new readers while preserving mutual exclusion.",
+      "source_paths": [
+        "tests/metamorphic/sync_rwlock.rs"
+      ],
+      "relation_markers": [
+        "mr3_writer_waiter_blocks_new_readers",
+        "Writer-waiter blocks new readers"
+      ],
+      "risk_focus": [
+        "reader barging",
+        "writer starvation"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.time.wheel.no_missed_deadlines",
+      "transform_family": "TransformFamily::TemporalCoverage",
+      "property": "Advancing the virtual timer wheel covers every due slot without missing deadlines.",
+      "source_paths": [
+        "tests/metamorphic/time_wheel.rs"
+      ],
+      "relation_markers": [
+        "MR4: wheel advancement covers all due slots",
+        "no missed deadlines"
+      ],
+      "risk_focus": [
+        "lost timer",
+        "wheel level migration bug"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.trace.replay.deterministic",
+      "transform_family": "TransformFamily::Replay",
+      "property": "Trace replay is deterministic even when recorded executions contain variable delays.",
+      "source_paths": [
+        "tests/metamorphic/trace_replay.rs"
+      ],
+      "relation_markers": [
+        "metamorphic_trace_deterministic_replay",
+        "Replay is deterministic under variable delays"
+      ],
+      "risk_focus": [
+        "nondeterministic replay",
+        "trace projection drift"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.trace.dpor.equivalent_schedule_dedup",
+      "transform_family": "TransformFamily::Permutation",
+      "property": "Equivalent interleavings are deduplicated and produce consistent DPOR analysis.",
+      "source_paths": [
+        "tests/metamorphic/trace_dpor.rs"
+      ],
+      "relation_markers": [
+        "mr5_symmetry_reduction_identifies_equivalent_schedules",
+        "Equivalent interleavings should be deduplicated"
+      ],
+      "risk_focus": [
+        "schedule explosion",
+        "incorrect independence classification"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.scheduler.three_lane.priority_ratios",
+      "transform_family": "TransformFamily::Priority",
+      "property": "Three-lane scheduling preserves high >= normal >= low completion throughput under priority transforms.",
+      "source_paths": [
+        "tests/metamorphic/scheduler_fairness.rs"
+      ],
+      "relation_markers": [
+        "metamorphic_priority_throughput_ratios",
+        "Three-lane priority throughput ratios"
+      ],
+      "risk_focus": [
+        "priority inversion",
+        "lane weighting drift"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.cx.scope.monotonic_attenuation",
+      "transform_family": "TransformFamily::CapabilityAttenuation",
+      "property": "Capability attenuation cannot re-grant revoked authority and composes monotonically.",
+      "source_paths": [
+        "tests/metamorphic/cx_scope_attenuation.rs"
+      ],
+      "relation_markers": [
+        "mr2_attenuation_is_monotonic_cannot_regrant_revoked_capability",
+        "Monotonic attenuation"
+      ],
+      "risk_focus": [
+        "ambient authority regain",
+        "child scope privilege escalation"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.obligation.ledger.reset_generation_monotone",
+      "transform_family": "TransformFamily::Monotonicity",
+      "property": "Obligation ledger reset preserves next-generation monotonicity after all obligations resolve.",
+      "source_paths": [
+        "tests/metamorphic/obligation_ledger.rs"
+      ],
+      "relation_markers": [
+        "mr5_reset_preserves_next_gen_monotonicity",
+        "Reset preserves next_gen monotonicity"
+      ],
+      "risk_focus": [
+        "obligation id reuse",
+        "generation rollback"
+      ],
+      "proof_surface": "integration-test"
+    },
+    {
+      "invariant_id": "metamorphic.sync.semaphore.chunked_reversibility",
+      "transform_family": "TransformFamily::Reversibility",
+      "property": "Chunked semaphore acquire/release returns observable permit state to the initial projection regardless of release order.",
+      "source_paths": [
+        "tests/metamorphic/sync_semaphore.rs"
+      ],
+      "relation_markers": [
+        "chunked_acquire_release_reversibility",
+        "release order independence"
+      ],
+      "risk_focus": [
+        "permit leak",
+        "release-order sensitivity"
+      ],
+      "proof_surface": "integration-test"
+    }
+  ]
+}

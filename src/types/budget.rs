@@ -1,0 +1,2586 @@
+//! Budget type with product semiring semantics.
+//!
+//! Budgets constrain the resources available to a task or region:
+//!
+//! - **Deadline**: Absolute time by which work must complete
+//! - **Poll quota**: Maximum number of poll calls
+//! - **Cost quota**: Abstract cost units (for priority scheduling)
+//! - **Priority**: Scheduling priority (higher = more urgent)
+//!
+//! # Semiring Semantics
+//!
+//! Budgets form a product semiring with two key operations:
+//!
+//! | Operation | Deadline | Poll/Cost Quota | Priority |
+//! |-----------|----------|-----------------|----------|
+//! | `meet` (∧) | min (earlier wins) | min (tighter wins) | max (higher urgency wins) |
+//! | identity  | None (no deadline) | u32::MAX / None | 0 (identity for max) |
+//!
+//! The **meet** operation (`combine`/`meet`) computes the tightest constraints
+//! from two budgets. This is used when nesting regions or combining timeout
+//! requirements:
+//! [`Budget::new`] uses the ordinary scheduling default priority of 128; it is
+//! not the algebraic identity. [`Budget::INFINITE`] uses priority 0 so meeting
+//! it with any budget preserves that budget's priority.
+//!
+//! ```
+//! # use asupersync::Budget;
+//! # use asupersync::types::id::Time;
+//! assert_eq!(Budget::INFINITE.priority, 0);
+//! assert_eq!(Budget::INFINITE.meet(Budget::new()), Budget::new());
+//!
+//! let outer = Budget::new().with_deadline(Time::from_secs(30));
+//! let inner = Budget::new().with_deadline(Time::from_secs(10));
+//!
+//! // Inner timeout is tighter, so it wins
+//! let combined = outer.meet(inner);
+//! assert_eq!(combined.deadline, Some(Time::from_secs(10)));
+//! ```
+//!
+//! # HTTP Timeout Integration
+//!
+//! Budget maps directly to HTTP request timeout management. The pattern is:
+//!
+//! 1. Create a budget from the request timeout configuration
+//! 2. Attach it to the request's capability context (`Cx`)
+//! 3. All downstream operations inherit and respect the budget
+//! 4. When budget is exhausted, operations return `Outcome::Cancelled`
+//!
+//! Budget deadlines are absolute `Time` instants. Convert duration-style
+//! request timeouts with [`Budget::with_timeout`] at request start instead of
+//! passing a duration-shaped `Time` to [`Budget::with_deadline`].
+//!
+//! ## Example: Request Timeout Middleware
+//!
+//! ```ignore
+//! use asupersync::{Budget, Cx, Outcome, Time};
+//! use std::time::Duration;
+//!
+//! // Server configuration
+//! struct ServerConfig {
+//!     request_timeout: Duration,
+//! }
+//!
+//! // Middleware creates budget from config
+//! async fn timeout_middleware<B>(
+//!     req: Request<B>,
+//!     next: Next<B>,
+//!     config: &ServerConfig,
+//! ) -> Outcome<Response, TimeoutError> {
+//!     // Capture the current logical time from the runtime or lab clock.
+//!     let now = Time::from_secs(1_000);
+//!     let budget = Budget::new().with_timeout(now, config.request_timeout);
+//!
+//!     // Get or create Cx, attach budget
+//!     let cx = req.extensions()
+//!         .get::<Cx>()
+//!         .cloned()
+//!         .unwrap_or_else(Cx::new);
+//!     let cx = cx.with_budget(budget);
+//!
+//!     // All downstream operations now respect the timeout
+//!     match next.run_with_cx(req, &cx).await {
+//!         Outcome::Cancelled(reason) if reason.is_time_exceeded() => {
+//!             Outcome::Err(TimeoutError::RequestTimeout)
+//!         }
+//!         other => other,
+//!     }
+//! }
+//! ```
+//!
+//! ## Budget Propagation Through Regions
+//!
+//! Budget flows through the region tree, with each nested region inheriting
+//! and potentially tightening the parent's constraints:
+//!
+//! ```text
+//! Request Region (budget: 30s deadline)
+//! ├── DB Query Region
+//! │   └── Inherits 30s, operation takes 5s
+//! │       Budget remaining: 25s
+//! ├── External API Call
+//! │   └── Has own 10s timeout, meets with parent: min(25s, 10s) = 10s effective
+//! │       Budget remaining: ~15s after completion
+//! └── Response Serialization
+//!     └── Uses remaining ~15s budget
+//! ```
+//!
+//! ## Exhaustion Behavior
+//!
+//! When a budget is exhausted:
+//!
+//! | Resource | Trigger | Result |
+//! |----------|---------|--------|
+//! | Deadline | `now >= deadline` | `Outcome::Cancelled(CancelReason::deadline())` |
+//! | Poll quota | `poll_quota == 0` | `Outcome::Cancelled(CancelReason::budget())` |
+//! | Cost quota | `cost_quota == Some(0)` | `Outcome::Cancelled(CancelReason::budget())` |
+//!
+//! The runtime checks these conditions at scheduling points and propagates
+//! cancellation through the region tree. A task's deadline is also armed as a
+//! timer when the task is created, so a task parked in a cancel-aware wait
+//! (a channel receive, a lock, a semaphore) is cancelled with
+//! `CancelReason::deadline()` when the deadline passes, without waiting for a
+//! checkpoint it would never reach.
+//!
+//! # Creating Budgets
+//!
+//! ```
+//! # use asupersync::Budget;
+//! # use asupersync::types::id::Time;
+//! // Unlimited budget (default)
+//! let unlimited = Budget::unlimited();
+//!
+//! // With an absolute logical deadline
+//! let timed = Budget::with_deadline_at_secs(30);
+//!
+//! // With a relative timeout from the current logical time
+//! # use std::time::Duration;
+//! let now = Time::from_secs(1_000);
+//! let request = Budget::new().with_timeout(now, Duration::from_secs(30));
+//!
+//! // Builder pattern for multiple constraints
+//! let complex = Budget::new()
+//!     .with_deadline(Time::from_secs(30))
+//!     .with_poll_quota(1000)
+//!     .with_cost_quota(10_000)
+//!     .with_priority(200);
+//! ```
+
+use super::id::Time;
+use crate::tracing_compat::{info, trace};
+use core::fmt;
+use std::time::Duration;
+
+/// A budget constraining resource usage for a task or region.
+///
+/// Budgets form a product semiring for combination:
+/// - Deadlines/quotas use min (tighter wins)
+/// - Priority uses max (higher urgency wins)
+///
+/// # Choosing a deadline constructor
+///
+/// Absolute vs. relative time is the classic budget footgun. Pick from this
+/// table; the `at` / `timeout` words in the names mark the semantics:
+///
+/// | You have | You want | Use |
+/// |----------|----------|-----|
+/// | An absolute logical instant (`Time`) | deadline at that instant | [`with_deadline`](Self::with_deadline) |
+/// | An absolute instant in raw seconds/nanos | deadline at that instant | [`with_deadline_at_secs`](Self::with_deadline_at_secs) / [`with_deadline_at_ns`](Self::with_deadline_at_ns) |
+/// | `now` + a relative timeout | deadline replaced by `now + timeout` | [`with_timeout`](Self::with_timeout) |
+/// | `now` + a relative timeout | deadline tightened, never loosened | [`tightened_by_timeout`](Self::tightened_by_timeout) |
+/// | A `Cx` + a relative timeout | ambient budget tightened correctly | `Cx::budget_for_timeout` |
+///
+/// For deadline *propagation* across calls (HTTP → handler → DB), always use
+/// the tightening forms — replacing a deadline can silently extend it past
+/// the caller's bound.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Budget {
+    /// Absolute deadline by which work must complete.
+    pub deadline: Option<Time>,
+    /// Maximum number of poll operations.
+    pub poll_quota: u32,
+    /// Abstract cost quota (for advanced scheduling).
+    pub cost_quota: Option<u64>,
+    /// Scheduling priority (0 = lowest, 255 = highest).
+    pub priority: u8,
+}
+
+/// A point-in-time snapshot of the remaining headroom in a [`Budget`].
+///
+/// Produced by [`Budget::remaining`]. Every dimension uses `None` to mean
+/// "effectively unlimited" (no deadline configured, `u32::MAX` poll quota, or
+/// no cost quota), so callers never need to know the sentinel encodings.
+///
+/// The canonical use is adaptive control flow such as "do I have time for
+/// another retry?":
+///
+/// ```
+/// # use asupersync::Budget;
+/// # use asupersync::types::id::Time;
+/// # use std::time::Duration;
+/// # let budget = Budget::new().with_deadline(Time::from_secs(30));
+/// # let now = Time::from_secs(29);
+/// # let estimated_attempt = Duration::from_secs(5);
+/// let left = budget.remaining(now);
+/// let can_retry = left.deadline.is_none_or(|d| d > estimated_attempt);
+/// # assert!(!can_retry);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemainingBudget {
+    /// Time left until the deadline, or `None` if no deadline is set or the
+    /// deadline has already passed with no remaining time (see
+    /// [`Budget::remaining_time`] for the exact past-deadline semantics).
+    pub deadline: Option<Duration>,
+    /// Polls left, or `None` if effectively unlimited.
+    pub polls: Option<u32>,
+    /// Cost units left, or `None` if no cost quota is configured.
+    pub cost: Option<u64>,
+}
+
+impl Budget {
+    /// A budget with no constraints (infinite resources).
+    pub const INFINITE: Self = Self {
+        deadline: None,
+        poll_quota: u32::MAX,
+        cost_quota: None,
+        priority: 0,
+    };
+
+    /// A budget with zero resources (nothing allowed).
+    pub const ZERO: Self = Self {
+        deadline: Some(Time::ZERO),
+        poll_quota: 0,
+        cost_quota: Some(0),
+        priority: 255,
+    };
+
+    /// A minimal budget for cleanup operations.
+    ///
+    /// This provides a small poll quota (100 polls) for cleanup and finalizer code
+    /// to run, but no deadline or cost constraints. Used when requesting cancellation
+    /// to allow tasks a bounded cleanup phase.
+    pub const MINIMAL: Self = Self {
+        deadline: None,
+        poll_quota: 100,
+        cost_quota: None,
+        priority: 128,
+    };
+
+    /// Creates a new budget with default values (priority 128, unlimited quotas).
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            deadline: None,
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
+    }
+
+    /// Creates an unlimited budget (alias for [`INFINITE`](Self::INFINITE)).
+    ///
+    /// This is the identity element for the meet operation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::unlimited();
+    /// assert!(!budget.is_exhausted());
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn unlimited() -> Self {
+        Self::INFINITE
+    }
+
+    /// Creates a budget with only an absolute deadline constraint (in seconds).
+    ///
+    /// The `at` in the name is deliberate: the value is a logical instant
+    /// since the runtime epoch ("deadline AT t=30s"), not a timeout duration.
+    /// For a per-operation timeout, use [`with_timeout`](Self::with_timeout)
+    /// or [`tightened_by_timeout`](Self::tightened_by_timeout) with the
+    /// current logical time.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_at_secs(30);
+    /// assert_eq!(budget.deadline, Some(Time::from_secs(30)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn with_deadline_at_secs(secs: u64) -> Self {
+        Self {
+            deadline: Some(Time::from_secs(secs)),
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
+    }
+
+    /// Creates a budget with only an absolute deadline constraint (in nanoseconds).
+    ///
+    /// The `at` in the name is deliberate: the value is a logical instant
+    /// since the runtime epoch, not a timeout duration. For a per-operation
+    /// timeout, use [`with_timeout`](Self::with_timeout) or
+    /// [`tightened_by_timeout`](Self::tightened_by_timeout) with the current
+    /// logical time.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let budget = Budget::with_deadline_at_ns(30_000_000_000); // 30 seconds
+    /// assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn with_deadline_at_ns(nanos: u64) -> Self {
+        Self {
+            deadline: Some(Time::from_nanos(nanos)),
+            poll_quota: u32::MAX,
+            cost_quota: None,
+            priority: 128,
+        }
+    }
+
+    /// Sets the absolute logical deadline.
+    ///
+    /// The deadline is an instant, not a duration. For example,
+    /// `Time::from_secs(30)` means the runtime/lab clock value `30s`, not
+    /// "30 seconds from now". For relative per-operation timeouts, use
+    /// [`with_timeout`](Self::with_timeout).
+    #[inline]
+    #[must_use]
+    pub const fn with_deadline(mut self, deadline: Time) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Sets the deadline to `now + timeout`.
+    ///
+    /// Use this for request, RPC, database, and other per-operation timeout
+    /// budgets. The caller supplies `now` explicitly so production and lab
+    /// runtimes use the same deterministic time source.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(100);
+    /// let budget = Budget::new().with_timeout(now, Duration::from_secs(30));
+    ///
+    /// assert_eq!(budget.deadline, Some(Time::from_secs(130)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn with_timeout(mut self, now: Time, timeout: Duration) -> Self {
+        self.deadline = Some(now + timeout);
+        self
+    }
+
+    /// Tightens this budget with a relative timeout, never loosening it.
+    ///
+    /// Unlike [`with_timeout`](Self::with_timeout), which *replaces* any
+    /// existing deadline, this composes via [`meet`](Self::meet): the
+    /// resulting deadline is `min(existing_deadline, now + timeout)`. This is
+    /// the correct operation for deadline propagation — an outer 10s request
+    /// budget tightened by a 30s per-call timeout stays a 10s budget.
+    ///
+    /// All other dimensions (poll quota, cost quota, priority) are preserved.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(100);
+    ///
+    /// // Ambient deadline at t=110s; a 30s timeout must NOT loosen it.
+    /// let ambient = Budget::new().with_deadline(Time::from_secs(110));
+    /// let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+    /// assert_eq!(tightened.deadline, Some(Time::from_secs(110)));
+    ///
+    /// // No ambient deadline: the timeout becomes the deadline.
+    /// let open = Budget::new();
+    /// let bounded = open.tightened_by_timeout(now, Duration::from_secs(30));
+    /// assert_eq!(bounded.deadline, Some(Time::from_secs(130)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn tightened_by_timeout(self, now: Time, timeout: Duration) -> Self {
+        self.meet(Self::new().with_timeout(now, timeout))
+    }
+
+    /// Sets the poll quota.
+    #[inline]
+    #[must_use]
+    pub const fn with_poll_quota(mut self, quota: u32) -> Self {
+        self.poll_quota = quota;
+        self
+    }
+
+    /// Sets the cost quota.
+    #[inline]
+    #[must_use]
+    pub const fn with_cost_quota(mut self, quota: u64) -> Self {
+        self.cost_quota = Some(quota);
+        self
+    }
+
+    /// Sets the priority.
+    #[inline]
+    #[must_use]
+    pub const fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Returns true if the budget has been exhausted.
+    ///
+    /// This checks only poll and cost quotas, not deadline (which requires current time).
+    #[inline]
+    #[must_use]
+    pub const fn is_exhausted(&self) -> bool {
+        self.poll_quota == 0 || matches!(self.cost_quota, Some(0))
+    }
+
+    /// Returns true if the deadline has passed.
+    #[inline]
+    #[must_use]
+    pub fn is_past_deadline(&self, now: Time) -> bool {
+        self.deadline.is_some_and(|d| now >= d)
+    }
+
+    /// Decrements the poll quota by one, returning the old value.
+    ///
+    /// Returns `None` if already at zero.
+    #[inline]
+    pub fn consume_poll(&mut self) -> Option<u32> {
+        if self.poll_quota > 0 {
+            let old = self.poll_quota;
+            self.poll_quota -= 1;
+            trace!(
+                polls_remaining = self.poll_quota,
+                polls_consumed = 1,
+                "budget poll consumed"
+            );
+            if self.poll_quota == 0 {
+                info!(
+                    exhausted_resource = "polls",
+                    final_quota = 0,
+                    overage_amount = 0,
+                    "budget poll quota exhausted"
+                );
+            }
+            Some(old)
+        } else {
+            trace!(
+                polls_remaining = 0,
+                "budget poll consume failed: already exhausted"
+            );
+            None
+        }
+    }
+
+    /// Combines two budgets using product semiring semantics.
+    ///
+    /// - Deadlines: min (earlier wins)
+    /// - Quotas: min (tighter wins)
+    /// - Priority: max (higher urgency wins)
+    ///
+    /// This is also known as the "meet" operation (∧) in lattice terminology.
+    /// See also: [`meet`](Self::meet).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let outer = Budget::new()
+    ///     .with_deadline(Time::from_secs(30))
+    ///     .with_poll_quota(1000);
+    ///
+    /// let inner = Budget::new()
+    ///     .with_deadline(Time::from_secs(10))  // tighter
+    ///     .with_poll_quota(5000);              // looser
+    ///
+    /// let combined = outer.combine(inner);
+    /// assert_eq!(combined.deadline, Some(Time::from_secs(10))); // min
+    /// assert_eq!(combined.poll_quota, 1000);                    // min
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn combine(self, other: Self) -> Self {
+        let combined = self.combine_untraced(other);
+
+        // Trace when budget is tightened (any constraint becomes stricter)
+        // For deadline comparison, None means "no constraint" (least restrictive),
+        // so tightening occurs only when a finite deadline replaces None, or when
+        // one finite deadline is earlier than another.
+        let deadline_tightened = match (combined.deadline, self.deadline, other.deadline) {
+            (Some(c), Some(s), _) if c < s => true,
+            (Some(c), _, Some(o)) if c < o => true,
+            (Some(_), None, _) | (Some(_), _, None) => true,
+            _ => false,
+        };
+        let poll_tightened =
+            combined.poll_quota < self.poll_quota || combined.poll_quota < other.poll_quota;
+        let cost_tightened = match (combined.cost_quota, self.cost_quota, other.cost_quota) {
+            (Some(c), Some(s), _) if c < s => true,
+            (Some(c), _, Some(o)) if c < o => true,
+            (Some(_), None, _) | (Some(_), _, None) => true,
+            _ => false,
+        };
+        let priority_tightened =
+            combined.priority > self.priority || combined.priority > other.priority;
+
+        if deadline_tightened || poll_tightened || cost_tightened || priority_tightened {
+            trace!(
+                deadline_tightened,
+                poll_tightened,
+                cost_tightened,
+                self_deadline = ?self.deadline,
+                other_deadline = ?other.deadline,
+                combined_deadline = ?combined.deadline,
+                self_poll_quota = self.poll_quota,
+                other_poll_quota = other.poll_quota,
+                combined_poll_quota = combined.poll_quota,
+                self_cost_quota = ?self.cost_quota,
+                other_cost_quota = ?other.cost_quota,
+                combined_cost_quota = ?combined.cost_quota,
+                self_priority = self.priority,
+                other_priority = other.priority,
+                combined_priority = combined.priority,
+                "budget combined (tightened)"
+            );
+        }
+
+        combined
+    }
+
+    /// Callback-free product meet for code that already owns a runtime/Cx
+    /// lock. The public [`Self::combine`] wrapper emits observability events;
+    /// invoking it from a cancellation critical section would let a tracing
+    /// subscriber reenter the same lock.
+    #[inline]
+    #[must_use]
+    pub(crate) fn combine_untraced(self, other: Self) -> Self {
+        Self {
+            deadline: match (self.deadline, other.deadline) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
+                (None, None) => None,
+            },
+            poll_quota: self.poll_quota.min(other.poll_quota),
+            cost_quota: match (self.cost_quota, other.cost_quota) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (quota @ Some(_), None) | (None, quota @ Some(_)) => quota,
+                (None, None) => None,
+            },
+            priority: self.priority.max(other.priority),
+        }
+    }
+
+    /// Meet operation (∧) - alias for [`combine`](Self::combine).
+    ///
+    /// Computes the tightest constraints from two budgets. This is the
+    /// fundamental operation for nesting budget scopes.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// let parent = Budget::with_deadline_at_secs(30);
+    /// let child = Budget::with_deadline_at_secs(10);
+    ///
+    /// // Child deadline is tighter, so it wins
+    /// let effective = parent.meet(child);
+    /// assert_eq!(effective.deadline, Some(Time::from_secs(10)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn meet(self, other: Self) -> Self {
+        self.combine(other)
+    }
+
+    /// Consumes cost quota, returning `true` if successful.
+    ///
+    /// Returns `false` (and does not modify quota) if there isn't enough
+    /// remaining cost quota. If no cost quota is set, always succeeds.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let mut budget = Budget::new().with_cost_quota(100);
+    ///
+    /// assert!(budget.consume_cost(30));   // 70 remaining
+    /// assert!(budget.consume_cost(70));   // 0 remaining
+    /// assert!(!budget.consume_cost(1));   // fails, quota exhausted
+    /// ```
+    #[allow(clippy::used_underscore_binding)]
+    #[inline]
+    pub fn consume_cost(&mut self, cost: u64) -> bool {
+        match self.cost_quota {
+            None => {
+                trace!(
+                    cost_consumed = cost,
+                    cost_remaining = "unlimited",
+                    "budget cost consumed (unlimited)"
+                );
+                true // No quota means unlimited
+            }
+            Some(remaining) if remaining >= cost => {
+                let new_remaining = remaining - cost;
+                self.cost_quota = Some(new_remaining);
+                trace!(
+                    cost_consumed = cost,
+                    cost_remaining = new_remaining,
+                    "budget cost consumed"
+                );
+                if new_remaining == 0 {
+                    info!(
+                        exhausted_resource = "cost",
+                        final_quota = 0,
+                        overage_amount = 0,
+                        "budget cost quota exhausted"
+                    );
+                }
+                true
+            }
+            Some(remaining) => {
+                #[cfg(not(feature = "tracing-integration"))]
+                let _ = remaining;
+                trace!(
+                    cost_requested = cost,
+                    cost_remaining = remaining,
+                    "budget cost consume failed: insufficient quota"
+                );
+                false
+            }
+        }
+    }
+
+    /// Returns the remaining time until the deadline, if any.
+    ///
+    /// Returns `None` if there is no deadline or if the deadline has passed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let budget = Budget::with_deadline_at_secs(30);
+    /// let now = Time::from_secs(10);
+    ///
+    /// let remaining = budget.remaining_time(now);
+    /// assert_eq!(remaining, Some(Duration::from_secs(20)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn remaining_time(&self, now: Time) -> Option<Duration> {
+        self.deadline.and_then(|d| {
+            if now < d {
+                Some(Duration::from_nanos(
+                    d.as_nanos().saturating_sub(now.as_nanos()),
+                ))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Returns the remaining poll quota.
+    ///
+    /// Returns the current poll quota value. A value of `u32::MAX` indicates
+    /// effectively unlimited polls.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::new().with_poll_quota(100);
+    /// assert_eq!(budget.remaining_polls(), 100);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn remaining_polls(&self) -> u32 {
+        self.poll_quota
+    }
+
+    /// Returns the remaining cost quota, if any.
+    ///
+    /// Returns `None` if no cost quota is set (unlimited).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// let budget = Budget::new().with_cost_quota(1000);
+    /// assert_eq!(budget.remaining_cost(), Some(1000));
+    ///
+    /// let unlimited = Budget::unlimited();
+    /// assert_eq!(unlimited.remaining_cost(), None);
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn remaining_cost(&self) -> Option<u64> {
+        self.cost_quota
+    }
+
+    /// Returns a point-in-time snapshot of every remaining budget dimension.
+    ///
+    /// This aggregates [`remaining_time`](Self::remaining_time),
+    /// [`remaining_polls`](Self::remaining_polls), and
+    /// [`remaining_cost`](Self::remaining_cost) into one structure, mapping
+    /// "effectively unlimited" sentinel values to `None` so callers can write
+    /// `if let Some(left) = snapshot.polls` without knowing the sentinels.
+    ///
+    /// The snapshot is valid at the moment of the call only; quotas continue
+    /// to drain as the task runs.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let now = Time::from_secs(10);
+    /// let budget = Budget::new()
+    ///     .with_deadline(Time::from_secs(30))
+    ///     .with_poll_quota(100);
+    ///
+    /// let left = budget.remaining(now);
+    /// assert_eq!(left.deadline, Some(Duration::from_secs(20)));
+    /// assert_eq!(left.polls, Some(100));
+    /// assert_eq!(left.cost, None); // no cost quota configured
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn remaining(&self, now: Time) -> RemainingBudget {
+        RemainingBudget {
+            deadline: self.remaining_time(now),
+            polls: if self.poll_quota == u32::MAX {
+                None
+            } else {
+                Some(self.poll_quota)
+            },
+            cost: self.cost_quota,
+        }
+    }
+
+    /// Converts the deadline to a timeout duration from the given time.
+    ///
+    /// Returns the same value as [`remaining_time`](Self::remaining_time).
+    /// This method is provided for API compatibility with timeout-based systems.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use asupersync::Budget;
+    /// # use asupersync::types::id::Time;
+    /// # use std::time::Duration;
+    /// let budget = Budget::with_deadline_at_secs(30);
+    /// let now = Time::from_secs(5);
+    ///
+    /// // 25 seconds remaining
+    /// let timeout = budget.to_timeout(now);
+    /// assert_eq!(timeout, Some(Duration::from_secs(25)));
+    /// ```
+    #[inline]
+    #[must_use]
+    pub fn to_timeout(&self, now: Time) -> Option<Duration> {
+        self.remaining_time(now)
+    }
+}
+
+/// Resource dimension covered by a [`CapabilityBudget`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityBudgetDimension {
+    /// Resident memory in bytes.
+    MemoryBytes,
+    /// Abstract CPU units.
+    CpuUnits,
+    /// I/O bytes.
+    IoBytes,
+    /// Cleanup budget used by drain/finalizer paths.
+    Cleanup,
+    /// Bytes emitted as proof, trace, or evidence artifacts.
+    ArtifactBytes,
+}
+
+impl CapabilityBudgetDimension {
+    /// Stable lower-case identifier for logs and reports.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MemoryBytes => "memory_bytes",
+            Self::CpuUnits => "cpu_units",
+            Self::IoBytes => "io_bytes",
+            Self::Cleanup => "cleanup",
+            Self::ArtifactBytes => "artifact_bytes",
+        }
+    }
+}
+
+/// Required resource dimensions for fail-closed capability-budget admission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityBudgetRequirements {
+    /// Require a memory envelope.
+    pub memory_bytes: bool,
+    /// Require a CPU envelope.
+    pub cpu_units: bool,
+    /// Require an I/O envelope.
+    pub io_bytes: bool,
+    /// Require a cleanup envelope.
+    pub cleanup: bool,
+    /// Require an artifact-emission envelope.
+    pub artifact_bytes: bool,
+}
+
+impl CapabilityBudgetRequirements {
+    /// No resource dimensions are required.
+    pub const NONE: Self = Self {
+        memory_bytes: false,
+        cpu_units: false,
+        io_bytes: false,
+        cleanup: false,
+        artifact_bytes: false,
+    };
+
+    /// Creates an empty requirement set.
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::NONE
+    }
+
+    /// Requires a memory envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_memory_bytes(mut self) -> Self {
+        self.memory_bytes = true;
+        self
+    }
+
+    /// Requires a CPU envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_cpu_units(mut self) -> Self {
+        self.cpu_units = true;
+        self
+    }
+
+    /// Requires an I/O envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_io_bytes(mut self) -> Self {
+        self.io_bytes = true;
+        self
+    }
+
+    /// Requires a cleanup envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_cleanup(mut self) -> Self {
+        self.cleanup = true;
+        self
+    }
+
+    /// Requires an artifact-emission envelope.
+    #[inline]
+    #[must_use]
+    pub const fn require_artifact_bytes(mut self) -> Self {
+        self.artifact_bytes = true;
+        self
+    }
+}
+
+/// Fail-closed refusal for capability-budget planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilityBudgetRefusal {
+    /// A required resource dimension had no inherited or child-supplied limit.
+    MissingRequired(CapabilityBudgetDimension),
+    /// A required resource dimension was present but already exhausted.
+    Exhausted(CapabilityBudgetDimension),
+}
+
+impl fmt::Display for CapabilityBudgetRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingRequired(dimension) => {
+                write!(
+                    f,
+                    "required capability budget missing: {}",
+                    dimension.as_str()
+                )
+            }
+            Self::Exhausted(dimension) => {
+                write!(f, "capability budget exhausted: {}", dimension.as_str())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CapabilityBudgetRefusal {}
+
+/// Explicit resource envelope carried by capability contexts and regions.
+///
+/// `None` means no explicit envelope for that dimension. Admission can still
+/// fail closed by requiring dimensions with [`CapabilityBudgetRequirements`].
+/// Child envelopes inherit parent limits and can only tighten them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CapabilityBudget {
+    /// Resident memory envelope in bytes.
+    pub memory_bytes: Option<u64>,
+    /// Abstract CPU unit envelope.
+    pub cpu_units: Option<u64>,
+    /// I/O byte envelope.
+    pub io_bytes: Option<u64>,
+    /// Cleanup/drain budget envelope.
+    pub cleanup_budget: Option<Budget>,
+    /// Artifact-emission byte envelope.
+    pub artifact_bytes: Option<u64>,
+}
+
+impl CapabilityBudget {
+    /// No explicit resource envelopes.
+    pub const UNSPECIFIED: Self = Self {
+        memory_bytes: None,
+        cpu_units: None,
+        io_bytes: None,
+        cleanup_budget: None,
+        artifact_bytes: None,
+    };
+
+    /// Creates an empty capability budget.
+    #[inline]
+    #[must_use]
+    pub const fn new() -> Self {
+        Self::UNSPECIFIED
+    }
+
+    /// Sets the memory envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_memory_bytes(mut self, bytes: u64) -> Self {
+        self.memory_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the CPU envelope in abstract units.
+    #[inline]
+    #[must_use]
+    pub const fn with_cpu_units(mut self, units: u64) -> Self {
+        self.cpu_units = Some(units);
+        self
+    }
+
+    /// Sets the I/O envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_io_bytes(mut self, bytes: u64) -> Self {
+        self.io_bytes = Some(bytes);
+        self
+    }
+
+    /// Sets the cleanup/drain budget envelope.
+    #[inline]
+    #[must_use]
+    pub const fn with_cleanup_budget(mut self, budget: Budget) -> Self {
+        self.cleanup_budget = Some(budget);
+        self
+    }
+
+    /// Sets the artifact-emission envelope in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn with_artifact_bytes(mut self, bytes: u64) -> Self {
+        self.artifact_bytes = Some(bytes);
+        self
+    }
+
+    /// Combines parent and child capability budgets, keeping the tightest
+    /// envelope for each resource dimension.
+    #[inline]
+    #[must_use]
+    pub fn meet(self, child: Self) -> Self {
+        Self {
+            memory_bytes: meet_optional_u64(self.memory_bytes, child.memory_bytes),
+            cpu_units: meet_optional_u64(self.cpu_units, child.cpu_units),
+            io_bytes: meet_optional_u64(self.io_bytes, child.io_bytes),
+            cleanup_budget: match (self.cleanup_budget, child.cleanup_budget) {
+                (Some(parent), Some(child)) => Some(parent.meet(child)),
+                (budget @ Some(_), None) | (None, budget @ Some(_)) => budget,
+                (None, None) => None,
+            },
+            artifact_bytes: meet_optional_u64(self.artifact_bytes, child.artifact_bytes),
+        }
+    }
+
+    /// Computes the effective child envelope and rejects if required dimensions
+    /// are absent or exhausted.
+    ///
+    /// Use this before admitting a region/task group that needs explicit
+    /// resource envelopes. On success the returned budget is the value to carry
+    /// forward in the child `Cx` or region record.
+    #[inline]
+    pub fn plan_child(
+        self,
+        child: Self,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<Self, CapabilityBudgetRefusal> {
+        let effective = self.meet(child);
+        effective.validate(requirements)?;
+        Ok(effective)
+    }
+
+    /// Validates this budget against required resource dimensions.
+    #[inline]
+    pub fn validate(
+        self,
+        requirements: CapabilityBudgetRequirements,
+    ) -> Result<(), CapabilityBudgetRefusal> {
+        validate_required_u64(
+            CapabilityBudgetDimension::MemoryBytes,
+            self.memory_bytes,
+            requirements.memory_bytes,
+        )?;
+        validate_required_u64(
+            CapabilityBudgetDimension::CpuUnits,
+            self.cpu_units,
+            requirements.cpu_units,
+        )?;
+        validate_required_u64(
+            CapabilityBudgetDimension::IoBytes,
+            self.io_bytes,
+            requirements.io_bytes,
+        )?;
+        validate_required_cleanup(self.cleanup_budget, requirements.cleanup)?;
+        validate_required_u64(
+            CapabilityBudgetDimension::ArtifactBytes,
+            self.artifact_bytes,
+            requirements.artifact_bytes,
+        )
+    }
+}
+
+#[inline]
+const fn meet_optional_u64(parent: Option<u64>, child: Option<u64>) -> Option<u64> {
+    match (parent, child) {
+        (Some(parent), Some(child)) => Some(if parent < child { parent } else { child }),
+        (value @ Some(_), None) | (None, value @ Some(_)) => value,
+        (None, None) => None,
+    }
+}
+
+#[inline]
+fn validate_required_u64(
+    dimension: CapabilityBudgetDimension,
+    value: Option<u64>,
+    required: bool,
+) -> Result<(), CapabilityBudgetRefusal> {
+    if !required {
+        return Ok(());
+    }
+
+    match value {
+        None => Err(CapabilityBudgetRefusal::MissingRequired(dimension)),
+        Some(0) => Err(CapabilityBudgetRefusal::Exhausted(dimension)),
+        Some(_) => Ok(()),
+    }
+}
+
+#[inline]
+fn validate_required_cleanup(
+    budget: Option<Budget>,
+    required: bool,
+) -> Result<(), CapabilityBudgetRefusal> {
+    if !required {
+        return Ok(());
+    }
+
+    match budget {
+        None => Err(CapabilityBudgetRefusal::MissingRequired(
+            CapabilityBudgetDimension::Cleanup,
+        )),
+        Some(budget) if budget.is_exhausted() => Err(CapabilityBudgetRefusal::Exhausted(
+            CapabilityBudgetDimension::Cleanup,
+        )),
+        Some(_) => Ok(()),
+    }
+}
+
+impl Default for Budget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Debug for Budget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut d = f.debug_struct("Budget");
+        if let Some(deadline) = self.deadline {
+            d.field("deadline", &deadline);
+        }
+        if self.poll_quota < u32::MAX {
+            d.field("poll_quota", &self.poll_quota);
+        }
+        if let Some(cost) = self.cost_quota {
+            d.field("cost_quota", &cost);
+        }
+        d.field("priority", &self.priority);
+        d.finish()
+    }
+}
+
+// ============================================================================
+// Min-Plus Network Calculus Curves (Hard Bounds)
+// ============================================================================
+
+/// Errors returned when constructing a min-plus curve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CurveError {
+    /// Curve samples must not be empty.
+    EmptySamples,
+    /// Curve samples must be nondecreasing.
+    NonMonotone {
+        /// Index where monotonicity was violated.
+        index: usize,
+        /// Previous sample value.
+        prev: u64,
+        /// Next sample value.
+        next: u64,
+    },
+}
+
+/// A discrete min-plus curve with a linear tail.
+///
+/// Curves are defined for nonnegative integer time `t` with:
+/// - `samples[t]` for `t <= horizon`
+/// - `samples[horizon] + tail_rate * (t - horizon)` for `t > horizon`
+///
+/// Samples must be nondecreasing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MinPlusCurve {
+    samples: Vec<u64>,
+    tail_rate: u64,
+}
+
+impl MinPlusCurve {
+    /// Creates a curve from samples and a tail rate.
+    ///
+    /// # Errors
+    /// Returns [`CurveError::EmptySamples`] if `samples` is empty, or
+    /// [`CurveError::NonMonotone`] if samples are not nondecreasing.
+    #[inline]
+    pub fn new(samples: Vec<u64>, tail_rate: u64) -> Result<Self, CurveError> {
+        if samples.is_empty() {
+            return Err(CurveError::EmptySamples);
+        }
+
+        for idx in 1..samples.len() {
+            if samples[idx] < samples[idx.saturating_sub(1)] {
+                return Err(CurveError::NonMonotone {
+                    index: idx,
+                    prev: samples[idx.saturating_sub(1)],
+                    next: samples[idx],
+                });
+            }
+        }
+
+        Ok(Self { samples, tail_rate })
+    }
+
+    /// Creates a curve with a flat tail from samples.
+    ///
+    /// # Errors
+    /// Returns an error if samples are empty or not nondecreasing.
+    #[inline]
+    pub fn from_samples(samples: Vec<u64>) -> Result<Self, CurveError> {
+        Self::new(samples, 0)
+    }
+
+    /// Creates a token-bucket arrival curve `burst + rate * t`.
+    #[inline]
+    #[must_use]
+    pub fn from_token_bucket(burst: u64, rate: u64, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            let inc = rate.saturating_mul(t as u64);
+            samples.push(burst.saturating_add(inc));
+        }
+        Self {
+            samples,
+            tail_rate: rate,
+        }
+    }
+
+    /// Creates a rate-latency service curve `max(0, rate * (t - latency))`.
+    #[inline]
+    #[must_use]
+    pub fn from_rate_latency(rate: u64, latency: usize, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            if t <= latency {
+                samples.push(0);
+            } else {
+                let dt = (t - latency) as u64;
+                samples.push(rate.saturating_mul(dt));
+            }
+        }
+        Self {
+            samples,
+            tail_rate: rate,
+        }
+    }
+
+    /// Returns the discrete horizon (last sample index).
+    #[must_use]
+    #[inline]
+    pub fn horizon(&self) -> usize {
+        self.samples.len().saturating_sub(1)
+    }
+
+    /// Returns the tail rate used for extrapolation beyond the horizon.
+    #[must_use]
+    #[inline]
+    pub fn tail_rate(&self) -> u64 {
+        self.tail_rate
+    }
+
+    /// Returns the curve value at integer time `t`.
+    #[must_use]
+    #[inline]
+    pub fn value_at(&self, t: usize) -> u64 {
+        let horizon = self.horizon();
+        if t <= horizon {
+            self.samples[t]
+        } else {
+            let extra = (t - horizon) as u64;
+            self.samples[horizon].saturating_add(self.tail_rate.saturating_mul(extra))
+        }
+    }
+
+    /// Returns the underlying samples.
+    #[must_use]
+    #[inline]
+    pub fn samples(&self) -> &[u64] {
+        &self.samples
+    }
+
+    /// Computes the min-plus convolution `(self ⊗ other)` over a horizon.
+    ///
+    /// This is O(horizon^2) and intended for small horizons/demonstrations.
+    #[inline]
+    #[must_use]
+    pub fn min_plus_convolution(&self, other: &Self, horizon: usize) -> Self {
+        let mut samples = Vec::with_capacity(horizon.saturating_add(1));
+        for t in 0..=horizon {
+            let mut best = u64::MAX;
+            for s in 0..=t {
+                let a = self.value_at(s);
+                let b = other.value_at(t - s);
+                let sum = a.saturating_add(b);
+                if sum < best {
+                    best = sum;
+                }
+            }
+            samples.push(best);
+        }
+
+        Self {
+            samples,
+            tail_rate: self.tail_rate.min(other.tail_rate),
+        }
+    }
+}
+
+/// Arrival/service curve pair for admission control hard bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurveBudget {
+    /// Arrival curve (demand).
+    pub arrival: MinPlusCurve,
+    /// Service curve (supply).
+    pub service: MinPlusCurve,
+}
+
+impl CurveBudget {
+    /// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
+    #[must_use]
+    #[inline]
+    pub fn backlog_bound(&self, horizon: usize) -> u64 {
+        backlog_bound(&self.arrival, &self.service, horizon)
+    }
+
+    /// Computes the delay bound over a horizon with a max delay search window.
+    ///
+    /// Returns `None` if no delay bound is found within `max_delay`.
+    #[must_use]
+    #[inline]
+    pub fn delay_bound(&self, horizon: usize, max_delay: usize) -> Option<usize> {
+        delay_bound(&self.arrival, &self.service, horizon, max_delay)
+    }
+}
+
+/// Computes the backlog bound `sup_t (arrival(t) - service(t))` over a horizon.
+#[inline]
+#[must_use]
+pub fn backlog_bound(arrival: &MinPlusCurve, service: &MinPlusCurve, horizon: usize) -> u64 {
+    let mut worst = 0;
+    for t in 0..=horizon {
+        let demand = arrival.value_at(t);
+        let supply = service.value_at(t);
+        let backlog = demand.saturating_sub(supply);
+        if backlog > worst {
+            worst = backlog;
+        }
+    }
+    worst
+}
+
+/// Computes a delay bound `d` such that `arrival(t) <= service(t + d)` for all `t`.
+///
+/// Returns `None` if no bound is found within `max_delay`.
+#[inline]
+#[must_use]
+pub fn delay_bound(
+    arrival: &MinPlusCurve,
+    service: &MinPlusCurve,
+    horizon: usize,
+    max_delay: usize,
+) -> Option<usize> {
+    let mut worst_delay = 0;
+    for t in 0..=horizon {
+        let demand = arrival.value_at(t);
+        let mut found = None;
+        for d in 0..=max_delay {
+            if service.value_at(t + d) >= demand {
+                found = Some(d);
+                break;
+            }
+        }
+        let delay = found?;
+        if delay > worst_delay {
+            worst_delay = delay;
+        }
+    }
+    Some(worst_delay)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use serde_json::json;
+
+    fn scrub_budget_event(deadline: Option<Time>) -> &'static str {
+        if deadline.is_some() {
+            "[DEADLINE]"
+        } else {
+            "[NONE]"
+        }
+    }
+
+    // =========================================================================
+    // Constants Tests
+    // =========================================================================
+
+    #[test]
+    fn infinite_budget_values() {
+        let b = Budget::INFINITE;
+        assert_eq!(b.deadline, None);
+        assert_eq!(b.poll_quota, u32::MAX);
+        assert_eq!(b.cost_quota, None);
+        assert_eq!(b.priority, 0);
+    }
+
+    #[test]
+    fn zero_budget_values() {
+        let b = Budget::ZERO;
+        assert_eq!(b.deadline, Some(Time::ZERO));
+        assert_eq!(b.poll_quota, 0);
+        assert_eq!(b.cost_quota, Some(0));
+        assert_eq!(b.priority, 255);
+    }
+
+    #[test]
+    fn new_returns_default_priority() {
+        let b = Budget::new();
+        assert_eq!(b.priority, 128);
+        assert_ne!(b, Budget::INFINITE);
+    }
+
+    #[test]
+    fn default_returns_new() {
+        assert_eq!(Budget::default(), Budget::new());
+        assert_ne!(Budget::default(), Budget::INFINITE);
+    }
+
+    // =========================================================================
+    // Builder Methods Tests
+    // =========================================================================
+
+    #[test]
+    fn with_deadline_sets_deadline() {
+        let deadline = Time::from_secs(30);
+        let budget = Budget::new().with_deadline(deadline);
+        assert_eq!(budget.deadline, Some(deadline));
+    }
+
+    #[test]
+    fn tightened_by_timeout_never_loosens_existing_deadline() {
+        let now = Time::from_secs(100);
+        // Ambient deadline (t=110) is sooner than now + 30s (t=130): keep it.
+        let ambient = Budget::new().with_deadline(Time::from_secs(110));
+        let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(tightened.deadline, Some(Time::from_secs(110)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_tightens_looser_deadline() {
+        let now = Time::from_secs(100);
+        // Ambient deadline (t=500) is later than now + 30s (t=130): tighten.
+        let ambient = Budget::new().with_deadline(Time::from_secs(500));
+        let tightened = ambient.tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(tightened.deadline, Some(Time::from_secs(130)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_bounds_open_budget() {
+        let now = Time::from_secs(100);
+        let bounded = Budget::new().tightened_by_timeout(now, Duration::from_secs(30));
+        assert_eq!(bounded.deadline, Some(Time::from_secs(130)));
+    }
+
+    #[test]
+    fn tightened_by_timeout_preserves_other_dimensions() {
+        let now = Time::from_secs(0);
+        let budget = Budget::new()
+            .with_poll_quota(77)
+            .with_cost_quota(11)
+            .with_priority(200)
+            .tightened_by_timeout(now, Duration::from_secs(1));
+        assert_eq!(budget.poll_quota, 77);
+        assert_eq!(budget.cost_quota, Some(11));
+        assert_eq!(budget.priority, 200);
+    }
+
+    #[test]
+    fn remaining_snapshot_maps_sentinels_to_none() {
+        let now = Time::from_secs(10);
+        let unlimited = Budget::new().remaining(now);
+        assert_eq!(unlimited.deadline, None);
+        assert_eq!(unlimited.polls, None);
+        assert_eq!(unlimited.cost, None);
+
+        let bounded = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .with_poll_quota(5)
+            .with_cost_quota(9)
+            .remaining(now);
+        assert_eq!(bounded.deadline, Some(Duration::from_secs(20)));
+        assert_eq!(bounded.polls, Some(5));
+        assert_eq!(bounded.cost, Some(9));
+    }
+
+    #[test]
+    fn remaining_snapshot_past_deadline_reports_none() {
+        let now = Time::from_secs(50);
+        let expired = Budget::new()
+            .with_deadline(Time::from_secs(30))
+            .remaining(now);
+        assert_eq!(expired.deadline, None);
+    }
+
+    #[test]
+    fn deadline_at_constructors_are_absolute_instants() {
+        // The rename's whole point: these are instants, not durations.
+        let secs = Budget::with_deadline_at_secs(30);
+        assert_eq!(secs.deadline, Some(Time::from_secs(30)));
+        let ns = Budget::with_deadline_at_ns(2_000_000_000);
+        assert_eq!(ns.deadline, Some(Time::from_nanos(2_000_000_000)));
+    }
+
+    #[test]
+    fn with_poll_quota_sets_quota() {
+        let budget = Budget::new().with_poll_quota(42);
+        assert_eq!(budget.poll_quota, 42);
+    }
+
+    #[test]
+    fn with_cost_quota_sets_quota() {
+        let budget = Budget::new().with_cost_quota(1000);
+        assert_eq!(budget.cost_quota, Some(1000));
+    }
+
+    #[test]
+    fn with_priority_sets_priority() {
+        let budget = Budget::new().with_priority(255);
+        assert_eq!(budget.priority, 255);
+    }
+
+    #[test]
+    fn builder_chaining() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(5000)
+            .with_priority(200);
+
+        assert_eq!(budget.deadline, Some(Time::from_secs(10)));
+        assert_eq!(budget.poll_quota, 100);
+        assert_eq!(budget.cost_quota, Some(5000));
+        assert_eq!(budget.priority, 200);
+    }
+
+    // =========================================================================
+    // is_exhausted Tests
+    // =========================================================================
+
+    #[test]
+    fn is_exhausted_false_for_infinite() {
+        assert!(!Budget::INFINITE.is_exhausted());
+    }
+
+    #[test]
+    fn is_exhausted_true_for_zero() {
+        assert!(Budget::ZERO.is_exhausted());
+    }
+
+    #[test]
+    fn is_exhausted_when_poll_quota_zero() {
+        let budget = Budget::new().with_poll_quota(0);
+        assert!(budget.is_exhausted());
+    }
+
+    #[test]
+    fn is_exhausted_when_cost_quota_zero() {
+        let budget = Budget::new().with_cost_quota(0);
+        assert!(budget.is_exhausted());
+    }
+
+    #[test]
+    fn is_exhausted_false_with_resources() {
+        let budget = Budget::new().with_poll_quota(10).with_cost_quota(100);
+        assert!(!budget.is_exhausted());
+    }
+
+    // =========================================================================
+    // is_past_deadline Tests
+    // =========================================================================
+
+    #[test]
+    fn is_past_deadline_true_when_past() {
+        let budget = Budget::new().with_deadline(Time::from_secs(5));
+        let now = Time::from_secs(10);
+        assert!(budget.is_past_deadline(now));
+    }
+
+    #[test]
+    fn is_past_deadline_false_when_not_past() {
+        let budget = Budget::new().with_deadline(Time::from_secs(10));
+        let now = Time::from_secs(5);
+        assert!(!budget.is_past_deadline(now));
+    }
+
+    #[test]
+    fn is_past_deadline_true_at_exact_time() {
+        let deadline = Time::from_secs(5);
+        let budget = Budget::new().with_deadline(deadline);
+        assert!(budget.is_past_deadline(deadline));
+    }
+
+    #[test]
+    fn is_past_deadline_false_when_no_deadline() {
+        let budget = Budget::new();
+        assert!(!budget.is_past_deadline(Time::from_secs(1_000_000)));
+    }
+
+    // =========================================================================
+    // consume_poll Tests
+    // =========================================================================
+
+    #[test]
+    fn consume_poll_decrements() {
+        let mut budget = Budget::new().with_poll_quota(2);
+
+        assert_eq!(budget.consume_poll(), Some(2));
+        assert_eq!(budget.poll_quota, 1);
+
+        assert_eq!(budget.consume_poll(), Some(1));
+        assert_eq!(budget.poll_quota, 0);
+
+        assert_eq!(budget.consume_poll(), None);
+        assert_eq!(budget.poll_quota, 0);
+    }
+
+    #[test]
+    fn consume_poll_returns_none_at_zero() {
+        let mut budget = Budget::new().with_poll_quota(0);
+        assert_eq!(budget.consume_poll(), None);
+        assert_eq!(budget.poll_quota, 0);
+    }
+
+    #[test]
+    fn consume_poll_transitions_to_exhausted() {
+        let mut budget = Budget::new().with_poll_quota(1);
+        assert!(!budget.is_exhausted());
+
+        budget.consume_poll();
+        assert!(budget.is_exhausted());
+    }
+
+    // =========================================================================
+    // Combine Tests (Product Semiring Semantics)
+    // =========================================================================
+
+    #[test]
+    fn combine_takes_tighter() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_priority(50);
+
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(5))
+            .with_poll_quota(200)
+            .with_priority(100);
+
+        let combined = a.combine(b);
+
+        // Deadline: min
+        assert_eq!(combined.deadline, Some(Time::from_secs(5)));
+        // Poll quota: min
+        assert_eq!(combined.poll_quota, 100);
+        // Priority: max
+        assert_eq!(combined.priority, 100);
+    }
+
+    #[test]
+    fn combine_deadline_none_with_some() {
+        let a = Budget::new(); // No deadline
+        let b = Budget::new().with_deadline(Time::from_secs(5));
+
+        // a.combine(b) should have b's deadline
+        assert_eq!(a.combine(b).deadline, Some(Time::from_secs(5)));
+        // b.combine(a) should also have b's deadline
+        assert_eq!(b.combine(a).deadline, Some(Time::from_secs(5)));
+    }
+
+    #[test]
+    fn combine_deadline_none_with_none() {
+        let a = Budget::new();
+        let b = Budget::new();
+        assert_eq!(a.combine(b).deadline, None);
+    }
+
+    #[test]
+    fn combine_cost_quota_none_with_some() {
+        let a = Budget::new(); // cost_quota = None
+        let b = Budget::new().with_cost_quota(100);
+
+        // Should take the defined quota
+        assert_eq!(a.combine(b).cost_quota, Some(100));
+        assert_eq!(b.combine(a).cost_quota, Some(100));
+    }
+
+    #[test]
+    fn combine_cost_quota_takes_min() {
+        let a = Budget::new().with_cost_quota(50);
+        let b = Budget::new().with_cost_quota(100);
+
+        assert_eq!(a.combine(b).cost_quota, Some(50));
+        assert_eq!(b.combine(a).cost_quota, Some(50));
+    }
+
+    #[test]
+    fn combine_with_zero_absorbs() {
+        let any_budget = Budget::new()
+            .with_deadline(Time::from_secs(100))
+            .with_poll_quota(1000)
+            .with_cost_quota(10000)
+            .with_priority(200);
+
+        let combined = any_budget.combine(Budget::ZERO);
+
+        // ZERO's deadline (Time::ZERO) is tighter
+        assert_eq!(combined.deadline, Some(Time::ZERO));
+        // ZERO's poll_quota (0) is tighter
+        assert_eq!(combined.poll_quota, 0);
+        // ZERO's cost_quota (Some(0)) is tighter
+        assert_eq!(combined.cost_quota, Some(0));
+        // Priority: max of 200 and 255 = 255
+        assert_eq!(combined.priority, 255);
+    }
+
+    #[test]
+    fn combine_with_infinite_preserves() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(1000)
+            .with_priority(50);
+
+        let combined = budget.combine(Budget::INFINITE);
+
+        // All values should be preserved (INFINITE doesn't constrain)
+        assert_eq!(combined.deadline, Some(Time::from_secs(10)));
+        assert_eq!(combined.poll_quota, 100);
+        assert_eq!(combined.cost_quota, Some(1000));
+        // Priority: max of 50 and 0 = 50
+        assert_eq!(combined.priority, 50);
+    }
+
+    // =========================================================================
+    // Capability Budget Planner Tests
+    // =========================================================================
+
+    #[test]
+    fn capability_budget_child_inherits_parent_and_tightens_overrides() {
+        let parent = CapabilityBudget::new()
+            .with_memory_bytes(1_024)
+            .with_cpu_units(100)
+            .with_io_bytes(10_000)
+            .with_cleanup_budget(Budget::new().with_poll_quota(50))
+            .with_artifact_bytes(4_096);
+        let child = CapabilityBudget::new()
+            .with_memory_bytes(2_048)
+            .with_cpu_units(25)
+            .with_io_bytes(1_000)
+            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+
+        let effective = parent.meet(child);
+
+        assert_eq!(effective.memory_bytes, Some(1_024));
+        assert_eq!(effective.cpu_units, Some(25));
+        assert_eq!(effective.io_bytes, Some(1_000));
+        assert_eq!(
+            effective.cleanup_budget.map(|budget| budget.poll_quota),
+            Some(10)
+        );
+        assert_eq!(effective.artifact_bytes, Some(4_096));
+    }
+
+    #[test]
+    fn capability_budget_optional_absent_dimension_admits() {
+        let requirements = CapabilityBudgetRequirements::NONE;
+
+        let effective = CapabilityBudget::new()
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect("optional absent envelopes should admit");
+
+        assert_eq!(effective, CapabilityBudget::UNSPECIFIED);
+    }
+
+    #[test]
+    fn capability_budget_required_absent_dimension_rejects() {
+        let requirements = CapabilityBudgetRequirements::new().require_memory_bytes();
+
+        let err = CapabilityBudget::new()
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required missing memory budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::MissingRequired(CapabilityBudgetDimension::MemoryBytes)
+        );
+    }
+
+    #[test]
+    fn capability_budget_required_exhausted_dimension_rejects() {
+        let requirements = CapabilityBudgetRequirements::new()
+            .require_cpu_units()
+            .require_cleanup();
+        let parent = CapabilityBudget::new()
+            .with_cpu_units(0)
+            .with_cleanup_budget(Budget::new().with_poll_quota(10));
+
+        let err = parent
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required exhausted CPU budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::Exhausted(CapabilityBudgetDimension::CpuUnits)
+        );
+    }
+
+    #[test]
+    fn capability_budget_required_exhausted_cleanup_rejects() {
+        let requirements = CapabilityBudgetRequirements::new().require_cleanup();
+        let parent = CapabilityBudget::new().with_cleanup_budget(Budget::new().with_poll_quota(0));
+
+        let err = parent
+            .plan_child(CapabilityBudget::new(), requirements)
+            .expect_err("required exhausted cleanup budget must reject");
+
+        assert_eq!(
+            err,
+            CapabilityBudgetRefusal::Exhausted(CapabilityBudgetDimension::Cleanup)
+        );
+    }
+
+    // =========================================================================
+    // Debug/Display Tests
+    // =========================================================================
+
+    #[test]
+    fn debug_shows_constrained_fields() {
+        let budget = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500);
+
+        let debug = format!("{budget:?}");
+
+        // Debug should include constrained fields
+        assert!(debug.contains("deadline"));
+        assert!(debug.contains("poll_quota"));
+        assert!(debug.contains("cost_quota"));
+        assert!(debug.contains("priority"));
+    }
+
+    #[test]
+    fn debug_omits_unconstrained_fields() {
+        let budget = Budget::INFINITE;
+        let debug = format!("{budget:?}");
+
+        // INFINITE has no deadline, MAX poll_quota, and no cost_quota
+        // Debug should omit deadline and poll_quota but include priority
+        assert!(!debug.contains("deadline"));
+        assert!(!debug.contains("poll_quota")); // u32::MAX is omitted
+        assert!(debug.contains("priority"));
+    }
+
+    // =========================================================================
+    // Equality Tests
+    // =========================================================================
+
+    #[test]
+    fn equality_works() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100);
+
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100);
+
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn inequality_on_deadline() {
+        let a = Budget::new().with_deadline(Time::from_secs(10));
+        let b = Budget::new().with_deadline(Time::from_secs(20));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn copy_semantics() {
+        let a = Budget::new().with_poll_quota(100);
+        let b = a; // Copy
+        assert_eq!(a.poll_quota, b.poll_quota);
+        // Modifying b doesn't affect a
+        let mut c = a;
+        c.poll_quota = 50;
+        assert_eq!(a.poll_quota, 100);
+        assert_eq!(c.poll_quota, 50);
+    }
+
+    // =========================================================================
+    // New Convenience Method Tests
+    // =========================================================================
+
+    #[test]
+    fn unlimited_returns_infinite() {
+        assert_eq!(Budget::unlimited(), Budget::INFINITE);
+    }
+
+    #[test]
+    fn with_deadline_secs_constructor() {
+        let budget = Budget::with_deadline_at_secs(30);
+        assert_eq!(budget.deadline, Some(Time::from_secs(30)));
+        assert_eq!(budget.poll_quota, u32::MAX);
+        assert_eq!(budget.cost_quota, None);
+        assert_eq!(budget.priority, 128);
+    }
+
+    #[test]
+    fn with_deadline_ns_constructor() {
+        let budget = Budget::with_deadline_at_ns(30_000_000_000);
+        assert_eq!(budget.deadline, Some(Time::from_nanos(30_000_000_000)));
+    }
+
+    #[test]
+    fn with_timeout_sets_deadline_relative_to_now() {
+        let now = Time::from_secs(100);
+        let budget = Budget::new().with_timeout(now, Duration::from_secs(30));
+
+        assert_eq!(budget.deadline, Some(Time::from_secs(130)));
+        assert_eq!(budget.remaining_time(now), Some(Duration::from_secs(30)));
+    }
+
+    #[test]
+    fn with_timeout_saturates_at_max_time() {
+        let now = Time::MAX.saturating_sub_nanos(5);
+        let budget = Budget::new().with_timeout(now, Duration::from_nanos(10));
+
+        assert_eq!(budget.deadline, Some(Time::MAX));
+    }
+
+    #[test]
+    fn with_timeout_keeps_other_constraints() {
+        let now = Time::from_secs(7);
+        let budget = Budget::new()
+            .with_poll_quota(42)
+            .with_cost_quota(99)
+            .with_priority(200)
+            .with_timeout(now, Duration::from_secs(3));
+
+        assert_eq!(budget.deadline, Some(Time::from_secs(10)));
+        assert_eq!(budget.poll_quota, 42);
+        assert_eq!(budget.cost_quota, Some(99));
+        assert_eq!(budget.priority, 200);
+    }
+
+    #[test]
+    fn meet_is_alias_for_combine() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100);
+
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(5))
+            .with_poll_quota(200);
+
+        assert_eq!(a.meet(b), a.combine(b));
+    }
+
+    // =========================================================================
+    // consume_cost Tests
+    // =========================================================================
+
+    #[test]
+    fn consume_cost_basic() {
+        let mut budget = Budget::new().with_cost_quota(100);
+
+        assert!(budget.consume_cost(30));
+        assert_eq!(budget.cost_quota, Some(70));
+
+        assert!(budget.consume_cost(70));
+        assert_eq!(budget.cost_quota, Some(0));
+
+        assert!(!budget.consume_cost(1));
+        assert_eq!(budget.cost_quota, Some(0));
+    }
+
+    #[test]
+    fn consume_cost_unlimited() {
+        let mut budget = Budget::new(); // No cost quota = unlimited
+        assert!(budget.consume_cost(1_000_000));
+        assert_eq!(budget.cost_quota, None);
+    }
+
+    #[test]
+    fn consume_cost_exact_amount() {
+        let mut budget = Budget::new().with_cost_quota(50);
+        assert!(budget.consume_cost(50));
+        assert_eq!(budget.cost_quota, Some(0));
+    }
+
+    #[test]
+    fn consume_cost_transitions_to_exhausted() {
+        let mut budget = Budget::new().with_cost_quota(10).with_poll_quota(u32::MAX);
+        assert!(!budget.is_exhausted());
+
+        budget.consume_cost(10);
+        assert!(budget.is_exhausted());
+    }
+
+    // =========================================================================
+    // Inspection Method Tests
+    // =========================================================================
+
+    #[test]
+    fn remaining_time_basic() {
+        let budget = Budget::with_deadline_at_secs(30);
+        let now = Time::from_secs(10);
+
+        let remaining = budget.remaining_time(now);
+        assert_eq!(remaining, Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn remaining_time_no_deadline() {
+        let budget = Budget::unlimited();
+        assert_eq!(budget.remaining_time(Time::from_secs(1000)), None);
+    }
+
+    #[test]
+    fn remaining_time_past_deadline() {
+        let budget = Budget::with_deadline_at_secs(10);
+        assert_eq!(budget.remaining_time(Time::from_secs(15)), None);
+    }
+
+    #[test]
+    fn remaining_time_at_deadline() {
+        let budget = Budget::with_deadline_at_secs(10);
+        assert_eq!(budget.remaining_time(Time::from_secs(10)), None);
+    }
+
+    #[test]
+    fn remaining_polls_basic() {
+        let budget = Budget::new().with_poll_quota(100);
+        assert_eq!(budget.remaining_polls(), 100);
+    }
+
+    #[test]
+    fn remaining_polls_unlimited() {
+        let budget = Budget::unlimited();
+        assert_eq!(budget.remaining_polls(), u32::MAX);
+    }
+
+    #[test]
+    fn remaining_cost_basic() {
+        let budget = Budget::new().with_cost_quota(1000);
+        assert_eq!(budget.remaining_cost(), Some(1000));
+    }
+
+    #[test]
+    fn remaining_cost_unlimited() {
+        let budget = Budget::unlimited();
+        assert_eq!(budget.remaining_cost(), None);
+    }
+
+    #[test]
+    fn to_timeout_is_alias_for_remaining_time() {
+        let budget = Budget::with_deadline_at_secs(30);
+        let now = Time::from_secs(10);
+
+        assert_eq!(budget.to_timeout(now), budget.remaining_time(now));
+    }
+
+    // =========================================================================
+    // Min-Plus Network Calculus Tests
+    // =========================================================================
+
+    #[test]
+    fn min_plus_curve_validation_rejects_non_monotone() {
+        let err = MinPlusCurve::new(vec![0, 2, 1], 0).expect_err("non-monotone samples");
+        assert!(matches!(
+            err,
+            CurveError::NonMonotone {
+                index: 2,
+                prev: 2,
+                next: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn min_plus_convolution_basic() {
+        let a = MinPlusCurve::new(vec![0, 1, 2], 1).expect("valid curve");
+        let b = MinPlusCurve::new(vec![0, 0, 1], 1).expect("valid curve");
+        let conv = a.min_plus_convolution(&b, 2);
+        assert_eq!(conv.samples(), &[0, 0, 1]);
+    }
+
+    #[test]
+    fn min_plus_backlog_delay_demo() {
+        let arrival = MinPlusCurve::from_token_bucket(5, 2, 10);
+        let service = MinPlusCurve::from_rate_latency(3, 2, 10);
+        let budget = CurveBudget { arrival, service };
+
+        let backlog = budget.backlog_bound(10);
+        let delay = budget.delay_bound(10, 10);
+
+        assert_eq!(backlog, 9);
+        assert_eq!(delay, Some(4));
+    }
+
+    // =========================================================================
+    // Budget Algebra Formal Lemmas (bd-hf5bz)
+    //
+    // These tests serve as mechanized proof artifacts for the budget algebra.
+    // Each test corresponds to a named lemma that downstream proofs
+    // (bd-3cq88, bd-2qmr4, bd-3fp4g, bd-ecp8u) can reference.
+    //
+    // Algebra summary:
+    //   (Budget, meet, INFINITE) forms a bounded meet-semilattice where:
+    //   - meet uses min on deadline/poll/cost and max on priority.
+    //   - INFINITE is the top element (identity for meet).
+    //   - ZERO is the bottom element (absorbing for meet, modulo priority).
+    //
+    // Code mapping:
+    //   meet        → Budget::meet / Budget::combine  (src/types/budget.rs)
+    //   identity    → Budget::INFINITE
+    //   absorbing   → Budget::ZERO
+    //   consumption → Budget::consume_poll, Budget::consume_cost
+    //
+    // Min-plus / tropical structure:
+    //   (DeadlineMicros, min, add, ∞, 0) forms a tropical semiring
+    //   used in plan analysis for sequential/parallel budget composition.
+    //   Code mapping → src/plan/analysis.rs :: DeadlineMicros
+    //
+    //   (MinPlusCurve, min_plus_convolution) forms a min-plus algebra
+    //   for network calculus admission control.
+    //   Code mapping → MinPlusCurve / CurveBudget (src/types/budget.rs)
+    // =========================================================================
+
+    // -- Lemma 1: meet is commutative --
+    // ∀ a b. a.meet(b) == b.meet(a)
+
+    #[test]
+    fn lemma_meet_commutative() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500)
+            .with_priority(50);
+
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(5))
+            .with_poll_quota(200)
+            .with_cost_quota(300)
+            .with_priority(100);
+
+        assert_eq!(a.meet(b), b.meet(a));
+    }
+
+    #[test]
+    fn lemma_meet_commutative_with_none_deadline() {
+        let a = Budget::new().with_poll_quota(100);
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(5))
+            .with_poll_quota(200);
+        assert_eq!(a.meet(b), b.meet(a));
+    }
+
+    #[test]
+    fn lemma_meet_commutative_with_none_cost() {
+        let a = Budget::new().with_cost_quota(100);
+        let b = Budget::new(); // cost_quota = None
+        assert_eq!(a.meet(b), b.meet(a));
+    }
+
+    // -- Lemma 2: meet is associative --
+    // ∀ a b c. a.meet(b.meet(c)) == a.meet(b).meet(c)
+
+    #[test]
+    fn lemma_meet_associative() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500)
+            .with_priority(50);
+
+        let b = Budget::new()
+            .with_deadline(Time::from_secs(5))
+            .with_poll_quota(200)
+            .with_cost_quota(300)
+            .with_priority(100);
+
+        let c = Budget::new()
+            .with_deadline(Time::from_secs(8))
+            .with_poll_quota(150)
+            .with_cost_quota(400)
+            .with_priority(75);
+
+        assert_eq!(a.meet(b.meet(c)), a.meet(b).meet(c));
+    }
+
+    #[test]
+    fn lemma_meet_associative_with_none_fields() {
+        let a = Budget::new().with_deadline(Time::from_secs(10));
+        let b = Budget::new().with_cost_quota(300);
+        let c = Budget::new().with_poll_quota(50);
+
+        assert_eq!(a.meet(b.meet(c)), a.meet(b).meet(c));
+    }
+
+    // -- Lemma 3: meet is idempotent --
+    // ∀ a. a.meet(a) == a
+
+    #[test]
+    fn lemma_meet_idempotent() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500)
+            .with_priority(75);
+        assert_eq!(a.meet(a), a);
+    }
+
+    #[test]
+    fn lemma_meet_idempotent_infinite() {
+        assert_eq!(Budget::INFINITE.meet(Budget::INFINITE), Budget::INFINITE);
+    }
+
+    #[test]
+    fn lemma_meet_idempotent_zero() {
+        assert_eq!(Budget::ZERO.meet(Budget::ZERO), Budget::ZERO);
+    }
+
+    // -- Lemma 4: INFINITE is the identity for meet --
+    // ∀ a. a.meet(INFINITE) == a
+
+    #[test]
+    fn lemma_identity_left() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500)
+            .with_priority(50);
+
+        // INFINITE has priority 0 (identity for max).
+        // meet takes max priority.
+        let result = Budget::INFINITE.meet(a);
+        assert_eq!(result.deadline, a.deadline);
+        assert_eq!(result.poll_quota, a.poll_quota);
+        assert_eq!(result.cost_quota, a.cost_quota);
+        assert_eq!(result.priority, a.priority);
+    }
+
+    #[test]
+    fn lemma_identity_right() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(10))
+            .with_poll_quota(100)
+            .with_cost_quota(500)
+            .with_priority(200);
+
+        let result = a.meet(Budget::INFINITE);
+        assert_eq!(result.deadline, a.deadline);
+        assert_eq!(result.poll_quota, a.poll_quota);
+        assert_eq!(result.cost_quota, a.cost_quota);
+        assert_eq!(result.priority, a.priority);
+    }
+
+    // -- Lemma 5: ZERO is absorbing for quotas --
+    // ∀ a. a.meet(ZERO).poll_quota == 0
+    // ∀ a. a.meet(ZERO).cost_quota == Some(0)
+    // ∀ a. a.meet(ZERO).deadline == Some(Time::ZERO)
+
+    #[test]
+    fn lemma_zero_absorbing_quotas() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(100))
+            .with_poll_quota(1000)
+            .with_cost_quota(10000);
+
+        let result = a.meet(Budget::ZERO);
+        assert_eq!(result.deadline, Some(Time::ZERO));
+        assert_eq!(result.poll_quota, 0);
+        assert_eq!(result.cost_quota, Some(0));
+    }
+
+    #[test]
+    fn lemma_zero_absorbing_symmetric() {
+        let a = Budget::new()
+            .with_deadline(Time::from_secs(100))
+            .with_poll_quota(1000)
+            .with_cost_quota(10000);
+
+        let left = a.meet(Budget::ZERO);
+        let right = Budget::ZERO.meet(a);
+        assert_eq!(left.deadline, right.deadline);
+        assert_eq!(left.poll_quota, right.poll_quota);
+        assert_eq!(left.cost_quota, right.cost_quota);
+    }
+
+    // -- Lemma 6: meet is monotone (narrowing) --
+    // ∀ a b. a.meet(b).poll_quota ≤ a.poll_quota
+    // ∀ a b. a.meet(b).poll_quota ≤ b.poll_quota
+    // (and analogously for cost_quota, deadline)
+
+    #[test]
+    fn lemma_meet_monotone_poll() {
+        let a = Budget::new().with_poll_quota(100);
+        let b = Budget::new().with_poll_quota(200);
+        let result = a.meet(b);
+        assert!(result.poll_quota <= a.poll_quota);
+        assert!(result.poll_quota <= b.poll_quota);
+    }
+
+    #[test]
+    fn lemma_meet_monotone_cost() {
+        let a = Budget::new().with_cost_quota(100);
+        let b = Budget::new().with_cost_quota(200);
+        let result = a.meet(b);
+        assert!(result.cost_quota.unwrap() <= a.cost_quota.unwrap());
+        assert!(result.cost_quota.unwrap() <= b.cost_quota.unwrap());
+    }
+
+    #[test]
+    fn lemma_meet_monotone_deadline() {
+        let a = Budget::new().with_deadline(Time::from_secs(10));
+        let b = Budget::new().with_deadline(Time::from_secs(20));
+        let result = a.meet(b);
+        assert!(result.deadline.unwrap() <= a.deadline.unwrap());
+        assert!(result.deadline.unwrap() <= b.deadline.unwrap());
+    }
+
+    // -- Lemma 7: consume_poll strictly decreases quota (well-founded) --
+    // ∀ b. b.poll_quota > 0 → consume_poll(&mut b) = Some(old) ∧ b.poll_quota < old
+
+    #[test]
+    fn lemma_consume_poll_strictly_decreasing() {
+        let mut budget = Budget::new().with_poll_quota(5);
+        let mut prev = budget.poll_quota;
+        while budget.poll_quota > 0 {
+            let old = budget.consume_poll().expect("quota > 0");
+            assert_eq!(old, prev);
+            assert!(budget.poll_quota < prev);
+            prev = budget.poll_quota;
+        }
+        // Exhausted: consume returns None
+        assert_eq!(budget.consume_poll(), None);
+    }
+
+    // -- Lemma 8: consume_cost strictly decreases quota (well-founded) --
+    // ∀ b cost. b.cost_quota = Some(q) ∧ q ≥ cost → consume_cost succeeds ∧ new_q < q
+
+    #[test]
+    fn lemma_consume_cost_strictly_decreasing() {
+        let mut budget = Budget::new().with_cost_quota(100);
+        let initial = budget.cost_quota.unwrap();
+        assert!(budget.consume_cost(30));
+        let after = budget.cost_quota.unwrap();
+        assert!(after < initial);
+        assert_eq!(after, 70);
+    }
+
+    // -- Lemma 9: sufficient budget implies progress --
+    // ∀ b. ¬b.is_exhausted() → (consume_poll succeeds ∨ cost_quota = None ∨ cost_quota > 0)
+
+    #[test]
+    fn lemma_sufficient_budget_enables_progress() {
+        let mut budget = Budget::new().with_poll_quota(10).with_cost_quota(100);
+        assert!(!budget.is_exhausted());
+
+        // Can make progress via poll
+        assert!(budget.consume_poll().is_some());
+        // Can make progress via cost
+        assert!(budget.consume_cost(1));
+    }
+
+    #[test]
+    fn lemma_exhausted_blocks_progress() {
+        let mut budget = Budget::new().with_poll_quota(0);
+        assert!(budget.is_exhausted());
+        assert!(budget.consume_poll().is_none());
+    }
+
+    // -- Lemma 10: budget consumption terminates --
+    // Starting from finite quota q, after exactly q calls to consume_poll,
+    // the budget is exhausted.
+
+    #[test]
+    fn lemma_poll_termination() {
+        let q = 7u32;
+        let mut budget = Budget::new().with_poll_quota(q);
+        for _ in 0..q {
+            assert!(!budget.is_exhausted());
+            budget.consume_poll().expect("should succeed");
+        }
+        assert!(budget.is_exhausted());
+        assert_eq!(budget.poll_quota, 0);
+    }
+
+    #[test]
+    fn lemma_cost_termination() {
+        let mut budget = Budget::new().with_cost_quota(100);
+        // Consume in chunks of 25
+        for _ in 0..4 {
+            assert!(budget.consume_cost(25));
+        }
+        assert_eq!(budget.cost_quota, Some(0));
+        assert!(!budget.consume_cost(1));
+    }
+
+    // -- Lemma 11: min-plus curve convolution associativity --
+    // (a ⊗ b) ⊗ c == a ⊗ (b ⊗ c)  over a finite horizon
+
+    #[test]
+    fn lemma_convolution_associative() {
+        let a = MinPlusCurve::new(vec![0, 1, 3], 2).expect("valid");
+        let b = MinPlusCurve::new(vec![0, 2, 4], 2).expect("valid");
+        let c = MinPlusCurve::new(vec![0, 1, 2], 1).expect("valid");
+        let h = 4;
+
+        let ab_c = a.min_plus_convolution(&b, h).min_plus_convolution(&c, h);
+        let a_bc = a.min_plus_convolution(&b.min_plus_convolution(&c, h), h);
+
+        for t in 0..=h {
+            assert_eq!(
+                ab_c.value_at(t),
+                a_bc.value_at(t),
+                "associativity failed at t={t}"
+            );
+        }
+    }
+
+    // -- Lemma 12: min-plus convolution commutativity --
+    // a ⊗ b == b ⊗ a  over a finite horizon
+
+    #[test]
+    fn lemma_convolution_commutative() {
+        let a = MinPlusCurve::new(vec![0, 1, 3], 2).expect("valid");
+        let b = MinPlusCurve::new(vec![0, 2, 4], 2).expect("valid");
+        let h = 4;
+
+        let ab = a.min_plus_convolution(&b, h);
+        let ba = b.min_plus_convolution(&a, h);
+
+        for t in 0..=h {
+            assert_eq!(
+                ab.value_at(t),
+                ba.value_at(t),
+                "commutativity failed at t={t}"
+            );
+        }
+    }
+
+    // -- Lemma 13: backlog bound monotonicity --
+    // Increasing arrival or decreasing service cannot reduce backlog.
+
+    #[test]
+    fn lemma_backlog_monotone_arrival() {
+        let service = MinPlusCurve::from_rate_latency(3, 2, 10);
+        let small_arrival = MinPlusCurve::from_token_bucket(2, 1, 10);
+        let large_arrival = MinPlusCurve::from_token_bucket(5, 2, 10);
+
+        let small_backlog = backlog_bound(&small_arrival, &service, 10);
+        let large_backlog = backlog_bound(&large_arrival, &service, 10);
+
+        assert!(large_backlog >= small_backlog);
+    }
+
+    // -- Lemma 14: delay bound monotonicity --
+    // Higher arrival burst leads to equal or worse delay bound.
+
+    #[test]
+    fn lemma_delay_monotone_arrival() {
+        let service = MinPlusCurve::from_rate_latency(3, 2, 10);
+        let small_arrival = MinPlusCurve::from_token_bucket(2, 1, 10);
+        let large_arrival = MinPlusCurve::from_token_bucket(5, 2, 10);
+
+        let small_delay = delay_bound(&small_arrival, &service, 10, 20).unwrap_or(0);
+        let large_delay = delay_bound(&large_arrival, &service, 10, 20).unwrap_or(0);
+
+        assert!(large_delay >= small_delay);
+    }
+
+    // -- Lemma 15: convolution tail rate is min of input rates --
+    // For min-plus convolution: (f ⊗ g)(t) = inf_s [f(s) + g(t-s)]
+    // the asymptotic growth rate is min(r_f, r_g), not r_f + r_g.
+
+    #[test]
+    fn lemma_convolution_tail_rate_is_min() {
+        let slow = MinPlusCurve::new(vec![0, 1], 1).expect("valid");
+        let fast = MinPlusCurve::new(vec![0, 3], 3).expect("valid");
+        let conv = slow.min_plus_convolution(&fast, 10);
+
+        // Tail rate must be min(1, 3) = 1
+        assert_eq!(conv.tail_rate(), 1);
+
+        // Verify beyond-horizon extrapolation matches the brute-force minimum
+        // at a point well past the computed samples.
+        let t = 20;
+        let mut brute = u64::MAX;
+        for s in 0..=t {
+            brute = brute.min(slow.value_at(s).saturating_add(fast.value_at(t - s)));
+        }
+        assert_eq!(conv.value_at(t), brute);
+    }
+
+    // ── derive-trait coverage (wave 74) ──────────────────────────────────
+
+    #[test]
+    fn budget_clone_copy() {
+        let b = Budget::new().with_poll_quota(42);
+        let b2 = b; // Copy
+        let b3 = b;
+        assert_eq!(b, b2);
+        assert_eq!(b2, b3);
+    }
+
+    #[test]
+    fn curve_error_debug_clone_eq() {
+        let e1 = CurveError::EmptySamples;
+        let e2 = e1.clone();
+        assert_eq!(e1, e2);
+
+        let e3 = CurveError::NonMonotone {
+            index: 2,
+            prev: 10,
+            next: 5,
+        };
+        let e4 = e3.clone();
+        assert_eq!(e3, e4);
+        assert_ne!(e1, e3);
+        let dbg = format!("{e3:?}");
+        assert!(dbg.contains("NonMonotone"));
+    }
+
+    #[test]
+    fn min_plus_curve_debug_clone_eq() {
+        let c1 = MinPlusCurve::new(vec![0, 1, 2], 1).unwrap();
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
+        let dbg = format!("{c1:?}");
+        assert!(dbg.contains("MinPlusCurve"));
+    }
+
+    #[test]
+    fn curve_budget_debug_clone_eq() {
+        let arrival = MinPlusCurve::new(vec![0, 2, 4], 2).unwrap();
+        let service = MinPlusCurve::new(vec![0, 3, 6], 3).unwrap();
+        let cb = CurveBudget { arrival, service };
+        let cb2 = cb.clone();
+        assert_eq!(cb, cb2);
+        let dbg = format!("{cb:?}");
+        assert!(dbg.contains("CurveBudget"));
+    }
+
+    #[test]
+    fn budget_event_snapshot_scrubbed() {
+        let mut budget = Budget::new()
+            .with_deadline(Time::from_secs(12))
+            .with_poll_quota(3)
+            .with_cost_quota(40)
+            .with_priority(180);
+
+        let before = budget;
+        let poll_before = budget.consume_poll();
+        let after_poll = budget;
+        let cost_ok = budget.consume_cost(15);
+        let after_cost = budget;
+
+        insta::assert_json_snapshot!(
+            "budget_event_scrubbed",
+            json!({
+                "events": [
+                    {
+                        "event": "created",
+                        "deadline": scrub_budget_event(before.deadline),
+                        "poll_quota": before.poll_quota,
+                        "cost_quota": before.cost_quota,
+                        "priority": before.priority,
+                    },
+                    {
+                        "event": "consume_poll",
+                        "returned": poll_before,
+                        "poll_quota_after": after_poll.poll_quota,
+                    },
+                    {
+                        "event": "consume_cost",
+                        "accepted": cost_ok,
+                        "cost_quota_after": after_cost.cost_quota,
+                        "exhausted": after_cost.is_exhausted(),
+                    }
+                ]
+            })
+        );
+    }
+}

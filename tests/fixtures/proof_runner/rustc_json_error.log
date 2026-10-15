@@ -1,0 +1,2 @@
+{"reason":"compiler-message","target":{"name":"validation_frontier_ledger_contract","kind":["test"],"crate_name":"asupersync"},"message":{"message":"missing field `proof_lane_id` in initializer of `ValidationFrontierRecord`","code":{"code":"E0063","explanation":null},"level":"error","spans":[{"file_name":"tests/validation_frontier_ledger_contract.rs","line_start":18,"column_start":5,"is_primary":true}]}}
+Remote command finished: exit=101

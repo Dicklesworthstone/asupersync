@@ -1,0 +1,90 @@
+{
+  "schema_version": "semantic-golden-fixture-v1",
+  "fixture_id": "golden-dual-run-harness-contract",
+  "rule_ids": ["differential.shared_harness.contract", "differential.seed_lineage.roundtrip"],
+  "description": "Expected shared dual-run identity and provenance records for the canonical harness contract case",
+  "identity": {
+    "schema_version": "lab-live-scenario-spec-v1",
+    "scenario_id": "phase1.cancel.race.one_loser",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "description": "Single loser is cancelled and drained",
+    "phase": "Phase 1",
+    "seed_plan": {
+      "canonical_seed": 42,
+      "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+      "lab_seed_mode": "inherit",
+      "live_seed_mode": "override",
+      "replay_policy": "single_seed",
+      "lab_seed_override": null,
+      "live_seed_override": 99,
+      "entropy_seed_override": 777
+    }
+  },
+  "lab_runtime": {
+    "seed": 42,
+    "entropy_seed": 777
+  },
+  "lab_replay": {
+    "execution_instance_id": "phase1.cancel.race.one_loser:lab:0x2A:0",
+    "effective_seed": 42,
+    "effective_entropy_seed": 777,
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1"
+  },
+  "live_context": {
+    "adapter": "live.current_thread",
+    "seed": 99,
+    "execution_instance_id": "phase1.cancel.race.one_loser:live:0x63:0",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1"
+  },
+  "seed_lineage": {
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+    "canonical_seed": 42,
+    "lab_effective_seed": 42,
+    "live_effective_seed": 99,
+    "lab_seed_mode": "inherit",
+    "live_seed_mode": "override",
+    "lab_entropy_seed": 777,
+    "live_entropy_seed": 777,
+    "replay_policy": "single_seed",
+    "seeds_match": false
+  },
+  "invariants": [
+    "Scenario family identity is shared across lab and live adapters",
+    "Seed lineage records explicit live overrides instead of hiding them",
+    "Live current-thread provenance keeps the same surface contract as lab",
+    "Explicit entropy overrides are retained in both replay metadata and seed lineage"
+  ],
+  "smoke_snapshot": {
+    "scenario_id": "phase1.cancel.race.one_loser",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+    "adapters": {
+      "lab": "lab.scenario_runner",
+      "spork": "lab.spork_harness",
+      "live": "live.current_thread"
+    },
+    "execution_instances": {
+      "lab": "phase1.cancel.race.one_loser:lab:0x2A:0",
+      "spork": "phase1.cancel.race.one_loser:lab:0x2A:0",
+      "live": "phase1.cancel.race.one_loser:live:0x63:0"
+    },
+    "passed": {
+      "lab": true,
+      "spork": true
+    }
+  },
+  "failure_manifest_excerpt": {
+    "scenario_id": "phase1.cancel.race.one_loser",
+    "adapter": "live.current_thread",
+    "surface_id": "cancel.race",
+    "surface_contract_version": "cancel.race.v1",
+    "seed_lineage_id": "seed.phase1.cancel.race.one_loser.v1",
+    "failure_reason": "contract smoke mismatch",
+    "phases_executed": ["setup", "execute", "compare"]
+  }
+}

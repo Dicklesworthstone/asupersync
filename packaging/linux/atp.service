@@ -1,0 +1,29 @@
+[Unit]
+Description=ATP (Asupersync Transfer Protocol) Daemon
+Documentation=https://github.com/asupersync/asupersync
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={binary_path} daemon --config {config_dir}/config.toml
+Restart=on-failure
+RestartSec=5
+Environment=ATP_LOG_LEVEL=info
+Environment=ATP_CONFIG_DIR={config_dir}
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths={config_dir}
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+
+[Install]
+WantedBy=default.target

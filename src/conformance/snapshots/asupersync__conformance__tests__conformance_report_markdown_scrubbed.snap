@@ -1,0 +1,47 @@
+---
+source: src/conformance/mod.rs
+expression: snapshot
+---
+## passing
+
+# Conformance Report
+
+Generated At: [TIMESTAMP]
+
+## Summary
+- Total Completed: 1
+- Passed: 1
+- Failed: 0
+
+## Results
+- `pass_only`: PASS
+
+## failing
+
+# Conformance Report
+
+Generated At: [TIMESTAMP]
+
+## Summary
+- Total Completed: 1
+- Passed: 0
+- Failed: 1
+
+## Results
+- `fail_only`: FAIL (deterministic markdown failure)
+
+## mixed
+
+# Conformance Report
+
+Generated At: [TIMESTAMP]
+
+## Summary
+- Total Completed: 3
+- Passed: 2
+- Failed: 1
+
+## Results
+- `pass_first`: PASS
+- `fail_second`: FAIL (deterministic markdown failure)
+- `pass_third`: PASS

@@ -1,0 +1,181 @@
+{
+  "schema_version": "artifact-governance-final-signoff-v1",
+  "signoff_id": "artifact_governance_final_signoff_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.6",
+  "created_date": "2026-06-12",
+  "purpose": "Aggregate the artifact-governance A1-A5, A7, and A8 deliverables into one checked signoff lane with explicit proof manifest, proof-status, runbook, closeout, and no-claim boundaries.",
+  "source_of_truth": {
+    "final_signoff": "artifacts/artifact_governance_final_signoff_v1.json",
+    "runbook": "docs/proof/artifact_governance_final_signoff.md",
+    "contract_test": "tests/artifact_governance_final_signoff_contract.rs",
+    "governance_ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "validation_harness": "artifacts/artifact_governance_validation_harness_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "signoff_policy": {
+    "corpus_coverage": "artifact_governance_program_signoff_not_full_corpus_certification",
+    "full_corpus_claim": false,
+    "requires_remote_required_validation": true,
+    "no_local_fallback": true,
+    "non_destructive_policy": "This signoff records governance closeout metadata only. It does not delete files, clean generated output, create branches, create worktrees, or authorize local Cargo fallback for remote-required proof lanes.",
+    "tracker_policy": "If .beads/issues.jsonl is dirty with unrelated work, record code and proof closeout in Agent Mail and defer tracker close until a clean tracker write is safe."
+  },
+  "child_deliverables": [
+    {
+      "child_id": "A1",
+      "bead_id": "asupersync-artifact-governance-awdiwy.1",
+      "name": "ledger schema, citeability taxonomy, and exclusion policy",
+      "primary_artifact": "artifacts/artifact_governance_ledger_v1.json",
+      "ledger_row": null,
+      "contract_tests": [
+        "tests/artifact_governance_ledger_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ]
+    },
+    {
+      "child_id": "A2",
+      "bead_id": "asupersync-artifact-governance-awdiwy.2",
+      "name": "corpus scanner for ownership, checks, and citation references",
+      "primary_artifact": "artifacts/artifact_governance_scanner_v1.json",
+      "ledger_row": "artifact-governance-scanner",
+      "contract_tests": [
+        "tests/artifact_governance_scanner_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ]
+    },
+    {
+      "child_id": "A3",
+      "bead_id": "asupersync-artifact-governance-awdiwy.3",
+      "name": "citation policy checks and no-claim boundary enforcement",
+      "primary_artifact": "artifacts/artifact_governance_citation_policy_v1.json",
+      "ledger_row": "artifact-governance-citation-policy",
+      "contract_tests": [
+        "tests/artifact_governance_citation_policy_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_authorize_overclaims",
+        "does_not_authorize_deletion",
+        "does_not_prove_fresh_rch_pass"
+      ]
+    },
+    {
+      "child_id": "A4",
+      "bead_id": "asupersync-artifact-governance-awdiwy.4",
+      "name": "operator report for orphan, stale, superseded, and citeable artifacts",
+      "primary_artifact": "artifacts/artifact_governance_operator_report_v1.json",
+      "ledger_row": "artifact-governance-operator-report",
+      "contract_tests": [
+        "tests/artifact_governance_operator_report_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_close_artifact_beads",
+        "does_not_prove_release_readiness",
+        "does_not_authorize_deletion"
+      ]
+    },
+    {
+      "child_id": "A5",
+      "bead_id": "asupersync-artifact-governance-awdiwy.5",
+      "name": "producer checklist and CI guard for new durable artifacts",
+      "primary_artifact": "artifacts/artifact_governance_producer_checklist_v1.json",
+      "ledger_row": "artifact-governance-producer-checklist",
+      "contract_tests": [
+        "tests/artifact_governance_producer_checklist_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_close_future_artifact_gaps",
+        "does_not_authorize_deletion",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    {
+      "child_id": "A7",
+      "bead_id": "asupersync-artifact-governance-awdiwy.7",
+      "name": "seed backfill across high-value artifact families",
+      "primary_artifact": "artifacts/artifact_governance_seed_backfill_v1.json",
+      "ledger_row": "artifact-governance-seed-backfill",
+      "contract_tests": [
+        "tests/artifact_governance_seed_backfill_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_select_ambiguous_owners",
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion"
+      ]
+    },
+    {
+      "child_id": "A8",
+      "bead_id": "asupersync-artifact-governance-awdiwy.8",
+      "name": "unit, fixture, and e2e validation harness with structured logs",
+      "primary_artifact": "artifacts/artifact_governance_validation_harness_v1.json",
+      "ledger_row": "artifact-governance-validation-harness",
+      "contract_tests": [
+        "tests/artifact_governance_validation_harness_contract.rs"
+      ],
+      "status": "landed",
+      "no_claim_boundaries": [
+        "does_not_authorize_local_cargo_fallback",
+        "does_not_close_artifact_beads",
+        "does_not_prove_release_readiness"
+      ]
+    }
+  ],
+  "proof_lane": {
+    "lane_id": "artifact-governance-final-signoff",
+    "guarantee_id": "artifact-governance-final-signoff",
+    "manifest_path": "artifacts/proof_lane_manifest_v1.json",
+    "status_claim_id": "artifact-governance-final-signoff",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_final_signoff_contract --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
+    "expected_signal": "artifact_governance_final_signoff_contract plus governance and proof manifest/status contracts pass",
+    "proof_status": "rerun-required"
+  },
+  "operator_closeout_checklist": [
+    {
+      "step_id": "verify_remote_lane",
+      "action": "Run the exact proof_lane.command through remote-required RCH.",
+      "fail_closed_if": "RCH admission is unavailable, falls back local, or returns stale progress without terminal test output."
+    },
+    {
+      "step_id": "verify_manifest_status",
+      "action": "Confirm proof_lane_manifest, proof_status_snapshot, README, and AGENTS markers stay aligned.",
+      "fail_closed_if": "The lane command, guarantee id, status claim, or docs markers drift."
+    },
+    {
+      "step_id": "verify_ledger_registration",
+      "action": "Confirm the final signoff row exists in the artifact-governance ledger and carries no local fallback and no release-readiness boundaries.",
+      "fail_closed_if": "The ledger row is missing, untested, or overclaims broad workspace health."
+    },
+    {
+      "step_id": "close_tracker_when_safe",
+      "action": "Close A4, A7, A8, and A6 in Beads only when .beads/issues.jsonl is clean enough for a bounded tracker write.",
+      "fail_closed_if": "Tracker state contains unrelated dirty comments or another agent is actively writing tracker rows."
+    }
+  ],
+  "no_claim_boundaries": [
+    "does_not_prove_full_corpus_coverage",
+    "does_not_authorize_deletion",
+    "does_not_authorize_local_cargo_fallback",
+    "does_not_prove_release_readiness",
+    "does_not_prove_workspace_health",
+    "does_not_prove_runtime_correctness",
+    "does_not_prove_performance_improvement",
+    "does_not_prove_live_rch_fleet_availability"
+  ]
+}

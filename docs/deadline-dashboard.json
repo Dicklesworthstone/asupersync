@@ -1,0 +1,80 @@
+{
+  "title": "Asupersync Deadline Monitoring",
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Deadline Warnings /s",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(asupersync_deadline_warnings_total[5m])",
+          "legendFormat": "warnings"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Deadline Violations /s",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(asupersync_deadline_violations_total[5m])",
+          "legendFormat": "violations"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Stuck Task Detections /s",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(asupersync_task_stuck_detected_total[5m])",
+          "legendFormat": "stuck"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Checkpoint Interval (p50/p90/p99)",
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(asupersync_checkpoint_interval_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(asupersync_checkpoint_interval_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p90"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(asupersync_checkpoint_interval_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Remaining Time at Completion (p50/p90/p99)",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(asupersync_deadline_remaining_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.90, sum(rate(asupersync_deadline_remaining_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p90"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(asupersync_deadline_remaining_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99"
+        }
+      ]
+    }
+  ]
+}

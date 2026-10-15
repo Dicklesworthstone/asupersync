@@ -1,0 +1,28 @@
+{
+  "repo": {
+    "head_sha": "2222222222222222222222222222222222222222",
+    "branch": "main"
+  },
+  "artifacts": [
+    {
+      "artifact_path": "artifacts/proof/fuzz-extent-warm-cache-only.json",
+      "git_sha": "2222222222222222222222222222222222222222",
+      "git_branch": "main",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_fuzz_extent cargo check --manifest-path fuzz/Cargo.toml --bins",
+      "touched_files": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets/dns_message_decoder.rs"
+      ],
+      "status": "pass",
+      "generated_at": "2026-05-08T05:15:00Z",
+      "stdout": "[RCH] remote rch-worker-fuzz-warm-01 (9.1s)\nFinished `dev` profile [unoptimized + debuginfo] target(s) in 0.02s\nProcess exited with code 0",
+      "fuzz_extent": {
+        "cache_warmth_used_as_correctness_evidence": true,
+        "target_dir_freshness": "warm-cache"
+      }
+    }
+  ],
+  "dirty_tree": {
+    "entries": []
+  }
+}

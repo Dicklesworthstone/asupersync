@@ -1,0 +1,68 @@
+{
+  "observations": [
+    {
+      "worker": "vmi-fast",
+      "command": "rch exec -- cargo test --test readme_claim_freshness_contract -- --nocapture",
+      "remote_exit_code": 0,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 2903,
+      "selected_slots": 2,
+      "queue_wait_ms": 0
+    },
+    {
+      "worker": "vmi-slow",
+      "command": "rch exec -- cargo test --test proof_runner_contract -- --nocapture",
+      "remote_exit_code": 0,
+      "retrieval_completed": false,
+      "retrieval_elapsed_ms": 180000,
+      "timeout_observed": true,
+      "selected_slots": 2,
+      "queue_wait_ms": 500
+    },
+    {
+      "worker": "vmi-slow",
+      "command": "rch exec -- cargo check -p asupersync --lib",
+      "remote_exit_code": 0,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 225261,
+      "selected_slots": 1,
+      "queue_wait_ms": 100
+    },
+    {
+      "worker": "vmi-fail",
+      "command": "rch exec -- cargo test -p asupersync --lib security:: -- --nocapture",
+      "remote_exit_code": 101,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 900,
+      "selected_slots": 1,
+      "queue_wait_ms": 0
+    },
+    {
+      "worker": "vmi-fail",
+      "command": "rch exec -- cargo clippy -p asupersync --all-targets -- -D warnings",
+      "remote_exit_code": 101,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 1100,
+      "selected_slots": 1,
+      "queue_wait_ms": 0
+    },
+    {
+      "worker": "vmi-zero",
+      "command": "rch exec -- cargo check -p asupersync --all-targets",
+      "remote_exit_code": 0,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 2200,
+      "selected_slots": 0,
+      "queue_wait_ms": 45000
+    },
+    {
+      "worker": "vmi-onefail",
+      "command": "rch exec -- cargo test --test stale_in_progress_receipt_contract -- --nocapture",
+      "remote_exit_code": 101,
+      "retrieval_completed": true,
+      "retrieval_elapsed_ms": 1600,
+      "selected_slots": 1,
+      "queue_wait_ms": 0
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "schema_version": "semantic-golden-fixture-v1",
+  "fixture_id": "golden-severity-lattice",
+  "rule_ids": ["def.outcome.severity_lattice", "def.outcome.four_valued"],
+  "description": "Expected severity values for all 4 outcome variants",
+  "entries": [
+    { "variant": "Ok", "severity_name": "ok", "severity_value": 0 },
+    { "variant": "Err", "severity_name": "err", "severity_value": 1 },
+    { "variant": "Cancelled", "severity_name": "cancelled", "severity_value": 2 },
+    { "variant": "Panicked", "severity_name": "panicked", "severity_value": 3 }
+  ],
+  "invariants": [
+    "Severity values form a total order: Ok < Err < Cancelled < Panicked",
+    "Severity values are contiguous integers 0..=3",
+    "Every Outcome variant maps to exactly one Severity",
+    "from_u8(as_u8(s)) == Some(s) for all valid severities"
+  ]
+}

@@ -1,0 +1,5 @@
+---
+source: src/plan/rewrite.rs
+expression: scrub_rewrite_summary(&report.summary())
+---
+1. JoinAssoc: flattened nested join ([PLAN_ID] -> [PLAN_ID])

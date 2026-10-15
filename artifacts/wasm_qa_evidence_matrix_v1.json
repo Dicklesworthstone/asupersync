@@ -1,0 +1,286 @@
+{
+  "contract_version": "wasm-qa-evidence-matrix-v1",
+  "bead_id": "asupersync-3qv04.8.1",
+  "extension_beads": [
+    "asupersync-1ky3w.1"
+  ],
+  "runner_bundle_schema_version": "wasm-qa-evidence-smoke-bundle-v1",
+  "runner_report_schema_version": "wasm-qa-evidence-smoke-run-report-v1",
+  "artifact_bundle_schema_version": "wasm-qa-artifact-bundle-v1",
+  "e2e_log_schema_version": "wasm-qa-e2e-log-v1",
+  "retention_policy": {
+    "schema_version": "wasm-qa-artifact-retention-v1",
+    "classes": [
+      {
+        "class": "hot",
+        "min_days": 30,
+        "description": "Failing runs and incident forensics"
+      },
+      {
+        "class": "warm",
+        "min_days": 14,
+        "description": "Passing execute-mode runs"
+      },
+      {
+        "class": "cold",
+        "min_days": 7,
+        "description": "Dry-run and low-signal bundles"
+      }
+    ]
+  },
+  "runner_script": "scripts/run_wasm_qa_evidence_smoke.sh",
+  "vnext_surface_matrix": [
+    {
+      "surface_id": "dedicated_worker_direct_runtime",
+      "support_level": "direct_runtime_supported",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext",
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+      ],
+      "fail_closed_rule": "Demote dedicated-worker support to canary or unsupported when onboarding, matrix, or fixture evidence drifts."
+    },
+    {
+      "surface_id": "durable_storage_artifact_persistence",
+      "support_level": "direct_runtime_supported_with_explicit_browser_limits",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh",
+        "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+      ],
+      "fail_closed_rule": "Remove durable browser persistence claims and fall back to explicit export or cleanup guidance on regression."
+    },
+    {
+      "surface_id": "rust_authored_browser_path",
+      "support_level": "preview_only_repository_maintained",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces + wasm-ga-readiness-review-board",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture",
+        "PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh",
+        "docs/wasm_quickstart_migration.md"
+      ],
+      "fail_closed_rule": "Keep the Rust-authored browser lane preview-only until a public Rust-callable browser builder exists."
+    },
+    {
+      "surface_id": "guarded_webtransport_lane",
+      "support_level": "guarded_direct_runtime_support",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces + wasm-launch-rollout-support-stabilization",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture",
+        "cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture",
+        "docs/WASM.md",
+        "docs/wasm_troubleshooting_compendium.md"
+      ],
+      "fail_closed_rule": "Demote WebTransport to preview-only and require fetch or WebSocket fallback guidance when capability or docs drift."
+    },
+    {
+      "surface_id": "worker_offload_parallel_preview",
+      "support_level": "guarded_preview_only",
+      "ci_or_release_lane": "wasm-browser-vnext-surfaces",
+      "required_evidence": [
+        "cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
+        "docs/wasm_browser_scheduler_semantics.md",
+        "docs/wasm_pilot_observability_contract.md"
+      ],
+      "fail_closed_rule": "Keep worker offload preview-only and fail closed on missing cancel, drain, finalize, or replay observability evidence."
+    }
+  ],
+  "certification_lane": {
+    "lane_id": "wasm-browser-vnext-surfaces",
+    "workflow_step_name": "WASM browser vNext surface certification",
+    "artifact_name": "wasm-browser-vnext-surface-certification",
+    "summary_artifact": "artifacts/wasm_browser_vnext_surface_summary.json",
+    "log_artifact": "artifacts/wasm_browser_vnext_surface_test.log",
+    "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_feasibility_matrix cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_js_exports_coverage_contract cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_example_contract cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_observability_contract cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture"
+  },
+  "evidence_layers": [
+    {
+      "layer_id": "L1",
+      "name": "Rust Cfg and Feature Gating",
+      "evidence_items": [
+        { "evidence_id": "L1-CFG-COMPILE", "description": "wasm32 cargo check passes with each wasm profile", "tool": "cargo/rch" },
+        { "evidence_id": "L1-CFG-NATIVE", "description": "Native cargo check still passes (no regression)", "tool": "cargo/rch" },
+        { "evidence_id": "L1-CFG-LEAK", "description": "No native-only import reachable under wasm32", "tool": "cargo/clippy" }
+      ]
+    },
+    {
+      "layer_id": "L2",
+      "name": "Exported ABI Handle Safety",
+      "evidence_items": [
+        { "evidence_id": "L2-ABI-OWNERSHIP", "description": "Exported handle single-owner invariant", "tool": "cargo test" },
+        { "evidence_id": "L2-ABI-DROP", "description": "Drop across wasm boundary releases resources", "tool": "cargo test" },
+        { "evidence_id": "L2-ABI-ERROR", "description": "Error values marshalled to JS-visible types", "tool": "cargo test" }
+      ]
+    },
+    {
+      "layer_id": "L3",
+      "name": "JS/TS Type Surface",
+      "evidence_items": [
+        { "evidence_id": "L3-TYPES-CORRECT", "description": ".d.ts declarations match actual exports", "tool": "tsc" },
+        { "evidence_id": "L3-EXPORTS-RESOLVE", "description": "Package exports resolve for ESM and CJS", "tool": "node" },
+        { "evidence_id": "L3-TREE-SHAKE", "description": "Tree shaking does not break live exports", "tool": "bundler" }
+      ]
+    },
+    {
+      "layer_id": "L4",
+      "name": "Browser Host-Bridge Correctness",
+      "evidence_items": [
+        { "evidence_id": "L4-FETCH-BASIC", "description": "Fetch bridge round-trip HTTP request", "tool": "E2E" },
+        { "evidence_id": "L4-STREAM-FLOW", "description": "ReadableStream/WritableStream backpressure", "tool": "E2E" },
+        { "evidence_id": "L4-WS-LIFECYCLE", "description": "WebSocket open/message/close lifecycle", "tool": "E2E" },
+        { "evidence_id": "L4-STORAGE-ROUNDTRIP", "description": "Storage bridge persist and retrieve", "tool": "E2E" },
+        { "evidence_id": "L4-ABORT", "description": "AbortSignal cancellation propagates", "tool": "E2E" }
+      ]
+    },
+    {
+      "layer_id": "L5",
+      "name": "Framework Adapter Lifecycle",
+      "evidence_items": [
+        { "evidence_id": "L5-REACT-MOUNT", "description": "React provider mount and init", "tool": "React test" },
+        { "evidence_id": "L5-REACT-STRICT", "description": "StrictMode double-mount safety", "tool": "React test" },
+        { "evidence_id": "L5-NEXT-SSR", "description": "SSR does not import wasm", "tool": "Next test" },
+        { "evidence_id": "L5-NEXT-HYDRATE", "description": "Client hydration bootstraps runtime", "tool": "Next test" }
+      ]
+    },
+    {
+      "layer_id": "L6",
+      "name": "Package Installability",
+      "evidence_items": [
+        { "evidence_id": "L6-NPM-INSTALL", "description": "npm install succeeds for each package", "tool": "npm" },
+        { "evidence_id": "L6-BUNDLER-VITE", "description": "Vite consumer builds and runs", "tool": "Vite" },
+        { "evidence_id": "L6-BUNDLER-WEBPACK", "description": "Webpack consumer builds and runs", "tool": "Webpack" },
+        { "evidence_id": "L6-BUNDLER-TURBOPACK", "description": "Turbopack consumer builds and runs", "tool": "Turbopack" }
+      ]
+    },
+    {
+      "layer_id": "L7",
+      "name": "Cross-Browser Execution",
+      "evidence_items": [
+        { "evidence_id": "L7-CHROME", "description": "E2E suite passes in Chrome", "tool": "Playwright" },
+        { "evidence_id": "L7-FIREFOX", "description": "E2E suite passes in Firefox", "tool": "Playwright" },
+        { "evidence_id": "L7-SAFARI", "description": "E2E suite passes in Safari/WebKit", "tool": "Playwright" }
+      ]
+    },
+    {
+      "layer_id": "L8",
+      "name": "Failure Forensics and Logging",
+      "evidence_items": [
+        { "evidence_id": "L8-CONSOLE-CAPTURE", "description": "Browser console captured in CI", "tool": "Playwright" },
+        { "evidence_id": "L8-WASM-VERSION", "description": "wasm module version in logs", "tool": "structured log" },
+        { "evidence_id": "L8-REPRO-COMMAND", "description": "Failure logs include repro command", "tool": "log schema" },
+        { "evidence_id": "L8-ARTIFACT-RETENTION", "description": "CI retains failure artifacts 7+ days", "tool": "CI config" }
+      ]
+    }
+  ],
+  "wasm_profiles": [
+    "wasm-browser-minimal",
+    "wasm-browser-dev",
+    "wasm-browser-prod",
+    "wasm-browser-deterministic"
+  ],
+  "cfg_gated_files": [
+    "src/net/tcp/stream.rs",
+    "src/http/h1/listener.rs",
+    "src/http/h1/server.rs",
+    "src/net/tcp/listener.rs",
+    "src/net/tcp/split.rs",
+    "src/net/tcp/socket.rs",
+    "src/net/tcp/traits.rs",
+    "src/net/tcp/mod.rs",
+    "src/net/udp.rs",
+    "src/runtime/reactor/mod.rs",
+    "src/runtime/reactor/source.rs",
+    "src/cx/cx.rs",
+    "src/config.rs",
+    "src/lib.rs",
+    "src/http/h1/mod.rs",
+    "src/trace/file.rs"
+  ],
+  "structured_log_fields_required": [
+    "schema_version",
+    "event_kind",
+    "scenario_id",
+    "run_id",
+    "timestamp_utc",
+    "evidence_id",
+    "layer",
+    "tool",
+    "wasm_profile",
+    "browser",
+    "package_name",
+    "module_fingerprint",
+    "verdict",
+    "command_exit_code",
+    "failure_reason",
+    "repro_command",
+    "bundle_manifest_path",
+    "artifact_path",
+    "retention_class",
+    "retention_until_utc"
+  ],
+  "artifact_bundle_layout_required": [
+    "bundle_manifest.json",
+    "run_report.json",
+    "run.log",
+    "events.ndjson"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "WASM-QA-SMOKE-LAYERS",
+      "description": "Verify evidence layer catalog completeness and structure",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_LAYERS cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals layer -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-PROFILES",
+      "description": "Verify wasm profile catalog and cfg-gated file existence",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_PROFILES cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals profile -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-EVIDENCE",
+      "description": "Verify evidence item IDs are unique and well-formed",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_qa_WASM_QA_SMOKE_EVIDENCE cargo test -p asupersync --test wasm_qa_evidence_matrix_contract --features test-internals evidence -- --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-CFG-MATRIX",
+      "description": "Run the ignored wasm profile compile-closure harness across the canonical browser matrix",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_WASM_QA_SMOKE_CFG_MATRIX cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals wasm_profile_matrix_compile_closure_holds -- --ignored --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-NATIVE-BACKSTOP",
+      "description": "Run the ignored native all-targets backstop after wasm cfg-gating changes",
+      "command": "${RCH_BIN:-rch} exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_cfg_WASM_QA_SMOKE_NATIVE_BACKSTOP cargo test -p asupersync --test wasm_cfg_compile_invariants --features test-internals native_all_targets_backstop_holds -- --ignored --nocapture"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-PACKAGED-BOOTSTRAP",
+      "description": "Run packaged bootstrap/load/reload harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=packaged_bootstrap HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-PACKAGED-CANCELLATION",
+      "description": "Run packaged cancellation/quiescence harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "bash scripts/build_browser_core_artifacts.sh prod && env WASM_PACKAGED_CANCELLATION_DRY_RUN=1 WASM_PERF_PROFILE=core-min RCH_BIN=/bin/true bash scripts/test_wasm_packaged_cancellation_e2e.sh"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-HOST-BRIDGE",
+      "description": "Run host-bridge fetch/streams/websocket/storage harness in dry-run mode and verify schema-style WASM E2E bundle emission",
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=host_bridge HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced bash scripts/test_wasm_cross_framework_e2e.sh"
+    },
+    {
+      "scenario_id": "WASM-QA-SMOKE-CROSS-BROWSER",
+      "description": "Run full cross-framework harness in dry-run mode with an explicit browser matrix and verify matrix metadata in emitted artifacts",
+      "command": "${RCH_BIN:-rch} exec -- env HARNESS_PROFILE=full HARNESS_DRY_RUN=1 RCH_BIN=/bin/true FAULT_MATRIX_MODE=reduced BROWSER_MATRIX=chromium-headless,firefox-headless,webkit-headless bash scripts/test_wasm_cross_framework_e2e.sh"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-3qv04.8.4.1",
+    "asupersync-3qv04.6.6",
+    "asupersync-3qv04.8.4.3",
+    "asupersync-3qv04.8.4.4",
+    "asupersync-3qv04.8.5",
+    "asupersync-3qv04.6"
+  ]
+}

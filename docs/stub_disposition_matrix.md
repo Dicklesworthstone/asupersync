@@ -1,0 +1,194 @@
+# Stub/Placeholder Disposition Matrix (A1)
+
+> Authoritative inventory for epic `asupersync-v2ofj7`.
+> Frozen by SapphireHill on 2026-04-03.
+> Each surface has exactly one disposition. Downstream tracks reference this file.
+
+## Disposition Categories
+
+| Code | Meaning | Closure Evidence Required |
+|------|---------|--------------------------|
+| **IMPLEMENT** | Surface needs real runtime behavior | Unit tests + E2E coverage |
+| **CONVERGE** | Duplicate surface — choose one canonical owner | Ownership frozen, non-canonical reduced |
+| **QUARANTINE** | Move to harness-only / test-only scope | cfg gate + documentation |
+| **DOCUMENT** | Honest contract already exists, just needs truthful docs | Doc update + no stale language |
+| **RETIRE** | Remove or deprecate the misleading public shape | Removal or #[deprecated] |
+| **RESOLVED** | Already fixed (by prior agent or this session) | Verification probe in Z0a |
+
+## Surface Inventory
+
+### Surface 1: WASM boundary split-brain
+- **Files**: `asupersync-wasm/src/{lib.rs, exports.rs, error.rs, types.rs}`
+- **State**: `asupersync-browser-core` is the frozen canonical owner of the shipped v1 JS/WASM boundary. `asupersync-wasm` is no longer comment-only; it is a retained non-canonical scaffold that exposes explicit status metadata and fail-closed helpers pointing callers at the canonical owner.
+- **Disposition**: **CONVERGE** → Track B (B1→B2→B3)
+- **Target**: Keep `asupersync-browser-core` as the sole live boundary owner while `asupersync-wasm` remains an honest retained scaffold unless a later bead deliberately promotes a new supported role.
+- **Adjacent epic**: `asupersync-3qv04` (Browser Edition)
+
+### Surface 2: quorum! macro placeholder
+- **File**: `src/combinator/quorum.rs`
+- **State**: **RESOLVED** — permanent `compile_error!` macro was removed by prior agent (bead `6yj6zn`).
+- **Disposition**: **RESOLVED**
+- **Evidence**: Macro no longer exists in source. Functional API `Quorum::new()` is complete.
+
+### Surface 3: try_join! macro placeholder
+- **File**: `src/combinator/timeout.rs`
+- **State**: **RESOLVED** — permanent `compile_error!` macro was removed by prior agent (bead `3eztk2`).
+- **Disposition**: **RESOLVED**
+- **Evidence**: Macro no longer exists. Functional API `Scope::join()` with FailFast is complete.
+
+### Surface 4: TLS compute_spki_sha256
+- **File**: `src/tls/types.rs:478-491`
+- **State**: **RESOLVED** — real implementation using `x509_parser` + `ring::digest` exists when `tls` feature enabled. cfg-off path returns proper "tls feature not enabled" error.
+- **Disposition**: **RESOLVED** (bead `v2ofj7.4.1`)
+- **Evidence**: Function parses X.509 DER, computes SHA-256 of SPKI. Feature-gated correctly.
+
+### Surface 5: Kafka StubBroker harness contract
+- **File**: `src/messaging/kafka.rs:490-623`
+- **State**: Decision frozen for Track E: the brokerless path behind `#[cfg(not(feature = "kafka"))]` is a harness-only deterministic in-process broker shared by the producer and consumer fallback APIs. It exists for tests and contract validation, not as a production Kafka broker substitute.
+- **Disposition**: **DOCUMENT** → Track E (E1→E2→E3)
+- **Target**: E2 aligns public naming/feature-gating with the harness-only contract. E3 removes stale wording and makes the non-production status obvious anywhere this lane is described.
+
+### Surface 6: remote.rs remote-execution contract
+- **File**: `src/remote.rs`
+- **State**: **RESOLVED / BOUNDED** — `src/remote.rs` documents the transport-agnostic remote-execution contract: protocol payloads/envelopes, origin/remote state machines, `RemoteCap`, lease/idempotency/saga helpers, and deterministic fail-closed behavior when no runtime is attached. Bead `asupersync-rckrmt` added the virtual/lab lifecycle proof `remote_virtual_lifecycle_proof_exercises_runtime_transport_and_protocol`, which drives `spawn_remote` through the injected `RemoteRuntime` boundary and covers accepted spawn/result delivery, cancellation before ack, cancellation while running with lease renewal, lease expiry, duplicate/idempotency behavior, send-failure cleanup, fallback, and trace emission. Production network execution remains an adapter responsibility, not a core-runtime proof claim.
+- **Disposition**: **RESOLVED** (bounded support class: virtual/lab proof + adapter responsibility)
+- **Target**: Preserve the shipped protocol/capability proof and require future production network adapters to meet the same spawn/result/cancel/lease/idempotency contract before docs widen beyond the current support class.
+
+### Surface 7: Session types — typestate without transport
+- **File**: `src/obligation/session_types.rs`
+- **State**: **RESOLVED** — the module now exposes an honest two-lane contract: pure typestate transitions for compile-time protocol enforcement, plus in-process transport-backed session channels via `new_transport_pair()` and the async transition methods (`send_async`, `recv_async`, `select_*_async`, `offer_async`). Cross-process/network transport remains explicitly deferred instead of being implied.
+- **Disposition**: **RESOLVED**
+- **Evidence**: `src/obligation/session_types.rs` documents the bounded `mpsc` bridge and ships transport cancellation/drop regressions; `tests/session_type_obligations.rs` covers typed/dynamic migration parity and transport-backed flows.
+
+### Surface 8: Legacy UringReactor shim
+- **File**: `src/runtime/reactor/uring.rs`
+- **State**: Detached legacy source file. `src/runtime/reactor/mod.rs` does not include or re-export `src/runtime/reactor/uring.rs`, so `UringReactor` is not part of the live public export graph today. If retained, H2 must make that status explicit instead of leaving a misleading standalone shim on disk.
+- **Disposition**: **RETIRE** → Track H (H2/v2ofj7.8.6)
+- **Target**: Either remove/archive the detached shim or turn any remaining public story into an explicit deprecated alias to `IoUringReactor`.
+
+### Surface 9: IoUringReactor cfg-off surface
+- **File**: `src/runtime/reactor/io_uring.rs:1079+`
+- **State**: `src/runtime/reactor/mod.rs` re-exports `IoUringReactor` on Linux targets. With `feature = "io-uring"` it is the real implementation; without that feature the same Linux-only public symbol intentionally returns `Unsupported`.
+- **Disposition**: **DOCUMENT** → Track H (H3/v2ofj7.8.7)
+- **Target**: Ensure docs and error messages are maximally clear. No code change needed.
+
+### Surface 10: macOS/kqueue reactor stub
+- **File**: `src/runtime/reactor/macos.rs:644-721`
+- **State**: Detached duplicate source file. The live public `KqueueReactor` export comes from `src/runtime/reactor/kqueue.rs` via `src/runtime/reactor/mod.rs`; `src/runtime/reactor/macos.rs` is not in the current compiled module graph.
+- **Disposition**: **DOCUMENT** → Track H (H4/v2ofj7.8.8)
+- **Target**: Reconcile stale docs/comments/waivers so contributors do not mistake `macos.rs` for the active public backend surface.
+
+## H1 Reactor Support Matrix (Frozen 2026-04-03)
+
+This is the authoritative Track H public-contract snapshot. Downstream H2-H4 work
+must preserve or deliberately update this matrix rather than inferring behavior
+from detached source files.
+
+| Target / feature | Public symbols in `runtime::reactor` | Live source | Current truthfulness target |
+|------------------|--------------------------------------|-------------|-----------------------------|
+| Linux | `EpollReactor` | `src/runtime/reactor/epoll.rs` | Always-available live Linux backend |
+| Linux + `io-uring` feature | `IoUringReactor` | `src/runtime/reactor/io_uring.rs` | Real io_uring backend |
+| Linux without `io-uring` feature | `IoUringReactor` | `src/runtime/reactor/io_uring.rs` | Intentional `Unsupported` export; H3 must keep docs/errors/tests honest |
+| macOS / FreeBSD / OpenBSD / NetBSD / DragonFlyBSD | `KqueueReactor` | `src/runtime/reactor/kqueue.rs` | Live BSD-family backend |
+| Windows | `IocpReactor` | `src/runtime/reactor/windows.rs` | Live Windows backend |
+| `wasm32` | `BrowserReactor` | `src/runtime/reactor/browser.rs` | Live browser/host-event backend |
+| Deterministic tests | `LabReactor` | `src/runtime/reactor/lab.rs` | Virtual replayable backend |
+| Detached legacy file | none (`UringReactor` is not re-exported) | `src/runtime/reactor/uring.rs` | H2 cleanup target |
+| Detached duplicate file | none (`macos.rs` is not re-exported) | `src/runtime/reactor/macos.rs` | H4 cleanup target |
+
+### Surface 11: BrowserEntropy "stub" language
+- **File**: `src/util/entropy.rs:135-154`
+- **State**: **RESOLVED** — implementation is a real CSPRNG wrapper around `getrandom`. Language updated to "honest thin wrapper" by prior agent (bead `v2ofj7.4.3`).
+- **Disposition**: **RESOLVED**
+- **Evidence**: No stale "stub" language remains. Working implementation.
+
+### Surface 12: AuthenticationTag cryptographic contract
+- **File**: `src/security/tag.rs:15-247`
+- **State**: **RESOLVED** — `AuthenticationTag` now uses a domain-separated HMAC-SHA256 over symbol identity and payload bytes. `zero()` remains only as an explicit invalid-test sentinel.
+- **Disposition**: **RESOLVED** (bead `v2ofj7.4.2`)
+- **Evidence**: `src/security/tag.rs` computes/verifies HMAC-SHA256 directly and the stale phase-0 stand-in language is removed from security docs.
+
+### Surface 13: Conformance panic-based dummies
+- **File**: `conformance/src/runner.rs:950-1220`
+- **State**: **RESOLVED** — the dummy conformance runtime no longer uses
+  `panic!("dummy ...")` placeholders. Channel surfaces execute in memory, and
+  unsupported I/O surfaces fail closed with `io::ErrorKind::Unsupported` via
+  `dummy_unsupported(...)`.
+- **Disposition**: **RESOLVED** (Track I / I2 / v2ofj7.9.2)
+- **Evidence**: `dummy_runtime_channels_are_non_panicking`,
+  `dummy_runtime_io_surfaces_fail_closed_with_unsupported_errors`, and
+  `dummy_runtime_contains_no_panic_based_placeholders` cover the previous
+  panic-based dummy surface; `scripts/scan_stubs.sh` reports
+  `ZR-SCAN-CONFORMANCE-DUMMY-PANIC` as passed.
+
+## Hygiene Surfaces (not from original audit, added during planning)
+
+### Surface 14: Stray artifacts
+- **Files**: `src/a.out`, `src/test_multipart_panic.rs`
+- **Disposition**: **RESOLVED** (bead `5js195`)
+- **Evidence**: Files deleted 2026-04-03.
+
+### Surface 15: Crate-level `#![allow(dead_code)]`
+- **Files**: `src/messaging/subject.rs:3`
+- **State**: `src/lib.rs` now denies dead code on non-Windows targets and
+  warns on Windows-only builds for platform-gated items. The remaining
+  crate-level suppression is local to `src/messaging/subject.rs`.
+- **Disposition**: **RETIRE** → bead `ir13xz`
+- **Target**: Remove or narrow the subject-language crate-level suppression
+  after fixing any resulting warnings; preserve the root crate's dead-code
+  deny/warn policy.
+
+### Surface 16: transport/mock unconditionally public
+- **File**: `src/transport/mod.rs:8`
+- **Disposition**: **RESOLVED** (bead `lf1lfv`)
+- **Evidence**: Module gated behind `test-internals` by YellowCanyon.
+
+### Surface 17: unimplemented!() in test harnesses
+- **Files**: `examples/test_manual.rs:18`, `tests/split_utf8_read_line.rs:18`
+- **Disposition**: **RESOLVED** (Track I / I1 / v2ofj7.9.1)
+- **Evidence**: `ast-grep run -l Rust -p 'unimplemented!()' examples tests`
+  returns no matches, and `scripts/scan_stubs.sh` reports
+  `ZR-SCAN-NO-HARNESS-UNIMPLEMENTED` as passed.
+
+### Surface 18: API skeleton in project root
+- **File**: `asupersync_v4_api_skeleton.rs`
+- **Disposition**: **RESOLVED** (Track I / I3 / v2ofj7.9.3)
+- **Evidence**: The root-level file is absent from `rg --files`; git history
+  records `f5f34b7e0 chore: remove root-level API skeleton after migration to
+  docs/design/`.
+
+## Reality-Check Overlay (2026-05-05)
+
+### Surface 19: Live placeholder marker classification
+- **Files**: `artifacts/stub_placeholder_inventory_v1.json`, `tests/stub_resolution_audit.rs`, `scripts/scan_stubs.sh`
+- **State**: **DOCUMENTED** — bead `asupersync-rckstb` adds a machine-readable selector inventory plus generated row-level inventory for current `src/`, `tests/`, `conformance/`, `examples/`, selected public docs, stub-resolution scripts, and public contract artifacts that affect product or conformance claims. The inventory uses the finite bead disposition set (`legitimate-test-harness`, `documented-deferred-surface`, `unsupported-fail-closed`, `implemented-now`, `product-bug-follow-up`, `conformance-bug-follow-up`, `obsolete-retained-no-delete`, `intentional-reference-implementation`) and records row fields for marker path, line, marker text, context, visibility, reasoning, owner bead or permanent rationale, revisit condition, and proof artifact. The scan runner now emits the rckstb `scanned_paths`, `marker_count`, `disposition_counts`, `unclassified_count`, `expired_allowance_count`, `owner_bead_missing_count`, `artifact_path`, `row_inventory_path`, `verdict`, and `first_failure` fields in its summary.
+- **Disposition**: **DOCUMENT** → Track Z / `asupersync-rckstb`
+- **Target**: Keep `unclassified_count = 0`; placeholder-only conformance rows must never be counted as production-live pass evidence unless a later bead replaces the placeholder path with a real seam and updates this inventory.
+
+## Disposition Summary
+
+| Disposition | Count | Surfaces |
+|-------------|-------|----------|
+| RESOLVED | 12 | #2, #3, #4, #6, #7, #11, #12, #13, #14, #16, #17, #18 |
+| IMPLEMENT | 0 | — |
+| DOCUMENT | 4 | #5, #9, #10, #19 |
+| CONVERGE | 1 | #1 |
+| QUARANTINE | 0 | — |
+| RETIRE | 2 | #8, #15 |
+| **Total** | **19** | |
+
+## Track-to-Surface Mapping
+
+| Track | Surfaces | Dispositions |
+|-------|----------|-------------|
+| A | This document | — |
+| B | #1 | CONVERGE |
+| C | #2, #3 | RESOLVED (both done) |
+| D | #4, #11, #12 | #4 RESOLVED, #11 RESOLVED, #12 RESOLVED |
+| E | #5 | DOCUMENT |
+| F | #6 | RESOLVED |
+| G | #7 | RESOLVED |
+| H | #8, #9, #10 | RETIRE, DOCUMENT, DOCUMENT |
+| I | #13, #17, #18 | RESOLVED, RESOLVED, RESOLVED |
+| Z | All, #19 | Verification of above plus live marker classification ratchet |
+| Hygiene | #14, #15, #16 | #14 RESOLVED, #15 RETIRE, #16 RESOLVED |

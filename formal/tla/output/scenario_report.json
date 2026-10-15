@@ -1,0 +1,11 @@
+{
+  "schema": "tla-scenario-report-v1",
+  "status": "skipped",
+  "reason": "TLC not found in PATH",
+  "tlc_available": false,
+  "scenario": null,
+  "invariants_checked": 0,
+  "invariants_passed": 0,
+  "invariants_violated": 0,
+  "violations": []
+}

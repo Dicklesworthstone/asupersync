@@ -1,0 +1,33 @@
+---
+source: tests/conformance/raptorq_proof_correctness.rs
+assertion_line: 542
+expression: vector_summary
+---
+{
+  "coverage": {
+    "failure_scenarios": 3,
+    "failure_types_covered": [
+      "InsufficientSymbols",
+      "SymbolSizeMismatch",
+      "CorruptDecodedOutput"
+    ],
+    "k_values_tested": [
+      4,
+      6,
+      8,
+      10,
+      12,
+      16
+    ],
+    "success_scenarios": 3
+  },
+  "invariants_verified": [
+    "proof_version_stable",
+    "content_hash_deterministic",
+    "replay_verification_roundtrip",
+    "artifact_size_bounded",
+    "elimination_trace_consistent"
+  ],
+  "schema_version": 2,
+  "vector_count": 6
+}

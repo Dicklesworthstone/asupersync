@@ -1,0 +1,24 @@
+---
+source: src/http/h2/hpack.rs
+assertion_line: 3860
+expression: encoded.as_ref()
+---
+[
+    130,
+    131,
+    132,
+    133,
+    135,
+    136,
+    141,
+    144,
+    152,
+    159,
+    166,
+    122,
+    132,
+    37,
+    168,
+    73,
+    233,
+]

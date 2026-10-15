@@ -1,0 +1,99 @@
+{
+  "schema_version": "lab-live-differential-v2-scenarios-v1",
+  "bead_id": "asupersync-xeh8m0.4",
+  "artifact_path": "artifacts/lab_live_differential_v2_scenarios_v1.json",
+  "proof_lane": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_4_lab_live_v2 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test lab_live_differential_v2 -- --nocapture",
+  "runtime_seam": {
+    "lab": "asupersync::lab::DualRunHarness",
+    "live": "asupersync::lab::run_live_adapter",
+    "transcript_builder": "tests/lab_live_differential_v2.rs",
+    "scope_note": "The pilots exercise the existing normalized-observable and live-witness seam. They do not claim broader primitive coverage beyond the listed Phase 1 surfaces."
+  },
+  "scenario_schema": {
+    "required_fields": [
+      "scenario_id",
+      "surface_id",
+      "surface_contract_version",
+      "description",
+      "canonical_seed",
+      "phase",
+      "pilot_kind",
+      "expected_verdict",
+      "transcript_artifact_path"
+    ],
+    "phase_values": [
+      "Phase 1"
+    ],
+    "pilot_kind_values": [
+      "semantic_equivalence",
+      "region_close_divergence"
+    ]
+  },
+  "transcript_schema": {
+    "schema_version": "lab-live-differential-v2-transcript-v1",
+    "required_fields": [
+      "schema_version",
+      "scenario_id",
+      "surface_id",
+      "seed",
+      "schedule_decisions",
+      "live_divergence_point",
+      "minimized_replay_handle",
+      "verdict"
+    ],
+    "schedule_decision_fields": [
+      "runtime",
+      "decision_seq",
+      "seed",
+      "source"
+    ],
+    "minimized_replay_handle_fields": [
+      "kind",
+      "seed_lineage_id",
+      "lab_seed",
+      "live_seed",
+      "repro_command"
+    ],
+    "verdict_values": [
+      "pass",
+      "semantic_mismatch_admitted_surface",
+      "hard_contract_break"
+    ]
+  },
+  "pilot_scenarios": [
+    {
+      "scenario_id": "xeh8m0.lab_live_v2.semantic_equivalence",
+      "surface_id": "lab_live_v2.semantic_equivalence",
+      "surface_contract_version": "lab-live-differential-v2.semantic-equivalence.v1",
+      "description": "Phase 1 pilot that proves the v2 transcript records an equivalent lab/live run through the existing dual-run seam.",
+      "canonical_seed": 132156657234889,
+      "phase": "Phase 1",
+      "pilot_kind": "semantic_equivalence",
+      "expected_verdict": "pass",
+      "transcript_artifact_path": "artifacts/differential/xeh8m0/lab_live_v2_semantic_equivalence.transcript.json"
+    },
+    {
+      "scenario_id": "xeh8m0.lab_live_v2.region_close_divergence",
+      "surface_id": "lab_live_v2.region_close",
+      "surface_contract_version": "lab-live-differential-v2.region-close.v1",
+      "description": "Phase 1 pilot that proves the v2 transcript pins a live region-close divergence to the first mismatched normalized field.",
+      "canonical_seed": 132156657234890,
+      "phase": "Phase 1",
+      "pilot_kind": "region_close_divergence",
+      "expected_verdict": "hard_contract_break",
+      "transcript_artifact_path": "artifacts/differential/xeh8m0/lab_live_v2_region_close_divergence.transcript.json"
+    }
+  ],
+  "claim_boundaries": {
+    "supported": [
+      "v2 scenario schema is machine-readable",
+      "v2 transcript schema carries seed, schedule decisions, divergence point, minimized replay handle, and verdict",
+      "two Phase 1 pilots run through the existing lab/live differential seam"
+    ],
+    "not_claimed": [
+      "raw OS scheduling parity",
+      "browser/runtime-wide adapter parity",
+      "automatic promotion of any divergence to a regression"
+    ]
+  }
+}

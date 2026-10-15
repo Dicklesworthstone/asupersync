@@ -1,0 +1,137 @@
+---
+source: src/raptorq/decoder.rs
+assertion_line: 4171
+expression: "json!({\n    \"happy_path\":\n    decode_stats_snapshot(\"happy_path\", k, symbol_size, happy_seed, 0,\n    happy_received.len(), &happy_result,), \"degraded_burst_loss\":\n    decode_stats_snapshot(\"degraded_burst_loss\", k, symbol_size,\n    degraded_seed, 4, degraded_received.len(), &degraded_result,),\n})"
+---
+{
+  "degraded_burst_loss": {
+    "decoded_source_symbols": 8,
+    "intermediate_symbols": 27,
+    "k": 8,
+    "received_symbols": 56,
+    "scenario": "degraded_burst_loss",
+    "seed": 2026,
+    "stats": {
+      "conservative_fallback_reason": "none",
+      "dense_core_cols": 27,
+      "dense_core_dropped_rows": 0,
+      "dense_core_rows": 58,
+      "dropped": 4,
+      "fallback_reason": "peeling_exhausted_to_dense_core",
+      "gauss_ops": 1089,
+      "governance": {
+        "chosen_action": "fallback",
+        "confidence_score": 250,
+        "deterministic_fallback_trigger": {
+          "fired": true,
+          "reason": "conservative_fallback_reason_unclassified"
+        },
+        "expected_loss_terms": {
+          "canary_hold": 61,
+          "continue": 122,
+          "fallback": 42,
+          "rollback": 43
+        },
+        "replay_ref": "replay:rq-track-g-expected-loss-v1",
+        "state_posterior": {
+          "degraded": 645,
+          "healthy": 15,
+          "regression": 244,
+          "unknown": 96
+        },
+        "top_evidence_contributors": [
+          {
+            "contribution_permille": 486,
+            "name": "performance_budget_signal"
+          },
+          {
+            "contribution_permille": 402,
+            "name": "instability_signal"
+          },
+          {
+            "contribution_permille": 112,
+            "name": "policy_conflict_signal"
+          }
+        ],
+        "uncertainty_score": 750
+      },
+      "hard_regime_activated": false,
+      "hard_regime_branch": "none",
+      "hard_regime_fallbacks": 0,
+      "inactivated": 27,
+      "k": 8,
+      "loss_pct": 50,
+      "peel_frontier_peak": 0,
+      "peel_queue_pops": 0,
+      "peel_queue_pushes": 0,
+      "peeled": 0,
+      "pivots": 27
+    },
+    "symbol_size": 32
+  },
+  "happy_path": {
+    "decoded_source_symbols": 8,
+    "intermediate_symbols": 27,
+    "k": 8,
+    "received_symbols": 44,
+    "scenario": "happy_path",
+    "seed": 42,
+    "stats": {
+      "conservative_fallback_reason": "none",
+      "dense_core_cols": 27,
+      "dense_core_dropped_rows": 0,
+      "dense_core_rows": 46,
+      "dropped": 0,
+      "fallback_reason": "peeling_exhausted_to_dense_core",
+      "gauss_ops": 848,
+      "governance": {
+        "chosen_action": "fallback",
+        "confidence_score": 250,
+        "deterministic_fallback_trigger": {
+          "fired": true,
+          "reason": "conservative_fallback_reason_unclassified"
+        },
+        "expected_loss_terms": {
+          "canary_hold": 64,
+          "continue": 126,
+          "fallback": 42,
+          "rollback": 44
+        },
+        "replay_ref": "replay:rq-track-g-expected-loss-v1",
+        "state_posterior": {
+          "degraded": 601,
+          "healthy": 14,
+          "regression": 238,
+          "unknown": 147
+        },
+        "top_evidence_contributors": [
+          {
+            "contribution_permille": 408,
+            "name": "instability_signal"
+          },
+          {
+            "contribution_permille": 402,
+            "name": "performance_budget_signal"
+          },
+          {
+            "contribution_permille": 190,
+            "name": "policy_conflict_signal"
+          }
+        ],
+        "uncertainty_score": 750
+      },
+      "hard_regime_activated": false,
+      "hard_regime_branch": "none",
+      "hard_regime_fallbacks": 0,
+      "inactivated": 27,
+      "k": 8,
+      "loss_pct": 0,
+      "peel_frontier_peak": 0,
+      "peel_queue_pops": 0,
+      "peel_queue_pushes": 0,
+      "peeled": 0,
+      "pivots": 27
+    },
+    "symbol_size": 32
+  }
+}

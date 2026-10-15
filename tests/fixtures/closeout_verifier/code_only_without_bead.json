@@ -1,0 +1,29 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "body_md": "Code-only closeout at `112233abc`. Validation: python smoke passed. No bead was claimed.",
+        "from": "GentleCitadel",
+        "id": 1004,
+        "subject": "Closed code-only closeout verifier smoke",
+        "thread_id": "code-only-closeout"
+      }
+    ],
+    "reservations": []
+  },
+  "beads": {
+    "issues": []
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "commit": "112233abc",
+    "mode": "code-only",
+    "slice_id": "code-only-closeout",
+    "thread_id": "code-only-closeout"
+  },
+  "git": {
+    "main_head": "112233abc",
+    "origin_main": "112233abc",
+    "origin_master": "112233abc"
+  }
+}

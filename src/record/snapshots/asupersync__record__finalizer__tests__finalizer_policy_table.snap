@@ -1,0 +1,7 @@
+---
+source: src/record/finalizer.rs
+expression: finalizer_policy_table()
+---
+Soft|soft=true|continue=false|polls=100|time_ns=5000000000
+BoundedLog|soft=false|continue=true|polls=100|time_ns=5000000000
+BoundedPanic|soft=false|continue=false|polls=100|time_ns=5000000000

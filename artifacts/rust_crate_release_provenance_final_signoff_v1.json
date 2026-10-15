@@ -1,0 +1,214 @@
+{
+  "schema_version": "rust-crate-release-provenance-final-signoff-v1",
+  "signoff_id": "rust_crate_release_provenance_final_signoff_v1",
+  "primary_bead": "asupersync-release-provenance-core-crates-jpts8n.5",
+  "parent_bead": "asupersync-release-provenance-core-crates-jpts8n",
+  "created_date": "2026-06-13",
+  "source_paths": {
+    "final_signoff": "artifacts/rust_crate_release_provenance_final_signoff_v1.json",
+    "dry_run_e2e_log": "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log",
+    "operator_report": "docs/rust_crate_release_provenance_final_signoff.md",
+    "policy": "docs/rust_crate_release_provenance_policy.md",
+    "artifact_contract": "artifacts/rust_crate_release_provenance_contract_v1.json",
+    "integrity_manifest": "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+    "publish_workflow": ".github/workflows/publish.yml",
+    "contract_test": "tests/rust_crate_release_provenance_contract.rs",
+    "proof_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json"
+  },
+  "artifact_integrity": [
+    {
+      "path": "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log",
+      "sha256": "sha256:4bdcbc18497b43b4aecdae327a02e965ca42a955e299f2c578c01c05b54ed424",
+      "role": "deterministic_dry_run_e2e_log"
+    },
+    {
+      "path": "docs/rust_crate_release_provenance_final_signoff.md",
+      "sha256": "sha256:45dd4561d2627a566312660783de5557cc654a22f561399b16f8b65c6eae7e8b",
+      "role": "operator_report"
+    }
+  ],
+  "dry_run_e2e": {
+    "execution_mode": "deterministic_fixture_no_live_publish",
+    "status_vocabulary": [
+      "packaged",
+      "skipped",
+      "already_published",
+      "blocked"
+    ],
+    "live_publish_performed": false,
+    "cargo_publish_dry_run_performed": false,
+    "package_byte_source": "deterministic_fixture_not_real_crate_tarball",
+    "github_actions_runner_behavior": "Real GitHub-hosted cargo publish dry-runs and live publishes remain runner-local with isolated CARGO_TARGET_DIR; credentials are never sent through RCH.",
+    "artifact_outputs": {
+      "json": "artifacts/rust_crate_release_provenance_final_signoff_v1.json",
+      "markdown": "docs/rust_crate_release_provenance_final_signoff.md",
+      "log": "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log"
+    },
+    "per_package_results": [
+      {
+        "publish_order": 1,
+        "package": "franken-kernel",
+        "manifest_path": "franken_kernel/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-franken-kernel-0.3.4",
+        "package_tarball_sha256": "sha256:377e9087a77ad9f445ce4f7ddc4a07e7f34d900c655227d1f682114a2f7e3eea",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 2,
+        "package": "franken-evidence",
+        "manifest_path": "franken_evidence/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-franken-evidence-0.3.4",
+        "package_tarball_sha256": "sha256:2d9be9b8417c0a2f551be535ce8e16ca3c052a90d28f565bb183c93e7cd8d241",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 3,
+        "package": "franken-decision",
+        "manifest_path": "franken_decision/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-franken-decision-0.3.4",
+        "package_tarball_sha256": "sha256:a176ebe44a9781bc52157e628b84994531a6a667b52ab4c9afd601ba4d1d8891",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 4,
+        "package": "asupersync-macros",
+        "manifest_path": "asupersync-macros/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-asupersync-macros-0.3.4",
+        "package_tarball_sha256": "sha256:12070fc73e4982c856f1a482d6a6d1b6f27bcba15b8e97114315a1fdff22fd37",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 5,
+        "package": "asupersync",
+        "manifest_path": "Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-asupersync-0.3.4",
+        "package_tarball_sha256": "sha256:78da2c05f873fa43909c6ccc2a4d6cbc4714a3f2e5b6b2dd20b02451f8ff3832",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 6,
+        "package": "asupersync-conformance",
+        "manifest_path": "conformance/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-asupersync-conformance-0.3.4",
+        "package_tarball_sha256": "sha256:41edc80f7db87c1e2af67fd8b367401c7477eb92f57d6f05c46688f61f39d5eb",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 7,
+        "package": "frankenlab",
+        "manifest_path": "frankenlab/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-frankenlab-0.3.4",
+        "package_tarball_sha256": "sha256:b6561ce7539f0c3f0eb25f70f5aeae852fd19b071b8d1ff06d9f01c623b947b8",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 8,
+        "package": "asupersync-browser-core",
+        "manifest_path": "asupersync-browser-core/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-asupersync-browser-core-0.3.4",
+        "package_tarball_sha256": "sha256:5aa4d2ccf99af99ad5ba0120dbb2a3ba0e4b3c0dcae687dcf61ed98a45da18ca",
+        "live_publish_performed": false
+      },
+      {
+        "publish_order": 9,
+        "package": "asupersync-tokio-compat",
+        "manifest_path": "asupersync-tokio-compat/Cargo.toml",
+        "status": "packaged",
+        "record_id": "fixture-e2e-asupersync-tokio-compat-0.3.4",
+        "package_tarball_sha256": "sha256:0302e9c0231bee59390b40a1847612073057578c1fb344d51949c703456b6a1e",
+        "live_publish_performed": false
+      }
+    ]
+  },
+  "child_evidence": [
+    {
+      "bead": "asupersync-release-provenance-core-crates-jpts8n.1",
+      "status": "closed",
+      "scope": "policy_and_surface_inventory",
+      "evidence_paths": [
+        "docs/rust_crate_release_provenance_policy.md"
+      ]
+    },
+    {
+      "bead": "asupersync-release-provenance-core-crates-jpts8n.2",
+      "status": "closed",
+      "scope": "artifact_contract_and_integrity_manifest",
+      "evidence_paths": [
+        "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "docs/rust_crate_release_provenance_artifacts.md"
+      ]
+    },
+    {
+      "bead": "asupersync-release-provenance-core-crates-jpts8n.3",
+      "status": "closed",
+      "scope": "publish_workflow_provenance_gate",
+      "evidence_paths": [
+        ".github/workflows/publish.yml",
+        "tests/rust_crate_release_provenance_contract.rs"
+      ]
+    },
+    {
+      "bead": "asupersync-release-provenance-core-crates-jpts8n.4",
+      "status": "closed",
+      "scope": "contract_tests_and_proof_status_rows",
+      "evidence_paths": [
+        "tests/rust_crate_release_provenance_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ]
+    }
+  ],
+  "proof_commands": [
+    {
+      "label": "focused_manifest_lane",
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture"
+    },
+    {
+      "label": "closeout_verifier",
+      "remote_required": true,
+      "local_fallback_allowed": false,
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture"
+    }
+  ],
+  "closeout_requirements": {
+    "agent_mail_handoff_required_before_close": true,
+    "tracker_comment_required_before_close": true,
+    "focused_rch_verifier_required_before_close": true,
+    "parent_epic_close_allowed_after_r5_close": true,
+    "parent_epic_close_claim": "Scoped Rust crate release-provenance evidence lane only; not release readiness."
+  },
+  "current_operator_report": {
+    "final_verdict": "yellow_scoped_signoff_complete",
+    "first_failing_row": null,
+    "package_surface_rows": 9,
+    "packaged": 9,
+    "skipped": 0,
+    "already_published": 0,
+    "blocked": 0,
+    "live_publish_performed": false,
+    "cargo_publish_dry_run_performed": false,
+    "agent_mail_handoff_status": "required_before_tracker_closeout",
+    "tracker_comment_status": "required_before_tracker_closeout"
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_release_readiness",
+    "does_not_prove_runtime_correctness",
+    "does_not_prove_broad_workspace_health",
+    "does_not_prove_security_audit_completion",
+    "does_not_prove_live_crates_io_publication",
+    "does_not_prove_real_package_tarball_integrity",
+    "does_not_authorize_local_cargo_fallback"
+  ]
+}

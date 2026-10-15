@@ -1,0 +1,515 @@
+{
+  "generated_at": "2026-02-03T02:15:08Z",
+  "benchmarks": [
+    {
+      "name": "arena/get_hit",
+      "mean_ns": 0.9937692761387947,
+      "median_ns": 0.9236456898727682,
+      "std_dev_ns": 0.25512186094889006
+    },
+    {
+      "name": "arena/insert",
+      "mean_ns": 13.634026241843975,
+      "median_ns": 13.913071714056743,
+      "std_dev_ns": 4.382151197043607
+    },
+    {
+      "name": "arena/insert_remove_cycle",
+      "mean_ns": 6.443368315789441,
+      "median_ns": 5.958513308969995,
+      "std_dev_ns": 1.0155185000178637
+    },
+    {
+      "name": "arena/iterate_1000",
+      "mean_ns": 558.0558462428496,
+      "median_ns": 516.4590515355111,
+      "std_dev_ns": 77.69234954316028
+    },
+    {
+      "name": "budget/combine",
+      "mean_ns": 10.084442495370253,
+      "median_ns": 10.082013005736183,
+      "std_dev_ns": 0.024909729032236032
+    },
+    {
+      "name": "budget/create_infinite",
+      "mean_ns": 5.504440877799342,
+      "median_ns": 5.838110422830273,
+      "std_dev_ns": 1.150208010000117
+    },
+    {
+      "name": "budget/create_with_deadline",
+      "mean_ns": 6.335063401838183,
+      "median_ns": 6.3331335177533,
+      "std_dev_ns": 2.3435582056703295
+    },
+    {
+      "name": "cancel_reason/create_timeout",
+      "mean_ns": 14.642865513711131,
+      "median_ns": 13.450479629551703,
+      "std_dev_ns": 2.4517304659970245
+    },
+    {
+      "name": "cancel_reason/create_user",
+      "mean_ns": 13.975173424683822,
+      "median_ns": 13.036952311867509,
+      "std_dev_ns": 2.1698096898384978
+    },
+    {
+      "name": "cancel_reason/strengthen_different",
+      "mean_ns": 15.149184190028802,
+      "median_ns": 12.565130198797064,
+      "std_dev_ns": 4.2760994572254605
+    },
+    {
+      "name": "cancel_reason/strengthen_same",
+      "mean_ns": 9.99391378204031,
+      "median_ns": 9.808223173612912,
+      "std_dev_ns": 2.0763743138641804
+    },
+    {
+      "name": "combinator/effective_deadline_no_existing",
+      "mean_ns": 0.8915930341935423,
+      "median_ns": 0.8857277183107993,
+      "std_dev_ns": 0.14002604877418515
+    },
+    {
+      "name": "combinator/effective_deadline_with_existing",
+      "mean_ns": 0.8113204256732129,
+      "median_ns": 0.7749678701174776,
+      "std_dev_ns": 0.14512129459357032
+    },
+    {
+      "name": "combinator/join2_outcomes_ok",
+      "mean_ns": 34.80420157098502,
+      "median_ns": 33.34219673143021,
+      "std_dev_ns": 4.042567355163193
+    },
+    {
+      "name": "combinator/race2_outcomes_first_wins",
+      "mean_ns": 49.6205319135656,
+      "median_ns": 47.2517476063952,
+      "std_dev_ns": 5.40945822707629
+    },
+    {
+      "name": "combinator/race2_outcomes_second_wins",
+      "mean_ns": 57.68370833031694,
+      "median_ns": 59.47352783714307,
+      "std_dev_ns": 8.919101818072546
+    },
+    {
+      "name": "combinator/timeout_config_new",
+      "mean_ns": 3.6392771192520725,
+      "median_ns": 3.4945855448512733,
+      "std_dev_ns": 0.34051872197356503
+    },
+    {
+      "name": "combinator/timeout_config_resolve",
+      "mean_ns": 0.8506990954729454,
+      "median_ns": 0.7825388245943596,
+      "std_dev_ns": 0.17516451540046804
+    },
+    {
+      "name": "lab_runtime/create",
+      "mean_ns": 44836.27563911905,
+      "median_ns": 43460.17231099935,
+      "std_dev_ns": 3580.084485127848
+    },
+    {
+      "name": "lab_runtime/now",
+      "mean_ns": 0.7906788100354651,
+      "median_ns": 0.7302479658159629,
+      "std_dev_ns": 0.1318051742443404
+    },
+    {
+      "name": "lab_runtime/steps",
+      "mean_ns": 0.9345356665125385,
+      "median_ns": 1.0832152196392855,
+      "std_dev_ns": 0.18554227258510927
+    },
+    {
+      "name": "lab_runtime/with_seed",
+      "mean_ns": 37383.38014548695,
+      "median_ns": 35528.24051069703,
+      "std_dev_ns": 4418.397388336735
+    },
+    {
+      "name": "outcome/join_ok_cancelled",
+      "mean_ns": 43.06716009039664,
+      "median_ns": 45.85384874876041,
+      "std_dev_ns": 5.109631688415854
+    },
+    {
+      "name": "outcome/join_ok_ok",
+      "mean_ns": 31.579754338735544,
+      "median_ns": 29.880082073133927,
+      "std_dev_ns": 3.5433847903740396
+    },
+    {
+      "name": "outcome/severity_cancelled",
+      "mean_ns": 0.7847105199485462,
+      "median_ns": 0.7051283403776343,
+      "std_dev_ns": 0.1642040646295391
+    },
+    {
+      "name": "outcome/severity_ok",
+      "mean_ns": 1.01570745644126,
+      "median_ns": 1.167232209592379,
+      "std_dev_ns": 0.20240614316477099
+    },
+    {
+      "name": "raptorq_pipeline/send_receive/65536",
+      "mean_ns": 519759.5397842286,
+      "median_ns": 489581.3224637681,
+      "std_dev_ns": 64420.0292350223
+    },
+    {
+      "name": "runtime_state/cancel_request_region",
+      "mean_ns": 366.2383082095819,
+      "median_ns": 335.87365403788635,
+      "std_dev_ns": 59.91758175021174
+    },
+    {
+      "name": "runtime_state/create",
+      "mean_ns": 8047.802352647805,
+      "median_ns": 8047.570188742838,
+      "std_dev_ns": 1023.3233340260373
+    },
+    {
+      "name": "runtime_state/create_root_region",
+      "mean_ns": 319.7993233463701,
+      "median_ns": 377.32853175370104,
+      "std_dev_ns": 128.08200275779433
+    },
+    {
+      "name": "runtime_state/is_quiescent_empty",
+      "mean_ns": 5.623189765896292,
+      "median_ns": 5.534259930897423,
+      "std_dev_ns": 0.20588775180385044
+    },
+    {
+      "name": "runtime_state/live_task_count_empty",
+      "mean_ns": 2.215350360615491,
+      "median_ns": 2.0692242970877266,
+      "std_dev_ns": 0.29739078776706834
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/10",
+      "mean_ns": 228.54566906794082,
+      "median_ns": 226.53523999417894,
+      "std_dev_ns": 5.944070701719616
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/100",
+      "mean_ns": 1645.4321214091274,
+      "median_ns": 1615.2882113821138,
+      "std_dev_ns": 275.62369363454013
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/1000",
+      "mean_ns": 17466.998743335753,
+      "median_ns": 18410.132880434783,
+      "std_dev_ns": 1444.6047799374355
+    },
+    {
+      "name": "scheduler_global_queue/push_pop_single",
+      "mean_ns": 105.77808326490475,
+      "median_ns": 102.31699564451858,
+      "std_dev_ns": 8.205203649494157
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/10",
+      "mean_ns": 478.717842671833,
+      "median_ns": 455.84452253336246,
+      "std_dev_ns": 119.18658671716115
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/100",
+      "mean_ns": 3067.0297624211066,
+      "median_ns": 3048.4463187042843,
+      "std_dev_ns": 85.15980444593163
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/1000",
+      "mean_ns": 30676.885087578496,
+      "median_ns": 30455.155336617405,
+      "std_dev_ns": 550.6318532334748
+    },
+    {
+      "name": "scheduler_lane_priority/mixed_lanes_pop_order",
+      "mean_ns": 253.20404021405085,
+      "median_ns": 250.1226283979501,
+      "std_dev_ns": 23.147822254121753
+    },
+    {
+      "name": "scheduler_lane_priority/ready_priority_ordering",
+      "mean_ns": 226.77855883417362,
+      "median_ns": 224.2241012719889,
+      "std_dev_ns": 8.722431941304245
+    },
+    {
+      "name": "scheduler_lane_priority/timed_edf_ordering",
+      "mean_ns": 244.1033416192557,
+      "median_ns": 250.1360100726337,
+      "std_dev_ns": 12.454457607335947
+    },
+    {
+      "name": "scheduler_local_queue/interleaved_push_pop",
+      "mean_ns": 4401.9032207920045,
+      "median_ns": 4301.1438596235585,
+      "std_dev_ns": 992.5078231508991
+    },
+    {
+      "name": "scheduler_local_queue/push_pop_single",
+      "mean_ns": 72.77149943979069,
+      "median_ns": 75.60607314036196,
+      "std_dev_ns": 9.633269454027802
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/10",
+      "mean_ns": 448.2359035652306,
+      "median_ns": 436.83594730238394,
+      "std_dev_ns": 79.38243306924429
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/100",
+      "mean_ns": 3170.0539468622237,
+      "median_ns": 3122.830883894751,
+      "std_dev_ns": 102.98500513274811
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/1000",
+      "mean_ns": 26825.80849423287,
+      "median_ns": 26782.57827030045,
+      "std_dev_ns": 292.1119610986265
+    },
+    {
+      "name": "scheduler_parker/cross_thread_unpark",
+      "mean_ns": 109313.15104020083,
+      "median_ns": 107602.88709415584,
+      "std_dev_ns": 15030.020568361164
+    },
+    {
+      "name": "scheduler_parker/park_timeout_zero",
+      "mean_ns": 128.50903313735,
+      "median_ns": 127.17218534382872,
+      "std_dev_ns": 33.23221237961266
+    },
+    {
+      "name": "scheduler_parker/park_unpark_cycle_100",
+      "mean_ns": 38622.663952584786,
+      "median_ns": 38908.83449122807,
+      "std_dev_ns": 2523.772752112342
+    },
+    {
+      "name": "scheduler_parker/unpark_then_park",
+      "mean_ns": 416.9940677344505,
+      "median_ns": 392.8816430208964,
+      "std_dev_ns": 82.51549303820696
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/10",
+      "mean_ns": 1241.8220771893712,
+      "median_ns": 1336.6577583414319,
+      "std_dev_ns": 159.9206189848677
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/100",
+      "mean_ns": 10853.89411174372,
+      "median_ns": 11718.589511846405,
+      "std_dev_ns": 1463.9525604813255
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/1000",
+      "mean_ns": 132009.04833609212,
+      "median_ns": 120106.11562671045,
+      "std_dev_ns": 56793.83868396279
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/10",
+      "mean_ns": 1813.0325405715366,
+      "median_ns": 1689.3740310383064,
+      "std_dev_ns": 217.1484169541369
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/100",
+      "mean_ns": 17416.421193149974,
+      "median_ns": 16657.847503789315,
+      "std_dev_ns": 1747.6836023499034
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/1000",
+      "mean_ns": 189361.0635127015,
+      "median_ns": 185558.48274410775,
+      "std_dev_ns": 11742.257270862128
+    },
+    {
+      "name": "scheduler_priority/dedup_same_task",
+      "mean_ns": 2922.9586123106933,
+      "median_ns": 2792.854384735436,
+      "std_dev_ns": 318.92559946298246
+    },
+    {
+      "name": "scheduler_priority/schedule_cancel_pop",
+      "mean_ns": 177.92930860912745,
+      "median_ns": 175.03720027862715,
+      "std_dev_ns": 17.655024921578807
+    },
+    {
+      "name": "scheduler_priority/schedule_ready_pop",
+      "mean_ns": 178.20049106825215,
+      "median_ns": 165.35857190325044,
+      "std_dev_ns": 65.98721697381791
+    },
+    {
+      "name": "scheduler_priority/schedule_timed_pop",
+      "mean_ns": 188.20016144173317,
+      "median_ns": 187.73430468872266,
+      "std_dev_ns": 24.102615389774982
+    },
+    {
+      "name": "scheduler_throughput/mixed_lane_cycle/1000",
+      "mean_ns": 185042.1568732367,
+      "median_ns": 179919.84995164408,
+      "std_dev_ns": 13034.310916998444
+    },
+    {
+      "name": "scheduler_throughput/mixed_lane_cycle/10000",
+      "mean_ns": 2083765.595450693,
+      "median_ns": 1982584.9772727273,
+      "std_dev_ns": 274916.2014844219
+    },
+    {
+      "name": "scheduler_throughput/schedule_pop_cycle/1000",
+      "mean_ns": 220552.69499108157,
+      "median_ns": 219552.0110689982,
+      "std_dev_ns": 30701.20261442628
+    },
+    {
+      "name": "scheduler_throughput/schedule_pop_cycle/10000",
+      "mean_ns": 2652437.1523950184,
+      "median_ns": 2767576.333333333,
+      "std_dev_ns": 269158.2040092283
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/16",
+      "mean_ns": 407.96474100081775,
+      "median_ns": 422.0180697080697,
+      "std_dev_ns": 37.48296003864548
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/256",
+      "mean_ns": 2961.7238563221104,
+      "median_ns": 2906.571810008174,
+      "std_dev_ns": 199.83826750271982
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/64",
+      "mean_ns": 1069.9013969049283,
+      "median_ns": 1035.0549246330386,
+      "std_dev_ns": 145.0647805581857
+    },
+    {
+      "name": "scheduler_work_stealing/steal_empty",
+      "mean_ns": 40.90107836879807,
+      "median_ns": 41.402439417666905,
+      "std_dev_ns": 3.1449487305264916
+    },
+    {
+      "name": "scheduler_work_stealing/steal_single",
+      "mean_ns": 62.99061256436349,
+      "median_ns": 63.20543829870256,
+      "std_dev_ns": 4.9119117274691595
+    },
+    {
+      "name": "throughput/arena_inserts/100",
+      "mean_ns": 634.6287329749582,
+      "median_ns": 599.2330503019342,
+      "std_dev_ns": 87.61931181888396
+    },
+    {
+      "name": "throughput/arena_inserts/1000",
+      "mean_ns": 2780.791616786753,
+      "median_ns": 2825.2461281841797,
+      "std_dev_ns": 444.69226546323375
+    },
+    {
+      "name": "throughput/arena_inserts/10000",
+      "mean_ns": 24569.701651019124,
+      "median_ns": 24276.113794864963,
+      "std_dev_ns": 1389.7723697482056
+    },
+    {
+      "name": "throughput/budget_combines/100",
+      "mean_ns": 1156.1303466117186,
+      "median_ns": 1164.8576076299137,
+      "std_dev_ns": 22.65801020961856
+    },
+    {
+      "name": "throughput/budget_combines/1000",
+      "mean_ns": 11926.796996125826,
+      "median_ns": 12556.216051492367,
+      "std_dev_ns": 790.863988384821
+    },
+    {
+      "name": "throughput/budget_combines/10000",
+      "mean_ns": 113994.80105683235,
+      "median_ns": 112774.48986604951,
+      "std_dev_ns": 4963.376693191175
+    },
+    {
+      "name": "throughput/region_creates/100",
+      "mean_ns": 18904.057913569937,
+      "median_ns": 18942.807292538477,
+      "std_dev_ns": 2075.027376928204
+    },
+    {
+      "name": "throughput/region_creates/1000",
+      "mean_ns": 128017.33811659437,
+      "median_ns": 136828.9270833333,
+      "std_dev_ns": 12234.733545369154
+    },
+    {
+      "name": "throughput/region_creates/10000",
+      "mean_ns": 1097224.628538107,
+      "median_ns": 1043949.8802197803,
+      "std_dev_ns": 111582.13705397656
+    },
+    {
+      "name": "time/as_nanos",
+      "mean_ns": 0.7108134360060699,
+      "median_ns": 0.6765757267887581,
+      "std_dev_ns": 0.0974592846229899
+    },
+    {
+      "name": "time/duration_since",
+      "mean_ns": 0.8447152189251438,
+      "median_ns": 0.8875551532232855,
+      "std_dev_ns": 0.10835747425272348
+    },
+    {
+      "name": "time/from_millis",
+      "mean_ns": 0.711591782759614,
+      "median_ns": 0.6806751708679927,
+      "std_dev_ns": 0.08525459315526712
+    },
+    {
+      "name": "time/from_nanos",
+      "mean_ns": 0.6917113303960869,
+      "median_ns": 0.6731372715391178,
+      "std_dev_ns": 0.07722829481360496
+    },
+    {
+      "name": "time/from_secs",
+      "mean_ns": 0.8703525967982461,
+      "median_ns": 0.8963215272070753,
+      "std_dev_ns": 0.1599624006833914
+    },
+    {
+      "name": "time/saturating_add_nanos",
+      "mean_ns": 0.7128800433867021,
+      "median_ns": 0.6667441331411527,
+      "std_dev_ns": 0.10231328873391847
+    }
+  ]
+}

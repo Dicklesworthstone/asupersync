@@ -1,0 +1,51 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "TopazGoose",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:08:00Z",
+        "path_pattern": "scripts/dirty_tree_ownership_receipt.py",
+        "reason": "asupersync-aj7lx3"
+      },
+      {
+        "agent_name": "MaroonBear",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:30:00Z",
+        "path_pattern": "fuzz/Cargo.toml",
+        "reason": "http-header-map-invariants"
+      },
+      {
+        "agent_name": "MaroonBear",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T06:30:00Z",
+        "path_pattern": "fuzz/fuzz_targets/*.rs",
+        "reason": "http-header-map-invariants"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "scripts/dirty_tree_ownership_receipt.py",
+        "status": "A "
+      },
+      {
+        "path": "fuzz/Cargo.toml",
+        "status": "M "
+      },
+      {
+        "path": "fuzz/fuzz_targets/http_header_map_invariants.rs",
+        "status": "A "
+      }
+    ],
+    "status": "ok"
+  }
+}

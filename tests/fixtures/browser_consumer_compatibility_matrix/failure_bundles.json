@@ -1,0 +1,100 @@
+{
+  "schema_version": "browser-consumer-compatibility-failure-bundles-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.3",
+  "bundle_root_pattern": "target/e2e-results/<consumer_id>/<run_id>/failure-bundle",
+  "required_bundle_files": [
+    "run-metadata.json",
+    "consumer_build.log",
+    "summary.json",
+    "failure.json"
+  ],
+  "required_failure_fields": [
+    "consumer_id",
+    "readiness_surface_id",
+    "support_class",
+    "verdict",
+    "reason_code",
+    "repro_command",
+    "expected_action",
+    "green_for_ga"
+  ],
+  "failure_rehearsals": [
+    {
+      "id": "missing_packaged_browser_artifact",
+      "consumer_id": "vite_vanilla_consumer",
+      "readiness_surface_id": "vite_vanilla_consumer",
+      "support_class": "direct_runtime_supported",
+      "verdict": "fail",
+      "reason_code": "missing_packaged_browser_artifact",
+      "expected_action": "block_browser_ga_and_build_package_artifacts_first",
+      "green_for_ga": false,
+      "repro_command": "PATH=/usr/bin:$PATH bash scripts/validate_vite_vanilla_consumer.sh"
+    },
+    {
+      "id": "browser_capability_skip",
+      "consumer_id": "dedicated_worker_consumer",
+      "readiness_surface_id": "dedicated_worker_runtime",
+      "support_class": "direct_runtime_supported",
+      "verdict": "skip",
+      "reason_code": "browser_prerequisite_missing",
+      "expected_action": "record_cold_skip_bundle_and_keep_row_unproven_for_candidate",
+      "green_for_ga": false,
+      "repro_command": "PATH=/usr/bin:$PATH bash scripts/validate_dedicated_worker_consumer.sh"
+    },
+    {
+      "id": "unsupported_direct_runtime_attempt",
+      "consumer_id": "service_worker_broker_consumer",
+      "readiness_surface_id": "service_worker_broker",
+      "support_class": "broker_coordinator_only",
+      "verdict": "fail_closed",
+      "reason_code": "service_worker_direct_runtime_not_shipped",
+      "expected_action": "keep_broker_only_claim_and_block_direct_runtime_promotion",
+      "green_for_ga": false,
+      "repro_command": "PATH=/usr/bin:$PATH bash scripts/validate_service_worker_broker_consumer.sh"
+    },
+    {
+      "id": "next_edge_direct_runtime_attempt",
+      "consumer_id": "next_server_edge_bridge",
+      "readiness_surface_id": "next_server_edge_bridge",
+      "support_class": "bridge_only",
+      "verdict": "fail_closed",
+      "reason_code": "next_server_edge_direct_runtime_forbidden",
+      "expected_action": "keep_bridge_only_claim_and_block_direct_runtime_promotion",
+      "green_for_ga": false,
+      "repro_command": "PATH=/usr/bin:$PATH bash scripts/validate_next_turbopack_consumer.sh"
+    },
+    {
+      "id": "bundle_budget_regression",
+      "consumer_id": "webpack_consumer",
+      "readiness_surface_id": "webpack_consumer",
+      "support_class": "direct_runtime_supported",
+      "verdict": "fail",
+      "reason_code": "bundle_budget_ceiling_exceeded",
+      "expected_action": "block_browser_ga_until_bundle_budget_and_b2_gate_are_green",
+      "green_for_ga": false,
+      "repro_command": "PATH=/usr/bin:$PATH bash scripts/validate_webpack_consumer.sh"
+    },
+    {
+      "id": "rust_preview_rch_local_fallback",
+      "consumer_id": "rust_browser_consumer_preview",
+      "readiness_surface_id": "rust_runtime_builder_browser_preview",
+      "support_class": "preview_public_lane",
+      "verdict": "error",
+      "reason_code": "rch_local_fallback_detected",
+      "expected_action": "discard_preview_evidence_and_rerun_remote_required",
+      "green_for_ga": false,
+      "repro_command": "RCH_REQUIRE_REMOTE=1 bash scripts/validate_rust_browser_consumer.sh"
+    },
+    {
+      "id": "native_only_surface_skip",
+      "consumer_id": "unsupported_native_only_surfaces_guard",
+      "readiness_surface_id": "unsupported_native_only_surfaces",
+      "support_class": "impossible_unsupported",
+      "verdict": "skip_fail_closed",
+      "reason_code": "unsupported_native_only_surface",
+      "expected_action": "keep_unsupported_claim_and_do_not_mark_green",
+      "green_for_ga": false,
+      "repro_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_support_boundary cargo test -p asupersync --test wasm_browser_support_boundary_contract -- --nocapture"
+    }
+  ]
+}

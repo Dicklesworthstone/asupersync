@@ -1,0 +1,82 @@
+{
+  "schema_version": "proof-lane-admission-input-v1",
+  "profile_id": "oversized-split-lane",
+  "generated_at_utc": "2026-05-29T02:18:00Z",
+  "host_profile": {
+    "cpu_cores": 64,
+    "memory_bytes": 274877906944,
+    "numa_nodes": 2,
+    "profile_class": "large_core_swarm"
+  },
+  "resource_pressure": {
+    "telemetry_sampled_at_utc": "2026-05-29T02:17:30Z",
+    "telemetry_age_seconds": 30,
+    "cpu_busy_bps": 3000,
+    "memory_used_bytes": 96636764160,
+    "memory_available_bytes": 178241142784,
+    "io_some_avg10_bps": 200,
+    "memory_some_avg10_bps": 100
+  },
+  "disk_headroom": {
+    "root_free_bytes": 858993459200,
+    "tmp_free_bytes": 536870912000,
+    "target_parent_free_bytes": 858993459200,
+    "pressure_class": "healthy"
+  },
+  "rch_workers": {
+    "remote_required": true,
+    "telemetry_sampled_at_utc": "2026-05-29T02:17:35Z",
+    "telemetry_age_seconds": 25,
+    "workers": [
+      {
+        "worker_id": "rchw-large-a",
+        "queue_state": "open",
+        "available_cores": 32,
+        "available_memory_bytes": 137438953472,
+        "active_project_excluded": false,
+        "cache_warmth": {
+          "proof_lane_family": "release-proof-pack",
+          "target_dir_family": "rch_target_release_proof_pack",
+          "warmth_class": "cold",
+          "confidence_bps": 6000
+        }
+      }
+    ]
+  },
+  "active_project_exclusion": {
+    "local_project_active": true,
+    "same_project_workers_excluded": [],
+    "remote_worker_required": true
+  },
+  "cargo_target_isolation": {
+    "target_dir_template": "${TMPDIR:-/tmp}/rch_target_{agent}_{bead}_{lane}",
+    "agent_scoped": true,
+    "bead_scoped": true,
+    "lane_scoped": true,
+    "forbid_shared_target_dir": true
+  },
+  "agent_mail_reservations": {
+    "telemetry_age_seconds": 20,
+    "tracker_reserved": false,
+    "active_peer_source_reservations": [],
+    "active_self_reservations": []
+  },
+  "dirty_tree": {
+    "classification": "clean",
+    "dirty_paths": [],
+    "peer_owned_paths": [],
+    "unreserved_source_paths": []
+  },
+  "proof_lane": {
+    "lane_id": "release-proof-pack-all-targets",
+    "workspace_package": "asupersync",
+    "lane_family": "release-proof-pack",
+    "estimated_cost": {
+      "cpu_core_seconds": 72000,
+      "memory_bytes_peak": 68719476736,
+      "io_bytes": 34359738368,
+      "proof_weight": "oversized"
+    },
+    "command_template": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_MistyCat_asupersync_l5m170_5_2_release_pack cargo test --workspace --all-targets -- --nocapture"
+  }
+}

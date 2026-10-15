@@ -1,0 +1,349 @@
+---
+source: tests/conformance/raptorq_proof_correctness.rs
+assertion_line: 441
+expression: scrubbed
+---
+{
+  "config": {
+    "h": 10,
+    "k": 16,
+    "l": 39,
+    "object_id": "[deterministic]",
+    "s": 11,
+    "sbn": 0,
+    "seed": "[deterministic]",
+    "symbol_size": 64
+  },
+  "content_hash": "0x91888af8ba63cc9dd5f74b26e2f8f49f09e19b80d728ee691f4e24ef4d0f2ea7",
+  "elimination": {
+    "inactivated": 39,
+    "inactive_cols_preview": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38
+    ],
+    "inactive_cols_truncated": false,
+    "pivot_events_preview": [
+      {
+        "col": 31,
+        "row": 1
+      },
+      {
+        "col": 35,
+        "row": 5
+      },
+      {
+        "col": 38,
+        "row": 8
+      },
+      {
+        "col": 25,
+        "row": 7
+      },
+      {
+        "col": 34,
+        "row": 4
+      },
+      {
+        "col": 3,
+        "row": 3
+      },
+      {
+        "col": 27,
+        "row": 9
+      },
+      {
+        "col": 30,
+        "row": 0
+      },
+      {
+        "col": 32,
+        "row": 2
+      },
+      {
+        "col": 2,
+        "row": 6
+      },
+      {
+        "col": 19,
+        "row": 11
+      },
+      {
+        "col": 12,
+        "row": 12
+      },
+      {
+        "col": 29,
+        "row": 13
+      },
+      {
+        "col": 36,
+        "row": 14
+      },
+      {
+        "col": 14,
+        "row": 15
+      },
+      {
+        "col": 26,
+        "row": 16
+      },
+      {
+        "col": 37,
+        "row": 17
+      },
+      {
+        "col": 1,
+        "row": 18
+      },
+      {
+        "col": 13,
+        "row": 19
+      },
+      {
+        "col": 15,
+        "row": 20
+      },
+      {
+        "col": 16,
+        "row": 21
+      },
+      {
+        "col": 17,
+        "row": 10
+      },
+      {
+        "col": 33,
+        "row": 22
+      },
+      {
+        "col": 5,
+        "row": 23
+      },
+      {
+        "col": 8,
+        "row": 24
+      },
+      {
+        "col": 10,
+        "row": 25
+      },
+      {
+        "col": 11,
+        "row": 26
+      },
+      {
+        "col": 18,
+        "row": 27
+      },
+      {
+        "col": 20,
+        "row": 28
+      },
+      {
+        "col": 21,
+        "row": 29
+      },
+      {
+        "col": 22,
+        "row": 30
+      },
+      {
+        "col": 24,
+        "row": 31
+      },
+      {
+        "col": 0,
+        "row": 32
+      },
+      {
+        "col": 4,
+        "row": 33
+      },
+      {
+        "col": 9,
+        "row": 34
+      },
+      {
+        "col": 28,
+        "row": 35
+      },
+      {
+        "col": 6,
+        "row": 36
+      },
+      {
+        "col": 23,
+        "row": 37
+      },
+      {
+        "col": 7,
+        "row": 38
+      }
+    ],
+    "pivot_events_truncated": false,
+    "pivots": 39,
+    "row_ops": 3109,
+    "strategy": "AllAtOnce",
+    "strategy_transitions": [],
+    "strategy_transitions_truncated": false
+  },
+  "outcome": {
+    "kind": "Success",
+    "source_payload_hash": "0xac8b10a4bda4f48c",
+    "symbols_recovered": 16
+  },
+  "peeling": {
+    "solved": 0,
+    "solved_indices_preview": [],
+    "truncated": false
+  },
+  "received": {
+    "esi_multiset_hash": "0x2c5265d280e1289f",
+    "esis_preview": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      8,
+      9,
+      9,
+      10,
+      10,
+      11,
+      11,
+      12,
+      12,
+      13,
+      13,
+      14,
+      14,
+      15,
+      15,
+      16,
+      16,
+      17,
+      17,
+      18,
+      18,
+      19,
+      19,
+      20,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79
+    ],
+    "repair_count": 85,
+    "source_count": 16,
+    "total": 101,
+    "truncated": false
+  },
+  "test_vector": "bounded_k16_many_repairs",
+  "version": 2
+}

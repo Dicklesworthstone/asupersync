@@ -1,0 +1,311 @@
+{
+  "schema_version": "doctor-remediation-unit-fixture-pack-v1",
+  "description": "Deterministic fixture pack for remediation DSL unit-test harness (bead asupersync-2b4jj.4.5)",
+  "fixtures": [
+    {
+      "fixture_id": "fixture-trusted-auto-apply",
+      "description": "All-high confidence scores land in trusted_auto_apply band (85-100).",
+      "recipe": {
+        "recipe_id": "recipe-lock-order-high",
+        "finding_id": "doctor-lock-contention:src/runtime/state.rs:critical",
+        "fix_intent": "enforce_lock_order",
+        "preconditions": [
+          {
+            "key": "lock_order_violation_present",
+            "predicate": "eq",
+            "expected_value": "true",
+            "evidence_ref": "evidence-lock-high-001",
+            "required": true
+          },
+          {
+            "key": "repro_seed_available",
+            "predicate": "exists",
+            "expected_value": "true",
+            "evidence_ref": "evidence-seed-high-001",
+            "required": true
+          }
+        ],
+        "rollback": {
+          "strategy": "git_apply_reverse_patch",
+          "rollback_command": "git apply -R artifacts/run-lock-high/patch.diff",
+          "verify_command": "rch exec -- cargo test --lib cli::doctor::tests::lock_order_smoke",
+          "timeout_secs": 120
+        },
+        "confidence_inputs": [
+          {
+            "key": "analyzer_confidence",
+            "score": 95,
+            "rationale": "High analyzer confidence with multiple corroborating oracles.",
+            "evidence_ref": "evidence-analyzer-high-001"
+          },
+          {
+            "key": "blast_radius",
+            "score": 90,
+            "rationale": "Change strictly scoped to single lock ordering block.",
+            "evidence_ref": "evidence-diff-high-001"
+          },
+          {
+            "key": "replay_reproducibility",
+            "score": 88,
+            "rationale": "Deterministic replay reproduces with fixed seed 100% of attempts.",
+            "evidence_ref": "evidence-replay-high-001"
+          },
+          {
+            "key": "test_coverage_delta",
+            "score": 85,
+            "rationale": "Full path coverage including cancel/drain branches.",
+            "evidence_ref": "evidence-tests-high-001"
+          }
+        ],
+        "override_justification": null
+      },
+      "expected_confidence_score": 90,
+      "expected_risk_band": "trusted_auto_apply",
+      "expected_decision": "apply"
+    },
+    {
+      "fixture_id": "fixture-guarded-auto-apply-boundary",
+      "description": "Scores at lower boundary of guarded_auto_apply band (70).",
+      "recipe": {
+        "recipe_id": "recipe-retry-backoff-boundary",
+        "finding_id": "doctor-invariant:src/combinator/retry.rs:warning",
+        "fix_intent": "harden_retry_backoff",
+        "preconditions": [
+          {
+            "key": "retry_budget_exceeded",
+            "predicate": "eq",
+            "expected_value": "true",
+            "evidence_ref": "evidence-retry-boundary-001",
+            "required": true
+          },
+          {
+            "key": "test_harness_available",
+            "predicate": "exists",
+            "expected_value": "true",
+            "evidence_ref": "evidence-harness-boundary-001",
+            "required": true
+          }
+        ],
+        "rollback": {
+          "strategy": "replay_last_green_artifact",
+          "rollback_command": "rch exec -- cargo test --lib combinator::retry::tests",
+          "verify_command": "rch exec -- cargo test --lib combinator::retry::tests::backoff_smoke",
+          "timeout_secs": 60
+        },
+        "confidence_inputs": [
+          {
+            "key": "analyzer_confidence",
+            "score": 70,
+            "rationale": "Moderate analyzer confidence with limited evidence.",
+            "evidence_ref": "evidence-analyzer-boundary-001"
+          },
+          {
+            "key": "blast_radius",
+            "score": 70,
+            "rationale": "Change touches retry path only.",
+            "evidence_ref": "evidence-diff-boundary-001"
+          },
+          {
+            "key": "replay_reproducibility",
+            "score": 70,
+            "rationale": "Replay reproduces under controlled scheduling.",
+            "evidence_ref": "evidence-replay-boundary-001"
+          },
+          {
+            "key": "test_coverage_delta",
+            "score": 70,
+            "rationale": "Coverage acceptable but edges not fully exercised.",
+            "evidence_ref": "evidence-tests-boundary-001"
+          }
+        ],
+        "override_justification": null
+      },
+      "expected_confidence_score": 70,
+      "expected_risk_band": "guarded_auto_apply",
+      "expected_decision": "apply"
+    },
+    {
+      "fixture_id": "fixture-elevated-risk-review",
+      "description": "Mid-range scores land in elevated_risk band (40-69) requiring human approval.",
+      "recipe": {
+        "recipe_id": "recipe-cancel-checkpoint-mid",
+        "finding_id": "doctor-invariant:src/cancel/protocol.rs:warning",
+        "fix_intent": "add_cancellation_checkpoint",
+        "preconditions": [
+          {
+            "key": "cancel_path_incomplete",
+            "predicate": "eq",
+            "expected_value": "true",
+            "evidence_ref": "evidence-cancel-mid-001",
+            "required": true
+          },
+          {
+            "key": "region_quiescence_at_risk",
+            "predicate": "eq",
+            "expected_value": "true",
+            "evidence_ref": "evidence-region-mid-001",
+            "required": true
+          }
+        ],
+        "rollback": {
+          "strategy": "git_apply_reverse_patch",
+          "rollback_command": "git apply -R artifacts/run-cancel-mid/patch.diff",
+          "verify_command": "rch exec -- cargo test --lib cancel::protocol::tests",
+          "timeout_secs": 180
+        },
+        "confidence_inputs": [
+          {
+            "key": "analyzer_confidence",
+            "score": 55,
+            "rationale": "Analyzer flags potential but with some ambiguity.",
+            "evidence_ref": "evidence-analyzer-mid-001"
+          },
+          {
+            "key": "blast_radius",
+            "score": 50,
+            "rationale": "Change may affect multiple cancellation paths.",
+            "evidence_ref": "evidence-diff-mid-001"
+          },
+          {
+            "key": "replay_reproducibility",
+            "score": 52,
+            "rationale": "Replay reproduces intermittently.",
+            "evidence_ref": "evidence-replay-mid-001"
+          },
+          {
+            "key": "test_coverage_delta",
+            "score": 48,
+            "rationale": "Coverage increase pending for drain/finalize branches.",
+            "evidence_ref": "evidence-tests-mid-001"
+          }
+        ],
+        "override_justification": null
+      },
+      "expected_confidence_score": 51,
+      "expected_risk_band": "elevated_risk",
+      "expected_decision": "review"
+    },
+    {
+      "fixture_id": "fixture-critical-risk-boundary",
+      "description": "Low scores at upper boundary of critical_risk band (score=39).",
+      "recipe": {
+        "recipe_id": "recipe-lock-scope-critical",
+        "finding_id": "doctor-lock-contention:src/sync/rwlock.rs:critical",
+        "fix_intent": "reduce_lock_scope",
+        "preconditions": [
+          {
+            "key": "lock_contention_detected",
+            "predicate": "gte",
+            "expected_value": "500",
+            "evidence_ref": "evidence-lock-critical-001",
+            "required": true
+          },
+          {
+            "key": "rollback_snapshot_exists",
+            "predicate": "exists",
+            "expected_value": "true",
+            "evidence_ref": "evidence-snapshot-critical-001",
+            "required": true
+          }
+        ],
+        "rollback": {
+          "strategy": "restore_backup_snapshot",
+          "rollback_command": "cp artifacts/backups/rwlock.prev src/sync/rwlock.rs",
+          "verify_command": "rch exec -- cargo test --lib sync::rwlock::tests",
+          "timeout_secs": 90
+        },
+        "confidence_inputs": [
+          {
+            "key": "analyzer_confidence",
+            "score": 38,
+            "rationale": "Low analyzer confidence due to sparse evidence.",
+            "evidence_ref": "evidence-analyzer-critical-001"
+          },
+          {
+            "key": "blast_radius",
+            "score": 42,
+            "rationale": "Wide impact on contended sync paths.",
+            "evidence_ref": "evidence-diff-critical-001"
+          },
+          {
+            "key": "replay_reproducibility",
+            "score": 40,
+            "rationale": "Replay inconsistent across scheduling strategies.",
+            "evidence_ref": "evidence-replay-critical-001"
+          },
+          {
+            "key": "test_coverage_delta",
+            "score": 37,
+            "rationale": "Limited test coverage for touched paths.",
+            "evidence_ref": "evidence-tests-critical-001"
+          }
+        ],
+        "override_justification": null
+      },
+      "expected_confidence_score": 39,
+      "expected_risk_band": "critical_risk",
+      "expected_decision": "review"
+    },
+    {
+      "fixture_id": "fixture-override-disables-auto-apply",
+      "description": "Override justification forces human review even at trusted score.",
+      "recipe": {
+        "recipe_id": "recipe-lock-order-override",
+        "finding_id": "doctor-lock-contention:src/runtime/state.rs:critical",
+        "fix_intent": "enforce_lock_order",
+        "preconditions": [
+          {
+            "key": "lock_order_violation_present",
+            "predicate": "eq",
+            "expected_value": "true",
+            "evidence_ref": "evidence-lock-override-001",
+            "required": true
+          },
+          {
+            "key": "repro_seed_available",
+            "predicate": "exists",
+            "expected_value": "true",
+            "evidence_ref": "evidence-seed-override-001",
+            "required": true
+          }
+        ],
+        "rollback": {
+          "strategy": "git_apply_reverse_patch",
+          "rollback_command": "git apply -R artifacts/run-lock-override/patch.diff",
+          "verify_command": "rch exec -- cargo test --lib cli::doctor::tests::lock_order_smoke",
+          "timeout_secs": 120
+        },
+        "confidence_inputs": [
+          {
+            "key": "analyzer_confidence",
+            "score": 95,
+            "rationale": "High analyzer confidence.",
+            "evidence_ref": "evidence-analyzer-override-001"
+          },
+          {
+            "key": "blast_radius",
+            "score": 90,
+            "rationale": "Narrow scope.",
+            "evidence_ref": "evidence-diff-override-001"
+          },
+          {
+            "key": "replay_reproducibility",
+            "score": 88,
+            "rationale": "Fully reproducible.",
+            "evidence_ref": "evidence-replay-override-001"
+          },
+          {
+            "key": "test_coverage_delta",
+            "score": 85,
+            "rationale": "Full coverage.",
+            "evidence_ref": "evidence-tests-override-001"
+          }
+        ],
+        "override_justification": "Force manual review for production deployment safety."
+      },
+      "expected_confidence_score": 90,
+      "expected_risk_band": "trusted_auto_apply",
+      "expected_decision": "review"
+    }
+  ]
+}

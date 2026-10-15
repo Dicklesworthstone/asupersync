@@ -1,0 +1,160 @@
+{
+  "schema_version": "semantic-guardrail-mismatch-fixtures-v1",
+  "description": "Controlled semantic mismatch fixtures for SEM-10.4 anti-drift guardrail validation.",
+  "cases": [
+    {
+      "fixture_id": "docs-contract-missing-rule-ci",
+      "surface": "docs",
+      "purpose": "Contract docs drift must fail CI consistency checks with explicit missing rule diagnostics.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": "docs/semantic_contract_schema.md",
+        "find": "def.determinism.seed_equivalence",
+        "replace": "def.determinism.seed_equiv_broken_fixture"
+      },
+      "command": "bash scripts/check_semantic_consistency.sh",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "Rule def.determinism.seed_equivalence MISSING from contract docs",
+        "VERDICT: FAIL"
+      ]
+    },
+    {
+      "fixture_id": "docs-contract-missing-rule-runner",
+      "surface": "docs",
+      "purpose": "Unified semantic runner must fail docs suite when contract docs drift.",
+      "heavy": true,
+      "run_via_rch": true,
+      "mutation": {
+        "operation": "replace_first",
+        "file": "docs/semantic_contract_schema.md",
+        "find": "def.determinism.seed_equivalence",
+        "replace": "def.determinism.seed_equiv_broken_fixture"
+      },
+      "command": "scripts/run_semantic_verification.sh --profile smoke --suite docs",
+      "expected_exit": 1,
+      "expected_substrings": ["docs: FAILED", "Semantic Verification Summary"]
+    },
+    {
+      "fixture_id": "runtime-annotation-removed",
+      "surface": "runtime",
+      "purpose": "Runtime rule-ID annotation removals must fail semantic-change policy checks.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": "src/runtime/state.rs",
+        "find": "inv.cancel.propagates_down",
+        "replace": "inv.cancel.propagates.down.removed_fixture"
+      },
+      "command": "bash scripts/check_semantic_change_policy.sh HEAD",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "Rule-ID annotation removed from src/runtime/state.rs: inv.cancel.propagates_down",
+        "VERDICT: FAIL"
+      ]
+    },
+    {
+      "fixture_id": "lean-suite-compile-drift",
+      "surface": "lean",
+      "purpose": "Unified semantic runner must fail Lean validation suite on intentional Lean-surface compile drift.",
+      "heavy": true,
+      "run_via_rch": true,
+      "mutation": {
+        "operation": "append_text",
+        "file": "tests/semantic_lean_regression.rs",
+        "text": "this is intentionally invalid rust for semantic mismatch fixture lean"
+      },
+      "command": "scripts/run_semantic_verification.sh --profile full --suite lean",
+      "expected_exit": 1,
+      "expected_substrings": ["lean_validation: FAILED", "Semantic Verification Summary"]
+    },
+    {
+      "fixture_id": "tla-suite-compile-drift",
+      "surface": "tla",
+      "purpose": "Unified semantic runner must fail TLA validation suite on intentional TLA-surface compile drift.",
+      "heavy": true,
+      "run_via_rch": true,
+      "mutation": {
+        "operation": "append_text",
+        "file": "tests/semantic_tla_scenarios.rs",
+        "text": "this is intentionally invalid rust for semantic mismatch fixture tla"
+      },
+      "command": "scripts/run_semantic_verification.sh --profile full --suite tla",
+      "expected_exit": 1,
+      "expected_substrings": ["tla_validation: FAILED", "Semantic Verification Summary"]
+    },
+    {
+      "fixture_id": "e2e-lane-artifact-contract-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when e2e artifact contract drifts from workflow reality.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/ci_matrix_policy.json",
+        "find": "phase6-e2e-artifacts",
+        "replace": "phase6-e2e-artifacts-broken-fixture"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "CI matrix lane failed: e2e",
+        "artifact:phase6-e2e-artifacts-broken-fixture"
+      ]
+    },
+    {
+      "fixture_id": "e2e-lane-replay-rch-prefix-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when a required-rch lane replay command is no longer rch-routed.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/ci_matrix_policy.json",
+        "find": "rch exec -- bash ./scripts/run_all_e2e.sh --verify-matrix",
+        "replace": "bash ./scripts/run_all_e2e.sh --verify-matrix"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": ["CI matrix lane failed: e2e", "replay:rch_prefix"]
+    },
+    {
+      "fixture_id": "lint-build-step-local-cargo-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when an rch-required step drifts back to local Cargo execution.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/workflows/ci.yml",
+        "find": "\"$RCH_BIN\" exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_ci_check\" cargo check --all-targets --all-features",
+        "replace": "cargo check --all-targets --all-features"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": [
+        "CI matrix lane failed: lint-build",
+        "step_local_cargo:Check compilation"
+      ]
+    },
+    {
+      "fixture_id": "e2e-lane-artifact-threshold-drift",
+      "surface": "e2e",
+      "purpose": "CI matrix policy gate must fail when required_artifacts_min exceeds available artifact contracts.",
+      "heavy": false,
+      "run_via_rch": false,
+      "mutation": {
+        "operation": "replace_first",
+        "file": ".github/ci_matrix_policy.json",
+        "find": "\"required_artifacts_min\": 2",
+        "replace": "\"required_artifacts_min\": 3"
+      },
+      "command": "python3 scripts/check_ci_matrix_policy.py --policy .github/ci_matrix_policy.json --workflow .github/workflows/ci.yml --summary-output target/ci_matrix_policy_summary_fixture.json --events-output target/ci_matrix_policy_events_fixture.ndjson",
+      "expected_exit": 1,
+      "expected_substrings": ["CI matrix lane failed: e2e", "threshold:required_artifacts_min(2<3)"]
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Repeated header names (cookies, vary)",
+  "headers": [
+    {
+      "name": "set-cookie",
+      "value": "sessionid=abc123"
+    },
+    {
+      "name": "set-cookie",
+      "value": "userid=456"
+    },
+    {
+      "name": "vary",
+      "value": "Accept-Encoding"
+    }
+  ],
+  "config": {
+    "use_huffman": false,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    119,
+    16,
+    115,
+    101,
+    115,
+    115,
+    105,
+    111,
+    110,
+    105,
+    100,
+    61,
+    97,
+    98,
+    99,
+    49,
+    50,
+    51,
+    119,
+    10,
+    117,
+    115,
+    101,
+    114,
+    105,
+    100,
+    61,
+    52,
+    53,
+    54,
+    123,
+    15,
+    65,
+    99,
+    99,
+    101,
+    112,
+    116,
+    45,
+    69,
+    110,
+    99,
+    111,
+    100,
+    105,
+    110,
+    103
+  ],
+  "encoded_size": 47,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}

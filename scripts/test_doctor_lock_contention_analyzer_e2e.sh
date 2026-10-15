@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Doctor Lock-Contention Analyzer E2E Runner (asupersync-2b4jj.2.4)
+#
+# Runs deterministic lock-order/contention analysis against a synthetic fixture
+# and verifies:
+# - stable analyzer/scanner schema versions
+# - deterministic output across repeated runs
+# - stable hotspot ranking + reproducible evidence links
+#
+# Usage:
+#   ./scripts/test_doctor_lock_contention_analyzer_e2e.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+OUTPUT_DIR="${PROJECT_ROOT}/target/e2e-results/doctor_lock_contention_analyzer"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+RUN_STARTED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+ARTIFACT_DIR="${OUTPUT_DIR}/artifacts_${TIMESTAMP}"
+SUMMARY_FILE="${ARTIFACT_DIR}/summary.json"
+RUN1_JSON="${ARTIFACT_DIR}/analysis_run1.json"
+RUN2_JSON="${ARTIFACT_DIR}/analysis_run2.json"
+RUN1_LOG="${ARTIFACT_DIR}/run1.log"
+RUN2_LOG="${ARTIFACT_DIR}/run2.log"
+FIXTURE_ROOT="${PROJECT_ROOT}/tests/fixtures/doctor_lock_contention_e2e"
+SUITE_ID="doctor_lock_contention_analyzer_e2e"
+SCENARIO_ID="E2E-SUITE-DOCTOR-LOCK-CONTENTION-ANALYZER"
+
+export TEST_LOG_LEVEL="${TEST_LOG_LEVEL:-info}"
+export RUST_LOG="${RUST_LOG:-asupersync=info}"
+export TEST_SEED="${TEST_SEED:-0xDEADBEEF}"
+RCH_SCAN_TIMEOUT="${RCH_SCAN_TIMEOUT:-240}"
+RCH_RETRY_ATTEMPTS="${RCH_RETRY_ATTEMPTS:-3}"
+
+RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+CARGO_BIN="${CARGO_BIN:-cargo}"
+if [[ ! -x "${RCH_BIN}" ]]; then
+    echo "FATAL: rch is required and was not found/executable at: ${RCH_BIN}" >&2
+    exit 1
+fi
+
+mkdir -p "${OUTPUT_DIR}" "${ARTIFACT_DIR}"
+
+echo "==================================================================="
+echo "        Asupersync Doctor Lock-Contention Analyzer E2E            "
+echo "==================================================================="
+echo "Config:"
+echo "  RCH_BIN:          ${RCH_BIN}"
+echo "  TEST_LOG_LEVEL:   ${TEST_LOG_LEVEL}"
+echo "  RUST_LOG:         ${RUST_LOG}"
+echo "  TEST_SEED:        ${TEST_SEED}"
+echo "  Retry attempts:   ${RCH_RETRY_ATTEMPTS}"
+echo "  Artifact dir:     ${ARTIFACT_DIR}"
+echo "  Fixture root:     ${FIXTURE_ROOT}"
+echo ""
+
+if [[ ! -f "${FIXTURE_ROOT}/Cargo.toml" ]]; then
+    echo "FATAL: fixture workspace missing at ${FIXTURE_ROOT}" >&2
+    exit 1
+fi
+
+EXIT_CODE=0
+CHECK_FAILURES=0
+CHECKS_PASSED=0
+RUN_FAILURE_CLASS="none"
+
+rch_attempt_went_local() {
+    local log_path=""
+    for log_path in "$@"; do
+        [[ -f "${log_path}" ]] || continue
+        if grep -Eq '\[RCH\] local \(|falling back to local' "${log_path}"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+update_run_failure_class() {
+    local failure_class="${1:-}"
+    if [[ "${failure_class}" == "rch_local_fallback" ]]; then
+        RUN_FAILURE_CLASS="rch_local_fallback"
+    fi
+}
+
+run_analysis_call() {
+    local run_label="$1"
+    local run_log="$2"
+    local run_json="$3"
+    local run_id="$4"
+    local rc=0
+    local payload=""
+    local attempt_log=""
+    local fell_back_local=0
+
+    for ((attempt = 1; attempt <= RCH_RETRY_ATTEMPTS; attempt++)); do
+        local target_dir="/tmp/rch-doctor-lock-contention-${TIMESTAMP}-${run_id}-attempt${attempt}"
+        local -a run_cmd=(
+            env "CARGO_TARGET_DIR=${target_dir}" \
+            "${CARGO_BIN}" run --quiet --features cli --bin asupersync --
+            --format json
+            --color never
+            doctor analyze-lock-contention
+            --root "${FIXTURE_ROOT}"
+        )
+        attempt_log="${run_log%.log}.attempt${attempt}.log"
+        if timeout "${RCH_SCAN_TIMEOUT}s" "${RCH_BIN}" exec -- "${run_cmd[@]}" >"${attempt_log}" 2>&1; then
+            rc=0
+        else
+            rc=$?
+        fi
+
+        fell_back_local=0
+        if rch_attempt_went_local "${attempt_log}"; then
+            echo "  ERROR: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} fell back to local execution; rejecting captured payload"
+            fell_back_local=1
+            rc=86
+            update_run_failure_class "rch_local_fallback"
+        fi
+
+        payload="$(grep -E '"analyzer_version"[[:space:]]*:[[:space:]]*"doctor-lock-contention-analyzer-v1"' "${attempt_log}" | tail -n1 || true)"
+        if [[ -n "${payload}" ]] && printf '%s\n' "${payload}" | jq -e . >/dev/null 2>&1; then
+            if [[ ${fell_back_local} -eq 0 ]]; then
+                cp "${attempt_log}" "${run_log}"
+                printf '%s\n' "${payload}" > "${run_json}"
+                if [[ ${rc} -ne 0 ]]; then
+                    echo "  WARN: ${run_label} exited ${rc}; proceeding with captured JSON payload"
+                fi
+                return 0
+            fi
+        fi
+
+        if [[ ${attempt} -lt ${RCH_RETRY_ATTEMPTS} ]]; then
+            echo "  WARN: ${run_label} attempt ${attempt}/${RCH_RETRY_ATTEMPTS} produced no valid JSON payload (exit=${rc}); retrying"
+            sleep 1
+        fi
+    done
+
+    if [[ -n "${attempt_log}" && -f "${attempt_log}" ]]; then
+        cp "${attempt_log}" "${run_log}"
+    fi
+    echo "  ERROR: ${run_label} failed after ${RCH_RETRY_ATTEMPTS} attempt(s) (last exit=${rc}) and produced no valid JSON payload (see ${run_log})"
+    return 1
+}
+
+echo ">>> [1/4] Running lock-contention analysis (run 1) via rch..."
+if ! run_analysis_call "analysis run 1" "${RUN1_LOG}" "${RUN1_JSON}" "run1"; then
+    EXIT_CODE=1
+fi
+
+echo ">>> [2/4] Running lock-contention analysis (run 2) via rch..."
+if ! run_analysis_call "analysis run 2" "${RUN2_LOG}" "${RUN2_JSON}" "run2"; then
+    EXIT_CODE=1
+fi
+
+if [[ ${EXIT_CODE} -eq 0 ]]; then
+    echo ">>> [3/4] Verifying deterministic output..."
+    if diff -u "${RUN1_JSON}" "${RUN2_JSON}" > "${ARTIFACT_DIR}/determinism.diff"; then
+        CHECKS_PASSED=$((CHECKS_PASSED + 1))
+        rm -f "${ARTIFACT_DIR}/determinism.diff"
+    else
+        echo "  ERROR: deterministic output check failed (see determinism.diff)"
+        CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    fi
+
+    echo ">>> [4/4] Validating schema + hotspot/risk expectations..."
+    if jq -e '
+        .analyzer_version == "doctor-lock-contention-analyzer-v1" and
+        .scanner_version == "doctor-workspace-scan-v1" and
+        (.correlation_id | type == "string" and length > 0) and
+        .hotspot_count == (.hotspots | length) and
+        .violation_count == (.violations | length) and
+        (.hotspot_count >= 1) and
+        (.violation_count >= 1) and
+        (.deadlock_risk_patterns | index("A(Tasks) -> B(Regions)")) != null and
+        (.hotspots[0].hotspot_id == "lock-hotspot-001") and
+        (.hotspots[0].path == "runtime_lock/src/lib.rs") and
+        (.hotspots[0].risk_score > 0) and
+        (.hotspots[0].confidence >= 70) and
+        (.hotspots[0].evidence | length >= 1) and
+        (.reproduction_commands | length >= 1) and
+        (.rule_traces | map(.rule_id) | sort) == [
+          "contention_hotspot_ranking",
+          "deadlock_risk_patterns",
+          "lock_order_consistency"
+        ] and
+        ((.rule_traces[] | select(.rule_id == "lock_order_consistency")).outcome == "fail")
+    ' "${RUN1_JSON}" >/dev/null; then
+        CHECKS_PASSED=$((CHECKS_PASSED + 1))
+    else
+        echo "  ERROR: golden/schema validation failed"
+        CHECK_FAILURES=$((CHECK_FAILURES + 1))
+    fi
+fi
+
+RUN_ENDED_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+SUITE_STATUS="failed"
+FAILURE_CLASS="test_or_pattern_failure"
+
+if [[ ${EXIT_CODE} -eq 0 && ${CHECK_FAILURES} -eq 0 ]]; then
+    SUITE_STATUS="passed"
+    FAILURE_CLASS="none"
+elif [[ "${RUN_FAILURE_CLASS}" == "rch_local_fallback" ]]; then
+    FAILURE_CLASS="rch_local_fallback"
+fi
+
+TESTS_PASSED=0
+TESTS_FAILED=1
+if [[ "${SUITE_STATUS}" == "passed" ]]; then
+    TESTS_PASSED=1
+    TESTS_FAILED=0
+fi
+
+REPRO_COMMAND="TEST_LOG_LEVEL=${TEST_LOG_LEVEL} RUST_LOG=${RUST_LOG} TEST_SEED=${TEST_SEED} RCH_BIN=${RCH_BIN} bash ${SCRIPT_DIR}/$(basename "$0")"
+
+cat > "${SUMMARY_FILE}" <<ENDJSON
+{
+  "schema_version": "e2e-suite-summary-v3",
+  "suite_id": "${SUITE_ID}",
+  "scenario_id": "${SCENARIO_ID}",
+  "seed": "${TEST_SEED}",
+  "started_ts": "${RUN_STARTED_TS}",
+  "ended_ts": "${RUN_ENDED_TS}",
+  "status": "${SUITE_STATUS}",
+  "failure_class": "${FAILURE_CLASS}",
+  "repro_command": "${REPRO_COMMAND}",
+  "artifact_path": "${SUMMARY_FILE}",
+  "suite": "${SUITE_ID}",
+  "timestamp": "${TIMESTAMP}",
+  "test_log_level": "${TEST_LOG_LEVEL}",
+  "tests_passed": ${TESTS_PASSED},
+  "tests_failed": ${TESTS_FAILED},
+  "exit_code": ${EXIT_CODE},
+  "pattern_failures": ${CHECK_FAILURES},
+  "log_file": "${RUN1_LOG}",
+  "artifact_dir": "${ARTIFACT_DIR}",
+  "checks_passed": ${CHECKS_PASSED}
+}
+ENDJSON
+
+echo ""
+echo "==================================================================="
+echo "      Doctor Lock-Contention Analyzer E2E Summary                 "
+echo "==================================================================="
+echo "  Status:         ${SUITE_STATUS}"
+echo "  Exit code:      ${EXIT_CODE}"
+echo "  Check failures: ${CHECK_FAILURES}"
+echo "  Checks passed:  ${CHECKS_PASSED}"
+echo "  Summary:        ${SUMMARY_FILE}"
+echo "==================================================================="
+
+if [[ ${EXIT_CODE} -ne 0 || ${CHECK_FAILURES} -ne 0 ]]; then
+    exit 1
+fi

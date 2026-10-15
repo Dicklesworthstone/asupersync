@@ -1,0 +1,5 @@
+error: explore_seeds count must be at least 1
+ --> tests/compile_fail/explore_seeds_bad_count.rs:3:25
+  |
+3 | #[explore_seeds(count = 0)]
+  |                         ^

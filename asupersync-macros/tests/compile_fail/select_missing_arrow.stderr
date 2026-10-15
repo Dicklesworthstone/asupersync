@@ -1,0 +1,5 @@
+error: expected `=>` in select branch: `binding = future => handler`
+ --> tests/compile_fail/select_missing_arrow.rs:5:39
+  |
+5 |     let _ = select!(cx, { a = fut_a() a });
+  |                                       ^

@@ -1,0 +1,983 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+//! Security invariant tests for Asupersync.
+//!
+//! These tests verify that critical security properties hold across the codebase.
+//! They are designed to catch regressions in security-sensitive code.
+
+#![allow(clippy::similar_names)]
+
+use asupersync::bytes::BytesMut;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder, Settings, SettingsBuilder};
+use asupersync::io::{
+    BrowserEntropyIoCap, BrowserHostApiIoCap, BrowserMessageError, BrowserStorageAdapter,
+    BrowserStorageIoCap, BrowserTimeIoCap, BrowserTransportAuthority,
+    BrowserTransportCancellationPolicy, BrowserTransportIoCap, BrowserTransportKind,
+    BrowserTransportPolicyError, BrowserTransportReconnectPolicy, BrowserTransportRequest,
+    BrowserTransportSupport, EntropyAuthority, EntropyIoCap, EntropyOperation, EntropyPolicyError,
+    EntropyRequest, EntropySourceKind, FetchAuthority, FetchMethod, FetchPolicyError, FetchRequest,
+    HostApiAuthority, HostApiIoCap, HostApiPolicyError, HostApiRequest, HostApiSurface,
+    StorageAuthority, StorageBackend, StorageConsistencyPolicy, StorageIoCap, StorageOperation,
+    StoragePolicyError, StorageQuotaPolicy, StorageRedactionPolicy, StorageRequest, TimeAuthority,
+    TimeIoCap, TimeOperation, TimePolicyError, TimeRequest, TimeSourceKind, TransportIoCap,
+};
+use asupersync::net::websocket::{CloseReason, Frame, Opcode, WsError};
+
+// =============================================================================
+// HTTP/2 SECURITY INVARIANTS
+// =============================================================================
+
+mod http2_security {
+    use super::*;
+
+    /// Verify that max_concurrent_streams has a reasonable default.
+    #[test]
+    fn invariant_max_concurrent_streams_bounded() {
+        let settings = Settings::default();
+        assert!(
+            settings.max_concurrent_streams <= 1000,
+            "max_concurrent_streams should be bounded to prevent stream exhaustion"
+        );
+        assert!(
+            settings.max_concurrent_streams >= 1,
+            "max_concurrent_streams should allow at least one stream"
+        );
+    }
+
+    /// Verify that max_header_list_size is bounded.
+    #[test]
+    fn invariant_max_header_list_size_bounded() {
+        let settings = Settings::default();
+        assert!(
+            settings.max_header_list_size <= 1024 * 1024, // 1 MB
+            "max_header_list_size should be bounded to prevent memory exhaustion"
+        );
+    }
+
+    /// Verify that max_frame_size is within RFC 7540 limits.
+    #[test]
+    fn invariant_max_frame_size_rfc_compliant() {
+        let settings = Settings::default();
+        // RFC 7540: SETTINGS_MAX_FRAME_SIZE must be between 2^14 and 2^24-1
+        assert!(
+            settings.max_frame_size >= 16384,
+            "max_frame_size must be at least 16384 (2^14) per RFC 7540"
+        );
+        assert!(
+            settings.max_frame_size <= 16_777_215,
+            "max_frame_size must not exceed 16777215 (2^24-1) per RFC 7540"
+        );
+    }
+
+    /// Verify that initial_window_size doesn't exceed RFC 7540 limits.
+    #[test]
+    fn invariant_initial_window_size_bounded() {
+        let settings = Settings::default();
+        // RFC 7540: SETTINGS_INITIAL_WINDOW_SIZE must be <= 2^31-1
+        assert!(
+            settings.initial_window_size <= 2_147_483_647,
+            "initial_window_size must not exceed 2^31-1 per RFC 7540"
+        );
+    }
+
+    /// Verify settings can be constructed safely.
+    #[test]
+    fn invariant_settings_builder_creates_valid_settings() {
+        // Valid settings should work
+        let settings = SettingsBuilder::new()
+            .max_concurrent_streams(100)
+            .max_header_list_size(65536)
+            .build();
+
+        assert_eq!(settings.max_concurrent_streams, 100);
+        assert_eq!(settings.max_header_list_size, 65536);
+    }
+
+    /// Verify continuation timeout is set.
+    #[test]
+    fn invariant_continuation_timeout_set() {
+        let settings = Settings::default();
+        assert!(
+            settings.continuation_timeout_ms > 0,
+            "CONTINUATION timeout should be non-zero"
+        );
+        assert!(
+            settings.continuation_timeout_ms <= 30_000,
+            "CONTINUATION timeout should be reasonable (<=30s)"
+        );
+    }
+}
+
+// =============================================================================
+// WEBSOCKET SECURITY INVARIANTS
+// =============================================================================
+
+mod websocket_security {
+    use super::*;
+
+    /// Verify that invalid opcodes are rejected.
+    #[test]
+    fn invariant_invalid_opcode_rejected() {
+        // Reserved opcodes should be rejected
+        for opcode in [0x03, 0x04, 0x05, 0x06, 0x07, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F] {
+            let result = Opcode::from_u8(opcode);
+            assert!(
+                result.is_err(),
+                "Reserved opcode {opcode:#x} should be rejected"
+            );
+        }
+    }
+
+    /// Verify that valid opcodes are accepted.
+    #[test]
+    fn invariant_valid_opcode_accepted() {
+        // Valid opcodes per RFC 6455
+        let valid_opcodes = [
+            (0x0, Opcode::Continuation),
+            (0x1, Opcode::Text),
+            (0x2, Opcode::Binary),
+            (0x8, Opcode::Close),
+            (0x9, Opcode::Ping),
+            (0xA, Opcode::Pong),
+        ];
+
+        for (byte, expected) in valid_opcodes {
+            let result = Opcode::from_u8(byte);
+            assert!(result.is_ok(), "Valid opcode {byte:#x} should be accepted");
+            assert_eq!(result.unwrap(), expected);
+        }
+    }
+
+    /// Verify control frames are correctly identified.
+    #[test]
+    fn invariant_control_frame_identification() {
+        assert!(Opcode::Close.is_control());
+        assert!(Opcode::Ping.is_control());
+        assert!(Opcode::Pong.is_control());
+        assert!(!Opcode::Text.is_control());
+        assert!(!Opcode::Binary.is_control());
+        assert!(!Opcode::Continuation.is_control());
+    }
+
+    /// Verify data frames are correctly identified.
+    #[test]
+    fn invariant_data_frame_identification() {
+        assert!(Opcode::Text.is_data());
+        assert!(Opcode::Binary.is_data());
+        assert!(Opcode::Continuation.is_data());
+        assert!(!Opcode::Close.is_data());
+        assert!(!Opcode::Ping.is_data());
+        assert!(!Opcode::Pong.is_data());
+    }
+
+    /// Verify close reason parsing for valid payloads.
+    #[test]
+    fn invariant_close_reason_valid_parsed() {
+        // Valid close reason: status code 1000 (normal closure) + "Goodbye"
+        let valid_payload = vec![0x03, 0xE8, b'G', b'o', b'o', b'd', b'b', b'y', b'e'];
+        let result = CloseReason::parse(&valid_payload);
+        assert!(result.is_ok(), "Valid close reason should parse");
+
+        // Empty payload is also valid (no code, no reason)
+        let empty_payload: Vec<u8> = vec![];
+        let result = CloseReason::parse(&empty_payload);
+        assert!(result.is_ok(), "Empty close payload should be valid");
+    }
+
+    /// Verify WsError types are distinguishable.
+    #[test]
+    fn invariant_ws_error_distinct() {
+        let invalid_opcode = WsError::InvalidOpcode(0xFF);
+        let invalid_utf8 = WsError::InvalidUtf8;
+        let reserved_bits = WsError::ReservedBitsSet;
+
+        // Different error kinds should be distinguishable
+        assert!(!matches!(invalid_opcode, WsError::InvalidUtf8));
+        assert!(!matches!(invalid_utf8, WsError::InvalidOpcode(_)));
+        assert!(!matches!(reserved_bits, WsError::InvalidOpcode(_)));
+    }
+}
+
+// =============================================================================
+// BROWSER FETCH AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_fetch_security {
+    use super::*;
+
+    fn strict_fetch_authority() -> FetchAuthority {
+        FetchAuthority {
+            allowed_origins: vec!["https://api.example.com".to_owned()],
+            allowed_methods: vec![FetchMethod::Get],
+            allow_credentials: false,
+            max_header_count: 2,
+        }
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_untrusted_origin() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://evil.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::OriginDenied(
+                "https://evil.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_default_authority_is_deny_all() {
+        let authority = FetchAuthority::default();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::OriginDenied(
+                "https://api.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_method_escalation() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Post, "https://api.example.com/v1/data");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::MethodDenied(FetchMethod::Post))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_denies_credentials_by_default() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_credentials();
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::CredentialsDenied)
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_allows_credentials_with_explicit_grant() {
+        let authority = FetchAuthority::deny_all()
+            .grant_origin("https://api.example.com")
+            .grant_method(FetchMethod::Get)
+            .with_max_header_count(4)
+            .with_credentials_allowed();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_credentials();
+        assert_eq!(authority.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn invariant_fetch_policy_enforces_header_limits() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_header("x-one", "1")
+            .with_header("x-two", "2")
+            .with_header("x-three", "3");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::TooManyHeaders { count: 3, limit: 2 })
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_rejects_invalid_url_shape() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "not-a-url");
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::InvalidUrl("not-a-url".to_owned()))
+        );
+    }
+
+    #[test]
+    fn invariant_fetch_policy_allows_explicitly_permitted_request() {
+        let authority = strict_fetch_authority();
+        let request = FetchRequest::new(FetchMethod::Get, "https://api.example.com/v1/data")
+            .with_header("x-trace-id", "t-1");
+        assert_eq!(authority.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn invariant_fetch_policy_wildcard_origin_still_denies_credentials() {
+        let authority = FetchAuthority {
+            allowed_origins: vec!["*".to_owned()],
+            allowed_methods: vec![FetchMethod::Get],
+            allow_credentials: false,
+            max_header_count: 4,
+        };
+        let request = FetchRequest::new(FetchMethod::Get, "https://any-origin.example/v1/data")
+            .with_credentials();
+        assert_eq!(
+            authority.authorize(&request),
+            Err(FetchPolicyError::CredentialsDenied)
+        );
+    }
+}
+
+// =============================================================================
+// BROWSER STORAGE AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_storage_security {
+    use super::*;
+
+    fn strict_storage_cap() -> BrowserStorageIoCap {
+        BrowserStorageIoCap::new(
+            StorageAuthority::deny_all()
+                .grant_backend(StorageBackend::IndexedDb)
+                .grant_namespace("cache:*")
+                .grant_operation(StorageOperation::Get)
+                .grant_operation(StorageOperation::Set)
+                .grant_operation(StorageOperation::Delete)
+                .grant_operation(StorageOperation::ListKeys),
+            StorageQuotaPolicy {
+                max_total_bytes: 1024,
+                max_key_bytes: 64,
+                max_value_bytes: 256,
+                max_namespace_bytes: 64,
+                max_entries: 32,
+            },
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy {
+                redact_keys: true,
+                redact_namespaces: true,
+                redact_value_lengths: true,
+            },
+        )
+    }
+
+    #[test]
+    fn invariant_storage_policy_default_authority_is_deny_all() {
+        let cap = BrowserStorageIoCap::new(
+            StorageAuthority::default(),
+            StorageQuotaPolicy::default(),
+            StorageConsistencyPolicy::ImmediateReadAfterWrite,
+            StorageRedactionPolicy::default(),
+        );
+        let request = StorageRequest::set(StorageBackend::IndexedDb, "cache:v1", "token", 4);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(StoragePolicyError::BackendDenied(StorageBackend::IndexedDb))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_policy_denies_namespace_escalation() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        let result = adapter.set(
+            StorageBackend::IndexedDb,
+            "session:v1",
+            "token",
+            b"abc".to_vec(),
+        );
+        assert_eq!(
+            result,
+            Err(asupersync::io::BrowserStorageError::Policy(
+                StoragePolicyError::NamespaceDenied("session:v1".to_owned())
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_policy_denies_clear_without_explicit_operation_grant() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        let result = adapter.clear_namespace(StorageBackend::IndexedDb, "cache:user:1");
+        assert_eq!(
+            result,
+            Err(asupersync::io::BrowserStorageError::Policy(
+                StoragePolicyError::OperationDenied(StorageOperation::ClearNamespace)
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_storage_telemetry_redacts_sensitive_labels() {
+        let mut adapter = BrowserStorageAdapter::new(strict_storage_cap());
+        adapter
+            .set(
+                StorageBackend::IndexedDb,
+                "cache:user:42",
+                "access_token",
+                b"secret".to_vec(),
+            )
+            .expect("set should succeed");
+
+        let event = adapter.events().last().expect("event should be recorded");
+        assert_eq!(event.namespace_label, "namespace[len:13]");
+        assert_eq!(event.key_label.as_deref(), Some("key[len:12]"));
+        assert_eq!(event.value_len, None);
+    }
+}
+
+// =============================================================================
+// BROWSER TRANSPORT AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_transport_security {
+    use super::*;
+
+    fn strict_transport_cap() -> BrowserTransportIoCap {
+        BrowserTransportIoCap::new(
+            BrowserTransportAuthority::deny_all()
+                .grant_origin("wss://chat.example.com")
+                .grant_kind(BrowserTransportKind::WebSocket)
+                .with_max_subprotocol_count(2),
+            BrowserTransportSupport::WEBSOCKET_ONLY,
+            BrowserTransportCancellationPolicy::CloseThenAbort,
+            BrowserTransportReconnectPolicy {
+                max_attempts: 2,
+                base_delay_ms: 200,
+                max_delay_ms: 2_000,
+                jitter_ms: 0,
+            },
+        )
+    }
+
+    #[test]
+    fn invariant_transport_policy_denies_untrusted_origin() {
+        let cap = strict_transport_cap();
+        let request =
+            BrowserTransportRequest::new(BrowserTransportKind::WebSocket, "wss://evil.example.com");
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::OriginDenied(
+                "wss://evil.example.com".to_owned()
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_denies_kind_escalation() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebTransport,
+            "https://chat.example.com/session",
+        );
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::UnsupportedKind(
+                BrowserTransportKind::WebTransport
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_enforces_reconnect_limits() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_reconnect_attempt(3);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::ReconnectAttemptExceeded {
+                attempt: 3,
+                max_attempts: 2
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_enforces_subprotocol_limits() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_subprotocol("chat")
+        .with_subprotocol("presence")
+        .with_subprotocol("typing");
+        assert_eq!(
+            cap.authorize(&request),
+            Err(BrowserTransportPolicyError::TooManySubprotocols { count: 3, limit: 2 })
+        );
+    }
+
+    #[test]
+    fn invariant_transport_policy_allows_explicitly_permitted_websocket() {
+        let cap = strict_transport_cap();
+        let request = BrowserTransportRequest::new(
+            BrowserTransportKind::WebSocket,
+            "wss://chat.example.com/socket",
+        )
+        .with_subprotocol("chat")
+        .with_reconnect_attempt(1);
+        assert_eq!(cap.authorize(&request), Ok(()));
+    }
+}
+
+// =============================================================================
+// BROWSER ENTROPY/TIME/HOST-API AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_host_authority_security {
+    use super::*;
+
+    fn strict_entropy_cap() -> BrowserEntropyIoCap {
+        BrowserEntropyIoCap::new(
+            EntropyAuthority::deny_all()
+                .grant_source(EntropySourceKind::WebCrypto)
+                .grant_operation(EntropyOperation::NextU64)
+                .grant_operation(EntropyOperation::FillBytes)
+                .with_max_fill_bytes(64),
+            true,
+        )
+    }
+
+    fn strict_time_cap() -> BrowserTimeIoCap {
+        BrowserTimeIoCap::new(
+            TimeAuthority::deny_all()
+                .grant_source(TimeSourceKind::PerformanceNow)
+                .grant_operation(TimeOperation::Now)
+                .grant_operation(TimeOperation::Sleep)
+                .with_min_duration_ms(5)
+                .with_max_duration_ms(30_000),
+            true,
+        )
+    }
+
+    fn strict_host_api_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::Crypto)
+                .grant_surface(HostApiSurface::Performance)
+                .grant_surface(HostApiSurface::MessageChannel)
+                .grant_surface(HostApiSurface::TimeoutScheduler),
+            true,
+        )
+    }
+
+    #[test]
+    fn invariant_entropy_authority_default_is_deny_all() {
+        let cap = BrowserEntropyIoCap::new(EntropyAuthority::default(), false);
+        let request = EntropyRequest::next_u64(EntropySourceKind::WebCrypto);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(EntropyPolicyError::SourceDenied(
+                EntropySourceKind::WebCrypto
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_entropy_authority_rejects_oversized_requests() {
+        let cap = strict_entropy_cap();
+        let request = EntropyRequest::fill_bytes(EntropySourceKind::WebCrypto, 128);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(EntropyPolicyError::ByteLengthExceeded {
+                requested: 128,
+                limit: 64
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_time_authority_denies_non_monotonic_source() {
+        let cap = strict_time_cap();
+        let request = TimeRequest::now(TimeSourceKind::DateNow);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(TimePolicyError::SourceDenied(TimeSourceKind::DateNow))
+        );
+    }
+
+    #[test]
+    fn invariant_time_authority_enforces_duration_floor() {
+        let cap = strict_time_cap();
+        let request = TimeRequest::sleep(TimeSourceKind::PerformanceNow, 1);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(TimePolicyError::DurationBelowMinimum {
+                requested_ms: 1,
+                minimum_ms: 5
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_default_is_deny_all() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        let request = HostApiRequest::new(HostApiSurface::Crypto);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::SurfaceDenied(HostApiSurface::Crypto))
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_denies_degraded_mode_without_grant() {
+        let cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::Crypto),
+            true,
+        );
+        let request = HostApiRequest::new(HostApiSurface::Crypto).with_degraded_mode();
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::Crypto
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_default_denies_message_channel_surface() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel);
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::SurfaceDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_denies_message_channel_degraded_mode_without_grant() {
+        let cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessageChannel),
+            true,
+        );
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel).with_degraded_mode();
+        assert_eq!(
+            cap.authorize(&request),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::MessageChannel
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_host_api_authority_allows_explicit_grants() {
+        let cap = strict_host_api_cap();
+        let request = HostApiRequest::new(HostApiSurface::TimeoutScheduler);
+        assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[test]
+    fn invariant_host_api_authority_allows_message_channel_explicit_grant() {
+        let cap = strict_host_api_cap();
+        let request = HostApiRequest::new(HostApiSurface::MessageChannel);
+        assert_eq!(cap.authorize(&request), Ok(()));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn invariant_native_message_wrappers_require_degraded_mode_grant() {
+        let strict_cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all().grant_surface(HostApiSurface::MessageChannel),
+            true,
+        );
+        assert!(matches!(
+            strict_cap.open_message_channel(),
+            Err(BrowserMessageError::Policy(
+                HostApiPolicyError::DegradedModeDenied(HostApiSurface::MessageChannel)
+            ))
+        ));
+
+        let degraded_cap = BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::MessageChannel)
+                .with_degraded_mode_allowed(),
+            true,
+        );
+        assert!(degraded_cap.open_message_channel().is_ok());
+    }
+}
+
+// =============================================================================
+// BROWSER ENTROPY/TIME/HOST AUTHORITY INVARIANTS
+// =============================================================================
+
+mod browser_authority_capsules_security {
+    use super::*;
+
+    fn strict_entropy_cap() -> BrowserEntropyIoCap {
+        BrowserEntropyIoCap::new(
+            EntropyAuthority::deny_all()
+                .grant_source(EntropySourceKind::WebCrypto)
+                .grant_operation(EntropyOperation::NextU64)
+                .grant_operation(EntropyOperation::FillBytes)
+                .with_max_fill_bytes(128),
+            true,
+        )
+    }
+
+    fn strict_time_cap() -> BrowserTimeIoCap {
+        BrowserTimeIoCap::new(
+            TimeAuthority::deny_all()
+                .grant_source(TimeSourceKind::PerformanceNow)
+                .grant_operation(TimeOperation::Now)
+                .grant_operation(TimeOperation::Sleep)
+                .with_min_duration_ms(10)
+                .with_max_duration_ms(5_000),
+            true,
+        )
+    }
+
+    fn strict_host_cap() -> BrowserHostApiIoCap {
+        BrowserHostApiIoCap::new(
+            HostApiAuthority::deny_all()
+                .grant_surface(HostApiSurface::Crypto)
+                .grant_surface(HostApiSurface::Performance),
+            true,
+        )
+    }
+
+    #[test]
+    fn invariant_entropy_capsule_default_is_deny_all() {
+        let cap = BrowserEntropyIoCap::new(EntropyAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&EntropyRequest::next_u64(EntropySourceKind::WebCrypto)),
+            Err(EntropyPolicyError::SourceDenied(
+                EntropySourceKind::WebCrypto
+            ))
+        );
+    }
+
+    #[test]
+    fn invariant_entropy_capsule_enforces_fill_limits() {
+        let cap = strict_entropy_cap();
+        assert_eq!(
+            cap.authorize(&EntropyRequest::fill_bytes(
+                EntropySourceKind::WebCrypto,
+                129
+            )),
+            Err(EntropyPolicyError::ByteLengthExceeded {
+                requested: 129,
+                limit: 128
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_time_capsule_requires_monotonic_source() {
+        let cap = strict_time_cap();
+        assert_eq!(
+            cap.authorize(&TimeRequest::now(TimeSourceKind::DateNow)),
+            Err(TimePolicyError::SourceDenied(TimeSourceKind::DateNow))
+        );
+    }
+
+    #[test]
+    fn invariant_time_capsule_enforces_duration_bounds() {
+        let cap = strict_time_cap();
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 1)),
+            Err(TimePolicyError::DurationBelowMinimum {
+                requested_ms: 1,
+                minimum_ms: 10
+            })
+        );
+        assert_eq!(
+            cap.authorize(&TimeRequest::sleep(TimeSourceKind::PerformanceNow, 9_999)),
+            Err(TimePolicyError::DurationAboveMaximum {
+                requested_ms: 9_999,
+                maximum_ms: 5_000
+            })
+        );
+    }
+
+    #[test]
+    fn invariant_host_capsule_default_is_deny_all() {
+        let cap = BrowserHostApiIoCap::new(HostApiAuthority::default(), false);
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto)),
+            Err(HostApiPolicyError::SurfaceDenied(HostApiSurface::Crypto))
+        );
+    }
+
+    #[test]
+    fn invariant_host_capsule_degraded_mode_requires_explicit_grant() {
+        let cap = strict_host_cap();
+        assert_eq!(
+            cap.authorize(&HostApiRequest::new(HostApiSurface::Crypto).with_degraded_mode()),
+            Err(HostApiPolicyError::DegradedModeDenied(
+                HostApiSurface::Crypto
+            ))
+        );
+    }
+}
+
+// =============================================================================
+// HPACK SECURITY INVARIANTS
+// =============================================================================
+
+mod hpack_security {
+    use super::*;
+
+    /// Verify that HPACK encoder produces bounded output.
+    #[test]
+    fn invariant_hpack_encoding_bounded() {
+        let mut encoder = HpackEncoder::new();
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":path", "/"),
+            Header::new(":scheme", "https"),
+            Header::new(":authority", "example.com"),
+        ];
+
+        let mut buf = BytesMut::with_capacity(4096);
+        encoder.encode(&headers, &mut buf);
+
+        // Output should be reasonable for typical headers
+        // HPACK can compress or expand depending on table state
+        assert!(
+            buf.len() <= 4096,
+            "HPACK encoding should not produce unbounded output"
+        );
+    }
+
+    /// Verify decode-encode roundtrip preserves headers.
+    #[test]
+    fn invariant_hpack_roundtrip() {
+        let original_headers = vec![
+            Header::new(":method", "POST"),
+            Header::new(":path", "/api/v1/data"),
+            Header::new("content-type", "application/json"),
+        ];
+
+        // Encode
+        let mut encoder = HpackEncoder::new();
+        let mut buf = BytesMut::with_capacity(256);
+        encoder.encode(&original_headers, &mut buf);
+        let mut encoded = buf.freeze();
+
+        // Decode
+        let mut decoder = HpackDecoder::new();
+        let decoded = decoder.decode(&mut encoded).expect("decode should succeed");
+
+        // Verify count matches
+        assert_eq!(
+            decoded.len(),
+            original_headers.len(),
+            "Decoded header count should match"
+        );
+
+        // Verify header content matches (using field access)
+        for (orig, dec) in original_headers.iter().zip(decoded.iter()) {
+            assert_eq!(&orig.name, &dec.name);
+            assert_eq!(&orig.value, &dec.value);
+        }
+    }
+
+    /// Verify HPACK decoder handles empty input.
+    #[test]
+    fn invariant_hpack_empty_input() {
+        let mut decoder = HpackDecoder::new();
+        let mut empty = asupersync::bytes::Bytes::new();
+        let result = decoder.decode(&mut empty);
+        assert!(result.is_ok(), "Empty input should decode to empty headers");
+        assert!(result.unwrap().is_empty());
+    }
+}
+
+// =============================================================================
+// FLOW CONTROL INVARIANTS
+// =============================================================================
+
+mod flow_control_security {
+    use super::*;
+
+    /// Verify that window sizes respect RFC 7540 limits.
+    #[test]
+    fn invariant_window_size_limits() {
+        // RFC 7540 Section 6.9.1: Window size cannot exceed 2^31-1
+        const MAX_WINDOW_SIZE: u32 = 2_147_483_647;
+
+        let settings = Settings::default();
+        assert!(
+            settings.initial_window_size <= MAX_WINDOW_SIZE,
+            "Initial window size must not exceed 2^31-1"
+        );
+    }
+}
+
+// =============================================================================
+// STRESS TEST MARKERS
+// =============================================================================
+
+/// Stress test for HPACK decoder with malformed input.
+/// Marked as ignored for normal test runs.
+#[test]
+#[ignore = "stress test: malformed inputs can be slow in CI"]
+fn stress_hpack_malformed_input() {
+    use asupersync::bytes::Bytes;
+
+    let mut decoder = HpackDecoder::new();
+
+    // Test with various malformed inputs
+    let malformed_inputs: Vec<Vec<u8>> = vec![
+        vec![0xFF; 100],                      // All 0xFF bytes
+        vec![0x00; 1000],                     // All zeros
+        (0..255).cycle().take(500).collect(), // Cycling bytes
+        vec![0x80; 50],                       // Incomplete integer encoding
+    ];
+
+    for input in malformed_inputs {
+        let mut bytes = Bytes::from(input);
+        let result = decoder.decode(&mut bytes);
+        // Should either succeed or return an error, never panic
+        let _ = result;
+    }
+}
+
+/// Stress test for WebSocket frame construction.
+#[test]
+#[ignore = "stress test: large frames are slow in CI"]
+fn stress_websocket_frame_sizes() {
+    use asupersync::bytes::Bytes;
+
+    // Test with various frame sizes and patterns
+    for size in [0, 1, 125, 126, 127, 1024, 65535, 65536] {
+        let payload = vec![0xAB; size];
+
+        // Valid frame construction
+        let frame = Frame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            masked: true,
+            mask_key: Some([0x12, 0x34, 0x56, 0x78]),
+            payload: Bytes::from(payload),
+        };
+
+        // Frame should be valid
+        assert!(frame.fin);
+        assert_eq!(frame.opcode, Opcode::Binary);
+    }
+}
+
+/// Stress test for settings builder with edge cases.
+#[test]
+#[ignore = "stress test: builder edge cases are slow in CI"]
+fn stress_settings_edge_cases() {
+    // Test with maximum values
+    let settings = SettingsBuilder::new()
+        .max_concurrent_streams(u32::MAX)
+        .max_frame_size(16_777_215) // Max per RFC 7540
+        .initial_window_size(2_147_483_647) // Max per RFC 7540
+        .build();
+
+    assert_eq!(settings.max_concurrent_streams, u32::MAX);
+    assert_eq!(settings.max_frame_size, 16_777_215);
+    assert_eq!(settings.initial_window_size, 2_147_483_647);
+
+    // Test with minimum values
+    let settings = SettingsBuilder::new()
+        .max_concurrent_streams(0)
+        .max_frame_size(16384) // Min per RFC 7540
+        .initial_window_size(0)
+        .build();
+
+    assert_eq!(settings.max_concurrent_streams, 0);
+    assert_eq!(settings.max_frame_size, 16384);
+}

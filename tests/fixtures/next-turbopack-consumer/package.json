@@ -1,0 +1,16 @@
+{
+  "name": "asupersync-next-turbopack-consumer-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "next build --turbopack",
+    "check:bundle": "node ./scripts/check-bundle.mjs"
+  },
+  "dependencies": {
+    "@asupersync/next": "file:../packages/next",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}

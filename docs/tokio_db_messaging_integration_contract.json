@@ -1,0 +1,269 @@
+{
+  "schema_version": "1.0.0",
+  "bead_id": "asupersync-2oh2u.6.10",
+  "track": "T6",
+  "title": "Deterministic Integration and Fault-Injection Suites for Database and Messaging",
+  "upstream_dependencies": [
+    {
+      "bead_id": "asupersync-2oh2u.6.5",
+      "title": "Pool, transaction, and observability contracts"
+    },
+    {
+      "bead_id": "asupersync-2oh2u.6.9",
+      "title": "Retry, idempotency, and failure contracts"
+    }
+  ],
+  "downstream_dependents": [
+    {
+      "bead_id": "asupersync-2oh2u.6.12",
+      "title": "Exhaustive unit-test matrix for database and messaging"
+    },
+    {
+      "bead_id": "asupersync-2oh2u.10.11",
+      "title": "Cross-track unit-test coverage thresholds"
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "INT-POOL-01",
+      "category": "pool_integration",
+      "description": "Acquire-use-release lifecycle through mock ConnectionManager",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-02",
+      "category": "pool_integration",
+      "description": "Validation failure recovery: discard invalid, create new",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-03",
+      "category": "pool_integration",
+      "description": "Capacity enforcement: max_size blocks further acquires",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-04",
+      "category": "pool_integration",
+      "description": "Stale connection eviction on idle/lifetime timeout",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-05",
+      "category": "pool_integration",
+      "description": "Graceful close and drain rejects new acquires",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-06",
+      "category": "pool_integration",
+      "description": "Connection failure during acquire propagates error cleanly",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-POOL-07",
+      "category": "pool_integration",
+      "description": "Warm-up pre-populates min_idle connections",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-TXN-01",
+      "category": "transaction_integration",
+      "description": "Retry policy exponential backoff calculation",
+      "systems": ["transaction"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-TXN-02",
+      "category": "transaction_integration",
+      "description": "Retry policy edge cases: overflow, zero base, cap",
+      "systems": ["transaction"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-TXN-03",
+      "category": "transaction_integration",
+      "description": "Error classification methods per backend",
+      "systems": ["postgres", "mysql", "sqlite"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-ERR-01",
+      "category": "error_classification",
+      "description": "Cross-backend error normalization consistency",
+      "systems": ["postgres", "mysql", "sqlite"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-ERR-02",
+      "category": "error_classification",
+      "description": "Messaging error classification: transient vs capacity",
+      "systems": ["kafka", "redis", "nats", "jetstream"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-ERR-03",
+      "category": "error_classification",
+      "description": "Error Display formatting includes category and detail",
+      "systems": ["pool", "kafka", "redis", "nats", "jetstream"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-MSG-01",
+      "category": "messaging_contracts",
+      "description": "Delivery guarantee matrix: at-most/at-least/exactly-once",
+      "systems": ["kafka", "redis", "nats", "jetstream"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-MSG-02",
+      "category": "messaging_contracts",
+      "description": "Kafka error variant coverage and display",
+      "systems": ["kafka"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-MSG-03",
+      "category": "messaging_contracts",
+      "description": "NATS error variant coverage and display",
+      "systems": ["nats"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-MSG-04",
+      "category": "messaging_contracts",
+      "description": "JetStream error variant coverage and display",
+      "systems": ["jetstream"],
+      "status": "enforced"
+    },
+    {
+      "id": "INT-MSG-05",
+      "category": "messaging_contracts",
+      "description": "Redis error variant coverage and display",
+      "systems": ["redis"],
+      "status": "enforced"
+    },
+    {
+      "id": "FI-01",
+      "category": "fault_injection",
+      "description": "Connection failure on first acquire: no capacity leak",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "FI-02",
+      "category": "fault_injection",
+      "description": "Validation failure after idle: discard and recreate",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "FI-03",
+      "category": "fault_injection",
+      "description": "Intermittent connection failure: recovery path",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "FI-04",
+      "category": "fault_injection",
+      "description": "Capacity leak prevention on connect failure",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "FI-05",
+      "category": "fault_injection",
+      "description": "Pool stats accuracy under churned connections",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "CS-01",
+      "category": "cancel_safety",
+      "description": "Cancel during pool acquire wait phase",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "CS-02",
+      "category": "cancel_safety",
+      "description": "Cancel during hold phase returns connection",
+      "systems": ["pool"],
+      "status": "enforced"
+    },
+    {
+      "id": "CS-03",
+      "category": "cancel_safety",
+      "description": "Cancel during transaction triggers rollback",
+      "systems": ["pool", "transaction"],
+      "status": "enforced"
+    },
+    {
+      "id": "DOC-01",
+      "category": "document_requirements",
+      "description": "Contract document contains all required sections",
+      "systems": [],
+      "status": "enforced"
+    },
+    {
+      "id": "DOC-02",
+      "category": "document_requirements",
+      "description": "JSON artifact has valid schema",
+      "systems": [],
+      "status": "enforced"
+    },
+    {
+      "id": "DOC-03",
+      "category": "document_requirements",
+      "description": "Source module references are complete",
+      "systems": [],
+      "status": "enforced"
+    }
+  ],
+  "fault_injection": [
+    {
+      "type": "connection_failure",
+      "description": "Mock ConnectionManager returns Err from connect()",
+      "expected": "DbPoolError::Connect propagated, no capacity leak"
+    },
+    {
+      "type": "validation_failure",
+      "description": "Mock ConnectionManager returns false from is_valid()",
+      "expected": "Connection discarded, new one created, stats updated"
+    },
+    {
+      "type": "intermittent_failure",
+      "description": "Alternating success/failure from connect()",
+      "expected": "Pool recovers, stats accurate"
+    },
+    {
+      "type": "capacity_exhaustion",
+      "description": "All connections checked out, acquire blocked",
+      "expected": "DbPoolError::Full, no permanent capacity loss"
+    },
+    {
+      "type": "pool_close",
+      "description": "Pool closed while connections idle",
+      "expected": "Idle drained, new acquires rejected"
+    }
+  ],
+  "coverage_matrix": {
+    "pool": ["INT-POOL-01", "INT-POOL-02", "INT-POOL-03", "INT-POOL-04", "INT-POOL-05", "INT-POOL-06", "INT-POOL-07", "FI-01", "FI-02", "FI-03", "FI-04", "FI-05", "CS-01", "CS-02"],
+    "transaction": ["INT-TXN-01", "INT-TXN-02", "INT-TXN-03", "CS-03"],
+    "postgres": ["INT-TXN-03", "INT-ERR-01"],
+    "mysql": ["INT-TXN-03", "INT-ERR-01"],
+    "sqlite": ["INT-TXN-03", "INT-ERR-01"],
+    "kafka": ["INT-ERR-02", "INT-MSG-01", "INT-MSG-02"],
+    "redis": ["INT-ERR-02", "INT-MSG-01", "INT-MSG-05"],
+    "nats": ["INT-ERR-02", "INT-MSG-01", "INT-MSG-03"],
+    "jetstream": ["INT-ERR-02", "INT-MSG-01", "INT-MSG-04"]
+  }
+}

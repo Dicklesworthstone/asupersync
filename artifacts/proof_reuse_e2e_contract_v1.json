@@ -1,0 +1,1490 @@
+{
+  "contract_version": "proof-reuse-e2e-contract-v1",
+  "bead_id": "asupersync-5pziae.6",
+  "created_date": "2026-06-05",
+  "description": "Deterministic no-network E2E proof contract for proof reuse cache-hit, refusal, rerun-required, no-win, and redaction paths.",
+  "source_of_truth": {
+    "contract": "artifacts/proof_reuse_e2e_contract_v1.json",
+    "contract_test": "tests/proof_reuse_e2e_contract.rs",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "proof_reuse_handoff_contract": "artifacts/proof_reuse_handoff_receipt_contract_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "proof_freshness_helper": "scripts/proof_artifact_freshness_receipt.py",
+    "reuse_query_json_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+    "reuse_query_markdown_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.md",
+    "agent_instructions": "AGENTS.md"
+  },
+  "policy": {
+    "network_access_required": false,
+    "tracker_mutation_allowed": false,
+    "raw_agent_mail_bodies_allowed": false,
+    "raw_log_excerpts_allowed": false,
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "required_rerun_command_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "allowed_final_verdicts": [
+      "approved-cache-hit",
+      "refused",
+      "rerun-required",
+      "no-win"
+    ],
+    "allowed_e2e_reason_codes": [
+      "rch-unavailable-no-safe-cache",
+      "secret-like-data-redacted"
+    ],
+    "required_stage_sequence": [
+      "fixture-load",
+      "request-fingerprint",
+      "candidate-scan",
+      "classifier-decision",
+      "manifest-policy",
+      "handoff-render",
+      "final-verdict"
+    ],
+    "required_scenario_ids": [
+      "exact-focused-cache-hit",
+      "frontier-dirty-overlap-rerun",
+      "local-fallback-refused",
+      "failed-nonzero-rerun",
+      "stale-head-refused",
+      "branch-mismatch-refused",
+      "toolchain-env-feature-mismatch-rerun",
+      "unsupported-broad-claim-refused",
+      "rch-unavailable-no-win",
+      "redaction-first-blocker-only"
+    ]
+  },
+  "disallowed_fields": [
+    "raw_agent_mail_body",
+    "raw_mail_body",
+    "raw_log_excerpt",
+    "secret",
+    "token",
+    "password",
+    "api_key"
+  ],
+  "secret_like_markers": [
+    "api_key=",
+    "authorization: bearer ",
+    "password=",
+    "secret=",
+    "token="
+  ],
+  "reference_reuse_query": {
+    "json_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.json",
+    "markdown_golden": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_query_expected.md",
+    "expected_candidate_count": 6,
+    "expected_accepted_count": 1,
+    "expected_refused_count": 4,
+    "expected_miss_count": 1,
+    "expected_best_candidate": "proof:reuse-index-reusable",
+    "expected_top_rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+  },
+  "scenarios": [
+    {
+      "scenario_id": "exact-focused-cache-hit",
+      "description": "Exact focused contract lane, claim scope, command, source, toolchain, outcome, and remote provenance match; the cache hit is approved but explicitly not a fresh RCH rerun.",
+      "request": {
+        "request_id": "e2e-exact-focused-cache-hit",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 6,
+        "accepted_count": 1,
+        "refused_count": 4,
+        "miss_count": 1,
+        "chosen_proof_id": "proof:e2e-manifest-contract-reusable"
+      },
+      "classifier": {
+        "decision": "reusable",
+        "safe_to_reuse": true,
+        "candidate_id": "proof:e2e-manifest-contract-reusable",
+        "reason_codes": [],
+        "freshness_classification": "current-clean",
+        "freshness_decision": "cite-as-current"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "approved-cache-hit",
+        "proof_evidence_status": "approved-cache-hit",
+        "handoff_fixture_id": "approved-cache-hit-handoff",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": "proof:e2e-manifest-contract-reusable",
+        "refusal_reason_codes": [],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Approved cache hit for proof-lane-manifest-verifier; this is not a fresh RCH rerun and is not workspace health."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "approved-cache-hit",
+        "proof_evidence_status": "approved-cache-hit",
+        "safe_to_reuse": true,
+        "safe_to_cite": true
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded reusable focused contract fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request command, source, toolchain, env, and claim fingerprints are complete"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "scanned approved proof index root and found one classifier-approved candidate"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "reusable",
+          "detail": "classifier accepted exact remote RCH proof"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "ok",
+          "detail": "manifest permits cache reuse only for proof-lane-manifest-verifier"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "approved-cache-hit",
+          "detail": "rendered metadata-only cache-hit receipt"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "approved-cache-hit",
+          "detail": "cache hit is citeable for the narrow claim and is not a fresh RCH pass"
+        }
+      ]
+    },
+    {
+      "scenario_id": "frontier-dirty-overlap-rerun",
+      "description": "All-target frontier lane has a dirty overlap and must be rerun even when an otherwise matching cache candidate exists.",
+      "request": {
+        "request_id": "e2e-frontier-dirty-overlap",
+        "manifest_lane_id": "all-targets-check",
+        "claim_scope": "all-target-compile-frontier",
+        "command_fingerprint": "sha256:all-targets-check-command",
+        "source_fingerprint": "sha256:dirty-frontier-source",
+        "tree_fingerprint": "git-tree:dirty-frontier",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "dirty-overlap",
+        "touched_files": [
+          "Cargo.toml",
+          "src/lib.rs",
+          "tests"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-all-targets-dirty-overlap",
+        "reason_codes": [
+          "dirty-frontier-overlap"
+        ],
+        "freshness_classification": "dirty-surface-overlap",
+        "freshness_decision": "rerun-required"
+      },
+      "manifest_policy": {
+        "lane_id": "all-targets-check",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets"
+      },
+      "handoff": {
+        "decision": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "handoff_fixture_id": "dirty-overlap-rerun-handoff",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "dirty-frontier-overlap"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+        "first_blocker_line": "dirty frontier overlaps src/lib.rs",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Rerun required because the dirty frontier overlaps all-targets-check; the prior candidate is not citeable."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "dirty-overlap",
+        "overlap_paths": [
+          "src/lib.rs"
+        ]
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "Cargo.toml",
+          "src/lib.rs",
+          "tests"
+        ],
+        "uncovered_paths": [
+          "src/lib.rs"
+        ]
+      },
+      "final_verdict": {
+        "verdict": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded dirty-overlap fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request covers all-target compile frontier"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found candidate whose surface overlaps dirty work"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "dirty-frontier-overlap"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "manifest requires fresh rerun on dirty overlap"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "rerun-required",
+          "detail": "included dirty-frontier verdict and rerun command"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "rerun-required",
+          "detail": "frontier cache candidate is not citeable"
+        }
+      ]
+    },
+    {
+      "scenario_id": "local-fallback-refused",
+      "description": "Candidate has a matching command and claim scope but records local fallback, so reuse is refused and the handoff is marker-only.",
+      "request": {
+        "request_id": "e2e-local-fallback",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-local-fallback",
+        "reason_codes": [
+          "local-fallback-marker"
+        ],
+        "freshness_classification": "rch-local-fallback-proof",
+        "freshness_decision": "rerun-required"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "refused",
+        "proof_evidence_status": "rerun-required",
+        "handoff_fixture_id": "local-fallback-refusal-handoff",
+        "redaction_class": "refused",
+        "log_excerpt_policy": "local-fallback-marker-only",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "local-fallback-marker"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "candidate recorded local fallback marker",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Refused cache reuse because the candidate recorded local fallback; rerun remotely before citing proof."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": null,
+        "route_segments": [],
+        "local_fallback_absent": false
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "refused",
+        "proof_evidence_status": "rerun-required",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded local-fallback fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request fingerprints otherwise match"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found one matching candidate with local fallback marker"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "local-fallback-marker"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "ok",
+          "detail": "manifest rerun command remains available"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "refused",
+          "detail": "redacted to marker-only refusal"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "refused",
+          "detail": "local fallback evidence cannot seed cache reuse"
+        }
+      ]
+    },
+    {
+      "scenario_id": "failed-nonzero-rerun",
+      "description": "Candidate proof returned a nonzero exit status, so the first blocker is retained and the lane must be rerun.",
+      "request": {
+        "request_id": "e2e-failed-nonzero",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-failed-nonzero",
+        "reason_codes": [
+          "failed-proof-status"
+        ],
+        "freshness_classification": "failed-proof-artifact",
+        "freshness_decision": "rerun-required"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "handoff_fixture_id": "",
+        "redaction_class": "redacted",
+        "log_excerpt_policy": "first-blocker-line-only",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "failed-proof-status"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "test proof_lane_manifest_contract::manifest_lanes_have_unique_ids failed with exit 101",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Rerun required because the candidate proof exited nonzero; retain only the first blocker line."
+      },
+      "candidate_outcome": {
+        "status": "failed",
+        "exit_code": 101,
+        "first_blocker_line": "test proof_lane_manifest_contract::manifest_lanes_have_unique_ids failed with exit 101"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded failed proof fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request fingerprint is complete"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found one failed candidate"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "failed-proof-status"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "nonzero proof cannot satisfy manifest lane"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "rerun-required",
+          "detail": "rendered first-blocker-line-only handoff"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "rerun-required",
+          "detail": "fresh remote rerun is required"
+        }
+      ]
+    },
+    {
+      "scenario_id": "stale-head-refused",
+      "description": "Candidate was produced for a stale HEAD and is suppressed as stale evidence.",
+      "request": {
+        "request_id": "e2e-stale-head",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-stale-head",
+        "reason_codes": [
+          "stale-head"
+        ],
+        "freshness_classification": "superseded-head",
+        "freshness_decision": "suppress-as-stale"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "refused",
+        "proof_evidence_status": "stale-evidence",
+        "handoff_fixture_id": "",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "stale-head"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "candidate HEAD 5417ddb5d does not match current HEAD",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Refused cache reuse because candidate HEAD is stale; rerun the manifest command for current evidence."
+      },
+      "source_comparison": {
+        "candidate_head": "5417ddb5d",
+        "current_head": "1036a758d",
+        "candidate_branch": "main",
+        "current_branch": "main"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "refused",
+        "proof_evidence_status": "stale-evidence",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded stale-head fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "current request fingerprint is complete"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found stale candidate"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "stale-head"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "stale cache hit is outside citeable policy"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "refused",
+          "detail": "included stale-head reason and rerun command"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "refused",
+          "detail": "candidate is stale evidence"
+        }
+      ]
+    },
+    {
+      "scenario_id": "branch-mismatch-refused",
+      "description": "Candidate proof was produced from a non-main branch and is suppressed even if all other fields look compatible.",
+      "request": {
+        "request_id": "e2e-branch-mismatch",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-branch-mismatch",
+        "reason_codes": [
+          "branch-mismatch"
+        ],
+        "freshness_classification": "wrong-branch",
+        "freshness_decision": "suppress-as-stale"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "refused",
+        "proof_evidence_status": "stale-evidence",
+        "handoff_fixture_id": "",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "branch-mismatch"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "candidate branch was not main",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Refused cache reuse because candidate branch was not main."
+      },
+      "source_comparison": {
+        "candidate_head": "1036a758d",
+        "current_head": "1036a758d",
+        "candidate_branch": "non-main-proof-branch",
+        "current_branch": "main"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "refused",
+        "proof_evidence_status": "stale-evidence",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded branch-mismatch fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "current request is on main"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found non-main candidate"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "branch-mismatch"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "non-main candidate cannot satisfy main-only policy"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "refused",
+          "detail": "included branch-mismatch reason and rerun command"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "refused",
+          "detail": "candidate is stale evidence from a non-main branch"
+        }
+      ]
+    },
+    {
+      "scenario_id": "toolchain-env-feature-mismatch-rerun",
+      "description": "Toolchain, environment, or feature fingerprints differ; the candidate must not be reused for the requested manifest lane.",
+      "request": {
+        "request_id": "e2e-toolchain-env-feature-mismatch",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-toolchain-env-feature-mismatch",
+        "reason_codes": [
+          "toolchain-mismatch"
+        ],
+        "freshness_classification": "current-clean",
+        "freshness_decision": "cite-as-current"
+      },
+      "fingerprint_mismatch": {
+        "candidate_toolchain_fingerprint": "sha256:toolchain-old",
+        "candidate_env_fingerprint": "sha256:env-old",
+        "candidate_feature_flags": [
+          "metrics"
+        ]
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "handoff_fixture_id": "",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "toolchain-mismatch"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "candidate toolchain fingerprint did not match request",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Rerun required because toolchain, environment, or feature fingerprints differ."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded toolchain mismatch fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request fingerprint includes toolchain, env, and feature set"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found current-clean candidate with mismatched fingerprints"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "toolchain-mismatch"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "strict proof reuse requires matching toolchain and feature fingerprints"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "rerun-required",
+          "detail": "included mismatch reason and rerun command"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "rerun-required",
+          "detail": "fresh rerun is required for changed fingerprints"
+        }
+      ]
+    },
+    {
+      "scenario_id": "unsupported-broad-claim-refused",
+      "description": "A focused lane cache hit is refused for an unsupported broad workspace-health claim.",
+      "request": {
+        "request_id": "e2e-unsupported-broad-claim",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "workspace-health",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-broad-claim",
+        "reason_codes": [
+          "broad-claim-unsupported"
+        ],
+        "freshness_classification": "current-clean",
+        "freshness_decision": "cite-as-current"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": false,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "refused",
+        "proof_evidence_status": "unsupported",
+        "handoff_fixture_id": "refused-unsupported-claim-handoff",
+        "redaction_class": "metadata_only",
+        "log_excerpt_policy": "none",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "broad-claim-unsupported"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "workspace-health is not citeable from this focused lane",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Refused cache reuse because workspace-health is not citeable from this focused lane."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "refused",
+        "proof_evidence_status": "unsupported",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded unsupported broad-claim fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request asks for workspace-health"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found focused candidate"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "broad-claim-unsupported"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "unsupported",
+          "detail": "manifest does not permit broad workspace-health cache reuse"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "refused",
+          "detail": "included unsupported claim reason and rerun command"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "refused",
+          "detail": "cache hit cannot support the broad claim"
+        }
+      ]
+    },
+    {
+      "scenario_id": "rch-unavailable-no-win",
+      "description": "No safe cache candidate exists and RCH admission is unavailable, so the operator outcome is an explicit no-win rather than a fake pass.",
+      "request": {
+        "request_id": "e2e-rch-unavailable-no-win",
+        "manifest_lane_id": "clippy-all-targets",
+        "claim_scope": "clippy-frontier",
+        "command_fingerprint": "sha256:clippy-all-targets-command",
+        "source_fingerprint": "sha256:clippy-source-current",
+        "tree_fingerprint": "git-tree:clippy-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "Cargo.toml",
+          "src",
+          "tests"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 2,
+        "accepted_count": 0,
+        "refused_count": 2,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-clippy-stale-or-failed",
+        "reason_codes": [
+          "failed-proof-status",
+          "stale-head"
+        ],
+        "freshness_classification": "failed-proof-artifact",
+        "freshness_decision": "rerun-required"
+      },
+      "rch_admission": {
+        "available": false,
+        "final_status": "no-win",
+        "first_blocker_line": "RCH unavailable: no remote worker admitted clippy-all-targets"
+      },
+      "manifest_policy": {
+        "lane_id": "clippy-all-targets",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings"
+      },
+      "handoff": {
+        "decision": "refused",
+        "proof_evidence_status": "no-win",
+        "handoff_fixture_id": "",
+        "redaction_class": "redacted",
+        "log_excerpt_policy": "first-blocker-line-only",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "failed-proof-status",
+          "stale-head",
+          "rch-unavailable-no-safe-cache"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+        "first_blocker_line": "RCH unavailable: no remote worker admitted clippy-all-targets",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "No-win: cache candidates are unsafe and RCH could not admit the required clippy frontier lane."
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": null,
+        "route_segments": [],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "Cargo.toml",
+          "src",
+          "tests"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "no-win",
+        "proof_evidence_status": "no-win",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded RCH unavailable fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request targets clippy frontier"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found only unsafe cache candidates"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "failed-proof-status, stale-head"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "manifest requires the clippy all-targets command"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "no-win",
+          "detail": "rendered first-blocker-line-only no-win handoff"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "no-win",
+          "detail": "no safe reuse or rerun path is available under current constraints"
+        }
+      ]
+    },
+    {
+      "scenario_id": "redaction-first-blocker-only",
+      "description": "A proof log with unsafe detail is summarized with only the first blocker line; raw logs, raw coordination bodies, and secret-like payloads are suppressed.",
+      "request": {
+        "request_id": "e2e-redaction-first-blocker",
+        "manifest_lane_id": "proof-lane-manifest-contract",
+        "claim_scope": "proof-lane-manifest-verifier",
+        "command_fingerprint": "sha256:proof-lane-manifest-contract-command",
+        "source_fingerprint": "sha256:manifest-source-current",
+        "tree_fingerprint": "git-tree:manifest-current",
+        "toolchain_fingerprint": "sha256:toolchain-current",
+        "env_fingerprint": "sha256:env-current",
+        "feature_flags": [],
+        "dirty_frontier_status": "clean",
+        "touched_files": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "require_full_pass": true
+      },
+      "candidate_scan": {
+        "approved_root_count": 1,
+        "candidate_count": 1,
+        "accepted_count": 0,
+        "refused_count": 1,
+        "miss_count": 0,
+        "chosen_proof_id": null
+      },
+      "classifier": {
+        "decision": "refused",
+        "safe_to_reuse": false,
+        "candidate_id": "proof:e2e-redaction-required",
+        "reason_codes": [
+          "failed-proof-status",
+          "secret-like-data-redacted"
+        ],
+        "freshness_classification": "failed-proof-artifact",
+        "freshness_decision": "rerun-required"
+      },
+      "manifest_policy": {
+        "lane_id": "proof-lane-manifest-contract",
+        "claim_scope_allowed": true,
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "cache_reuse_allowed": true,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture"
+      },
+      "handoff": {
+        "decision": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "handoff_fixture_id": "",
+        "redaction_class": "redacted",
+        "log_excerpt_policy": "first-blocker-line-only",
+        "chosen_proof_id": null,
+        "refusal_reason_codes": [
+          "failed-proof-status",
+          "secret-like-data-redacted"
+        ],
+        "cache_hit_is_fresh_rch_pass": false,
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+        "first_blocker_line": "test proof_lane_manifest_contract::status_catalog_is_complete failed",
+        "raw_log_excerpt_included": false,
+        "raw_agent_mail_body_included": false,
+        "operator_statement": "Rerun required; retained only the first blocker line and suppressed unsafe proof detail."
+      },
+      "redaction": {
+        "raw_coordination_payload_suppressed": true,
+        "raw_log_payload_suppressed": true,
+        "secret_like_payload_suppressed": true,
+        "retained_fields": [
+          "scenario_id",
+          "first_blocker_line",
+          "reason_codes",
+          "rerun_command"
+        ]
+      },
+      "candidate_outcome": {
+        "status": "failed",
+        "exit_code": 101,
+        "first_blocker_line": "test proof_lane_manifest_contract::status_catalog_is_complete failed"
+      },
+      "rch_remote_provenance": {
+        "remote_required": true,
+        "remote_worker": "vmi1149989",
+        "route_segments": [
+          "Selected worker: vmi1149989"
+        ],
+        "local_fallback_absent": true
+      },
+      "dirty_frontier": {
+        "verdict": "clean",
+        "overlap_paths": []
+      },
+      "touched_surface_coverage": {
+        "covered_paths": [
+          "artifacts/proof_lane_manifest_v1.json",
+          "tests/proof_lane_manifest_contract.rs"
+        ],
+        "uncovered_paths": []
+      },
+      "final_verdict": {
+        "verdict": "rerun-required",
+        "proof_evidence_status": "rerun-required",
+        "safe_to_reuse": false,
+        "safe_to_cite": false
+      },
+      "stage_log": [
+        {
+          "stage": "fixture-load",
+          "status": "ok",
+          "detail": "loaded redaction fixture"
+        },
+        {
+          "stage": "request-fingerprint",
+          "status": "ok",
+          "detail": "request fingerprint is complete"
+        },
+        {
+          "stage": "candidate-scan",
+          "status": "ok",
+          "detail": "found failed candidate with unsafe detail"
+        },
+        {
+          "stage": "classifier-decision",
+          "status": "refused",
+          "detail": "failed-proof-status, secret-like-data-redacted"
+        },
+        {
+          "stage": "manifest-policy",
+          "status": "rerun-required",
+          "detail": "manifest rerun command is included"
+        },
+        {
+          "stage": "handoff-render",
+          "status": "rerun-required",
+          "detail": "retained only first blocker line"
+        },
+        {
+          "stage": "final-verdict",
+          "status": "rerun-required",
+          "detail": "unsafe proof detail is suppressed"
+        }
+      ]
+    }
+  ],
+  "expected_json_summary": {
+    "contract_version": "proof-reuse-e2e-contract-v1",
+    "scenario_count": 10,
+    "verdict_counts": {
+      "approved-cache-hit": 1,
+      "no-win": 1,
+      "refused": 4,
+      "rerun-required": 4
+    },
+    "cache_hit_is_fresh_rch_pass_count": 0,
+    "raw_payload_included_count": 0,
+    "stage_sequence": [
+      "fixture-load",
+      "request-fingerprint",
+      "candidate-scan",
+      "classifier-decision",
+      "manifest-policy",
+      "handoff-render",
+      "final-verdict"
+    ],
+    "scenario_verdicts": [
+      {
+        "scenario_id": "exact-focused-cache-hit",
+        "proof_evidence_status": "approved-cache-hit",
+        "verdict": "approved-cache-hit",
+        "reason_codes": []
+      },
+      {
+        "scenario_id": "frontier-dirty-overlap-rerun",
+        "proof_evidence_status": "rerun-required",
+        "verdict": "rerun-required",
+        "reason_codes": [
+          "dirty-frontier-overlap"
+        ]
+      },
+      {
+        "scenario_id": "local-fallback-refused",
+        "proof_evidence_status": "rerun-required",
+        "verdict": "refused",
+        "reason_codes": [
+          "local-fallback-marker"
+        ]
+      },
+      {
+        "scenario_id": "failed-nonzero-rerun",
+        "proof_evidence_status": "rerun-required",
+        "verdict": "rerun-required",
+        "reason_codes": [
+          "failed-proof-status"
+        ]
+      },
+      {
+        "scenario_id": "stale-head-refused",
+        "proof_evidence_status": "stale-evidence",
+        "verdict": "refused",
+        "reason_codes": [
+          "stale-head"
+        ]
+      },
+      {
+        "scenario_id": "branch-mismatch-refused",
+        "proof_evidence_status": "stale-evidence",
+        "verdict": "refused",
+        "reason_codes": [
+          "branch-mismatch"
+        ]
+      },
+      {
+        "scenario_id": "toolchain-env-feature-mismatch-rerun",
+        "proof_evidence_status": "rerun-required",
+        "verdict": "rerun-required",
+        "reason_codes": [
+          "toolchain-mismatch"
+        ]
+      },
+      {
+        "scenario_id": "unsupported-broad-claim-refused",
+        "proof_evidence_status": "unsupported",
+        "verdict": "refused",
+        "reason_codes": [
+          "broad-claim-unsupported"
+        ]
+      },
+      {
+        "scenario_id": "rch-unavailable-no-win",
+        "proof_evidence_status": "no-win",
+        "verdict": "no-win",
+        "reason_codes": [
+          "failed-proof-status",
+          "stale-head",
+          "rch-unavailable-no-safe-cache"
+        ]
+      },
+      {
+        "scenario_id": "redaction-first-blocker-only",
+        "proof_evidence_status": "rerun-required",
+        "verdict": "rerun-required",
+        "reason_codes": [
+          "failed-proof-status",
+          "secret-like-data-redacted"
+        ]
+      }
+    ]
+  },
+  "expected_markdown_summary": "# Proof reuse E2E contract v1\n\n- scenarios: 10\n- approved-cache-hit: 1\n- rerun-required: 4\n- refused: 4\n- no-win: 1\n- cache_hit_is_fresh_rch_pass: 0\n- raw_payloads_included: 0\n\n## Scenario verdicts\n1. exact-focused-cache-hit | verdict=approved-cache-hit | proof=approved-cache-hit | reasons=<none>\n2. frontier-dirty-overlap-rerun | verdict=rerun-required | proof=rerun-required | reasons=dirty-frontier-overlap\n3. local-fallback-refused | verdict=refused | proof=rerun-required | reasons=local-fallback-marker\n4. failed-nonzero-rerun | verdict=rerun-required | proof=rerun-required | reasons=failed-proof-status\n5. stale-head-refused | verdict=refused | proof=stale-evidence | reasons=stale-head\n6. branch-mismatch-refused | verdict=refused | proof=stale-evidence | reasons=branch-mismatch\n7. toolchain-env-feature-mismatch-rerun | verdict=rerun-required | proof=rerun-required | reasons=toolchain-mismatch\n8. unsupported-broad-claim-refused | verdict=refused | proof=unsupported | reasons=broad-claim-unsupported\n9. rch-unavailable-no-win | verdict=no-win | proof=no-win | reasons=failed-proof-status,stale-head,rch-unavailable-no-safe-cache\n10. redaction-first-blocker-only | verdict=rerun-required | proof=rerun-required | reasons=failed-proof-status,secret-like-data-redacted\n"
+}

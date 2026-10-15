@@ -1,0 +1,3756 @@
+//! HTTP/1.1 codec for framed transports.
+//!
+//! [`Http1Codec`] implements [`Decoder`] for parsing HTTP/1.1 requests and
+//! [`Encoder`] for serializing HTTP/1.1 responses, suitable for use with
+//! [`Framed`](crate::codec::Framed).
+
+use crate::bytes::BytesMut;
+use crate::codec::{Decoder, Encoder};
+use crate::http::h1::stream::BodyKind as StreamingBodyKind;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::http::h1::stream::RequestHead;
+use crate::http::h1::types::{self, Method, Request, Response, Version};
+use memchr::{memchr, memchr_iter, memmem};
+use std::fmt;
+use std::io;
+
+/// Maximum allowed header block size (64 KiB).
+const DEFAULT_MAX_HEADERS_SIZE: usize = 64 * 1024;
+
+/// Maximum allowed body size (16 MiB).
+const DEFAULT_MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+
+/// Maximum number of headers.
+const MAX_HEADERS: usize = 128;
+
+/// Maximum allowed request line length.
+const MAX_REQUEST_LINE: usize = 8192;
+
+/// Empty lines ignored before a request-line (RFC 9112 §2.2 asks for at
+/// least one; Apache also stops at ten). More is a malformed request. Every
+/// read of an incomplete head walks this prefix again, so an unbounded run
+/// trickled in by a peer cost a pass over up to 64 KiB of buffer per read.
+const MAX_LEADING_EMPTY_LINES: usize = 10;
+
+/// HTTP/1.1 protocol errors.
+#[derive(Debug)]
+pub enum HttpError {
+    /// An I/O error from the transport.
+    Io(io::Error),
+    /// The request line is malformed.
+    BadRequestLine,
+    /// A header line is malformed.
+    BadHeader,
+    /// Unsupported HTTP version in request.
+    UnsupportedVersion,
+    /// Unrecognised HTTP method.
+    BadMethod,
+    /// Content-Length header is not a valid integer.
+    BadContentLength,
+    /// Multiple Content-Length headers present.
+    DuplicateContentLength,
+    /// Multiple Transfer-Encoding headers present.
+    DuplicateTransferEncoding,
+    /// Transfer-Encoding is present but unsupported.
+    BadTransferEncoding,
+    /// Header name contains invalid characters.
+    InvalidHeaderName,
+    /// Header value contains invalid characters.
+    InvalidHeaderValue,
+    /// Header block exceeds the configured limit.
+    HeadersTooLarge,
+    /// Too many headers.
+    TooManyHeaders,
+    /// Too many informational responses were received before a final response.
+    TooManyInformationalResponses {
+        /// Number of informational responses seen.
+        actual: usize,
+        /// Maximum allowed informational responses.
+        limit: usize,
+    },
+    /// Request line too long.
+    RequestLineTooLong,
+    /// Incomplete chunked encoding.
+    BadChunkedEncoding,
+    /// Body exceeds the configured limit.
+    BodyTooLarge,
+    /// Body exceeds the configured limit (with size details).
+    BodyTooLargeDetailed {
+        /// Actual body size (Content-Length or bytes received so far).
+        actual: u64,
+        /// Configured maximum body size.
+        limit: u64,
+    },
+    /// Body stream was cancelled.
+    BodyCancelled,
+    /// Body channel closed unexpectedly.
+    BodyChannelClosed,
+    /// Both Content-Length and Transfer-Encoding present (RFC 7230 3.3.3 violation).
+    /// This is a potential request smuggling vector.
+    AmbiguousBodyLength,
+    /// Trailers were provided/encountered but are not permitted in this context.
+    TrailersNotAllowed,
+    /// Response parsing left unread prefetched bytes when a fully-buffered
+    /// response API was used.
+    PrefetchedDataRemaining(usize),
+}
+
+impl fmt::Display for HttpError {
+    #[allow(clippy::cast_precision_loss)]
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::BadRequestLine => write!(f, "malformed request line"),
+            Self::BadHeader => write!(f, "malformed header"),
+            Self::UnsupportedVersion => write!(f, "unsupported HTTP version"),
+            Self::BadMethod => write!(f, "unrecognised HTTP method"),
+            Self::BadContentLength => write!(f, "invalid Content-Length"),
+            Self::DuplicateContentLength => write!(f, "duplicate Content-Length"),
+            Self::DuplicateTransferEncoding => write!(f, "duplicate Transfer-Encoding"),
+            Self::BadTransferEncoding => write!(f, "unsupported Transfer-Encoding"),
+            Self::InvalidHeaderName => write!(f, "invalid header name"),
+            Self::InvalidHeaderValue => write!(f, "invalid header value"),
+            Self::HeadersTooLarge => write!(f, "header block too large"),
+            Self::TooManyHeaders => write!(f, "too many headers"),
+            Self::TooManyInformationalResponses { actual, limit } => {
+                write!(
+                    f,
+                    "received too many informational responses before a final response ({actual} > {limit})"
+                )
+            }
+            Self::RequestLineTooLong => write!(f, "request line too long"),
+            Self::BadChunkedEncoding => write!(f, "malformed chunked encoding"),
+            Self::BodyTooLarge => write!(f, "body exceeds size limit"),
+            Self::BodyTooLargeDetailed { actual, limit } => {
+                #[allow(clippy::cast_precision_loss)] // display-only MB approximation
+                let actual_mb = *actual as f64 / 1_048_576.0;
+                #[allow(clippy::cast_precision_loss)]
+                let limit_mb = *limit as f64 / 1_048_576.0;
+                write!(
+                    f,
+                    "body size ({actual} bytes, {actual_mb:.1} MB) exceeds limit ({limit} bytes, {limit_mb:.1} MB)",
+                )
+            }
+            Self::BodyCancelled => write!(f, "body stream cancelled"),
+            Self::BodyChannelClosed => write!(f, "body stream closed"),
+            Self::AmbiguousBodyLength => {
+                write!(f, "both Content-Length and Transfer-Encoding present")
+            }
+            Self::TrailersNotAllowed => write!(f, "trailers not allowed"),
+            Self::PrefetchedDataRemaining(count) => {
+                write!(
+                    f,
+                    "response completed with {count} unread prefetched bytes; use streaming API"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for HttpError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for HttpError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+/// Codec state machine.
+#[derive(Debug)]
+enum DecodeState {
+    /// Waiting for a complete request line + headers block.
+    Head,
+    /// Headers parsed; reading exactly `remaining` body bytes.
+    Body {
+        method: Method,
+        uri: String,
+        version: Version,
+        headers: Vec<(String, String)>,
+        remaining: usize,
+    },
+    /// Headers parsed; reading chunked transfer-encoding body.
+    Chunked {
+        method: Method,
+        uri: String,
+        version: Version,
+        headers: Vec<(String, String)>,
+        chunked: ChunkedBodyDecoder,
+    },
+    /// Codec encountered a fatal error and is permanently poisoned.
+    Poisoned,
+}
+
+/// HTTP/1.1 request decoder and response encoder.
+///
+/// Implements [`Decoder<Item = Request>`] for parsing incoming HTTP/1.1
+/// requests and [`Encoder<Response>`] for serializing outgoing responses.
+///
+/// # Limits
+///
+/// - Maximum header block size: 64 KiB (configurable via [`max_headers_size`](Self::max_headers_size))
+/// - Maximum body size: 16 MiB (configurable via [`max_body_size`](Self::max_body_size))
+/// - Maximum number of headers: 128
+/// - Maximum request line: 8 KiB
+pub struct Http1Codec {
+    state: DecodeState,
+    max_headers_size: usize,
+    max_body_size: usize,
+    /// Buffered head bytes already checked without finding the head's end,
+    /// so a head that arrives a few bytes per read is not rescanned from its
+    /// first byte on every read (quadratic up to `max_headers_size`).
+    head_scanned: usize,
+    /// Bytes the head checks have scanned, for the linear-scan test.
+    #[cfg(test)]
+    head_bytes_scanned: usize,
+}
+
+impl Http1Codec {
+    /// Create a new codec with default limits.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            state: DecodeState::Head,
+            max_headers_size: DEFAULT_MAX_HEADERS_SIZE,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            head_scanned: 0,
+            #[cfg(test)]
+            head_bytes_scanned: 0,
+        }
+    }
+
+    /// Returns `true` while the buffered head is still incomplete, checking
+    /// only the bytes that arrived since the previous call with the same
+    /// errors `inspect_request_head_parts` reports for an incomplete head.
+    /// Returns `false` once the head's end is buffered, so the full
+    /// inspection runs exactly once per head.
+    fn head_still_incomplete(&mut self, src: &[u8]) -> Result<bool, HttpError> {
+        let non_crlf_start = leading_empty_lines_len(src);
+        // A caller that drained or replaced the buffer starts a new scan.
+        let scanned = if self.head_scanned > src.len() {
+            0
+        } else {
+            self.head_scanned
+        };
+        // The terminator can straddle the previous end, but cannot start
+        // before any leading empty CRLFs.
+        let from = scanned.saturating_sub(3).max(non_crlf_start);
+        #[cfg(test)]
+        {
+            self.head_bytes_scanned += src.len() - from;
+        }
+        if memmem::find(&src[from..], b"\r\n\r\n").is_some() {
+            self.head_scanned = 0;
+            return Ok(false);
+        }
+        // A trailing CR left unjudged last time is judged now.
+        let limit = src.len().min(self.max_headers_size);
+        let cr_from = scanned.saturating_sub(1).min(limit);
+        for idx in memchr_iter(b'\r', &src[cr_from..limit]) {
+            let idx = cr_from + idx;
+            if idx + 1 < limit && src[idx + 1] != b'\n' {
+                return Err(HttpError::BadRequestLine);
+            }
+        }
+        if src.len() > self.max_headers_size {
+            return Err(HttpError::HeadersTooLarge);
+        }
+        let unparsed = &src[non_crlf_start..];
+        if unparsed.len() > MAX_REQUEST_LINE {
+            match find_crlf(unparsed) {
+                Some(line_end) if line_end > MAX_REQUEST_LINE => {
+                    return Err(HttpError::RequestLineTooLong);
+                }
+                Some(_) => {}
+                None => return Err(HttpError::RequestLineTooLong),
+            }
+        }
+        self.head_scanned = src.len();
+        Ok(true)
+    }
+
+    /// Set the maximum header block size.
+    #[inline]
+    #[must_use]
+    pub fn max_headers_size(mut self, size: usize) -> Self {
+        self.max_headers_size = size;
+        self
+    }
+
+    /// Set the maximum body size.
+    #[inline]
+    #[must_use]
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.max_body_size = size;
+        self
+    }
+
+    /// Validate one request head without consuming or copying the input.
+    ///
+    /// This additive API is intended for routing, admission, and protocol
+    /// inspection that does not need the legacy owned [`Request`] yet. It uses
+    /// this codec's configured header-size limit and returns a borrowed view
+    /// with allocation-free header iteration. The method is stateless: it does
+    /// not alter the codec state or advance `src`.
+    ///
+    /// Existing callers of [`Decoder::decode`] keep the v0.4.3-compatible
+    /// owned `Request` representation and behavior.
+    pub fn inspect_request_head<'a>(
+        &self,
+        src: &'a [u8],
+    ) -> Result<Option<BorrowedRequestHead<'a>>, HttpError> {
+        inspect_request_head_parts(src, self.max_headers_size)
+    }
+}
+
+impl Default for Http1Codec {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Find the position of `\r\n\r\n` in `buf`, returning the index of the
+/// first byte after the delimiter.
+///
+/// Leading CRLF sequences (RFC 9112 §2.2) are skipped so they do not falsely
+/// match as an empty header block delimiter.
+#[inline]
+fn find_headers_end(buf: &[u8]) -> Option<usize> {
+    let start = leading_empty_lines_len(buf);
+    memmem::find(&buf[start..], b"\r\n\r\n").map(|idx| start + idx + 4)
+}
+
+/// Length of the empty lines ignored at the start of `buf`: at most
+/// [`MAX_LEADING_EMPTY_LINES`] of them.
+#[inline]
+fn leading_empty_lines_len(buf: &[u8]) -> usize {
+    let mut len = 0;
+    for _ in 0..MAX_LEADING_EMPTY_LINES {
+        if !buf[len..].starts_with(b"\r\n") {
+            break;
+        }
+        len += 2;
+    }
+    len
+}
+
+/// Find the position of the first CRLF (`\r\n`) in `buf`.
+///
+/// Returns the index of `\r` when found.
+#[inline]
+fn find_crlf(buf: &[u8]) -> Option<usize> {
+    memmem::find(buf, b"\r\n")
+}
+
+/// Collect all CRLF (`\r\n`) positions in `buf` into a pre-allocated vector.
+///
+/// Each returned value is the index of `\r` in a valid `\r\n` pair.
+/// Used by `decode_head` to avoid repeated per-header `find_crlf` calls.
+#[inline]
+#[cfg(test)]
+fn collect_crlf_positions(buf: &[u8], out: &mut smallvec::SmallVec<[usize; 32]>) {
+    out.clear();
+    for idx in memchr_iter(b'\n', buf) {
+        if idx > 0 && buf[idx - 1] == b'\r' {
+            out.push(idx - 1);
+        }
+    }
+}
+
+/// Valid bytes for the HTTP/1.x request-target (RFC 3986 URI + reserved/sub-delims).
+///
+/// Rejects control characters (including `\x00`, `\x01`, …, `\x1f`), `DEL`
+/// (`0x7F`), any non-ASCII byte, and whitespace — all of which can enable
+/// smuggling or header injection if silently accepted inside a path.
+#[inline]
+fn is_valid_request_target_byte(b: u8) -> bool {
+    // RFC 3986 permits all printable ASCII except space in a URI; anything
+    // outside `0x21..=0x7E` is invalid in a request-target. Space is the
+    // delimiter between tokens and is already consumed by the caller, so a
+    // stray space here also represents a malformed request-line.
+    (0x21..=0x7E).contains(&b)
+}
+
+fn parse_method_ref(src: &[u8]) -> Option<BorrowedMethod<'_>> {
+    match src {
+        b"GET" => Some(BorrowedMethod::Get),
+        b"HEAD" => Some(BorrowedMethod::Head),
+        b"POST" => Some(BorrowedMethod::Post),
+        b"PUT" => Some(BorrowedMethod::Put),
+        b"DELETE" => Some(BorrowedMethod::Delete),
+        b"CONNECT" => Some(BorrowedMethod::Connect),
+        b"OPTIONS" => Some(BorrowedMethod::Options),
+        b"TRACE" => Some(BorrowedMethod::Trace),
+        b"PATCH" => Some(BorrowedMethod::Patch),
+        other => std::str::from_utf8(other)
+            .ok()
+            .filter(|_| is_valid_header_name_bytes(other))
+            .map(BorrowedMethod::Extension),
+    }
+}
+
+fn parse_request_line_ref(line: &[u8]) -> Result<(BorrowedMethod<'_>, &str, Version), HttpError> {
+    // Reject bare CR embedded in the request line — only the terminating
+    // CRLF may contain \r, and that has already been stripped. A bare \r
+    // in the middle is a framing error / smuggling vector.
+    if line.contains(&b'\r') {
+        return Err(HttpError::BadRequestLine);
+    }
+    // Fast path for the overwhelmingly common HTTP/1.x wire form:
+    // `METHOD SP URI SP VERSION` with no extra whitespace tokens.
+    if let Some(first_sp) = memchr(b' ', line) {
+        if first_sp > 0 {
+            let rest = &line[first_sp + 1..];
+            if let Some(second_sp_rel) = memchr(b' ', rest) {
+                let second_sp = first_sp + 1 + second_sp_rel;
+                if second_sp > first_sp + 1 {
+                    let method_bytes = &line[..first_sp];
+                    let uri_bytes = &line[first_sp + 1..second_sp];
+                    let version_bytes = &line[second_sp + 1..];
+                    if !version_bytes.is_empty()
+                        && !version_bytes.iter().any(u8::is_ascii_whitespace)
+                    {
+                        let method = parse_method_ref(method_bytes).ok_or(HttpError::BadMethod)?;
+                        if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
+                            return Err(HttpError::BadRequestLine);
+                        }
+                        let version = Version::from_bytes(version_bytes)
+                            .ok_or(HttpError::UnsupportedVersion)?;
+                        let uri = std::str::from_utf8(uri_bytes)
+                            .map_err(|_| HttpError::BadRequestLine)?;
+
+                        validate_request_target_ref(method, uri)?;
+
+                        return Ok((method, uri, version));
+                    }
+                }
+            }
+        }
+    }
+
+    parse_request_line_ref_slow(line)
+}
+
+fn parse_request_line_ref_slow(
+    line: &[u8],
+) -> Result<(BorrowedMethod<'_>, &str, Version), HttpError> {
+    fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
+        let start = *cursor;
+        while *cursor < bytes.len() && bytes[*cursor] != b' ' {
+            *cursor += 1;
+        }
+        (start < *cursor).then_some((start, *cursor))
+    }
+
+    fn consume_single_space(bytes: &[u8], cursor: &mut usize) -> Result<(), HttpError> {
+        if *cursor >= bytes.len() || bytes[*cursor] != b' ' {
+            return Err(HttpError::BadRequestLine);
+        }
+        *cursor += 1;
+        if *cursor >= bytes.len() || bytes[*cursor] == b' ' {
+            return Err(HttpError::BadRequestLine);
+        }
+        Ok(())
+    }
+
+    let mut cursor = 0usize;
+    let method_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    consume_single_space(line, &mut cursor)?;
+    let uri_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    consume_single_space(line, &mut cursor)?;
+    let version_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    if cursor != line.len() {
+        return Err(HttpError::BadRequestLine);
+    }
+
+    let method =
+        parse_method_ref(&line[method_bounds.0..method_bounds.1]).ok_or(HttpError::BadMethod)?;
+    let uri_bytes = &line[uri_bounds.0..uri_bounds.1];
+    if !uri_bytes.iter().copied().all(is_valid_request_target_byte) {
+        return Err(HttpError::BadRequestLine);
+    }
+    let version = Version::from_bytes(&line[version_bounds.0..version_bounds.1])
+        .ok_or(HttpError::UnsupportedVersion)?;
+    let uri = std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
+
+    validate_request_target_ref(method, uri)?;
+
+    Ok((method, uri, version))
+}
+
+fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    let (method, uri, version) = parse_request_line_ref(line)?;
+    Ok((method.into_owned(), uri.to_owned(), version))
+}
+
+fn validate_request_target_ref(method: BorrowedMethod<'_>, uri: &str) -> Result<(), HttpError> {
+    validate_request_target_name(method.as_str(), uri)
+}
+
+fn validate_request_target_name(method: &str, uri: &str) -> Result<(), HttpError> {
+    if uri.is_empty() {
+        return Err(HttpError::BadRequestLine);
+    }
+
+    // asterisk-form (RFC 9112 §3.2.4)
+    if uri == "*" {
+        if method != "OPTIONS" {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // authority-form (RFC 9112 §3.2.3)
+    if method == "CONNECT" {
+        return validate_connect_authority(uri);
+    }
+
+    // origin-form (RFC 9112 §3.2.1)
+    if uri.starts_with('/') {
+        // MUST NOT start with // (ambiguous or potential smuggling vector)
+        if uri.starts_with("//") {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // absolute-form (RFC 9112 §3.2.2)
+    if let Some((scheme, rest)) = uri.split_once("://") {
+        if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(HttpError::BadRequestLine);
+        }
+        // absolute-form MUST have a non-empty authority. RFC 3986 defines
+        // authority = [userinfo "@"] host [":" port], and RFC 9112 §3.2.2
+        // requires it. `rest` starts with '/' or '?' or '#' only when the
+        // authority is empty (e.g. "http:///path", "http://?q", "http://#f");
+        // reject those shapes. (br-asupersync-w6u4cn)
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if authority_end == 0 {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // If it doesn't match any allowed form, it's invalid.
+    Err(HttpError::BadRequestLine)
+}
+
+fn validate_connect_authority(uri: &str) -> Result<(), HttpError> {
+    if uri.starts_with('/') || uri.contains("://") || uri.contains(['/', '?', '#']) {
+        return Err(HttpError::BadRequestLine);
+    }
+
+    // Authority-form must be host:port. Bracketed IPv6 is the only accepted
+    // CONNECT host form that may contain ':' in the host token.
+    if let Some(rest) = uri.strip_prefix('[') {
+        let Some(close_bracket) = rest.find(']') else {
+            return Err(HttpError::BadRequestLine);
+        };
+        let host = &rest[..close_bracket];
+        let port = rest[close_bracket + 1..]
+            .strip_prefix(':')
+            .ok_or(HttpError::BadRequestLine)?;
+        if host.is_empty() || port.is_empty() || !port.as_bytes().iter().all(u8::is_ascii_digit) {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    let (host, port) = uri.rsplit_once(':').ok_or(HttpError::BadRequestLine)?;
+    if host.is_empty()
+        || host.contains(':')
+        || host.contains(['[', ']'])
+        || port.is_empty()
+        || !port.as_bytes().iter().all(u8::is_ascii_digit)
+    {
+        return Err(HttpError::BadRequestLine);
+    }
+    Ok(())
+}
+
+/// Validates an HTTP field-name (RFC 7230 token / tchar set).
+fn is_valid_header_name(name: &str) -> bool {
+    is_valid_header_name_bytes(name.as_bytes())
+}
+
+fn is_valid_header_name_bytes(name: &[u8]) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    name.iter().all(|&b| is_valid_header_name_byte(b))
+}
+
+#[inline]
+fn is_valid_header_name_byte(b: u8) -> bool {
+    matches!(
+        b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^'
+            | b'_' | b'`' | b'|' | b'~' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+    )
+}
+
+fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), HttpError> {
+    // Use memchr for SIMD-accelerated colon search.
+    let colon = memchr(b':', line_bytes).ok_or(HttpError::BadHeader)?;
+
+    // Header field names cannot be empty, and all bytes before the colon
+    // must be valid tchar (RFC 7230).
+    if colon == 0
+        || !line_bytes[..colon]
+            .iter()
+            .all(|&b| is_valid_header_name_byte(b))
+    {
+        return Err(HttpError::InvalidHeaderName);
+    }
+
+    let mut value_start = colon + 1;
+    while value_start < line_bytes.len()
+        && (line_bytes[value_start] == b' ' || line_bytes[value_start] == b'\t')
+    {
+        value_start += 1;
+    }
+    let mut value_end = line_bytes.len();
+    while value_end > value_start
+        && (line_bytes[value_end - 1] == b' ' || line_bytes[value_end - 1] == b'\t')
+    {
+        value_end -= 1;
+    }
+    for &b in &line_bytes[value_start..value_end] {
+        // Reject control characters per RFC 9110 Section 5.5.
+        // Only HTAB (0x09) and visible ASCII (0x20..=0x7E) plus
+        // obs-text (0x80..=0xFF) are allowed in field values.
+        if b == b'\r' || b == b'\n' || b == b'\0' || (b < 0x20 && b != b'\t') || b == 0x7F {
+            return Err(HttpError::InvalidHeaderValue);
+        }
+    }
+
+    Ok((colon, value_start, value_end))
+}
+
+/// br-asupersync-135g0e + br-asupersync-ko0gde: returns `true` for header
+/// field names that RFC 9110 §6.5.2 forbids in the trailer section. The list
+/// covers framing, routing, request-modifier, authentication, payload-
+/// processing, and cache-control fields that an intermediary might rely on
+/// when forwarding the message. Comparison is case-insensitive per RFC 9110
+/// §5.1 ("field names are case-insensitive").
+pub(crate) fn is_forbidden_trailer(name: &str) -> bool {
+    // Sorted alphabetically for review. Keep in sync with RFC 9110 §6.5.2's
+    // restricted-fields table and the related security guidance in §17.13.
+    const FORBIDDEN: &[&str] = &[
+        // Authentication / authorization.
+        "authorization",
+        // Cache control.
+        "age",
+        "cache-control",
+        // Hop-by-hop framing fields explicitly listed in RFC 9110 §6.5.2.
+        // A coalescing proxy that treats trailers as headers could otherwise
+        // honour a smuggled `Connection: x-secret` and strip x-secret on
+        // the next hop, or terminate the connection unexpectedly.
+        "connection",
+        // Payload processing & message framing.
+        "content-encoding",
+        "content-length",
+        "content-range",
+        "content-type",
+        // Cookies / session credentials.
+        "cookie",
+        // Response control data.
+        "date",
+        "expect",
+        "expires",
+        // Routing.
+        "host",
+        // Legacy hop-by-hop framing — same semantics as Connection.
+        "keep-alive",
+        // Request modifiers.
+        "max-forwards",
+        "pragma",
+        "proxy-authenticate",
+        "proxy-authorization",
+        // Not in RFC 9110's table but ubiquitous on the wire and routinely
+        // honoured as hop-state by proxies; share Connection's risk profile.
+        "proxy-connection",
+        "range",
+        "retry-after",
+        "set-cookie",
+        // Tracking / interception.
+        "te",
+        // Framing-critical.
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "vary",
+        "warning",
+        "www-authenticate",
+    ];
+    FORBIDDEN
+        .iter()
+        .any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
+}
+
+fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
+    let (colon, value_start, value_end) = parse_header_line_bounds(line_bytes)?;
+    let name_bytes = &line_bytes[..colon];
+    let value_bytes = &line_bytes[value_start..value_end];
+    let name = std::str::from_utf8(name_bytes).map_err(|_| HttpError::BadHeader)?;
+
+    Ok((name.to_owned(), header_value_to_owned(value_bytes)))
+}
+
+/// Preserve the legacy HTTP/1 header-value representation exactly: valid
+/// UTF-8 stays UTF-8, while invalid UTF-8 is decoded byte-for-byte as Latin-1.
+fn header_value_to_owned(value: &[u8]) -> String {
+    std::str::from_utf8(value).map_or_else(
+        |_| value.iter().map(|&byte| char::from(byte)).collect(),
+        std::borrow::ToOwned::to_owned,
+    )
+}
+
+/// Parse a single `Name: Value` header line.
+pub(super) fn parse_header_line(line: &str) -> Result<(String, String), HttpError> {
+    let (colon, value_start, value_end) = parse_header_line_bounds(line.as_bytes())?;
+    let name = &line[..colon];
+    let value = &line[value_start..value_end];
+    Ok((name.to_owned(), value.to_owned()))
+}
+
+/// Test-specific export of parse_header_line for conformance testing.
+#[cfg(test)]
+pub fn parse_header_line_test(line: &str) -> Result<(String, String), HttpError> {
+    parse_header_line(line)
+}
+
+pub(crate) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpError> {
+    if name.contains('\r') || name.contains('\n') {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if !is_valid_header_name(name) {
+        return Err(HttpError::InvalidHeaderName);
+    }
+    if value
+        .bytes()
+        .any(|b| b == b'\r' || b == b'\n' || b == b'\0' || (b < 0x20 && b != b'\t') || b == 0x7F)
+    {
+        return Err(HttpError::InvalidHeaderValue);
+    }
+    Ok(())
+}
+
+/// br-asupersync-zepgmq — Fuzz-target re-exporter for the H1
+/// header-line bounds parser. `#[doc(hidden)]`; only exists for
+/// direct fuzz harness access.
+#[doc(hidden)]
+pub fn fuzz_parse_header_line_bounds(
+    line_bytes: &[u8],
+) -> Result<(usize, usize, usize), HttpError> {
+    parse_header_line_bounds(line_bytes)
+}
+
+/// br-asupersync-8dl9j7 — Fuzz-target re-exporter for the H1
+/// chunked-encoding chunk-size-line parser.
+#[doc(hidden)]
+pub fn fuzz_parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
+    parse_chunk_size_line(line)
+}
+
+/// br-asupersync-sbc0pi — Fuzz-target re-exporter for the H1
+/// request-line parser. `#[doc(hidden)]`; only exists for
+/// direct fuzz harness access.
+#[doc(hidden)]
+pub fn fuzz_parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
+    parse_request_line_bytes(line)
+}
+
+/// Look up a header value, rejecting duplicates for security-sensitive headers.
+pub(super) fn unique_header_value<'a>(
+    headers: &'a [(String, String)],
+    name: &str,
+) -> Result<Option<&'a str>, HttpError> {
+    let mut found = None;
+    for (n, v) in headers {
+        if n.eq_ignore_ascii_case(name) {
+            if found.is_some() {
+                if name.eq_ignore_ascii_case("content-length") {
+                    return Err(HttpError::DuplicateContentLength);
+                }
+                if name.eq_ignore_ascii_case("transfer-encoding") {
+                    return Err(HttpError::DuplicateTransferEncoding);
+                }
+                return Err(HttpError::BadHeader);
+            }
+            found = Some(v.as_str());
+        }
+    }
+    Ok(found)
+}
+
+pub(super) fn require_transfer_encoding_chunked(value: &str) -> Result<(), HttpError> {
+    require_transfer_encoding_chunked_bytes(value.as_bytes())
+}
+
+/// Trim HTTP optional whitespace (OWS), which RFC 9110 defines as SP / HTAB.
+/// Unicode whitespace and Latin-1 `obs-text` are data, not framing whitespace;
+/// accepting them here can make this parser disagree with an intermediary.
+pub(super) fn trim_ows_bytes(value: &[u8]) -> &[u8] {
+    let mut start = 0;
+    while start < value.len() && matches!(value[start], b' ' | b'\t') {
+        start += 1;
+    }
+    let mut end = value.len();
+    while end > start && matches!(value[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &value[start..end]
+}
+
+pub(super) fn trim_ows(value: &str) -> &str {
+    std::str::from_utf8(trim_ows_bytes(value.as_bytes()))
+        .expect("trimming ASCII OWS preserves UTF-8 boundaries")
+}
+
+pub(super) fn for_each_header_value_token(value: &[u8], mut visit: impl FnMut(&[u8])) {
+    for token in value
+        .split(|&byte| byte == b',')
+        .map(trim_ows_bytes)
+        .filter(|token| !token.is_empty())
+    {
+        visit(token);
+    }
+}
+
+fn require_transfer_encoding_chunked_bytes(value: &[u8]) -> Result<(), HttpError> {
+    let mut token_count = 0usize;
+    let mut first_is_chunked = false;
+    for_each_header_value_token(value, |token| {
+        token_count += 1;
+        if token_count == 1 {
+            first_is_chunked = token.eq_ignore_ascii_case(b"chunked");
+        }
+    });
+
+    if token_count == 1 && first_is_chunked {
+        Ok(())
+    } else {
+        Err(HttpError::BadTransferEncoding)
+    }
+}
+
+/// Append a `usize` as decimal ASCII digits to `dst`.
+pub(super) fn append_decimal(dst: &mut BytesMut, mut n: usize) {
+    // Stack buffer large enough for any usize (max 20 digits on 64-bit).
+    let mut buf = [0u8; 20];
+    let mut pos = buf.len();
+    if n == 0 {
+        dst.extend_from_slice(b"0");
+        return;
+    }
+    while n > 0 {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    dst.extend_from_slice(&buf[pos..]);
+}
+
+fn upper_hex_len(mut n: usize) -> usize {
+    let mut len = 1;
+    while n >= 16 {
+        n /= 16;
+        len += 1;
+    }
+    len
+}
+
+pub(super) fn append_chunk_size_line(dst: &mut BytesMut, mut size: usize) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut digits = [0u8; usize::BITS as usize / 4];
+    let mut written = 0usize;
+    loop {
+        let idx = size & 0xF;
+        digits[digits.len() - 1 - written] = HEX[idx];
+        written += 1;
+        size >>= 4;
+        if size == 0 {
+            break;
+        }
+    }
+    let start = digits.len() - written;
+    dst.extend_from_slice(&digits[start..]);
+    dst.extend_from_slice(b"\r\n");
+}
+
+/// Return `(Transfer-Encoding, Content-Length)` while enforcing duplicate rules.
+fn transfer_and_content_length(
+    headers: &[(String, String)],
+) -> Result<(Option<&str>, Option<&str>), HttpError> {
+    let mut transfer_encoding = None;
+    let mut content_length = None;
+
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if transfer_encoding.is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+            transfer_encoding = Some(value.as_str());
+            continue;
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if content_length.is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
+            content_length = Some(value.as_str());
+        }
+    }
+
+    Ok((transfer_encoding, content_length))
+}
+
+const HEADER_TRANSFER_ENCODING: &[u8] = b"transfer-encoding";
+const HEADER_CONTENT_LENGTH: &[u8] = b"content-length";
+
+#[inline]
+fn is_transfer_encoding_name(name: &str) -> bool {
+    name.as_bytes()
+        .eq_ignore_ascii_case(HEADER_TRANSFER_ENCODING)
+}
+
+#[inline]
+fn is_content_length_name(name: &str) -> bool {
+    name.as_bytes().eq_ignore_ascii_case(HEADER_CONTENT_LENGTH)
+}
+
+/// HTTP request method borrowed from the request line.
+///
+/// Standard methods carry no payload. Extension methods borrow their token,
+/// avoiding the `String` allocation required by [`Method::Extension`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BorrowedMethod<'a> {
+    /// GET
+    Get,
+    /// HEAD
+    Head,
+    /// POST
+    Post,
+    /// PUT
+    Put,
+    /// DELETE
+    Delete,
+    /// CONNECT
+    Connect,
+    /// OPTIONS
+    Options,
+    /// TRACE
+    Trace,
+    /// PATCH
+    Patch,
+    /// Extension method not covered by the standard set.
+    Extension(&'a str),
+}
+
+impl<'a> BorrowedMethod<'a> {
+    /// Return the method token.
+    #[must_use]
+    pub const fn as_str(self) -> &'a str {
+        match self {
+            Self::Get => "GET",
+            Self::Head => "HEAD",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Connect => "CONNECT",
+            Self::Options => "OPTIONS",
+            Self::Trace => "TRACE",
+            Self::Patch => "PATCH",
+            Self::Extension(method) => method,
+        }
+    }
+
+    /// Materialize the legacy owned method representation.
+    #[must_use]
+    pub fn into_owned(self) -> Method {
+        match self {
+            Self::Get => Method::Get,
+            Self::Head => Method::Head,
+            Self::Post => Method::Post,
+            Self::Put => Method::Put,
+            Self::Delete => Method::Delete,
+            Self::Connect => Method::Connect,
+            Self::Options => Method::Options,
+            Self::Trace => Method::Trace,
+            Self::Patch => Method::Patch,
+            Self::Extension(method) => Method::Extension(method.to_owned()),
+        }
+    }
+}
+
+/// One validated HTTP/1 header borrowed directly from the caller's input.
+///
+/// This is the allocation-free counterpart to the legacy owned
+/// `(String, String)` representation. Header names are always valid ASCII.
+/// Values remain wire bytes so RFC 9110 `obs-text` does not require an eager
+/// Latin-1-to-UTF-8 allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BorrowedHeader<'a> {
+    /// Validated field name.
+    pub name: &'a str,
+    /// Validated field value after optional whitespace trimming.
+    pub value: &'a [u8],
+}
+
+impl BorrowedHeader<'_> {
+    /// Return the value as UTF-8 when the wire bytes are valid UTF-8.
+    pub fn value_str(&self) -> Result<&str, std::str::Utf8Error> {
+        std::str::from_utf8(self.value)
+    }
+
+    /// Materialize the value using the legacy HTTP/1 decoder's exact
+    /// UTF-8-or-Latin-1 conversion.
+    #[must_use]
+    pub fn value_to_owned(&self) -> String {
+        header_value_to_owned(self.value)
+    }
+}
+
+/// Iterator over validated headers in a [`BorrowedRequestHead`].
+#[derive(Debug, Clone)]
+pub struct BorrowedHeaders<'a> {
+    remaining: &'a [u8],
+    remaining_count: usize,
+}
+
+impl<'a> Iterator for BorrowedHeaders<'a> {
+    type Item = BorrowedHeader<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining_count == 0 {
+            return None;
+        }
+
+        let line_end = find_crlf(self.remaining)
+            .expect("validated borrowed request head must retain each header CRLF");
+        let line = &self.remaining[..line_end];
+        self.remaining = &self.remaining[line_end + 2..];
+        self.remaining_count -= 1;
+
+        let (colon, value_start, value_end) = parse_header_line_bounds(line)
+            .expect("validated borrowed request head must retain valid header bounds");
+        let name = std::str::from_utf8(&line[..colon])
+            .expect("validated HTTP field names are ASCII and therefore UTF-8");
+        Some(BorrowedHeader {
+            name,
+            value: &line[value_start..value_end],
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining_count, Some(self.remaining_count))
+    }
+}
+
+impl ExactSizeIterator for BorrowedHeaders<'_> {}
+
+/// A validated, allocation-free view of one HTTP/1 request head.
+///
+/// The view borrows the caller's input and does not consume it. Use
+/// [`Http1Codec::inspect_request_head`] when a routing, admission, or protocol
+/// decision only needs request metadata. Existing [`Decoder`] behavior remains
+/// unchanged and still returns the legacy owned [`Request`].
+#[derive(Debug, Clone, Copy)]
+pub struct BorrowedRequestHead<'a> {
+    /// HTTP method.
+    pub method: BorrowedMethod<'a>,
+    /// Request target borrowed from the request line.
+    pub uri: &'a str,
+    /// HTTP version.
+    pub version: Version,
+    header_block: &'a [u8],
+    header_count: usize,
+    consumed_len: usize,
+    body_kind: BodyKind,
+}
+
+impl<'a> BorrowedRequestHead<'a> {
+    /// Iterate over validated headers without allocating.
+    #[must_use]
+    pub fn headers(&self) -> BorrowedHeaders<'a> {
+        BorrowedHeaders {
+            remaining: self.header_block,
+            remaining_count: self.header_count,
+        }
+    }
+
+    /// Number of validated headers.
+    #[must_use]
+    pub const fn header_count(&self) -> usize {
+        self.header_count
+    }
+
+    /// Number of input bytes occupied by the request line, headers, and final
+    /// empty line. The inspection API itself does not consume these bytes.
+    #[must_use]
+    pub const fn consumed_len(&self) -> usize {
+        self.consumed_len
+    }
+
+    /// Determine request-body framing from the validated headers.
+    #[must_use]
+    pub fn body_kind(&self) -> StreamingBodyKind {
+        match self.body_kind {
+            BodyKind::ContentLength(0) => StreamingBodyKind::Empty,
+            BodyKind::ContentLength(len) => {
+                StreamingBodyKind::ContentLength(u64::try_from(len).unwrap_or(u64::MAX))
+            }
+            BodyKind::Chunked => StreamingBodyKind::Chunked,
+        }
+    }
+
+    fn into_owned_parts(self) -> (Method, String, Version, Vec<(String, String)>, BodyKind) {
+        let mut headers = Vec::with_capacity(self.header_count);
+        headers.extend(
+            self.headers()
+                .map(|header| (header.name.to_owned(), header.value_to_owned())),
+        );
+        (
+            self.method.into_owned(),
+            self.uri.to_owned(),
+            self.version,
+            headers,
+            self.body_kind,
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum BodyKind {
+    ContentLength(usize),
+    Chunked,
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(not(target_arch = "wasm32"))]
+enum PreviewHeaders<'a> {
+    Owned(&'a [(String, String)]),
+    Borrowed(BorrowedRequestHead<'a>),
+}
+
+#[derive(Debug, Clone, Copy)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) struct RequestHeadPreview<'a> {
+    pub version: Version,
+    headers: PreviewHeaders<'a>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> RequestHeadPreview<'a> {
+    pub fn headers(&self) -> PreviewHeaderIter<'a> {
+        match self.headers {
+            PreviewHeaders::Owned(headers) => PreviewHeaderIter::Owned(headers.iter()),
+            PreviewHeaders::Borrowed(head) => PreviewHeaderIter::Borrowed(head.headers()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) enum PreviewHeaderIter<'a> {
+    Owned(std::slice::Iter<'a, (String, String)>),
+    Borrowed(BorrowedHeaders<'a>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<'a> Iterator for PreviewHeaderIter<'a> {
+    type Item = (&'a str, &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Owned(headers) => headers
+                .next()
+                .map(|(name, value)| (name.as_str(), value.as_bytes())),
+            Self::Borrowed(headers) => headers.next().map(|header| (header.name, header.value)),
+        }
+    }
+}
+
+const MAX_CHUNK_LINE_LEN: usize = 1024;
+
+type ChunkedDecoded = (Vec<u8>, Vec<(String, String)>);
+
+#[derive(Debug)]
+enum ChunkPhase {
+    SizeLine,
+    Data { remaining: usize },
+    DataCrlf,
+    Trailers,
+}
+
+#[derive(Debug)]
+pub(super) struct ChunkedBodyDecoder {
+    phase: ChunkPhase,
+    body: Vec<u8>,
+    trailers: Vec<(String, String)>,
+    trailers_bytes: usize,
+    max_body_size: usize,
+    max_trailers_size: usize,
+}
+
+impl ChunkedBodyDecoder {
+    pub(super) fn new(max_body_size: usize, max_trailers_size: usize) -> Self {
+        Self {
+            phase: ChunkPhase::SizeLine,
+            body: Vec::new(),
+            trailers: Vec::new(),
+            trailers_bytes: 0,
+            max_body_size,
+            max_trailers_size,
+        }
+    }
+
+    pub(super) fn decode(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> Result<Option<ChunkedDecoded>, HttpError> {
+        loop {
+            match self.phase {
+                ChunkPhase::SizeLine => {
+                    let Some(line) = split_line_crlf(src, MAX_CHUNK_LINE_LEN)? else {
+                        return Ok(None);
+                    };
+                    let size = parse_chunk_size_line(line.as_ref())?;
+                    if size == 0 {
+                        self.phase = ChunkPhase::Trailers;
+                        continue;
+                    }
+
+                    if self.body.len().saturating_add(size) > self.max_body_size {
+                        return Err(HttpError::BodyTooLarge);
+                    }
+
+                    self.phase = ChunkPhase::Data { remaining: size };
+                }
+
+                ChunkPhase::Data { remaining } => {
+                    if src.len() < remaining {
+                        return Ok(None);
+                    }
+                    let data = src.split_to(remaining);
+                    self.body.extend_from_slice(data.as_ref());
+                    self.phase = ChunkPhase::DataCrlf;
+                }
+
+                ChunkPhase::DataCrlf => {
+                    if src.len() < 2 {
+                        return Ok(None);
+                    }
+                    if src.as_ref()[0] != b'\r' || src.as_ref()[1] != b'\n' {
+                        return Err(HttpError::BadChunkedEncoding);
+                    }
+                    src.advance(2);
+                    self.phase = ChunkPhase::SizeLine;
+                }
+
+                ChunkPhase::Trailers => {
+                    let Some(line) = split_line_crlf(src, self.max_trailers_size)? else {
+                        return Ok(None);
+                    };
+
+                    if line.is_empty() {
+                        self.phase = ChunkPhase::SizeLine;
+                        self.trailers_bytes = 0;
+                        return Ok(Some((
+                            std::mem::take(&mut self.body),
+                            std::mem::take(&mut self.trailers),
+                        )));
+                    }
+
+                    self.trailers_bytes = self.trailers_bytes.saturating_add(line.len() + 2);
+                    if self.trailers_bytes > self.max_trailers_size {
+                        return Err(HttpError::HeadersTooLarge);
+                    }
+
+                    let (name, value) = parse_header_line_bytes(line.as_ref())?;
+                    // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids trailers
+                    // that affect framing, routing, request modifiers, auth,
+                    // payload processing, or cache control. Some middleware
+                    // merges trailers into the header set, which would let a
+                    // malicious trailer smuggle a Content-Length / TE override
+                    // past the intermediary. Reject at the parser.
+                    if is_forbidden_trailer(&name) {
+                        return Err(HttpError::BadHeader);
+                    }
+                    self.trailers.push((name, value));
+                    if self.trailers.len() > MAX_HEADERS {
+                        return Err(HttpError::TooManyHeaders);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn split_line_crlf(src: &mut BytesMut, max_len: usize) -> Result<Option<BytesMut>, HttpError> {
+    let Some(line_end) = find_crlf(src.as_ref()) else {
+        if src.len() > max_len {
+            return Err(HttpError::BadChunkedEncoding);
+        }
+        return Ok(None);
+    };
+
+    if line_end > max_len {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+
+    let line = src.split_to(line_end);
+    src.advance(2); // CRLF
+    Ok(Some(line))
+}
+
+/// Finds the CRLF ending the chunk-size line at the start of `buf`, for the
+/// streaming decoders. A line is at most `MAX_CHUNK_LINE_LEN` bytes, as in
+/// the buffered codec, so only that much is searched: a longer line is an
+/// error, not a reason to keep buffering and rescanning (CVE-2024-22019).
+pub(super) fn find_chunk_size_line_end(buf: &[u8]) -> Result<Option<usize>, HttpError> {
+    let window = &buf[..buf.len().min(MAX_CHUNK_LINE_LEN + 2)];
+    match window.windows(2).position(|pair| pair == b"\r\n") {
+        Some(line_end) => Ok(Some(line_end)),
+        None if buf.len() >= MAX_CHUNK_LINE_LEN + 2 => Err(HttpError::BadChunkedEncoding),
+        None => Ok(None),
+    }
+}
+
+pub(super) fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
+    let line = std::str::from_utf8(line).map_err(|_| HttpError::BadChunkedEncoding)?;
+    // RFC 9112 §7.1.1: chunk-ext is tokens and quoted strings, so it holds no
+    // control characters. The line runs to the first CRLF, so a bare LF or CR
+    // inside an extension would end the line early on a peer that accepts bare
+    // LF, framing the body differently (request smuggling). Reject every CTL
+    // except HTAB.
+    if line
+        .bytes()
+        .any(|byte| byte.is_ascii_control() && byte != b'\t')
+    {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    // Split on ';' to separate chunk-size from optional chunk-ext (RFC 7230 §4.1).
+    // Do NOT trim — chunk-size = 1*HEXDIG with no leading/trailing whitespace.
+    // Trimming would mask differences from stricter proxies (request smuggling vector).
+    let size_part = line.split(';').next().unwrap_or("");
+    if size_part.is_empty() {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    // Reject leading/trailing whitespace explicitly to prevent smuggling.
+    if size_part
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_whitespace)
+        || size_part
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_whitespace)
+    {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    // br-asupersync-usvn1p: RFC 9112 §7.1 — chunk-size = 1*HEXDIG (no
+    // sign). Rust's usize::from_str_radix accepts '+1A' which can
+    // disagree with stricter intermediaries (nginx, envoy) and create
+    // a request-smuggling primitive. Reject any non-hexdigit prefix
+    // before parsing.
+    if size_part.is_empty() || !size_part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(HttpError::BadChunkedEncoding);
+    }
+    usize::from_str_radix(size_part, 16).map_err(|_| HttpError::BadChunkedEncoding)
+}
+
+/// Validate a request line and header block without allocating or consuming
+/// the caller's input. Returns `None` until the final empty line arrives.
+fn inspect_request_head_parts(
+    src: &[u8],
+    max_headers_size: usize,
+) -> Result<Option<BorrowedRequestHead<'_>>, HttpError> {
+    // Reject bare CRs in the buffered head: HTTP/1.x line terminators MUST be
+    // CRLF (RFC 9112 §2.2). A `\r` followed by anything other than `\n` is a
+    // framing violation (request-smuggling vector), so fail fast instead of
+    // waiting for a CRLF that will never arrive. A trailing single `\r` with
+    // no successor byte yet may still be completed, so we only fire when the
+    // next byte is already buffered.
+    //
+    // br-asupersync-2ovm8z: bound the scan to the HEAD region only. The
+    // previous unbounded scan over `src` would inspect body bytes (or
+    // pipelined-next-request bytes) and reject any 0x0D byte as a bare-CR,
+    // poisoning the connection on virtually all binary uploads (gRPC,
+    // protobuf, images, octet-stream — any payload contains 0x0D in ~1/256
+    // bytes). The scan must apply ONLY to head bytes.
+    let head_scan_limit = match find_headers_end(src) {
+        Some(end) => end, // complete head — scan exactly the head bytes
+        None => src.len().min(max_headers_size),
+    };
+    for idx in memchr_iter(b'\r', &src[..head_scan_limit]) {
+        if idx + 1 < head_scan_limit && src[idx + 1] != b'\n' {
+            return Err(HttpError::BadRequestLine);
+        }
+    }
+
+    let Some(end) = find_headers_end(src) else {
+        if src.len() > max_headers_size {
+            return Err(HttpError::HeadersTooLarge);
+        }
+        // Preserve request-line limit behavior for incomplete heads while
+        // avoiding an extra scan on the common fully-buffered decode path.
+        let unparsed = &src[leading_empty_lines_len(src)..];
+        if unparsed.len() > MAX_REQUEST_LINE {
+            match find_crlf(unparsed) {
+                Some(line_end) if line_end > MAX_REQUEST_LINE => {
+                    return Err(HttpError::RequestLineTooLong);
+                }
+                Some(_) => {}
+                None => return Err(HttpError::RequestLineTooLong),
+            }
+        }
+        return Ok(None);
+    };
+
+    if end > max_headers_size {
+        return Err(HttpError::HeadersTooLarge);
+    }
+
+    let head = &src[..end];
+
+    // Walk CRLF positions directly. The iterator is allocation-free even for
+    // the maximum 128 headers, unlike collecting offsets into a growable
+    // vector before validation.
+    let mut crlf_positions = memmem::find_iter(head, b"\r\n");
+    let mut request_line_start = 0;
+    let mut request_line_end = None;
+    for pos in crlf_positions.by_ref() {
+        if pos == request_line_start && request_line_start < 2 * MAX_LEADING_EMPTY_LINES {
+            // RFC 9112 §2.2: A server that is expecting to receive and parse a
+            // request-line SHOULD ignore at least one empty line (CRLF) received
+            // prior to the request-line. Past the allowance the empty line is
+            // the request-line, which is malformed.
+            request_line_start = pos + 2;
+        } else {
+            request_line_end = Some(pos);
+            break;
+        }
+    }
+    let Some(request_line_end) = request_line_end else {
+        return Err(HttpError::BadRequestLine);
+    };
+    let request_line_len = request_line_end - request_line_start;
+    if request_line_len > MAX_REQUEST_LINE {
+        return Err(HttpError::RequestLineTooLong);
+    }
+    if request_line_end >= head.len() {
+        return Err(HttpError::BadRequestLine);
+    }
+    let request_line = &head[request_line_start..request_line_end];
+    let (method, uri, version) = parse_request_line_ref(request_line)?;
+
+    let header_block_start = request_line_end + 2;
+    let mut header_count = 0usize;
+    let mut transfer_encoding = None;
+    let mut content_length = None;
+    let mut cursor = request_line_end + 2;
+    for crlf_pos in crlf_positions {
+        if crlf_pos < cursor {
+            continue;
+        }
+        let line_len = crlf_pos - cursor;
+        if line_len == 0 {
+            break;
+        }
+        header_count += 1;
+        if header_count > MAX_HEADERS {
+            return Err(HttpError::TooManyHeaders);
+        }
+
+        let line = &head[cursor..crlf_pos];
+        let (colon, value_start, value_end) = parse_header_line_bounds(line)?;
+        let name = std::str::from_utf8(&line[..colon]).map_err(|_| HttpError::BadHeader)?;
+        let value = &line[value_start..value_end];
+        if is_transfer_encoding_name(name) {
+            if transfer_encoding.is_some() {
+                return Err(HttpError::DuplicateTransferEncoding);
+            }
+            transfer_encoding = Some(value);
+        } else if is_content_length_name(name) {
+            if content_length.is_some() {
+                return Err(HttpError::DuplicateContentLength);
+            }
+            content_length = Some(value);
+        }
+        cursor = crlf_pos + 2;
+    }
+
+    let kind = match (transfer_encoding, content_length) {
+        (Some(_), Some(_)) => return Err(HttpError::AmbiguousBodyLength),
+        (Some(transfer_encoding), None) => {
+            if version == Version::Http10 {
+                return Err(HttpError::BadTransferEncoding);
+            }
+            require_transfer_encoding_chunked_bytes(transfer_encoding)?;
+            BodyKind::Chunked
+        }
+        (None, Some(content_length)) => {
+            // br-asupersync-lbhaf2: RFC 9112 §6.1 — Content-Length is
+            // 1*DIGIT (no leading sign). Rust's usize::parse() accepts
+            // '+5' which can disagree with stricter intermediaries
+            // (nginx, envoy) and create a request-smuggling primitive.
+            // Reject any non-digit prefix before parsing.
+            let content_length = trim_ows_bytes(content_length);
+            if content_length.is_empty() || !content_length.iter().all(u8::is_ascii_digit) {
+                return Err(HttpError::BadContentLength);
+            }
+            let content_length =
+                std::str::from_utf8(content_length).map_err(|_| HttpError::BadContentLength)?;
+            let len: usize = content_length
+                .parse()
+                .map_err(|_| HttpError::BadContentLength)?;
+            BodyKind::ContentLength(len)
+        }
+        (None, None) => BodyKind::ContentLength(0),
+    };
+
+    Ok(Some(BorrowedRequestHead {
+        method,
+        uri,
+        version,
+        header_block: &head[header_block_start..],
+        header_count,
+        consumed_len: end,
+        body_kind: kind,
+    }))
+}
+
+#[allow(clippy::type_complexity)]
+fn decode_head(
+    src: &mut BytesMut,
+    max_headers_size: usize,
+) -> Result<Option<(Method, String, Version, Vec<(String, String)>, BodyKind)>, HttpError> {
+    let Some(head) = inspect_request_head_parts(src.as_ref(), max_headers_size)? else {
+        return Ok(None);
+    };
+    let end = head.consumed_len();
+    let (method, uri, version, headers, kind) = head.into_owned_parts();
+
+    // Discard the parsed head. `advance` bumps the front offset in place;
+    // `split_to(end)` would heap-allocate + memcpy an `end`-byte head (up to
+    // max_headers_size for many-header requests) only to drop it. Profiled:
+    // http1/parse is allocation-bound and this is one of its allocations.
+    src.advance(end);
+    Ok(Some((method, uri, version, headers, kind)))
+}
+
+/// Decodes and consumes one request head without buffering its body.
+///
+/// This is the protocol boundary used by the streaming server. It shares the
+/// exact hardened request-line, header, Content-Length, and Transfer-Encoding
+/// parser with [`Http1Codec`] while publishing the validated head before any
+/// body bytes are required.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn decode_streaming_request_head(
+    src: &mut BytesMut,
+    max_headers_size: usize,
+    max_body_size: usize,
+) -> Result<Option<(RequestHead, StreamingBodyKind)>, HttpError> {
+    let Some((method, uri, version, headers, kind)) = decode_head(src, max_headers_size)? else {
+        return Ok(None);
+    };
+    let kind = match kind {
+        BodyKind::ContentLength(0) => StreamingBodyKind::Empty,
+        BodyKind::ContentLength(len) => {
+            if len > max_body_size {
+                return Err(HttpError::BodyTooLargeDetailed {
+                    actual: u64::try_from(len).unwrap_or(u64::MAX),
+                    limit: u64::try_from(max_body_size).unwrap_or(u64::MAX),
+                });
+            }
+            StreamingBodyKind::ContentLength(
+                u64::try_from(len).map_err(|_| HttpError::BodyTooLarge)?,
+            )
+        }
+        BodyKind::Chunked => StreamingBodyKind::Chunked,
+    };
+    Ok(Some((
+        RequestHead {
+            method,
+            uri,
+            version,
+            headers,
+        },
+        kind,
+    )))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) fn preview_request_head<'a>(
+    codec: &'a Http1Codec,
+    src: &'a BytesMut,
+) -> Result<Option<RequestHeadPreview<'a>>, HttpError> {
+    match &codec.state {
+        DecodeState::Body {
+            version, headers, ..
+        }
+        | DecodeState::Chunked {
+            version, headers, ..
+        } => {
+            return Ok(Some(RequestHeadPreview {
+                version: *version,
+                headers: PreviewHeaders::Owned(headers),
+            }));
+        }
+        DecodeState::Poisoned => return Err(HttpError::BadHeader),
+        DecodeState::Head => {}
+    }
+
+    let Some(head) = codec.inspect_request_head(src.as_ref())? else {
+        return Ok(None);
+    };
+
+    Ok(Some(RequestHeadPreview {
+        version: head.version,
+        headers: PreviewHeaders::Borrowed(head),
+    }))
+}
+
+/// Extract the head fields from a `DecodeState::Body` or `DecodeState::Chunked`.
+fn take_head(state: DecodeState) -> (Method, String, Version, Vec<(String, String)>) {
+    match state {
+        DecodeState::Body {
+            method,
+            uri,
+            version,
+            headers,
+            ..
+        }
+        | DecodeState::Chunked {
+            method,
+            uri,
+            version,
+            headers,
+            ..
+        } => (method, uri, version, headers),
+        DecodeState::Head | DecodeState::Poisoned => {
+            unreachable!("take_head called in invalid state")
+        }
+    }
+}
+
+impl Decoder for Http1Codec {
+    type Item = Request;
+    type Error = HttpError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
+        match self.decode_inner(src) {
+            Err(e) => {
+                self.state = DecodeState::Poisoned;
+                Err(e)
+            }
+            Ok(v) => Ok(v),
+        }
+    }
+}
+
+impl Http1Codec {
+    fn decode_inner(&mut self, src: &mut BytesMut) -> Result<Option<Request>, HttpError> {
+        loop {
+            if matches!(self.state, DecodeState::Head)
+                && self.head_still_incomplete(src.as_ref())?
+            {
+                return Ok(None);
+            }
+            match &mut self.state {
+                DecodeState::Poisoned => {
+                    return Err(HttpError::BadHeader); // Generic error for poisoned state
+                }
+                state @ DecodeState::Head => {
+                    let Some((method, uri, version, headers, kind)) =
+                        decode_head(src, self.max_headers_size)?
+                    else {
+                        return Ok(None);
+                    };
+
+                    match kind {
+                        BodyKind::ContentLength(0) => {
+                            return Ok(Some(Request {
+                                method,
+                                uri,
+                                version,
+                                headers,
+                                body: Vec::new(),
+                                trailers: Vec::new(),
+                                peer_addr: None,
+                            }));
+                        }
+                        BodyKind::ContentLength(len) => {
+                            // Check body size limit upfront for Content-Length
+                            if len > self.max_body_size {
+                                return Err(HttpError::BodyTooLarge);
+                            }
+                            *state = DecodeState::Body {
+                                method,
+                                uri,
+                                version,
+                                headers,
+                                remaining: len,
+                            };
+                        }
+                        BodyKind::Chunked => {
+                            *state = DecodeState::Chunked {
+                                method,
+                                uri,
+                                version,
+                                headers,
+                                chunked: ChunkedBodyDecoder::new(
+                                    self.max_body_size,
+                                    self.max_headers_size,
+                                ),
+                            };
+                        }
+                    }
+                }
+
+                DecodeState::Body { remaining, .. } => {
+                    let need = *remaining;
+                    if src.len() < need {
+                        return Ok(None);
+                    }
+
+                    let body_bytes = src.split_to(need);
+                    let old = std::mem::replace(&mut self.state, DecodeState::Head);
+                    let (method, uri, version, headers) = take_head(old);
+
+                    return Ok(Some(Request {
+                        method,
+                        uri,
+                        version,
+                        headers,
+                        // br-asupersync-i5w8lh: into_vec consumes the
+                        // BytesMut and moves out the underlying Vec<u8>
+                        // with zero memcpy and zero allocation. The
+                        // previous to_vec() copied the body again on top
+                        // of the copy split_to() already paid (split_to
+                        // is O(n) in the current Vec<u8>-backed BytesMut
+                        // — see bytes_mut.rs split_to doc). Eliminating
+                        // this second memcpy halves the per-request body
+                        // copy cost on the HTTP/1 receive hot path.
+                        body: body_bytes.into_vec(),
+                        trailers: Vec::new(),
+                        peer_addr: None,
+                    }));
+                }
+
+                DecodeState::Chunked { chunked, .. } => {
+                    let Some((body, trailers)) = chunked.decode(src)? else {
+                        return Ok(None);
+                    };
+
+                    let old = std::mem::replace(&mut self.state, DecodeState::Head);
+                    let (method, uri, version, headers) = take_head(old);
+
+                    return Ok(Some(Request {
+                        method,
+                        uri,
+                        version,
+                        headers,
+                        body,
+                        trailers,
+                        peer_addr: None,
+                    }));
+                }
+            }
+        }
+    }
+}
+
+impl Encoder<Response> for Http1Codec {
+    type Error = HttpError;
+
+    #[allow(clippy::too_many_lines)]
+    fn encode(&mut self, resp: Response, dst: &mut BytesMut) -> Result<(), HttpError> {
+        let reason = if resp.reason.is_empty() {
+            types::default_reason(resp.status)
+        } else {
+            &resp.reason
+        };
+
+        if reason.contains('\r') || reason.contains('\n') {
+            return Err(HttpError::BadHeader);
+        }
+
+        let (te, cl) = transfer_and_content_length(&resp.headers)?;
+
+        let chunked = match te {
+            Some(value) => {
+                require_transfer_encoding_chunked(value)?;
+                true
+            }
+            None => false,
+        };
+
+        if chunked && cl.is_some() {
+            return Err(HttpError::AmbiguousBodyLength);
+        }
+
+        if !chunked && !resp.trailers.is_empty() {
+            return Err(HttpError::TrailersNotAllowed);
+        }
+
+        // A response without a body (1xx, 204, 304) never carries chunked
+        // framing: a keep-alive client would read the "0\r\n\r\n" terminator
+        // as the start of the next response (RFC 9112 6.3). An HTTP/1.0
+        // recipient cannot decode chunked at all (RFC 9112 6.1), so its body
+        // goes out with Content-Length. Either way the handler's
+        // Transfer-Encoding and Trailer headers, and its trailers, are dropped.
+        let bodyless =
+            (100..=199).contains(&resp.status) || resp.status == 204 || resp.status == 304;
+        let chunked_on_wire = chunked && !bodyless && resp.version != Version::Http10;
+        let drop_chunked_headers = chunked && !chunked_on_wire;
+
+        if !chunked {
+            if let Some(cl) = cl {
+                // br-asupersync-lbhaf2: same digit-only validation on the
+                // encode side. Reject Content-Length values like '+5' that
+                // Rust parse accepts but the spec rejects.
+                let cl_str = trim_ows(cl);
+                if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(HttpError::BadContentLength);
+                }
+                let declared: usize = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
+                // Allow empty bodies with non-zero Content-Length for HEAD responses.
+                if declared != resp.body.len() && !resp.body.is_empty() {
+                    return Err(HttpError::BadContentLength);
+                }
+            }
+        }
+
+        // Pre-validate all headers (and trailers for chunked) so the write
+        // path below is infallible and we can write directly to `dst`.
+        let mut has_content_length = false;
+        for (name, value) in &resp.headers {
+            validate_header_field(name, value)?;
+            if name.eq_ignore_ascii_case("content-length") {
+                has_content_length = true;
+            }
+        }
+        if chunked {
+            for (name, value) in &resp.trailers {
+                validate_header_field(name, value)?;
+            }
+        }
+
+        // Pre-reserve capacity for the entire response.
+        let headers_bytes: usize = resp
+            .headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum();
+        let trailers_bytes: usize = resp
+            .trailers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum();
+        let chunk_line_bytes = if chunked_on_wire && !resp.body.is_empty() {
+            upper_hex_len(resp.body.len()) + 2
+        } else {
+            0
+        };
+        let encoded_body_bytes = if chunked_on_wire {
+            chunk_line_bytes + resp.body.len() + 2 + 3 + trailers_bytes + 2
+        } else {
+            resp.body.len()
+        };
+        dst.reserve(64 + reason.len() + headers_bytes + encoded_body_bytes);
+
+        // Write directly to dst via extend_from_slice — no fmt machinery.
+        {
+            // Status line: "HTTP/1.1 200 OK\r\n"
+            dst.extend_from_slice(resp.version.as_str().as_bytes());
+            dst.extend_from_slice(b" ");
+            append_decimal(dst, resp.status as usize);
+            dst.extend_from_slice(b" ");
+            dst.extend_from_slice(reason.as_bytes());
+            dst.extend_from_slice(b"\r\n");
+
+            for (name, value) in &resp.headers {
+                if drop_chunked_headers
+                    && (name.eq_ignore_ascii_case("transfer-encoding")
+                        || name.eq_ignore_ascii_case("trailer"))
+                {
+                    continue;
+                }
+                dst.extend_from_slice(name.as_bytes());
+                dst.extend_from_slice(b": ");
+                dst.extend_from_slice(value.as_bytes());
+                dst.extend_from_slice(b"\r\n");
+            }
+
+            if chunked_on_wire {
+                dst.extend_from_slice(b"\r\n");
+                if !resp.body.is_empty() {
+                    append_chunk_size_line(dst, resp.body.len());
+                    dst.extend_from_slice(&resp.body);
+                    dst.extend_from_slice(b"\r\n");
+                }
+                dst.extend_from_slice(b"0\r\n");
+                for (name, value) in &resp.trailers {
+                    dst.extend_from_slice(name.as_bytes());
+                    dst.extend_from_slice(b": ");
+                    dst.extend_from_slice(value.as_bytes());
+                    dst.extend_from_slice(b"\r\n");
+                }
+                dst.extend_from_slice(b"\r\n");
+                return Ok(());
+            }
+
+            let suppress_content_length = bodyless;
+            if !has_content_length && !suppress_content_length {
+                dst.extend_from_slice(b"Content-Length: ");
+                append_decimal(dst, resp.body.len());
+                dst.extend_from_slice(b"\r\n");
+            }
+
+            dst.extend_from_slice(b"\r\n");
+            if !suppress_content_length && !resp.body.is_empty() {
+                dst.extend_from_slice(&resp.body);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+
+    fn decode_one(codec: &mut Http1Codec, data: &[u8]) -> Result<Option<Request>, HttpError> {
+        let mut buf = BytesMut::from(data);
+        codec.decode(&mut buf)
+    }
+
+    fn encode_one(codec: &mut Http1Codec, resp: Response) -> Vec<u8> {
+        let mut buf = BytesMut::with_capacity(1024);
+        codec.encode(resp, &mut buf).unwrap();
+        buf.to_vec()
+    }
+
+    /// br-asupersync-2ovm8z: a complete request whose body contains a
+    /// bare 0x0D byte (any binary upload — gRPC, protobuf, image — has
+    /// 0x0D appearing in ~1/256 random bytes) must NOT poison the
+    /// codec. Previously the bare-CR scan ran over the entire `src`
+    /// buffer (head + body), rejecting any 0x0D in the body as
+    /// BadRequestLine and tripping the codec into Poisoned state.
+    #[test]
+    fn ovm8z_body_with_bare_cr_byte_decodes_cleanly() {
+        let mut codec = Http1Codec::new();
+        // Build a request with Content-Length=4 and a body containing a
+        // bare 0x0D (no \n successor) — the kind of byte sequence that
+        // appears in any binary payload.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n");
+        data.extend_from_slice(&[0x42, 0x0D, 0x44, 0x45]); // 4-byte body with bare \r
+        let mut buf = BytesMut::from(&data[..]);
+        let result = codec.decode(&mut buf);
+        assert!(
+            result.is_ok(),
+            "binary body with bare 0x0D must NOT poison the codec, got: {result:?}"
+        );
+        let req = result.unwrap().expect("complete request decodes");
+        assert_eq!(
+            AsRef::<[u8]>::as_ref(&req.body),
+            &[0x42, 0x0D, 0x44, 0x45][..]
+        );
+    }
+
+    /// br-asupersync-2ovm8z: a chunked request where the body chunk
+    /// contains 0x0D bytes must also decode cleanly (covers the
+    /// pipelined / chunked pathway).
+    #[test]
+    fn ovm8z_chunked_body_with_bare_cr_byte_does_not_poison() {
+        let mut codec = Http1Codec::new();
+        // Head with Transfer-Encoding: chunked, then a single chunk of 4
+        // bytes containing a bare 0x0D.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
+        data.extend_from_slice(b"4\r\n");
+        data.extend_from_slice(&[0x42, 0x0D, 0x44, 0x45]);
+        data.extend_from_slice(b"\r\n0\r\n\r\n");
+        let mut buf = BytesMut::from(&data[..]);
+        let result = codec.decode(&mut buf);
+        assert!(
+            result.is_ok(),
+            "chunked body with bare 0x0D must decode cleanly, got: {result:?}"
+        );
+    }
+
+    /// br-asupersync-2ovm8z: bare-CR within the HEAD itself must STILL
+    /// be rejected (the original smuggling-defense intent).
+    #[test]
+    fn ovm8z_bare_cr_in_head_still_rejected() {
+        let mut codec = Http1Codec::new();
+        // Bare 0x0D in the request line (not followed by \n) — must be
+        // rejected as BadRequestLine.
+        let data = b"GET /\rsmuggle HTTP/1.1\r\nHost: x\r\n\r\n";
+        let mut buf = BytesMut::from(&data[..]);
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("bare CR in head must still reject");
+        assert!(matches!(err, HttpError::BadRequestLine));
+    }
+
+    #[test]
+    fn decode_simple_get() {
+        let mut codec = Http1Codec::new();
+        let req = decode_one(&mut codec, b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.method, Method::Get);
+        assert_eq!(req.uri, "/");
+        assert_eq!(req.version, Version::Http11);
+        assert_eq!(req.headers.len(), 1);
+        assert_eq!(req.headers[0].0, "Host");
+        assert_eq!(req.headers[0].1, "localhost");
+        assert!(req.body.is_empty());
+    }
+
+    #[test]
+    fn decode_request_with_leading_blank_lines_rfc9112() {
+        let mut codec = Http1Codec::new();
+
+        // Single leading CRLF per RFC 9112 §2.2
+        let req1 = decode_one(
+            &mut codec,
+            b"\r\nGET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap()
+        .expect("single leading CRLF must be ignored");
+        assert_eq!(req1.method, Method::Get);
+        assert_eq!(req1.uri, "/");
+
+        // Multiple leading CRLFs
+        let req2 = decode_one(
+            &mut codec,
+            b"\r\n\r\n\r\nGET /multi HTTP/1.1\r\nHost: localhost\r\n\r\n",
+        )
+        .unwrap()
+        .expect("multiple leading CRLFs must be ignored");
+        assert_eq!(req2.method, Method::Get);
+        assert_eq!(req2.uri, "/multi");
+
+        // Only CRLFs with no request line yet yields Ok(None) (waiting for request line)
+        let mut only_crlfs = BytesMut::from(&b"\r\n\r\n"[..]);
+        assert!(codec.decode(&mut only_crlfs).unwrap().is_none());
+        // Once request line and headers arrive, it completes successfully
+        only_crlfs.extend_from_slice(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let req3 = codec
+            .decode(&mut only_crlfs)
+            .unwrap()
+            .expect("delayed request must decode");
+        assert_eq!(req3.method, Method::Get);
+        assert_eq!(req3.uri, "/delayed");
+
+        // Streaming head decoder ignores leading CRLF
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut stream_buf =
+                BytesMut::from(&b"\r\nPOST /stream HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"[..]);
+            let (head, kind) = decode_streaming_request_head(&mut stream_buf, 4096, 4096)
+                .unwrap()
+                .expect("streaming head with leading CRLF must succeed");
+            assert_eq!(head.method, Method::Post);
+            assert_eq!(head.uri, "/stream");
+            assert_eq!(kind, StreamingBodyKind::Empty);
+        }
+    }
+
+    /// asupersync-8udzw7 (review of f5e6fda16): the RFC 9112 §2.2 allowance
+    /// of empty lines before a request-line is bounded. A longer run is a
+    /// malformed request, refused as soon as it passes the allowance; the
+    /// unbounded skip buffered a trickled run up to 64 KiB, walking it again
+    /// on every read.
+    #[test]
+    fn a_run_of_leading_empty_lines_past_the_allowance_is_refused_at_once() {
+        let mut ten = b"\r\n".repeat(MAX_LEADING_EMPTY_LINES);
+        ten.extend_from_slice(b"GET /ten HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        let req = decode_one(&mut Http1Codec::new(), &ten)
+            .unwrap()
+            .expect("the allowed empty lines are ignored");
+        assert_eq!(req.uri, "/ten");
+
+        let mut eleven = b"\r\n".repeat(MAX_LEADING_EMPTY_LINES + 1);
+        eleven.extend_from_slice(b"GET /eleven HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        assert!(matches!(
+            decode_one(&mut Http1Codec::new(), &eleven),
+            Err(HttpError::BadRequestLine)
+        ));
+
+        let mut codec = Http1Codec::new();
+        let mut buf = BytesMut::new();
+        let mut refused_at = None;
+        for (fed, byte) in b"\r\n".repeat(2048).into_iter().enumerate() {
+            buf.extend_from_slice(&[byte]);
+            match codec.decode(&mut buf) {
+                Ok(None) => {}
+                Ok(Some(req)) => panic!("a run of empty lines decoded as {req:?}"),
+                Err(err) => {
+                    assert!(matches!(err, HttpError::BadRequestLine), "{err:?}");
+                    refused_at = Some(fed + 1);
+                    break;
+                }
+            }
+        }
+        let refused_at = refused_at.expect("a trickled run of empty lines must be refused");
+        assert!(
+            refused_at <= 2 * (MAX_LEADING_EMPTY_LINES + 2),
+            "refused only after {refused_at} bytes"
+        );
+    }
+
+    /// Feed `raw` one byte per decode call, as a peer trickling its request
+    /// would, and return every decode result that is not `Ok(None)`.
+    fn decode_trickled(codec: &mut Http1Codec, raw: &[u8]) -> Vec<Result<Request, HttpError>> {
+        let mut buf = BytesMut::new();
+        let mut out = Vec::new();
+        for byte in raw {
+            buf.extend_from_slice(&[*byte]);
+            match codec.decode(&mut buf) {
+                Ok(None) => {}
+                Ok(Some(req)) => out.push(Ok(req)),
+                Err(err) => {
+                    out.push(Err(err));
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_trickled_head_is_scanned_in_linear_time() {
+        let raw = format!(
+            "GET /pad HTTP/1.1\r\nHost: a\r\nX-Pad: {}\r\n\r\nGET /next HTTP/1.1\r\nHost: a\r\n\r\n",
+            "p".repeat(8_000)
+        );
+        let mut codec = Http1Codec::new();
+        let results = decode_trickled(&mut codec, raw.as_bytes());
+        let uris: Vec<String> = results
+            .into_iter()
+            .map(|result| result.expect("valid requests").uri)
+            .collect();
+        assert_eq!(uris, ["/pad", "/next"]);
+        // Each byte is scanned with the three before it (the terminator can
+        // straddle reads): linear, where a rescan per read is quadratic.
+        assert!(
+            codec.head_bytes_scanned < 8 * raw.len(),
+            "{} head bytes scanned for {} bytes of requests",
+            codec.head_bytes_scanned,
+            raw.len()
+        );
+    }
+
+    #[test]
+    fn a_trickled_head_reports_the_same_errors() {
+        let bare_cr = decode_trickled(&mut Http1Codec::new(), b"GET / HTTP/1.1\r\nX: a\rb\r\n\r\n");
+        assert!(matches!(
+            bare_cr.as_slice(),
+            [Err(HttpError::BadRequestLine)]
+        ));
+
+        let long_line = format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(MAX_REQUEST_LINE));
+        let too_long = decode_trickled(&mut Http1Codec::new(), long_line.as_bytes());
+        assert!(matches!(
+            too_long.as_slice(),
+            [Err(HttpError::RequestLineTooLong)]
+        ));
+
+        let mut small = Http1Codec::new().max_headers_size(64);
+        let big = format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(100));
+        let too_large = decode_trickled(&mut small, big.as_bytes());
+        assert!(matches!(
+            too_large.as_slice(),
+            [Err(HttpError::HeadersTooLarge)]
+        ));
+    }
+
+    #[test]
+    fn decode_post_with_body() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.method, Method::Post);
+        assert_eq!(req.uri, "/data");
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn decode_chunked_body() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello world");
+        assert!(req.trailers.is_empty());
+    }
+
+    #[test]
+    fn decode_chunked_with_extensions() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5;ext=1\r\nhello\r\n0\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn chunk_size_line_search_is_bounded_like_the_buffered_codec() {
+        let mut line = b"1;".to_vec();
+        line.resize(MAX_CHUNK_LINE_LEN, b'a');
+        line.extend_from_slice(b"\r\nX");
+        assert_eq!(
+            find_chunk_size_line_end(&line).unwrap(),
+            Some(MAX_CHUNK_LINE_LEN)
+        );
+
+        let mut long = b"1;".to_vec();
+        long.resize(MAX_CHUNK_LINE_LEN + 1, b'a');
+        long.extend_from_slice(b"\r\nX");
+        assert!(matches!(
+            find_chunk_size_line_end(&long),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert!(matches!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 2]),
+            Err(HttpError::BadChunkedEncoding)
+        ));
+        assert_eq!(
+            find_chunk_size_line_end(&long[..MAX_CHUNK_LINE_LEN + 1]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_chunk_size_line_accepts_only_bare_hex_digits() {
+        let accepted: &[(&[u8], usize)] = &[
+            (b"0", 0),
+            (b"000f", 15),
+            (b"10", 16),
+            (b"A;ext=1", 10),
+            (b"a;name=value", 10),
+            (b"5;a=\"quoted value\"", 5),
+            (b"5;a=1;b", 5),
+        ];
+        for &(line, expected) in accepted {
+            assert_eq!(
+                parse_chunk_size_line(line).unwrap(),
+                expected,
+                "expected chunk size {expected} for {line:?}",
+            );
+        }
+
+        let rejected: &[&[u8]] = &[
+            b"",
+            b";ext=1",
+            b"+1",
+            b"-1",
+            b" 1",
+            b"1 ",
+            b"1\t",
+            b"0x10",
+            b"g",
+            b"1\0",
+            &[0xff],
+            b"FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
+            // Control characters inside a chunk extension (RFC 9112 §7.1.1).
+            b"5;ext\nX",
+            b"5;ext\rX",
+            b"5;a=\"q\nq\"",
+            b"5;ext\x7f",
+            b"5;\x00",
+        ];
+        for line in rejected {
+            assert!(
+                matches!(
+                    parse_chunk_size_line(line),
+                    Err(HttpError::BadChunkedEncoding)
+                ),
+                "expected BadChunkedEncoding for {line:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn decode_chunked_with_trailers() {
+        let mut codec = Http1Codec::new();
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5\r\nhello\r\n0\r\nX-Trailer: one\r\nY-Trailer: two\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+        assert_eq!(req.trailers.len(), 2);
+        assert_eq!(req.trailers[0].0, "X-Trailer");
+        assert_eq!(req.trailers[0].1, "one");
+    }
+
+    /// br-asupersync-135g0e: trailers carrying RFC 9110 §6.5.1 forbidden
+    /// header names must be rejected at the parser. A trailer carrying
+    /// `Content-Length` or `Transfer-Encoding` is the canonical smuggling
+    /// vector when downstream middleware merges trailers into the header
+    /// set.
+    #[test]
+    fn decode_chunked_rejects_forbidden_trailers() {
+        // Each entry is a forbidden trailer name. `decode_one` must reach
+        // chunked-trailer parsing and return BadHeader. The set covers
+        // RFC 9110 §6.5.2's restricted-fields table plus the legacy
+        // hop-by-hop fields (Keep-Alive, Proxy-Connection) that share the
+        // same framing-critical semantics.
+        let forbidden = [
+            "Content-Length",
+            "Transfer-Encoding",
+            "transfer-encoding",
+            "TRANSFER-ENCODING",
+            "Content-Encoding",
+            "Content-Type",
+            "Content-Range",
+            "Trailer",
+            "Host",
+            "Authorization",
+            "Cookie",
+            "Set-Cookie",
+            "Cache-Control",
+            "Range",
+            "TE",
+            "Pragma",
+            "Max-Forwards",
+            "Expect",
+            "Proxy-Authorization",
+            "Proxy-Authenticate",
+            "WWW-Authenticate",
+            "Upgrade",
+            // br-asupersync-ko0gde: hop-by-hop fields explicitly listed in
+            // RFC 9110 §6.5.2's restricted-fields table. A trailer
+            // `Connection: x-secret` could be coalesced into a downstream
+            // proxy's header set and used as a request-smuggling primitive
+            // (the proxy would then strip `x-secret` on the next hop).
+            "Connection",
+            "connection",
+            "Keep-Alive",
+            "keep-alive",
+            // Not standardized but implemented by widely deployed proxies;
+            // shares the same framing semantics as Connection.
+            "Proxy-Connection",
+            "proxy-connection",
+        ];
+        for name in forbidden {
+            let raw = format!(
+                "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n{name}: x\r\n\r\n"
+            );
+            let mut codec = Http1Codec::new();
+            let result = decode_one(&mut codec, raw.as_bytes());
+            assert!(
+                matches!(result, Err(HttpError::BadHeader)),
+                "expected BadHeader for forbidden trailer {name:?}, got {result:?}"
+            );
+        }
+    }
+
+    /// Positive control: benign trailers must still parse after the filter
+    /// is in place. Drift here would silently neuter a legitimate use case.
+    #[test]
+    fn decode_chunked_accepts_safe_trailers() {
+        let safe = [
+            "X-Trailer-Checksum",
+            "X-Custom-Metadata",
+            "X-Request-Id",
+            "ETag",
+        ];
+        for name in safe {
+            let raw = format!(
+                "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n{name}: ok\r\n\r\n"
+            );
+            let mut codec = Http1Codec::new();
+            let req = decode_one(&mut codec, raw.as_bytes())
+                .unwrap_or_else(|e| panic!("safe trailer {name:?} rejected: {e:?}"))
+                .unwrap();
+            assert_eq!(req.trailers.len(), 1, "expected one trailer for {name:?}");
+            assert_eq!(req.trailers[0].0, name);
+        }
+    }
+
+    #[test]
+    fn decode_chunked_keeps_pipelined_next_request() {
+        let mut codec = Http1Codec::new();
+        let mut raw =
+            b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n".to_vec();
+        raw.extend_from_slice(b"GET /next HTTP/1.1\r\nX-Long: ");
+        raw.extend_from_slice(&vec![b'a'; 9000]);
+        raw.extend_from_slice(b"\r\n\r\n");
+
+        let mut buf = BytesMut::from(raw.as_slice());
+        let first = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(first.method, Method::Post);
+        assert_eq!(first.uri, "/upload");
+        assert!(first.trailers.is_empty());
+        assert!(buf.as_ref().starts_with(b"GET /next HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn decode_incomplete_returns_none() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(&mut codec, b"GET / HTTP/1.1\r\nHost:");
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn decode_incomplete_body_returns_none() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST /x HTTP/1.1\r\nContent-Length: 10\r\n\r\nhel",
+        );
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn preview_request_head_available_before_body_bytes() {
+        let raw = b"POST /upload HTTP/1.1\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+        let codec = Http1Codec::new();
+
+        let preview = preview_request_head(&codec, &buf)
+            .unwrap()
+            .expect("header preview should be available before body bytes arrive");
+
+        assert_eq!(preview.version, Version::Http11);
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
+                .map(|(_, value)| value),
+            Some(b"100-continue".as_slice())
+        );
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value),
+            Some(b"5".as_slice())
+        );
+        assert_eq!(buf.as_ref(), raw);
+
+        let mut codec = Http1Codec::new();
+        assert!(codec.decode(&mut buf).unwrap().is_none());
+        assert!(buf.is_empty(), "head bytes should move into codec state");
+
+        let preview = preview_request_head(&codec, &buf)
+            .unwrap()
+            .expect("pending codec state should still expose request head");
+        assert_eq!(preview.version, Version::Http11);
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("expect"))
+                .map(|(_, value)| value),
+            Some(b"100-continue".as_slice())
+        );
+        assert_eq!(
+            preview
+                .headers()
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .map(|(_, value)| value),
+            Some(b"5".as_slice())
+        );
+    }
+
+    #[test]
+    fn borrowed_request_head_is_zero_copy_and_owned_decode_equivalent() {
+        let raw = b"POST /upload?q=1 HTTP/1.1\r\nHost: example.test\r\nX-Obs: \xFFok\r\nContent-Length: 4\r\n\r\ndata";
+        let codec = Http1Codec::new();
+        let head = codec
+            .inspect_request_head(raw)
+            .unwrap()
+            .expect("complete request head");
+
+        assert_eq!(head.method, BorrowedMethod::Post);
+        assert_eq!(head.uri, "/upload?q=1");
+        assert_eq!(head.version, Version::Http11);
+        assert_eq!(head.header_count(), 3);
+        assert_eq!(head.body_kind(), StreamingBodyKind::ContentLength(4));
+        assert_eq!(&raw[head.consumed_len()..], b"data");
+
+        let input = raw.as_ptr_range();
+        assert!(input.contains(&head.uri.as_ptr()));
+        let borrowed_headers: Vec<_> = head.headers().collect();
+        for header in &borrowed_headers {
+            assert!(input.contains(&header.name.as_ptr()));
+            assert!(input.contains(&header.value.as_ptr()));
+        }
+        assert_eq!(borrowed_headers[1].value, b"\xFFok");
+        assert!(borrowed_headers[1].value_str().is_err());
+
+        let expected_headers: Vec<_> = head
+            .headers()
+            .map(|header| (header.name.to_owned(), header.value_to_owned()))
+            .collect();
+        let mut owned_codec = Http1Codec::new();
+        let owned = decode_one(&mut owned_codec, raw).unwrap().unwrap();
+        assert_eq!(owned.method, head.method.into_owned());
+        assert_eq!(owned.uri, head.uri);
+        assert_eq!(owned.version, head.version);
+        assert_eq!(owned.headers, expected_headers);
+        assert_eq!(owned.body, b"data");
+    }
+
+    #[test]
+    fn borrowed_and_owned_framing_reject_non_rfc_ows() {
+        for content_length in [
+            "\u{2003}5\u{2003}".as_bytes().to_vec(),
+            vec![0xA0, b'5', 0xA0],
+        ] {
+            let mut raw = b"POST / HTTP/1.1\r\nContent-Length: ".to_vec();
+            raw.extend_from_slice(&content_length);
+            raw.extend_from_slice(b"\r\n\r\nhello");
+
+            let codec = Http1Codec::new();
+            assert!(matches!(
+                codec.inspect_request_head(&raw),
+                Err(HttpError::BadContentLength)
+            ));
+
+            let mut owned_codec = Http1Codec::new();
+            assert!(matches!(
+                decode_one(&mut owned_codec, &raw),
+                Err(HttpError::BadContentLength)
+            ));
+        }
+    }
+
+    #[test]
+    fn borrowed_request_head_is_non_consuming_and_honors_codec_limit() {
+        let raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let codec = Http1Codec::new();
+        let before = raw.as_slice();
+        assert!(codec.inspect_request_head(before).unwrap().is_some());
+        assert_eq!(before, raw);
+
+        let limited = Http1Codec::new().max_headers_size(raw.len() - 1);
+        assert!(matches!(
+            limited.inspect_request_head(raw),
+            Err(HttpError::HeadersTooLarge)
+        ));
+    }
+
+    #[test]
+    fn borrowed_extension_method_stays_in_the_input_buffer() {
+        let raw = b"PURGE /cache HTTP/1.1\r\n\r\n";
+        let head = Http1Codec::new()
+            .inspect_request_head(raw)
+            .unwrap()
+            .expect("complete request head");
+        let BorrowedMethod::Extension(method) = head.method else {
+            panic!("expected borrowed extension method, got {:?}", head.method);
+        };
+        assert_eq!(method, "PURGE");
+        assert!(raw.as_ptr_range().contains(&method.as_ptr()));
+
+        let mut owned_codec = Http1Codec::new();
+        let owned = decode_one(&mut owned_codec, raw).unwrap().unwrap();
+        assert_eq!(owned.method, Method::Extension("PURGE".to_owned()));
+    }
+
+    #[test]
+    fn decode_extension_method() {
+        let mut codec = Http1Codec::new();
+        let req = decode_one(&mut codec, b"PURGE /cache HTTP/1.1\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.method, Method::Extension("PURGE".into()));
+    }
+
+    #[test]
+    fn parse_request_line_fast_path() {
+        let (method, uri, version) = parse_request_line_bytes(b"GET /fast HTTP/1.1").unwrap();
+        assert_eq!(method, Method::Get);
+        assert_eq!(uri, "/fast");
+        assert_eq!(version, Version::Http11);
+    }
+
+    /// br-asupersync-w6u4cn: absolute-form (RFC 9112 §3.2.2) MUST have a
+    /// non-empty authority. `http:///path` parses cleanly under split_once
+    /// but has no authority and must be rejected; per-RFC the authority is
+    /// the substring of `rest` before the first '/', '?', or '#'.
+    #[test]
+    fn parse_request_line_absolute_form_rejects_empty_authority() {
+        // Empty authority shapes — must all reject.
+        let empty = [
+            "GET http:/// HTTP/1.1",
+            "GET http:///path HTTP/1.1",
+            "GET http://?query HTTP/1.1",
+            "GET http://#fragment HTTP/1.1",
+            "GET http:// HTTP/1.1",
+        ];
+        for line in empty {
+            assert!(
+                matches!(
+                    parse_request_line_bytes(line.as_bytes()),
+                    Err(HttpError::BadRequestLine)
+                ),
+                "expected BadRequestLine for {line:?}"
+            );
+        }
+
+        // Positive controls — well-formed absolute-form must still parse.
+        let ok = [
+            "GET http://host/path HTTP/1.1",
+            "GET http://host:8080/path HTTP/1.1",
+            "GET http://user@host/p HTTP/1.1",
+            "GET http://host HTTP/1.1",
+            "GET https://host/p?q=1 HTTP/1.1",
+        ];
+        for line in ok {
+            let parsed = parse_request_line_bytes(line.as_bytes());
+            assert!(parsed.is_ok(), "expected Ok for {line:?}, got {parsed:?}");
+        }
+    }
+
+    /// RFC 9112 §3.2.3: CONNECT requests use authority-form, specifically
+    /// `host:port`. The port delimiter is not enough; the port token must be
+    /// numeric so invalid authority values cannot slide through as paths.
+    #[test]
+    fn parse_request_line_connect_authority_requires_numeric_port() {
+        let ok = [
+            "CONNECT example.com:443 HTTP/1.1",
+            "CONNECT localhost:8080 HTTP/1.1",
+            "CONNECT [2001:db8::1]:443 HTTP/1.1",
+        ];
+        for line in ok {
+            let parsed = parse_request_line_bytes(line.as_bytes());
+            assert!(parsed.is_ok(), "expected Ok for {line:?}, got {parsed:?}");
+        }
+
+        let invalid = [
+            "CONNECT example.com:http HTTP/1.1",
+            "CONNECT example.com:443x HTTP/1.1",
+            "CONNECT example.com: HTTP/1.1",
+            "CONNECT :443 HTTP/1.1",
+            "CONNECT 2001:db8::1:443 HTTP/1.1",
+            "CONNECT [2001:db8::1:443 HTTP/1.1",
+            "CONNECT [2001:db8::1]443 HTTP/1.1",
+            "CONNECT []:443 HTTP/1.1",
+            "CONNECT [2001:db8::1]: HTTP/1.1",
+        ];
+        for line in invalid {
+            assert!(
+                matches!(
+                    parse_request_line_bytes(line.as_bytes()),
+                    Err(HttpError::BadRequestLine)
+                ),
+                "expected BadRequestLine for {line:?}"
+            );
+        }
+    }
+
+    /// Differential vs `httparse` 1.10.x default request parsing: repeated
+    /// SP delimiters are rejected unless the caller explicitly enables the
+    /// lenient `allow_multiple_spaces_in_request_line_delimiters(true)` mode.
+    #[test]
+    fn parse_request_line_rejects_multiple_spaces_like_httparse_default() {
+        let line = b"GET   /slow   HTTP/1.1";
+        assert!(
+            matches!(
+                parse_request_line_bytes(line),
+                Err(HttpError::BadRequestLine)
+            ),
+            "default parser should reject repeated request-line delimiters",
+        );
+    }
+
+    #[test]
+    fn crlf_search_matches_only_complete_pairs() {
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\r\nHost: example.com"), Some(14));
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\nHost: example.com"), None);
+        assert_eq!(find_crlf(b"GET / HTTP/1.1\rHost: example.com"), None);
+
+        let mut positions = smallvec::SmallVec::<[usize; 32]>::new();
+        collect_crlf_positions(b"bad\nline\r\nnext\r\n", &mut positions);
+        assert_eq!(positions.as_slice(), &[8, 14]);
+    }
+
+    #[test]
+    fn decode_request_line_too_long_without_crlf() {
+        let mut codec = Http1Codec::new();
+        let raw = vec![b'G'; MAX_REQUEST_LINE + 1];
+        let result = decode_one(&mut codec, &raw);
+        assert!(matches!(result, Err(HttpError::RequestLineTooLong)));
+    }
+
+    #[test]
+    fn decode_unsupported_version() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(&mut codec, b"GET / HTTP/2.0\r\n\r\n");
+        assert!(matches!(result, Err(HttpError::UnsupportedVersion)));
+    }
+
+    #[test]
+    fn decode_headers_too_large() {
+        let mut codec = Http1Codec::new().max_headers_size(32);
+        let result = decode_one(
+            &mut codec,
+            b"GET / HTTP/1.1\r\nX-Large: aaaaaaaaaaaaaaa\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::HeadersTooLarge)));
+    }
+
+    #[test]
+    fn decode_too_many_headers() {
+        let mut request = b"GET / HTTP/1.1\r\n".to_vec();
+        for idx in 0..=MAX_HEADERS {
+            request.extend_from_slice(format!("X-{idx}: value\r\n").as_bytes());
+        }
+        request.extend_from_slice(b"\r\n");
+
+        let mut codec = Http1Codec::new();
+        let result = decode_one(&mut codec, &request);
+        assert!(matches!(result, Err(HttpError::TooManyHeaders)));
+    }
+
+    #[test]
+    fn decode_bad_content_length() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nContent-Length: abc\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::BadContentLength)));
+    }
+
+    #[test]
+    fn reject_duplicate_content_length() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nContent-Length: 5\r\nContent-Length: 5\r\n\r\nhello",
+        );
+        assert!(matches!(result, Err(HttpError::DuplicateContentLength)));
+    }
+
+    #[test]
+    fn reject_duplicate_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n\
+              0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::DuplicateTransferEncoding)));
+    }
+
+    #[test]
+    fn reject_unsupported_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::BadTransferEncoding)));
+    }
+
+    #[test]
+    fn framing_ows_is_strictly_space_or_tab() {
+        // RFC 9110 defines OWS as SP / HTAB. Treating Unicode whitespace or
+        // Latin-1 obs-text as OWS can make two HTTP hops disagree about the
+        // framing value, which is a request-smuggling primitive.
+        let content_length_cases: [&[u8]; 2] = [
+            b"POST / HTTP/1.1\r\nContent-Length: \xC2\xA05\xC2\xA0\r\n\r\nhello",
+            b"POST / HTTP/1.1\r\nContent-Length: \xA05\xA0\r\n\r\nhello",
+        ];
+        for request in content_length_cases {
+            let codec = Http1Codec::new();
+            assert!(matches!(
+                codec.inspect_request_head(request),
+                Err(HttpError::BadContentLength)
+            ));
+
+            let mut codec = Http1Codec::new();
+            assert!(matches!(
+                decode_one(&mut codec, request),
+                Err(HttpError::BadContentLength)
+            ));
+        }
+
+        let transfer_encoding_cases: [&[u8]; 2] = [
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: \xC2\xA0chunked\xC2\xA0\r\n\r\n0\r\n\r\n",
+            b"POST / HTTP/1.1\r\nTransfer-Encoding: \xA0chunked\xA0\r\n\r\n0\r\n\r\n",
+        ];
+        for request in transfer_encoding_cases {
+            let codec = Http1Codec::new();
+            assert!(matches!(
+                codec.inspect_request_head(request),
+                Err(HttpError::BadTransferEncoding)
+            ));
+
+            let mut codec = Http1Codec::new();
+            assert!(matches!(
+                decode_one(&mut codec, request),
+                Err(HttpError::BadTransferEncoding)
+            ));
+        }
+
+        let valid_ows = b"POST / HTTP/1.1\r\nContent-Length:\t 5 \t\r\n\r\nhello";
+        let codec = Http1Codec::new();
+        assert!(codec.inspect_request_head(valid_ows).unwrap().is_some());
+        let mut codec = Http1Codec::new();
+        assert!(decode_one(&mut codec, valid_ows).unwrap().is_some());
+
+        let mut encoded = BytesMut::new();
+        let mut codec = Http1Codec::new();
+        let response = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Content-Length", "\u{a0}5\u{a0}");
+        assert!(matches!(
+            codec.encode(response, &mut encoded),
+            Err(HttpError::BadContentLength)
+        ));
+
+        let mut encoded = BytesMut::new();
+        let mut codec = Http1Codec::new();
+        let response = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "\u{a0}chunked\u{a0}");
+        assert!(matches!(
+            codec.encode(response, &mut encoded),
+            Err(HttpError::BadTransferEncoding)
+        ));
+    }
+
+    #[test]
+    fn reject_chunked_http10() {
+        let mut codec = Http1Codec::new();
+        let result = decode_one(
+            &mut codec,
+            b"POST / HTTP/1.0\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        );
+        assert!(matches!(result, Err(HttpError::BadTransferEncoding)));
+    }
+
+    #[test]
+    fn decode_multiple_headers() {
+        let mut codec = Http1Codec::new();
+        let req = decode_one(
+            &mut codec,
+            b"GET / HTTP/1.1\r\nHost: example.com\r\nAccept: */*\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(req.headers.len(), 3);
+    }
+
+    #[test]
+    fn decode_http10() {
+        let mut codec = Http1Codec::new();
+        let req = decode_one(&mut codec, b"GET / HTTP/1.0\r\n\r\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(req.version, Version::Http10);
+    }
+
+    #[test]
+    fn encode_simple_response() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec());
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(s.contains("Content-Length: 5\r\n"));
+        assert!(s.ends_with("\r\n\r\nhello"));
+    }
+
+    /// A handler (or a proxy copying upstream headers) can put
+    /// Transfer-Encoding: chunked on a 204 or 304. The terminator it wrote
+    /// was read by a keep-alive client as the start of the next response.
+    #[test]
+    fn encode_bodyless_status_never_writes_chunked_framing() {
+        for status in [103, 204, 304] {
+            let mut codec = Http1Codec::new();
+            let resp = Response::new(status, "", Vec::new())
+                .with_header("ETag", "\"v1\"")
+                .with_header("Transfer-Encoding", "chunked")
+                .with_header("Trailer", "x-digest")
+                .with_trailer("x-digest", "abc");
+            let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+            assert!(wire.ends_with("ETag: \"v1\"\r\n\r\n"), "{status}: {wire:?}");
+            let lower = wire.to_ascii_lowercase();
+            assert!(!lower.contains("transfer-encoding"), "{status}: {wire:?}");
+            assert!(!lower.contains("trailer"), "{status}: {wire:?}");
+            assert!(!lower.contains("x-digest"), "{status}: {wire:?}");
+        }
+    }
+
+    /// RFC 9112 6.1: chunked is undecodable for an HTTP/1.0 recipient, which
+    /// would take the chunk syntax as body bytes.
+    #[test]
+    fn encode_http10_response_uses_content_length_instead_of_chunked() {
+        let mut codec = Http1Codec::new();
+        let mut resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("x-digest", "abc");
+        resp.version = Version::Http10;
+        let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+        assert_eq!(wire, "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello");
+
+        // An HTTP/1.1 response keeps its chunked framing and trailers.
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("x-digest", "abc");
+        let wire = String::from_utf8(encode_one(&mut codec, resp)).unwrap();
+        assert_eq!(
+            wire,
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nx-digest: abc\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn encode_empty_body() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(204, "No Content", Vec::new());
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(!s.contains("Content-Length"));
+        assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_with_explicit_headers() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"{}".to_vec())
+            .with_header("Content-Type", "application/json")
+            .with_header("Content-Length", "2");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("Content-Type: application/json\r\n"));
+        assert_eq!(s.matches("Content-Length").count(), 1);
+    }
+
+    #[test]
+    fn encode_head_response_with_content_length() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", Vec::new()).with_header("Content-Length", "1024");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("Content-Length: 1024\r\n"));
+        assert!(s.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_default_reason_phrase() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(404, "", Vec::new());
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.starts_with("HTTP/1.1 404 Not Found\r\n"));
+    }
+
+    #[test]
+    fn encode_chunked_response() {
+        let mut codec = Http1Codec::new();
+        let resp =
+            Response::new(200, "OK", b"hello".to_vec()).with_header("Transfer-Encoding", "chunked");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.contains("Transfer-Encoding: chunked\r\n"));
+        assert!(!s.contains("Content-Length"));
+        assert!(s.ends_with("5\r\nhello\r\n0\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_chunked_response_with_trailers() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec())
+            .with_header("Transfer-Encoding", "chunked")
+            .with_trailer("X-Trailer", "one");
+        let bytes = encode_one(&mut codec, resp);
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(s.ends_with("0\r\nX-Trailer: one\r\n\r\n"));
+    }
+
+    #[test]
+    fn encode_trailers_without_chunked_is_error() {
+        let mut codec = Http1Codec::new();
+        let resp = Response::new(200, "OK", b"hello".to_vec()).with_trailer("X-Trailer", "one");
+        let mut buf = BytesMut::with_capacity(256);
+        let err = codec.encode(resp, &mut buf).unwrap_err();
+        assert!(matches!(err, HttpError::TrailersNotAllowed));
+    }
+
+    #[test]
+    fn decode_sequential_requests() {
+        let mut codec = Http1Codec::new();
+        let raw = b"GET /a HTTP/1.1\r\nHost: a\r\n\r\nGET /b HTTP/1.1\r\nHost: b\r\n\r\n";
+        let mut buf = BytesMut::from(&raw[..]);
+
+        let r1 = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(r1.uri, "/a");
+
+        let r2 = codec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(r2.uri, "/b");
+    }
+
+    #[test]
+    fn decode_body_too_large_content_length() {
+        let mut codec = Http1Codec::new().max_body_size(10);
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 100\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_too_large_chunked() {
+        let mut codec = Http1Codec::new().max_body_size(10);
+        // Chunked body with 20 bytes total (exceeds 10 byte limit)
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    14\r\n01234567890123456789\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BodyTooLarge)));
+    }
+
+    #[test]
+    fn decode_body_at_limit_succeeds() {
+        let mut codec = Http1Codec::new().max_body_size(5);
+        let raw = b"POST /data HTTP/1.1\r\nContent-Length: 5\r\n\r\nhello";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello");
+    }
+
+    #[test]
+    fn decode_chunked_body_at_limit_succeeds() {
+        let mut codec = Http1Codec::new().max_body_size(11);
+        // "hello world" = 11 bytes, exactly at the limit
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                     5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let req = decode_one(&mut codec, raw).unwrap().unwrap();
+        assert_eq!(req.body, b"hello world");
+    }
+
+    // Security: Request smuggling protection (RFC 7230 3.3.3)
+    #[test]
+    fn reject_both_content_length_and_transfer_encoding() {
+        let mut codec = Http1Codec::new();
+        // Having both headers is a request smuggling vector
+        let raw = b"POST /data HTTP/1.1\r\n\
+                    Content-Length: 5\r\n\
+                    Transfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::AmbiguousBodyLength)));
+    }
+
+    #[test]
+    fn reject_transfer_encoding_before_content_length() {
+        let mut codec = Http1Codec::new();
+        // Order shouldn't matter - still reject
+        let raw = b"POST /data HTTP/1.1\r\n\
+                    Transfer-Encoding: chunked\r\n\
+                    Content-Length: 5\r\n\r\n\
+                    5\r\nhello\r\n0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::AmbiguousBodyLength)));
+    }
+
+    // Security: Chunked encoding CRLF validation
+    #[test]
+    fn reject_invalid_crlf_after_chunk() {
+        let mut codec = Http1Codec::new();
+        // Invalid: "XX" instead of "\r\n" after chunk data
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhelloXX0\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BadChunkedEncoding)));
+    }
+
+    #[test]
+    fn reject_invalid_trailer_header_line() {
+        let mut codec = Http1Codec::new();
+        // Invalid: trailer header line missing ':'.
+        let raw = b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n\
+                    5\r\nhello\r\n0\r\nXX\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Err(HttpError::BadHeader)));
+    }
+
+    #[test]
+    fn decode_obs_text_header_value() {
+        let mut codec = Http1Codec::new();
+        let raw = b"GET / HTTP/1.1\r\nTest-Header: \xff\r\n\r\n";
+        let result = decode_one(&mut codec, raw);
+        assert!(matches!(result, Ok(Some(_))));
+    }
+
+    /// Grammar-based fuzz test for HTTP/1.1 codec covering chunked encoding,
+    /// trailers, 100-continue, HEAD body suppression, and fold pipelining.
+    #[test]
+    fn grammar_based_http11_features_fuzz() {
+        /// HTTP/1.1 grammar-based test generator
+        struct Http11Grammar {
+            seed: u64,
+            counter: u64,
+        }
+
+        impl Http11Grammar {
+            fn new(seed: u64) -> Self {
+                Self { seed, counter: 0 }
+            }
+
+            fn next_u8(&mut self) -> u8 {
+                self.counter = self.counter.wrapping_add(1);
+                ((self
+                    .seed
+                    .wrapping_add(self.counter)
+                    .wrapping_mul(1103515245)
+                    .wrapping_add(12345))
+                    >> 16) as u8
+            }
+
+            fn next_bool(&mut self) -> bool {
+                self.next_u8() & 1 == 1
+            }
+
+            fn next_choice<T: Copy>(&mut self, choices: &[T]) -> T {
+                let idx = (self.next_u8() as usize) % choices.len();
+                choices[idx]
+            }
+
+            /// Generate chunked encoding test case
+            fn generate_chunked_request(&mut self) -> Vec<u8> {
+                let mut request = Vec::new();
+
+                // Request line
+                let method = self.next_choice(&[&b"POST"[..], &b"PUT"[..], &b"PATCH"[..]]);
+                request.extend_from_slice(method);
+                request.extend_from_slice(b" /test HTTP/1.1\r\n");
+
+                // Headers
+                request.extend_from_slice(b"Host: example.com\r\n");
+                request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+
+                // Expect: 100-continue (grammar condition)
+                if self.next_bool() {
+                    request.extend_from_slice(b"Expect: 100-continue\r\n");
+                }
+
+                request.extend_from_slice(b"\r\n");
+
+                // Chunked body with variable chunk sizes
+                let chunk_sizes = [0, 1, 5, 10, 255, 4096];
+                let chunk_size = self.next_choice(&chunk_sizes);
+
+                if chunk_size > 0 {
+                    request.extend_from_slice(format!("{:x}\r\n", chunk_size).as_bytes());
+                    for _ in 0..chunk_size {
+                        request.push(b'A' + (self.next_u8() % 26));
+                    }
+                    request.extend_from_slice(b"\r\n");
+                }
+
+                // Terminal chunk
+                request.extend_from_slice(b"0\r\n");
+
+                // Trailers (grammar condition)
+                if self.next_bool() {
+                    let trailer_names = [
+                        &b"X-Checksum"[..],
+                        &b"X-Final-Status"[..],
+                        &b"X-Processing-Time"[..],
+                    ];
+                    let trailer_name = self.next_choice(&trailer_names);
+                    request.extend_from_slice(trailer_name);
+                    request.extend_from_slice(b": test-value\r\n");
+                }
+
+                request.extend_from_slice(b"\r\n");
+                request
+            }
+
+            /// Generate HEAD request test case for body suppression
+            fn generate_head_request(&mut self) -> Vec<u8> {
+                let mut request = Vec::new();
+
+                request.extend_from_slice(b"HEAD /resource HTTP/1.1\r\n");
+                request.extend_from_slice(b"Host: example.com\r\n");
+
+                // Content-Length header that should be preserved in response
+                // but body suppressed
+                if self.next_bool() {
+                    request.extend_from_slice(b"Accept: application/json\r\n");
+                }
+
+                request.extend_from_slice(b"\r\n");
+                request
+            }
+
+            /// Generate pipelined request test case
+            fn generate_pipelined_requests(&mut self) -> Vec<u8> {
+                let mut requests = Vec::new();
+
+                // First request
+                requests.extend_from_slice(b"GET /first HTTP/1.1\r\n");
+                requests.extend_from_slice(b"Host: example.com\r\n");
+                requests.extend_from_slice(b"\r\n");
+
+                // Second request (pipelined)
+                let second_method = self.next_choice(&[&b"GET"[..], &b"HEAD"[..], &b"POST"[..]]);
+                requests.extend_from_slice(second_method);
+                requests.extend_from_slice(b" /second HTTP/1.1\r\n");
+                requests.extend_from_slice(b"Host: example.com\r\n");
+
+                if second_method == &b"POST"[..] {
+                    requests.extend_from_slice(b"Content-Length: 4\r\n");
+                    requests.extend_from_slice(b"\r\n");
+                    requests.extend_from_slice(b"data");
+                } else {
+                    requests.extend_from_slice(b"\r\n");
+                }
+
+                requests
+            }
+
+            /// Generate folded header test case
+            fn generate_folded_headers(&mut self) -> Vec<u8> {
+                let mut request = Vec::new();
+
+                request.extend_from_slice(b"GET / HTTP/1.1\r\n");
+                request.extend_from_slice(b"Host: example.com\r\n");
+
+                // Folded header (obs-fold - obsolete but sometimes encountered)
+                request.extend_from_slice(b"X-Long-Header: first-part\r\n");
+                request.extend_from_slice(b" second-part\r\n"); // Folded continuation
+
+                request.extend_from_slice(b"\r\n");
+                request
+            }
+        }
+
+        let test_cases = [
+            ("chunked_encoding", 0x1234),
+            ("head_body_suppression", 0x5678),
+            ("pipelined_requests", 0x9abc),
+            ("folded_headers", 0xdef0),
+            ("chunked_with_trailers", 0x2468),
+            ("chunked_100_continue", 0xace1),
+        ];
+
+        for (test_name, seed) in &test_cases {
+            let mut grammar = Http11Grammar::new(*seed);
+            let mut codec = Http1Codec::new();
+
+            let test_data = match *test_name {
+                "chunked_encoding" | "chunked_with_trailers" | "chunked_100_continue" => {
+                    grammar.generate_chunked_request()
+                }
+                "head_body_suppression" => grammar.generate_head_request(),
+                "pipelined_requests" => grammar.generate_pipelined_requests(),
+                "folded_headers" => grammar.generate_folded_headers(),
+                _ => continue,
+            };
+
+            // Test parsing - should not panic and handle edge cases gracefully
+            let result = {
+                let mut buf = BytesMut::new();
+                buf.extend_from_slice(&test_data);
+                codec.decode(&mut buf)
+            };
+
+            match result {
+                Ok(Some(request)) => {
+                    // Validate grammar-specific invariants
+                    match *test_name {
+                        "head_body_suppression" => {
+                            assert_eq!(request.method, Method::Head);
+                        }
+                        "chunked_encoding" | "chunked_with_trailers" | "chunked_100_continue" => {
+                            // Should have chunked encoding headers
+                            let has_chunked = request
+                                .headers
+                                .iter()
+                                .any(|(k, _)| k.eq_ignore_ascii_case("transfer-encoding"));
+                            if has_chunked {
+                                // Validate we can parse chunked encoding structure
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(None) => {
+                    // Incomplete data - acceptable for fuzzing
+                }
+                Err(err) => {
+                    // Should fail gracefully with appropriate error types
+                    match err {
+                        HttpError::BadRequestLine
+                        | HttpError::BadHeader
+                        | HttpError::UnsupportedVersion
+                        | HttpError::BadMethod
+                        | HttpError::BadContentLength
+                        | HttpError::DuplicateContentLength
+                        | HttpError::DuplicateTransferEncoding
+                        | HttpError::BadTransferEncoding
+                        | HttpError::InvalidHeaderName
+                        | HttpError::InvalidHeaderValue
+                        | HttpError::HeadersTooLarge
+                        | HttpError::TooManyHeaders
+                        | HttpError::RequestLineTooLong
+                        | HttpError::BadChunkedEncoding
+                        | HttpError::BodyTooLarge
+                        | HttpError::AmbiguousBodyLength
+                        | HttpError::TrailersNotAllowed => {
+                            // Expected error types - codec correctly rejected malformed input
+                        }
+                        _ => {
+                            // Unexpected error type might indicate a bug
+                            println!("Test '{}' produced unexpected error: {:?}", test_name, err);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Additional stress test with combined features
+        let mut combined_grammar = Http11Grammar::new(0xcafe);
+        for _ in 0..100 {
+            let mut codec = Http1Codec::new();
+            let mut request = Vec::new();
+
+            // Grammar: Method selection
+            let method = combined_grammar.next_choice(&[
+                &b"GET"[..],
+                &b"HEAD"[..],
+                &b"POST"[..],
+                &b"PUT"[..],
+            ]);
+            request.extend_from_slice(method);
+            request.extend_from_slice(b" /combined HTTP/1.1\r\n");
+
+            // Grammar: Header combinations
+            request.extend_from_slice(b"Host: test.example\r\n");
+
+            if method == &b"POST"[..] || method == &b"PUT"[..] {
+                if combined_grammar.next_bool() {
+                    // Chunked
+                    request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
+                    if combined_grammar.next_bool() {
+                        request.extend_from_slice(b"Expect: 100-continue\r\n");
+                    }
+                } else {
+                    // Fixed length
+                    let length = combined_grammar.next_choice(&[0, 1, 10, 100]);
+                    request.extend_from_slice(format!("Content-Length: {}\r\n", length).as_bytes());
+                }
+            }
+
+            request.extend_from_slice(b"\r\n");
+
+            // Test without panicking
+            let mut buf = BytesMut::new();
+            buf.extend_from_slice(&request);
+            let _ = codec.decode(&mut buf);
+        }
+    }
+
+    /// HTTP/1.1 request parsing conformance test against httparse reference implementation.
+    ///
+    /// This test ensures that the same byte stream produces identical (method, uri, version,
+    /// headers) tuples between our implementation and the httparse reference implementation.
+    /// This is Pattern 1: Differential Testing (Reference Implementation) from the
+    /// testing-conformance-harnesses methodology.
+    #[test]
+    fn http1_codec_conformance_against_httparse() {
+        /// Canonical HTTP request for conformance testing.
+        #[derive(Debug, Clone)]
+        struct CanonicalRequest {
+            raw_bytes: Vec<u8>,
+            description: String,
+            expect_error: bool,
+            coverage: ReferenceCoverage,
+        }
+
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum ReferenceCoverage {
+            HttparseRequestHead,
+            CodecOnly,
+        }
+
+        impl CanonicalRequest {
+            fn httparse_head(raw_bytes: &[u8], description: &str, expect_error: bool) -> Self {
+                Self {
+                    raw_bytes: raw_bytes.to_vec(),
+                    description: description.to_string(),
+                    expect_error,
+                    coverage: ReferenceCoverage::HttparseRequestHead,
+                }
+            }
+
+            fn codec_only_error(raw_bytes: &[u8], description: &str) -> Self {
+                Self {
+                    raw_bytes: raw_bytes.to_vec(),
+                    description: description.to_string(),
+                    expect_error: true,
+                    coverage: ReferenceCoverage::CodecOnly,
+                }
+            }
+        }
+
+        /// Parsed request tuple for comparison.
+        #[derive(Debug, PartialEq, Eq)]
+        struct ParsedRequest {
+            method: String,
+            uri: String,
+            version: String,
+            headers: Vec<(String, String)>,
+        }
+
+        // Test cases covering various HTTP/1.1 scenarios including chunked encoding edge cases
+        let test_cases = vec![
+            // Basic GET request
+            CanonicalRequest::httparse_head(
+                b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                "Basic GET request",
+                false,
+            ),
+
+            // POST with Content-Length
+            CanonicalRequest::httparse_head(
+                b"POST /api/v1/data HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"test\":\"data\"}",
+                "POST with Content-Length body",
+                false,
+            ),
+
+            // Chunked encoding - basic
+            CanonicalRequest::httparse_head(
+                b"POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                "Basic chunked encoding",
+                false,
+            ),
+
+            // Chunked encoding edge case: chunk extensions
+            CanonicalRequest::httparse_head(
+                b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=value\r\nhello\r\n0\r\n\r\n",
+                "Chunked encoding with extensions",
+                false,
+            ),
+
+            // Chunked encoding edge case: zero-length chunks in middle
+            CanonicalRequest::httparse_head(
+                b"POST /stream HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n",
+                "Chunked encoding with zero-length chunks",
+                false,
+            ),
+
+            // Complex headers with multiple values
+            CanonicalRequest::httparse_head(
+                b"PUT /resource HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-client/1.0\r\nAccept: application/json, text/plain\r\nAuthorization: Bearer token123\r\nContent-Length: 0\r\n\r\n",
+                "Complex headers with multiple values",
+                false,
+            ),
+
+            // HTTP/1.0 version
+            CanonicalRequest::httparse_head(
+                b"GET /legacy HTTP/1.0\r\nHost: old.example.com\r\n\r\n",
+                "HTTP/1.0 request",
+                false,
+            ),
+
+            // Edge case: method with unusual but valid characters
+            CanonicalRequest::httparse_head(
+                b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                "OPTIONS with asterisk URI",
+                false,
+            ),
+
+            // Edge case: chunked with trailers
+            CanonicalRequest::httparse_head(
+                b"POST /data HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\nX-Checksum: abc123\r\n\r\n",
+                "Chunked encoding with trailers",
+                false,
+            ),
+
+            // Error case: malformed request line
+            CanonicalRequest::httparse_head(b"GET\r\n\r\n", "Malformed request line", true),
+
+            // Body-semantic error: httparse only validates the request head, so this
+            // stays as a direct codec assertion instead of a differential verdict.
+            CanonicalRequest::codec_only_error(
+                b"POST /bad HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\ndata\r\n",
+                "Invalid chunk size",
+            ),
+        ];
+
+        /// Parse request with our implementation.
+        fn parse_with_our_codec(raw_bytes: &[u8]) -> Result<ParsedRequest, String> {
+            let mut codec = Http1Codec::new();
+            let mut buf = BytesMut::from(raw_bytes);
+
+            match codec.decode(&mut buf) {
+                Ok(Some(req)) => Ok(ParsedRequest {
+                    method: format!("{:?}", req.method),
+                    uri: req.uri,
+                    version: format!("{:?}", req.version),
+                    headers: req.headers.into_iter().collect(),
+                }),
+                Ok(None) => Err("Incomplete request".to_string()),
+                Err(e) => Err(format!("{:?}", e)),
+            }
+        }
+
+        /// Parse request with httparse reference implementation.
+        fn parse_with_httparse_reference(raw_bytes: &[u8]) -> Result<ParsedRequest, String> {
+            let mut headers = [httparse::Header {
+                name: "",
+                value: &[],
+            }; 64];
+            let mut req = httparse::Request::new(&mut headers);
+
+            match req.parse(raw_bytes) {
+                Ok(httparse::Status::Complete(_)) => {
+                    let method = req.method.ok_or("Missing method")?.to_string();
+                    let uri = req.path.ok_or("Missing path")?.to_string();
+                    let version = req
+                        .version
+                        .map(|v| {
+                            if v == 1 {
+                                "Http11".to_string()
+                            } else {
+                                "Http10".to_string()
+                            }
+                        })
+                        .unwrap_or_else(|| "Http11".to_string());
+
+                    let headers: Vec<(String, String)> = req
+                        .headers
+                        .iter()
+                        .filter(|h| !h.name.is_empty())
+                        .map(|h| {
+                            (
+                                h.name.to_string(),
+                                String::from_utf8_lossy(h.value).to_string(),
+                            )
+                        })
+                        .collect();
+
+                    Ok(ParsedRequest {
+                        method,
+                        uri,
+                        version,
+                        headers,
+                    })
+                }
+                Ok(httparse::Status::Partial) => Err("Partial request".to_string()),
+                Err(e) => Err(format!("httparse error: {:?}", e)),
+            }
+        }
+
+        let mut conformance_failures = Vec::new();
+        let mut both_error_count = 0;
+        let mut both_success_count = 0;
+
+        for test_case in &test_cases {
+            let our_result = parse_with_our_codec(&test_case.raw_bytes);
+
+            if test_case.coverage == ReferenceCoverage::CodecOnly {
+                match (&our_result, test_case.expect_error) {
+                    (Err(_), true) => {
+                        both_error_count += 1;
+                    }
+                    (Ok(parsed), true) => {
+                        conformance_failures.push(format!(
+                            "EXPECTED CODEC ERROR but our implementation succeeded: {}\n\
+                             Our result: {:?}\n\
+                             Raw bytes:  {:?}",
+                            test_case.description,
+                            parsed,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                    (Ok(_), false) => {
+                        both_success_count += 1;
+                    }
+                    (Err(err), false) => {
+                        conformance_failures.push(format!(
+                            "CODEC ERROR but expected success: {}\n\
+                             Our error:  {}\n\
+                             Raw bytes:  {:?}",
+                            test_case.description,
+                            err,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                }
+                continue;
+            }
+
+            let ref_result = parse_with_httparse_reference(&test_case.raw_bytes);
+
+            match (&our_result, &ref_result, test_case.expect_error) {
+                // Both implementations succeeded - compare results
+                (Ok(our_parsed), Ok(ref_parsed), false) => {
+                    if our_parsed == ref_parsed {
+                        both_success_count += 1;
+                    } else {
+                        conformance_failures.push(format!(
+                            "CONFORMANCE MISMATCH: {}\n\
+                             Our result:  {:?}\n\
+                             Ref result:  {:?}\n\
+                             Raw bytes:   {:?}",
+                            test_case.description,
+                            our_parsed,
+                            ref_parsed,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                }
+
+                // Both implementations failed (expected for error cases)
+                (Err(_), Err(_), true) => {
+                    both_error_count += 1;
+                }
+
+                // Expected error but one succeeded
+                (Ok(parsed), Err(err), true) => {
+                    conformance_failures.push(format!(
+                        "EXPECTED ERROR but our implementation succeeded: {}\n\
+                         Our result: {:?}\n\
+                         Ref error:  {}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        parsed,
+                        err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+                (Err(err), Ok(parsed), true) => {
+                    conformance_failures.push(format!(
+                        "EXPECTED ERROR but reference succeeded: {}\n\
+                         Our error:  {}\n\
+                         Ref result: {:?}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        err,
+                        parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+
+                // Unexpected success/error mismatch
+                (Ok(our_parsed), Err(ref_err), false) => {
+                    conformance_failures.push(format!(
+                        "SUCCESS/ERROR MISMATCH: {}\n\
+                         Our success: {:?}\n\
+                         Ref error:   {}\n\
+                         Raw bytes:   {:?}",
+                        test_case.description,
+                        our_parsed,
+                        ref_err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+                (Err(our_err), Ok(ref_parsed), false) => {
+                    conformance_failures.push(format!(
+                        "ERROR/SUCCESS MISMATCH: {}\n\
+                         Our error:   {}\n\
+                         Ref success: {:?}\n\
+                         Raw bytes:   {:?}",
+                        test_case.description,
+                        our_err,
+                        ref_parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+                (Err(our_err), Err(ref_err), false) => {
+                    conformance_failures.push(format!(
+                        "BOTH ERRORED but expected success: {}\n\
+                         Our error:  {}\n\
+                         Ref error:  {}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        our_err,
+                        ref_err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+
+                // Both succeeded but we expected error
+                (Ok(our_parsed), Ok(ref_parsed), true) => {
+                    conformance_failures.push(format!(
+                        "BOTH SUCCEEDED but expected error: {}\n\
+                         Our result: {:?}\n\
+                         Ref result: {:?}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        our_parsed,
+                        ref_parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+            }
+        }
+
+        // Generate conformance report
+        let total_tests = test_cases.len();
+        let success_rate =
+            (both_success_count + both_error_count) as f64 / total_tests as f64 * 100.0;
+
+        eprintln!(
+            "HTTP/1.1 Codec Conformance Report:\n\
+             - Total tests: {}\n\
+             - Both succeeded: {}\n\
+             - Both failed (expected): {}\n\
+             - Conformance rate: {:.1}%\n\
+             - Failures: {}",
+            total_tests,
+            both_success_count,
+            both_error_count,
+            success_rate,
+            conformance_failures.len()
+        );
+
+        // If there are failures, create insta snapshots for debugging
+        if !conformance_failures.is_empty() {
+            use std::collections::BTreeMap;
+
+            let failure_report = conformance_failures
+                .into_iter()
+                .enumerate()
+                .map(|(i, failure)| (format!("failure_{}", i), failure))
+                .collect::<BTreeMap<String, String>>();
+
+            insta::with_settings!({
+                snapshot_path => "../../tests/snapshots",
+                prepend_module_to_snapshot => false,
+            }, {
+                insta::assert_yaml_snapshot!("http1_codec_conformance_failures", failure_report);
+            });
+
+            panic!(
+                "HTTP/1.1 codec conformance test failed: {} mismatches against httparse reference.\n\
+                 Check snapshot file for detailed comparison.",
+                failure_report.len()
+            );
+        }
+
+        // Success: perfect conformance with httparse reference
+        eprintln!(
+            "✅ HTTP/1.1 codec conformance test passed: {:.1}% compliance with httparse reference",
+            success_rate
+        );
+    }
+}

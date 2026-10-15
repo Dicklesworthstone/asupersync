@@ -1,0 +1,313 @@
+{
+  "schema_version": "raptorq-h3-post-closure-opportunity-backlog-v1",
+  "artifact_id": "raptorq_post_closure_opportunity_backlog_v1",
+  "track_bead_id": "asupersync-387as",
+  "parent_track_bead_id": "asupersync-p8o9m",
+  "external_ref": "bd-3gmf5",
+  "generated_at_utc": "2026-04-13T08:39:14Z",
+  "command_policy": {
+    "cargo_heavy_commands_must_use_rch": true,
+    "required_prefix": "rch exec --"
+  },
+  "scoring_model": {
+    "score_range": [
+      0,
+      100
+    ],
+    "composite_formula": "round(0.6 * expected_value_score + 0.4 * strategic_fit_score)",
+    "tie_breaker": "higher strategic_fit_score, then lexicographic opportunity_id"
+  },
+  "evidence_baseline": [
+    "artifacts/raptorq_optimization_decision_records_v1.json",
+    "artifacts/raptorq_controlled_rollout_policy_v1.json",
+    "artifacts/raptorq_expected_loss_decision_contract_v1.json",
+    "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+    "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+    "artifacts/raptorq_track_f_factor_cache_p95p99_v3.json",
+    "artifacts/raptorq_track_f_wavefront_pipeline_v1.json"
+  ],
+  "entry_criteria": {
+    "must_reference_gating_evidence": true,
+    "must_include_dependency_anchors": true,
+    "must_include_unit_test_expectations": true,
+    "must_include_deterministic_e2e_expectations": true,
+    "must_include_structured_logging_expectations": true,
+    "must_include_user_benefit_hypothesis": true,
+    "must_include_measurable_success_metrics": true
+  },
+  "opportunities": [
+    {
+      "opportunity_id": "RQ-H3-001",
+      "title": "Expand GF256 profile packs to AVX-512 and SVE2 classes",
+      "status": "proposed",
+      "theme": "throughput",
+      "expected_value_score": 93,
+      "strategic_fit_score": 86,
+      "composite_score": 90,
+      "dependency_anchors": {
+        "bead_prerequisites": [
+          "asupersync-36m6p",
+          "asupersync-2ncba"
+        ],
+        "artifact_prerequisites": [
+          "artifacts/raptorq_track_e_gf256_p95p99_highconf_v1.json",
+          "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v5.json",
+          "artifacts/raptorq_optimization_decision_records_v1.json"
+        ]
+      },
+      "risk": {
+        "class": "high",
+        "rationale": "ISA-specific kernels raise implementation and validation complexity."
+      },
+      "user_benefit_hypothesis": "Large deployments on modern CPUs gain materially lower encode/decode cost per object.",
+      "success_metrics": [
+        {
+          "metric": "decode_throughput_gib_s",
+          "target": ">= 1.20x versus current auto profile on AVX-512/SVE2 hosts",
+          "window": "k in [32, 256], symbol_size in [1024, 16384]"
+        },
+        {
+          "metric": "correctness_regressions",
+          "target": "0 mismatches versus scalar conservative comparator",
+          "window": "deterministic corpus + replay catalog"
+        }
+      ],
+      "unit_test_expectations": [
+        "Profile-pack catalog includes AVX-512/SVE2 entries with deterministic fallback behavior.",
+        "Dual-policy decision matrix remains symmetric and deterministic for lane swaps.",
+        "Bit-exact parity tests pass for mul/addmul fused and sequential paths."
+      ],
+      "deterministic_e2e_expectations": [
+        "Replay-catalog driven decode campaign across profile classes must be reproducible by fixed seed.",
+        "Canary rollback rehearsal from AVX-512/SVE2 back to scalar-conservative-v1 must pass without data mismatch."
+      ],
+      "structured_logging_expectations": [
+        "Emit selected profile id, architecture class, rejected candidates, and fallback reason.",
+        "Emit replay pointer and command bundle for every benchmark and decode verdict."
+      ],
+      "starter_repro_commands": [
+        "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark -- gf256_primitives --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2",
+        "rch exec -- cargo test --test raptorq_perf_invariants g3_decision -- --nocapture"
+      ]
+    },
+    {
+      "opportunity_id": "RQ-H3-002",
+      "title": "Scale wavefront decode for large-k with memory-aware batching",
+      "status": "proposed",
+      "theme": "latency",
+      "expected_value_score": 90,
+      "strategic_fit_score": 88,
+      "composite_score": 89,
+      "dependency_anchors": {
+        "bead_prerequisites": [
+          "asupersync-2zu9p",
+          "asupersync-j96j4"
+        ],
+        "artifact_prerequisites": [
+          "artifacts/raptorq_track_f_wavefront_pipeline_v1.json",
+          "artifacts/raptorq_optimization_decision_records_v1.json"
+        ]
+      },
+      "risk": {
+        "class": "medium",
+        "rationale": "Scheduler tuning can regress small-k paths if not gated."
+      },
+      "user_benefit_hypothesis": "Tail decode latency drops in bursty high-loss workloads at larger block sizes.",
+      "success_metrics": [
+        {
+          "metric": "decode_p99_us",
+          "target": "<= 0.80x of current wavefront baseline at k >= 128",
+          "window": "loss_fraction in [0.25, 0.60]"
+        },
+        {
+          "metric": "rollback_safety",
+          "target": "sequential fallback recovers identical source symbols in all closure scenarios",
+          "window": "batch_size set to 0 rollback rehearsals"
+        }
+      ],
+      "unit_test_expectations": [
+        "Wavefront and sequential decode outputs remain identical for deterministic fixtures.",
+        "Batch-size autotuning preserves deterministic tie-break behavior.",
+        "No invariant violations in peel/inactivation accounting."
+      ],
+      "deterministic_e2e_expectations": [
+        "High-loss replay scenarios run with fixed seeds and produce stable p95/p99 telemetry.",
+        "End-to-end decode corpus includes explicit rollback rehearsals per scenario family."
+      ],
+      "structured_logging_expectations": [
+        "Emit batch-size selection reason and memory-budget bucket.",
+        "Emit policy replay reference and dense-core dimensions per run."
+      ],
+      "starter_repro_commands": [
+        "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture",
+        "rch exec -- cargo bench --features criterion-benches --bench raptorq_benchmark -- repair_campaign --sample-size 20 --warm-up-time 0.2 --measurement-time 0.2"
+      ]
+    },
+    {
+      "opportunity_id": "RQ-H3-003",
+      "title": "Adaptive repair-budget controller driven by expected-loss contract",
+      "status": "proposed",
+      "theme": "efficiency",
+      "expected_value_score": 88,
+      "strategic_fit_score": 90,
+      "composite_score": 89,
+      "dependency_anchors": {
+        "bead_prerequisites": [
+          "asupersync-m7o6i",
+          "asupersync-324sc"
+        ],
+        "artifact_prerequisites": [
+          "artifacts/raptorq_expected_loss_decision_contract_v1.json",
+          "artifacts/raptorq_controlled_rollout_policy_v1.json"
+        ]
+      },
+      "risk": {
+        "class": "medium",
+        "rationale": "Policy feedback loops can oscillate if confidence thresholds are weak."
+      },
+      "user_benefit_hypothesis": "Repair overhead decreases in healthy regimes while preserving reliability under adverse loss.",
+      "success_metrics": [
+        {
+          "metric": "mean_repair_symbols_per_object",
+          "target": "<= 0.90x of fixed-budget baseline in healthy/degraded states",
+          "window": "mixed-loss deterministic campaign"
+        },
+        {
+          "metric": "decode_failure_rate",
+          "target": "no increase versus conservative fixed-budget baseline",
+          "window": "regression and unknown state slices"
+        }
+      ],
+      "unit_test_expectations": [
+        "Expected-loss argmin action remains deterministic under tie and low-confidence cases.",
+        "Fallback trigger overrides adaptive behavior whenever hard safety signals fire.",
+        "Budget adjustments are bounded and monotonic per policy step."
+      ],
+      "deterministic_e2e_expectations": [
+        "Decision replay bundle drives deterministic budget updates for normal/edge/conflicting scenarios.",
+        "Rollback to fixed-budget mode remains reproducible and bit-exact."
+      ],
+      "structured_logging_expectations": [
+        "Emit state posterior, expected loss terms, chosen action, and resulting repair budget.",
+        "Emit confidence/uncertainty and fallback trigger details per policy tick."
+      ],
+      "starter_repro_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_replay_bundle_is_well_formed -- --nocapture",
+        "rch exec -- cargo test --test ci_regression_gates g2_f7_burst_cache_closure_evidence_v3 -- --nocapture"
+      ]
+    },
+    {
+      "opportunity_id": "RQ-H3-004",
+      "title": "Automated replay minimizer for performance regressions",
+      "status": "proposed",
+      "theme": "operability",
+      "expected_value_score": 82,
+      "strategic_fit_score": 91,
+      "composite_score": 86,
+      "dependency_anchors": {
+        "bead_prerequisites": [
+          "asupersync-2cyx5",
+          "asupersync-vca9g"
+        ],
+        "artifact_prerequisites": [
+          "artifacts/raptorq_replay_catalog_v1.json",
+          "artifacts/raptorq_optimization_decision_records_v1.json"
+        ]
+      },
+      "risk": {
+        "class": "low",
+        "rationale": "Tooling-only change with conservative fallback to manual triage."
+      },
+      "user_benefit_hypothesis": "On-call and CI triage time shrinks via deterministic minimized replay packets.",
+      "success_metrics": [
+        {
+          "metric": "median_triage_minutes",
+          "target": "<= 0.50x of current manual replay workflow",
+          "window": "first 30 regression incidents"
+        },
+        {
+          "metric": "repro_success_rate",
+          "target": ">= 0.98 deterministic repro success on first run",
+          "window": "incident replay corpus"
+        }
+      ],
+      "unit_test_expectations": [
+        "Replay minimizer preserves failing verdict while reducing input footprint.",
+        "Minimization output is deterministic for identical seed/input.",
+        "Catalog references stay valid after minimization."
+      ],
+      "deterministic_e2e_expectations": [
+        "Regression gate can auto-emit minimized replay bundle and rerun it end-to-end.",
+        "Operator rollback checklist remains executable from minimized bundle alone."
+      ],
+      "structured_logging_expectations": [
+        "Emit original and minimized replay hashes plus size reduction percentage.",
+        "Emit preserved failure signature and final repro command."
+      ],
+      "starter_repro_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants g7_expected_loss_contract_schema_and_coverage -- --nocapture",
+        "rch exec -- cargo test --test ci_regression_gates g2_f8_wavefront_closure_evidence -- --nocapture"
+      ]
+    },
+    {
+      "opportunity_id": "RQ-H3-005",
+      "title": "Interop-focused conformance extension corpus",
+      "status": "proposed",
+      "theme": "correctness",
+      "expected_value_score": 79,
+      "strategic_fit_score": 87,
+      "composite_score": 82,
+      "dependency_anchors": {
+        "bead_prerequisites": [
+          "asupersync-2c9j7",
+          "asupersync-p8o9m"
+        ],
+        "artifact_prerequisites": [
+          "artifacts/raptorq_gap_taxonomy_v1.json",
+          "artifacts/raptorq_replay_catalog_v1.json"
+        ]
+      },
+      "risk": {
+        "class": "medium",
+        "rationale": "Cross-implementation fixture drift can add maintenance overhead."
+      },
+      "user_benefit_hypothesis": "Future interoperability regressions are detected before release and easier to diagnose.",
+      "success_metrics": [
+        {
+          "metric": "interop_fixture_coverage",
+          "target": ">= 30 deterministic corpus cases across partner implementations",
+          "window": "initial rollout quarter"
+        },
+        {
+          "metric": "silent_corruption_incidents",
+          "target": "0 undetected decode mismatches in interop CI",
+          "window": "continuous"
+        }
+      ],
+      "unit_test_expectations": [
+        "Tuple/constraint derivation parity checks against imported fixtures.",
+        "Decoder reconstruction invariants hold for all external fixtures.",
+        "Unsupported-surface failures remain explicit and reproducible."
+      ],
+      "deterministic_e2e_expectations": [
+        "Interop fixture replay runs in deterministic lab runtime with fixed seeds.",
+        "Every failing fixture emits one-command repro and artifact pointer."
+      ],
+      "structured_logging_expectations": [
+        "Emit fixture ID, implementation source, schema version, and replay reference.",
+        "Emit mismatch class taxonomy and first divergence offset."
+      ],
+      "starter_repro_commands": [
+        "rch exec -- cargo test --test raptorq_perf_invariants -- --nocapture",
+        "rch exec -- cargo test --test ci_regression_gates -- --nocapture"
+      ]
+    }
+  ],
+  "ranked_queue": [
+    "RQ-H3-001",
+    "RQ-H3-003",
+    "RQ-H3-002",
+    "RQ-H3-004",
+    "RQ-H3-005"
+  ]
+}

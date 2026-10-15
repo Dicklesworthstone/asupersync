@@ -1,0 +1,17 @@
+{
+  "name": "asupersync-webpack-consumer-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "webpack --mode=production",
+    "check:bundle": "node ./scripts/check-bundle.mjs"
+  },
+  "dependencies": {
+    "@asupersync/browser": "file:../packages/browser"
+  },
+  "devDependencies": {
+    "webpack": "^5.0.0",
+    "webpack-cli": "^5.0.0"
+  }
+}

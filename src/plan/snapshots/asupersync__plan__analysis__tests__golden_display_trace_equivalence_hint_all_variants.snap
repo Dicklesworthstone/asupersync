@@ -1,0 +1,11 @@
+---
+source: src/plan/analysis.rs
+assertion_line: 3231
+expression: rendered
+---
+Atomic: atomic
+FullyCommutative: fully-commutative
+PartiallyCommutative(2): partially-commutative(2 groups)
+PartiallyCommutative(3): partially-commutative(3 groups)
+Sequential: sequential
+Unknown: unknown

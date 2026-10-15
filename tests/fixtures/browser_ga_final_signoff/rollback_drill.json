@@ -1,0 +1,53 @@
+{
+  "schema_version": "browser-ga-rollback-drill-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.4",
+  "signoff_artifact": "artifacts/browser_ga_final_signoff_v1.json",
+  "scenarios": [
+    {
+      "scenario_id": "bad_browser_core_wasm_digest",
+      "mutation": "replace packages/browser-core/asupersync_bg.wasm with bytes whose sha256 no longer matches the signoff packet",
+      "expected_reason_code": "package_artifact_digest_mismatch",
+      "expected_action": "block_package_ga",
+      "expected_public_channel": "hold_stable_promotion",
+      "green_for_ga": false,
+      "required_operator_note": "Do not publish or promote the candidate; rebuild the package artifact set and rerun B2, B3, and B4."
+    },
+    {
+      "scenario_id": "abi_metadata_mismatch",
+      "mutation": "change packages/browser-core/abi-metadata.json without refreshing the package integrity gate",
+      "expected_reason_code": "abi_metadata_fingerprint_or_version_mismatch",
+      "expected_action": "block_package_ga",
+      "expected_public_channel": "hold_stable_promotion",
+      "green_for_ga": false,
+      "required_operator_note": "Keep the prior stable package line and rerun ABI/package integrity before any GA claim."
+    },
+    {
+      "scenario_id": "consumer_compatibility_regression",
+      "mutation": "flip a required direct-runtime consumer expected outcome from pass to fail",
+      "expected_reason_code": "required_consumer_fixture_regressed",
+      "expected_action": "demote_candidate_to_canary",
+      "expected_public_channel": "canary",
+      "green_for_ga": false,
+      "required_operator_note": "Do not cite JS/TS Browser GA for the regressed consumer until the B3 matrix is green again."
+    },
+    {
+      "scenario_id": "rust_preview_stable_overclaim",
+      "mutation": "attempt to mark rust_runtime_builder_browser_preview as stable Browser GA",
+      "expected_reason_code": "rust_browser_preview_lane_overclaimed",
+      "expected_action": "reject_rust_stable_promotion",
+      "expected_public_channel": "preview_only",
+      "green_for_ga": false,
+      "required_operator_note": "Keep RuntimeBuilder::browser() preview-only and require Rust browser fixture evidence before changing the support class."
+    }
+  ],
+  "required_fail_closed_actions": [
+    "block_package_ga",
+    "demote_candidate_to_canary",
+    "reject_rust_stable_promotion"
+  ],
+  "non_claims": [
+    "rollback drill does not execute npm publish",
+    "rollback drill does not prove broad workspace health",
+    "rollback drill does not promote Rust browser API to stable"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "agent_mail": {
+    "messages": [
+      {
+        "id": 10,
+        "from": "CopperSpring",
+        "thread_id": "asupersync-aj7lx3.11",
+        "subject": "[asupersync-aj7lx3.11] Starting redacted timeline receipt",
+        "created_ts": "2026-05-08T05:20:56Z",
+        "body_md": "Claimed asupersync-aj7lx3.11 and reserved scripts/swarm_timeline_receipt.py plus tests/swarm_timeline_receipt_contract.rs."
+      },
+      {
+        "id": 11,
+        "from": "CopperSpring",
+        "thread_id": "asupersync-aj7lx3.12",
+        "subject": "[asupersync-aj7lx3.12] Claiming touched-surface proof selector",
+        "created_ts": "2026-05-08T05:21:30Z",
+        "body_md": "Starting asupersync-aj7lx3.12. Validation will use rch exec -- cargo test -p asupersync --test touched_surface_contract."
+      },
+      {
+        "id": 12,
+        "from": "MossyJaguar",
+        "thread_id": "asupersync-vddieh",
+        "subject": "Blocker: Compilation failed due to another agent's syntax error",
+        "created_ts": "2026-05-08T05:22:00Z",
+        "body_md": "asupersync-vddieh is blocked by an unrelated syntax error in src/trace/distributed/context.rs. Validation failed before the intended snapshot assertion."
+      },
+      {
+        "id": 13,
+        "from": "TopazGoose",
+        "thread_id": "asupersync-aj7lx3.11",
+        "subject": "[asupersync-aj7lx3.11] Reservation refreshed",
+        "created_ts": "2026-05-08T05:23:00Z",
+        "body_md": "Reservation refreshed for tests/fixtures/swarm_timeline_receipt/*.json."
+      }
+    ]
+  },
+  "git": {
+    "commits": [
+      {
+        "hash": "230604c1b8d0b4f8",
+        "author": "CopperSpring",
+        "created_ts": "2026-05-08T05:40:00Z",
+        "subject": "[br-asupersync-aj7lx3.11] ship redacted timeline receipt",
+        "body": "Validation: python3 -m py_compile scripts/swarm_timeline_receipt.py passed. rch exec -- cargo test -p asupersync --test swarm_timeline_receipt_contract -- --nocapture passed 6 tests."
+      }
+    ]
+  }
+}

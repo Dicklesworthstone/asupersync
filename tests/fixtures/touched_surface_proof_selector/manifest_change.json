@@ -1,0 +1,35 @@
+{
+  "schema_version": "touched-surface-proof-selector-input-v1",
+  "touched_files": ["Cargo.toml"],
+  "lanes": [
+    {
+      "lane_id": "default-production-tokio-tree",
+      "kind": "dependency_graph",
+      "command": "rch exec -- cargo tree -e normal -p asupersync -i tokio",
+      "guarantee_ids": ["default-production-tokio-free"],
+      "source_paths": ["Cargo.toml"],
+      "covers": "default production dependency graph has no tokio edge",
+      "explicit_not_covered": "workspace and fuzz graphs",
+      "broad_frontier": false
+    },
+    {
+      "lane_id": "all-targets-check",
+      "kind": "compile_frontier",
+      "command": "rch exec -- cargo check -p asupersync --all-targets",
+      "guarantee_ids": ["all-target-compile-frontier"],
+      "source_paths": ["src/**", "tests/**"],
+      "covers": "runtime crate all-target compile frontier",
+      "explicit_not_covered": "workspace satellite crates and fuzz manifest",
+      "broad_frontier": true
+    }
+  ],
+  "selection_rules": [
+    {
+      "rule_id": "dependency-manifest",
+      "patterns": ["Cargo.toml", "Cargo.lock"],
+      "lane_ids": ["default-production-tokio-tree"],
+      "supplemental_lane_ids": ["all-targets-check"],
+      "reason": "dependency changes need production graph proof and compile frontier"
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "schema_version": "doctor-log-quality-event-stream-v1",
+  "description": "Golden event stream for logging-quality validator tests",
+  "bead_id": "asupersync-2b4jj.6.7",
+  "run_id": "run-golden-lq-001",
+  "events": [
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "execution",
+      "event_kind": "gate_complete",
+      "outcome_class": "success",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-scan-baseline",
+      "trace_id": "trace-exec-gate-complete-001",
+      "artifact_pointer": "artifacts/scan_output.json",
+      "command_provenance": "cargo test --lib scan_module -- --nocapture",
+      "fields": {
+        "gate_name": "compile_check",
+        "stage": "complete",
+        "duration_ms": "42"
+      }
+    },
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "execution",
+      "event_kind": "gate_start",
+      "outcome_class": "success",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-scan-baseline",
+      "trace_id": "trace-exec-gate-start-002",
+      "artifact_pointer": "artifacts/scan_output.json",
+      "command_provenance": "cargo test --lib scan_module -- --nocapture",
+      "fields": {
+        "gate_name": "compile_check",
+        "stage": "pre_flight"
+      }
+    },
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "integration",
+      "event_kind": "adapter_sync",
+      "outcome_class": "success",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-adapter-baseline",
+      "trace_id": "trace-integ-adapter-003",
+      "artifact_pointer": "artifacts/adapter_sync.json",
+      "command_provenance": "asupersync doctor integration-sync",
+      "fields": {
+        "adapter_name": "beads",
+        "sync_direction": "push"
+      }
+    },
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "remediation",
+      "event_kind": "fix_applied",
+      "outcome_class": "success",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-remediation-baseline",
+      "trace_id": "trace-remed-fix-004",
+      "artifact_pointer": "artifacts/remediation_log.json",
+      "command_provenance": "asupersync doctor remediate --target lock_ordering",
+      "fields": {
+        "fix_id": "lock-order-001",
+        "rollback_available": "true"
+      }
+    },
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "replay",
+      "event_kind": "replay_complete",
+      "outcome_class": "cancelled",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-replay-baseline",
+      "trace_id": "trace-replay-complete-005",
+      "artifact_pointer": "",
+      "command_provenance": "asupersync doctor replay --seed 42",
+      "fields": {
+        "seed": "42",
+        "deterministic": "true",
+        "cancel_reason": "timeout_exceeded"
+      }
+    },
+    {
+      "contract_version": "doctor-logging-v1",
+      "flow_id": "replay",
+      "event_kind": "replay_start",
+      "outcome_class": "success",
+      "run_id": "run-golden-lq-001",
+      "scenario_id": "lq-replay-baseline",
+      "trace_id": "trace-replay-start-006",
+      "artifact_pointer": "",
+      "command_provenance": "asupersync doctor replay --seed 42",
+      "fields": {
+        "seed": "42",
+        "deterministic": "true"
+      }
+    }
+  ],
+  "expected_violations": [
+    {
+      "event_index": 4,
+      "rule_id": "LQ-ENV-07",
+      "field": "artifact_pointer",
+      "severity": "warning",
+      "suppressed_by": "SUP-001"
+    },
+    {
+      "event_index": 5,
+      "rule_id": "LQ-ENV-07",
+      "field": "artifact_pointer",
+      "severity": "warning",
+      "suppressed_by": "SUP-001"
+    }
+  ],
+  "expected_quality_score": 100,
+  "expected_quality_gate": "pass"
+}

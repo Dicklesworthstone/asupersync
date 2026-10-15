@@ -1,0 +1,262 @@
+---
+source: src/runtime/scheduler/three_lane.rs
+assertion_line: 13984
+expression: scheduler_decision_trace_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
+---
+{
+  "dispatch_counts": {
+    "cancel": 2,
+    "ready": 2,
+    "timed": 3
+  },
+  "dispatch_trace": [
+    "TaskId(8800:1)",
+    "TaskId(8800:3)",
+    "TaskId(8800:2)",
+    "TaskId(8801:2)",
+    "TaskId(8801:1)",
+    "TaskId(8802:2)",
+    "TaskId(8802:1)"
+  ],
+  "seed": "0xC0DECAFEBEEF0191",
+  "steps": [
+    {
+      "dispatch_task": "TaskId(8800:1)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 1
+      },
+      "step": 0
+    },
+    {
+      "dispatch_task": "TaskId(8800:3)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 2
+      },
+      "step": 1
+    },
+    {
+      "dispatch_task": "TaskId(8800:2)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 3
+      },
+      "step": 2
+    },
+    {
+      "dispatch_task": "TaskId(8801:2)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 4
+      },
+      "step": 3
+    },
+    {
+      "dispatch_task": "TaskId(8801:1)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 5
+      },
+      "step": 4
+    },
+    {
+      "dispatch_task": "TaskId(8802:2)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            2.0
+          ]
+        ],
+        "ts": 6
+      },
+      "step": 5
+    },
+    {
+      "dispatch_task": "TaskId(8802:1)",
+      "scheduler_evidence": {
+        "action": "meet_deadlines",
+        "calibration_score": 1.0,
+        "chosen_expected_loss": 0.0,
+        "component": "scheduler",
+        "expected_loss_by_action": {
+          "meet_deadlines": 0.0
+        },
+        "fallback_active": false,
+        "posterior": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "top_features": [
+          [
+            "cancel_depth",
+            0.0
+          ],
+          [
+            "timed_depth",
+            0.0
+          ],
+          [
+            "ready_depth",
+            1.0
+          ]
+        ],
+        "ts": 7
+      },
+      "step": 6
+    }
+  ]
+}

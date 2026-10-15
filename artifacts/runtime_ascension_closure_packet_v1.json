@@ -1,0 +1,310 @@
+{
+  "contract_version": "runtime-ascension-closure-packet-v1",
+  "bead_id": "asupersync-1508v.10.6",
+  "prep_bead_ids": [
+    "asupersync-1508v.10.6.1",
+    "asupersync-1508v.10.6.2"
+  ],
+  "parent_epic_id": "asupersync-1508v.10",
+  "runner_script": "scripts/run_runtime_ascension_closure_smoke.sh",
+  "runner_bundle_schema_version": "runtime-ascension-closure-smoke-bundle-v1",
+  "runner_report_schema_version": "runtime-ascension-closure-smoke-run-report-v1",
+  "runner_behavior": {
+    "execution_root": "project_root",
+    "caller_cwd_policy": "Runner always executes from project_root even when invoked from another caller CWD.",
+    "provenance_fields_required": [
+      "project_root",
+      "invoked_from",
+      "command",
+      "command_workdir",
+      "log_file",
+      "summary_file"
+    ]
+  },
+  "execution_state": {
+    "phase": "active_closure_execution",
+    "packet_mode": "preparatory",
+    "verdict": "no_go",
+    "remaining_blockers": []
+  },
+  "decision_snapshot": {
+    "overall_verdict": "no_go",
+    "packet_mode": "preparatory",
+    "blocking_beads": []
+  },
+  "closure_inputs": [
+    {
+      "bead_id": "asupersync-1508v.10.4",
+      "artifact_refs": [
+        "artifacts/claim_evidence_graph_v1.json"
+      ]
+    },
+    {
+      "bead_id": "asupersync-1508v.10.5",
+      "artifact_refs": [
+        "artifacts/ci_proof_gates_v1.json"
+      ]
+    },
+    {
+      "bead_id": "asupersync-1508v.10.7",
+      "artifact_refs": [
+        "artifacts/cross_track_composition_v1.json"
+      ]
+    },
+    {
+      "bead_id": "asupersync-1508v.5.6",
+      "artifact_refs": [
+        "artifacts/capability_token_model_v1.json"
+      ]
+    },
+    {
+      "bead_id": "asupersync-1508v.6.6",
+      "artifact_refs": [
+        "artifacts/replay_minimization_validation_contract_v1.json"
+      ]
+    },
+    {
+      "bead_id": "asupersync-1508v.8.6",
+      "artifact_refs": [
+        "artifacts/transport_frontier_benchmark_v1.json"
+      ]
+    }
+  ],
+  "comparative_demos": [
+    {
+      "demo_id": "DEMO-CORE-STACK",
+      "status": "staged",
+      "blockers": [],
+      "evidence_refs": [
+        "artifacts/claim_evidence_graph_v1.json",
+        "artifacts/ci_proof_gates_v1.json",
+        "artifacts/cross_track_composition_v1.json"
+      ],
+      "rerun_recipe": "Refresh claim graph, CI gate report, and supported composition evidence before doctrine review."
+    },
+    {
+      "demo_id": "DEMO-STATIC-SAFETY",
+      "status": "staged",
+      "blockers": [],
+      "evidence_refs": [
+        "tests/cap_obligation_compile_fail.rs",
+        "tests/session_type_obligations.rs",
+        "docs/integration.md"
+      ],
+      "rerun_recipe": "Re-run static safety compile-fail and session-obligation suites and refresh the continuation packet."
+    },
+    {
+      "demo_id": "DEMO-TRACE-INTELLIGENCE",
+      "status": "staged",
+      "blockers": [],
+      "evidence_refs": [
+        "artifacts/replay_minimization_validation_contract_v1.json",
+        "artifacts/runtime_workload_corpus_v1.json"
+      ],
+      "rerun_recipe": "Re-run replay minimization validation and workload-corpus checks before promoting trace intelligence."
+    },
+    {
+      "demo_id": "DEMO-TRANSPORT-OPTIN",
+      "status": "staged",
+      "blockers": [],
+      "evidence_refs": [
+        "artifacts/transport_frontier_benchmark_v1.json",
+        "artifacts/cross_track_composition_v1.json"
+      ],
+      "rerun_recipe": "Refresh transport benchmark and composition evidence while keeping AA-08 experimental-only."
+    }
+  ],
+  "surface_classification": {
+    "status_definitions": {
+      "default_ready": "Eligible for default-ready launch doctrine if evidence remains fresh and downgrade paths exist.",
+      "experimental": "Opt-in only and excluded from default-ready launch posture.",
+      "blocked": "Not promotable until closure evidence and doctrine checks are refreshed."
+    },
+    "surfaces": [
+      {
+        "surface_id": "AA-CORE-STACK",
+        "status": "default_ready"
+      },
+      {
+        "surface_id": "AA-TRANSPORT-OPTIN",
+        "status": "experimental"
+      },
+      {
+        "surface_id": "AA-CLOSURE-PACKET",
+        "status": "blocked"
+      }
+    ]
+  },
+  "evidence_registry": [
+    {
+      "scope_id": "DEMO-CORE-STACK",
+      "scope_kind": "demo",
+      "rerun_command_ids": [
+        "RACP-REFRESH-CLAIM-GRAPH",
+        "RACP-REFRESH-CI-GATES",
+        "RACP-REFRESH-COMPOSITION",
+        "RACP-REFRESH-PACKET"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "DEMO-STATIC-SAFETY",
+      "scope_kind": "demo",
+      "rerun_command_ids": [
+        "RACP-VERIFY-STATIC-SAFETY-COMPILE-FAIL",
+        "RACP-VERIFY-STATIC-SAFETY-SESSIONS"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "DEMO-TRACE-INTELLIGENCE",
+      "scope_kind": "demo",
+      "rerun_command_ids": [
+        "RACP-VERIFY-TRACE-INTELLIGENCE",
+        "RACP-VERIFY-WORKLOAD-CORPUS"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "DEMO-TRANSPORT-OPTIN",
+      "scope_kind": "demo",
+      "rerun_command_ids": [
+        "RACP-VERIFY-TRANSPORT-OPTIN"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "AA-CORE-STACK",
+      "scope_kind": "surface",
+      "rerun_command_ids": [
+        "RACP-REFRESH-CLAIM-GRAPH",
+        "RACP-REFRESH-CI-GATES",
+        "RACP-REFRESH-COMPOSITION",
+        "RACP-REFRESH-PACKET"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "AA-TRANSPORT-OPTIN",
+      "scope_kind": "surface",
+      "rerun_command_ids": [
+        "RACP-VERIFY-TRANSPORT-OPTIN"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    },
+    {
+      "scope_id": "AA-CLOSURE-PACKET",
+      "scope_kind": "surface",
+      "rerun_command_ids": [
+        "RACP-REFRESH-PACKET",
+        "RACP-RUN-SMOKE-BUNDLE"
+      ],
+      "blocked_by": [],
+      "missing_command_reason": ""
+    }
+  ],
+  "operator_recipes": [
+    {
+      "recipe_id": "RACP-REFRESH-CLAIM-GRAPH",
+      "description": "Refresh claim-evidence graph.",
+      "command": "cargo test --test claim_evidence_graph_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-REFRESH-CI-GATES",
+      "description": "Refresh CI proof-gates contract evidence.",
+      "command": "cargo test --test ci_proof_gates_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-REFRESH-COMPOSITION",
+      "description": "Refresh supported cross-track composition evidence.",
+      "command": "cargo test --test cross_track_composition_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-REFRESH-PACKET",
+      "description": "Refresh closure packet artifact and contract suite.",
+      "command": "cargo test --test runtime_ascension_closure_packet_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-VERIFY-STATIC-SAFETY-COMPILE-FAIL",
+      "description": "Verify compile-fail static safety coverage.",
+      "command": "cargo test --test cap_obligation_compile_fail -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-VERIFY-STATIC-SAFETY-SESSIONS",
+      "description": "Verify session-type obligations coverage.",
+      "command": "cargo test --test session_type_obligations -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-VERIFY-TRACE-INTELLIGENCE",
+      "description": "Verify replay-minimization and trace-intelligence evidence.",
+      "command": "cargo test --test replay_minimization_validation_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-VERIFY-WORKLOAD-CORPUS",
+      "description": "Verify runtime workload corpus references.",
+      "command": "cargo test --test runtime_workload_corpus_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-VERIFY-TRANSPORT-OPTIN",
+      "description": "Refresh AA-08 transport opt-in evidence without promoting launch status.",
+      "command": "cargo test --test transport_frontier_benchmark_contract -- --nocapture"
+    },
+    {
+      "recipe_id": "RACP-RUN-SMOKE-BUNDLE",
+      "description": "Run the closure packet smoke bundle.",
+      "command": "bash ./scripts/run_runtime_ascension_closure_smoke.sh --execute"
+    }
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "RACP-SMOKE-PACKET",
+      "description": "Smoke the closure packet doctrine and artifact bundle",
+      "command": "cargo test --test runtime_ascension_closure_packet_contract packet -- --nocapture"
+    }
+  ],
+  "launch_doctrine": {
+    "default_ready_rules": [
+      "Only promote supported surfaces with current evidence and explicit downgrade paths.",
+      "Never treat a staged demo as a ship signal."
+    ],
+    "experimental_opt_in_rules": [
+      "Experimental surfaces remain opt-in and excluded from default-ready posture.",
+      "Transport experiments stay behind explicit operator intent."
+    ],
+    "incident_rules": [
+      "If doctrine or evidence drifts, downgrade to the conservative baseline immediately.",
+      "Re-run the relevant recipe bundle before lifting a no-go posture."
+    ]
+  },
+  "known_risks": [
+    {
+      "risk_id": "RACP-RISK-01",
+      "summary": "Closure packet exists before refreshed comparative evidence is fully rerun.",
+      "downgrade_action": "Hold launch at no_go and rerun packet demos before any promotion."
+    },
+    {
+      "risk_id": "RACP-RISK-02",
+      "summary": "Transport evidence is closed but the AA-08 surface remains experimental-only.",
+      "downgrade_action": "Keep transport opt-in only and route traffic to the conservative runtime path."
+    }
+  ],
+  "structured_log_fields_required": [
+    "packet_id",
+    "packet_verdict",
+    "demo_id",
+    "surface_id",
+    "blocker_id",
+    "rerun_command",
+    "downgrade_action"
+  ],
+  "continuation_beads": [
+    "asupersync-1508v.10.6",
+    "asupersync-1508v.8"
+  ]
+}

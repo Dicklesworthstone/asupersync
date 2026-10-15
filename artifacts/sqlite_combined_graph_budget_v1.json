@@ -1,0 +1,360 @@
+{
+  "artifact_id": "sqlite-combined-graph-budget-v1",
+  "schema_version": 1,
+  "program_id": "asupersync-ir2uf0",
+  "phase_id": "asupersync-ym2wtv",
+  "bead_id": "asupersync-ym2wtv.1",
+  "governing_adr": "DEP-ADR-010",
+  "doc_path": "docs/sqlite_combined_graph_budget.md",
+  "measured_date_utc": "2026-07-25",
+  "policy": {
+    "purpose": "Measure the real cost of the proposed FrankenSQLite integration against the incumbent sqlite feature, under one profile, target and host, from synthesized consumers that live outside asupersync's dependency graph.",
+    "cycle_rule": "The harness must never enter the asupersync workspace. FrankenSQLite depends on asupersync, so measuring from inside would create the reverse cycle DEP-ADR-010 forbids.",
+    "native_attribution_rule": "Native code is counted only when the compiling package is reachable in the platform-filtered resolve AND build-depends on cc or cmake, with that compiler also resolved. A declared build dependency is not evidence of active compilation; that trap produced two earlier errors in this program.",
+    "no_free_capability_rule": "No capability may be described as free and no transitive eviction may be claimed without a measured row here.",
+    "blocked_rule": "An unmeasured axis is recorded BLOCKED with its reason and unblock path. A silent skip is not a green result."
+  },
+  "environment": {
+    "host_triple": "x86_64-unknown-linux-gnu",
+    "target_triple": "x86_64-unknown-linux-gnu",
+    "profile": "release",
+    "toolchain": "rustc 1.98.0-nightly (c397dae80 2026-07-02)",
+    "edge_kinds_counted": "normal and build; dev excluded",
+    "asupersync_rev": "9c2edb2ce12807ff986b035c1f0a23f2a667fca3",
+    "frankensqlite_rev": "f03ac0fddb43222b387a2c38e17702290b201dcc",
+    "reproducibility_caveat": "Both trees carried uncommitted changes when measured: asupersync 7 modified paths, FrankenSQLite 23. The revisions above therefore identify the baseline, not an exactly reproducible state. A clean-tree re-measure is required before any cutover decision cites these numbers as final."
+  },
+  "consumers": [
+    {
+      "consumer_id": "A",
+      "role": "incumbent",
+      "description": "asupersync with its current sqlite feature",
+      "manifest": "[package]\nname = \"budget-consumer-a\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nasupersync = { path = \"/data/projects/asupersync\", default-features = false, features = [\"sqlite\"] }\n\n[workspace]\n",
+      "lockfile": {
+        "sha256": "487f069734dd78b3cd58edee55465855833fe91d2156a947e23dd8023b255732",
+        "locked_packages": 199
+      },
+      "graph": {
+        "reachable_packages": 155,
+        "unique_crates": 146,
+        "build_script_packages": 27,
+        "proc_macro_packages": 10,
+        "duplicate_version_crates": {
+          "block-buffer": 2,
+          "const-oid": 2,
+          "cpufeatures": 2,
+          "crypto-common": 2,
+          "digest": 2,
+          "getrandom": 2,
+          "rand_core": 2,
+          "sha2": 2,
+          "syn": 2
+        },
+        "active_c_compilation": [
+          "libsqlite3-sys",
+          "psm",
+          "signal-hook",
+          "stacker"
+        ],
+        "asupersync_instances": [
+          "0.3.9 from path"
+        ]
+      }
+    },
+    {
+      "consumer_id": "B",
+      "role": "proposal",
+      "description": "FrankenSQLite with native and async-api",
+      "manifest": "[package]\nname = \"budget-consumer-b\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nfsqlite = { path = \"/dp/frankensqlite/crates/fsqlite\", default-features = false, features = [\"native\", \"async-api\"] }\n\n[workspace]\n",
+      "lockfile": {
+        "sha256": "9eeecb75bf4db2820ca990f80266d230201e8196a20471d960e76d5510aa58bb",
+        "locked_packages": 235
+      },
+      "graph": {
+        "reachable_packages": 191,
+        "unique_crates": 179,
+        "build_script_packages": 28,
+        "proc_macro_packages": 10,
+        "duplicate_version_crates": {
+          "block-buffer": 2,
+          "chacha20": 2,
+          "const-oid": 2,
+          "cpufeatures": 2,
+          "crypto-common": 2,
+          "digest": 2,
+          "getrandom": 2,
+          "hashbrown": 2,
+          "rand": 2,
+          "rand_core": 2,
+          "sha2": 2,
+          "syn": 2
+        },
+        "active_c_compilation": [
+          "blake3",
+          "signal-hook"
+        ],
+        "asupersync_instances": [
+          "0.3.9 from crates.io"
+        ]
+      }
+    },
+    {
+      "consumer_id": "C",
+      "role": "combined-naive",
+      "description": "Both, as a downstream user would naively write it",
+      "manifest": "[package]\nname = \"budget-consumer-c\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nasupersync = { path = \"/data/projects/asupersync\", default-features = false, features = [\"sqlite\"] }\nfsqlite = { path = \"/dp/frankensqlite/crates/fsqlite\", default-features = false, features = [\"native\", \"async-api\"] }\n\n[workspace]\n",
+      "lockfile": {
+        "sha256": "bde6f560677474985f2358f9b2dca46b1f85fece28bbb4a605a14aa701a7e19f",
+        "locked_packages": 269
+      },
+      "graph": {
+        "reachable_packages": 222,
+        "unique_crates": 194,
+        "build_script_packages": 32,
+        "proc_macro_packages": 11,
+        "duplicate_version_crates": {
+          "aead": 2,
+          "aes": 2,
+          "aes-gcm": 2,
+          "asupersync": 2,
+          "base64": 2,
+          "block-buffer": 2,
+          "chacha20": 2,
+          "chacha20poly1305": 2,
+          "cipher": 2,
+          "const-oid": 2,
+          "cpufeatures": 2,
+          "crypto-common": 2,
+          "ctr": 2,
+          "digest": 2,
+          "franken-decision": 2,
+          "franken-evidence": 2,
+          "franken-kernel": 2,
+          "getrandom": 2,
+          "ghash": 2,
+          "hashbrown": 2,
+          "inout": 2,
+          "poly1305": 2,
+          "polyval": 2,
+          "rand": 2,
+          "rand_core": 2,
+          "sha2": 2,
+          "syn": 2,
+          "universal-hash": 2
+        },
+        "active_c_compilation": [
+          "blake3",
+          "libsqlite3-sys",
+          "psm",
+          "signal-hook",
+          "stacker"
+        ],
+        "asupersync_instances": [
+          "0.3.9 from crates.io",
+          "0.3.9 from path"
+        ]
+      }
+    },
+    {
+      "consumer_id": "D",
+      "role": "combined-patched",
+      "description": "Both, with a patch unifying asupersync",
+      "manifest": "[package]\nname = \"budget-consumer-d\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[dependencies]\nasupersync = { path = \"/data/projects/asupersync\", default-features = false, features = [\"sqlite\"] }\nfsqlite = { path = \"/dp/frankensqlite/crates/fsqlite\", default-features = false, features = [\"native\", \"async-api\"] }\n\n[patch.crates-io]\nasupersync = { path = \"/data/projects/asupersync\" }\n\n[workspace]\n",
+      "lockfile": {
+        "sha256": "9024861081910897ab7f93b96b92e1195cf1dc0752632ce07efc33224397911e",
+        "locked_packages": 258
+      },
+      "graph": {
+        "reachable_packages": 211,
+        "unique_crates": 193,
+        "build_script_packages": 32,
+        "proc_macro_packages": 11,
+        "duplicate_version_crates": {
+          "aead": 2,
+          "block-buffer": 2,
+          "chacha20": 2,
+          "chacha20poly1305": 2,
+          "cipher": 2,
+          "const-oid": 2,
+          "cpufeatures": 2,
+          "crypto-common": 2,
+          "digest": 2,
+          "getrandom": 2,
+          "hashbrown": 2,
+          "inout": 2,
+          "poly1305": 2,
+          "rand": 2,
+          "rand_core": 2,
+          "sha2": 2,
+          "syn": 2,
+          "universal-hash": 2
+        },
+        "active_c_compilation": [
+          "blake3",
+          "libsqlite3-sys",
+          "psm",
+          "signal-hook",
+          "stacker"
+        ],
+        "asupersync_instances": [
+          "0.3.9 from path"
+        ]
+      }
+    }
+  ],
+  "delta_incumbent_to_proposal": {
+    "unique_crates_incumbent": 146,
+    "unique_crates_proposal": 179,
+    "net_unique_crates": 33,
+    "shared_crates": 131,
+    "incumbent_only": [
+      "ar_archive_writer",
+      "cpubits",
+      "fallible-iterator",
+      "fallible-streaming-iterator",
+      "hashlink",
+      "libsqlite3-sys",
+      "object",
+      "pkg-config",
+      "psm",
+      "recursive",
+      "recursive-proc-macro-impl",
+      "rusqlite",
+      "sqlparser",
+      "stacker",
+      "vcpkg"
+    ],
+    "proposal_only": [
+      "advisory-lock",
+      "argon2",
+      "arrayref",
+      "arrayvec",
+      "blake2",
+      "blake3",
+      "bumpalo",
+      "chrono",
+      "constant_time_eq",
+      "crc32c",
+      "crossbeam-deque",
+      "crossbeam-epoch",
+      "dashmap",
+      "fsqlite",
+      "fsqlite-ast",
+      "fsqlite-btree",
+      "fsqlite-core",
+      "fsqlite-error",
+      "fsqlite-ext-fts5",
+      "fsqlite-ext-icu",
+      "fsqlite-ext-json",
+      "fsqlite-ext-misc",
+      "fsqlite-ext-rtree",
+      "fsqlite-func",
+      "fsqlite-mvcc",
+      "fsqlite-observability",
+      "fsqlite-pager",
+      "fsqlite-parser",
+      "fsqlite-planner",
+      "fsqlite-types",
+      "fsqlite-vdbe",
+      "fsqlite-vfs",
+      "fsqlite-wal",
+      "hkdf",
+      "iana-time-zone",
+      "indexmap",
+      "io-uring",
+      "json5",
+      "lazy_static",
+      "lru",
+      "opaque-debug",
+      "password-hash",
+      "simdutf8",
+      "tracing",
+      "tracing-attributes",
+      "tracing-core",
+      "ucd-trie",
+      "xxhash-rust"
+    ],
+    "c_compilation_evicted": [
+      "libsqlite3-sys",
+      "psm",
+      "stacker"
+    ],
+    "c_compilation_added": [
+      "blake3"
+    ],
+    "c_compilation_common": [
+      "signal-hook"
+    ]
+  },
+  "blocked_measurements": [
+    {
+      "axis": "binary_size",
+      "state": "BLOCKED",
+      "reason": "The RCH hook intercepts cargo builds and refuses a project outside its canonical root (/data/projects); every worker fails preflight for such a path and RCH then refuses local fallback. The consumers must live outside the asupersync tree to satisfy the cycle rule, so the two constraints conflict.",
+      "unblock": "Run the consumers from a path under the RCH canonical root, or obtain explicit authorization for a local release build."
+    },
+    {
+      "axis": "compile_time",
+      "state": "BLOCKED",
+      "reason": "Same RCH constraint as binary_size.",
+      "unblock": "Same as binary_size. Compile time must be measured cold, per consumer, on one host."
+    }
+  ],
+  "findings": [
+    {
+      "finding_id": "GB-01",
+      "severity": "high",
+      "summary": "The proposal is a net ADDITION of dependencies, not a reduction.",
+      "detail": "Unique crates go from 146 to 179, a net +33. 131 crates are shared. This confirms the plan's own framing that this is capability relocation rather than zero dependency cost, and it now has a number."
+    },
+    {
+      "finding_id": "GB-02",
+      "severity": "high",
+      "summary": "The proposal does evict the bundled SQLite C amalgamation, which is the real win.",
+      "detail": "Active C compilation drops from four packages to two. Evicted: libsqlite3-sys (the bundled SQLite amalgamation), psm and stacker (stack probing pulled in by sqlparser's recursion helper). Added: blake3. signal-hook compiles C in both and is attributable to neither. So the native trade is three evicted against one added."
+    },
+    {
+      "finding_id": "GB-03",
+      "severity": "critical",
+      "summary": "A naive combined consumer links TWO asupersync runtimes.",
+      "detail": "Consumer C resolves asupersync twice: once from path and once from crates.io, both 0.3.9, because FrankenSQLite pins the published version. Cargo treats them as distinct packages, so a type such as Cx from one is not the same type as Cx from the other. Duplicate crates rise to 28, including the whole AEAD stack and all three FrankenSuite crates. The overlap period DEP-ADR-010 requires -- the same suite running on both engines -- is therefore impossible in one binary unless the graphs are unified."
+    },
+    {
+      "finding_id": "GB-04",
+      "severity": "medium",
+      "summary": "A patch unifies asupersync and removes ten duplicate crates, but not all skew.",
+      "detail": "Consumer D adds a patch pointing FrankenSQLite's asupersync at the local path. asupersync collapses to one instance and duplicates fall from 28 to 18. The residue is genuine version skew between the two projects' hash and crypto choices, plus syn and hashbrown. Any official integration must either pin these jointly or accept the duplication knowingly."
+    },
+    {
+      "finding_id": "GB-05",
+      "severity": "medium",
+      "summary": "io-uring has a build script but compiles no C.",
+      "detail": "It surfaced as native-suspect under a name-based heuristic and is pure Rust under the build-dependency test. Recorded because the earlier heuristic would have misreported it, which is the same declared-versus-active error the program has already made twice."
+    }
+  ],
+  "budget_threshold": {
+    "rule": "A cutover may not increase the consumer's unique-crate count unless it evicts native C compilation, and may never leave a supported consumer linking two asupersync runtimes.",
+    "incumbent_meets_threshold": true,
+    "proposal_meets_threshold": "CONDITIONAL",
+    "assessment": "The proposal fails the first clause (+33 crates) and passes the second (three C packages evicted against one added). The decisive constraint is GB-03: without a unifying patch a combined consumer is not merely expensive, it is incoherent. That is a correctness bar, not a budget bar."
+  },
+  "terminal_outcome": {
+    "decision": "DEFER",
+    "keeps": "the incumbent sqlite feature, per DEP-ADR-010",
+    "rationale": "The measured graph does not justify a transition on cost. The native eviction is real and is the strongest argument for continuing the campaign, but it is bought with 33 additional crates and, absent a unifying patch, a duplicated runtime. No transitive-eviction or free-capability claim survives this measurement.",
+    "not_a_rejection": "This defers on graph cost only. It makes no claim about FrankenSQLite's correctness, maturity or performance, and does not close the campaign."
+  },
+  "validation": {
+    "contract_test": "tests/sqlite_combined_graph_budget_contract.rs",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_sqlite_combined_graph_budget\" cargo test -p asupersync --test sqlite_combined_graph_budget_contract -- --nocapture",
+    "checks": [
+      "asupersync's own manifest and lockfile contain no FrankenSQLite edge of any kind",
+      "every consumer records a manifest, a lockfile digest and a package count",
+      "the incumbent-to-proposal delta is arithmetically consistent with the per-consumer counts",
+      "the combined-naive consumer is recorded as resolving asupersync more than once",
+      "every blocked measurement carries a reason and an unblock path",
+      "the terminal outcome is one of the allowed values and states what it keeps"
+    ],
+    "no_claim_boundary": "This artifact measures dependency-graph cost only, at one profile, target and host, from working trees that were not clean. It does not measure binary size or compile time, both recorded BLOCKED. It makes no claim about FrankenSQLite's correctness, semantic parity, maturity, performance or data compatibility, and it authorizes no cutover."
+  }
+}

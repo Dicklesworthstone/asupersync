@@ -1,0 +1,44 @@
+{
+  "schema_version": "proof-pack-warmth-planner-input-v1",
+  "operator": {
+    "agent": "MistyCat",
+    "target_dir_root": "${TMPDIR:-/tmp}"
+  },
+  "telemetry": {
+    "sampled_at": "",
+    "max_age_seconds": 900,
+    "workers": []
+  },
+  "proof_lanes": [
+    {
+      "lane_id": "module-microharness",
+      "target_dir_family": "rch_target_module_microharness_contract",
+      "command": "cargo test --test module_microharness_proof_contract",
+      "required_worker_capabilities": ["linux", "module-microharness", "rust"],
+      "estimated_cold_compile_seconds": 900,
+      "estimated_warm_compile_seconds": 120,
+      "cache_key_input": {
+        "cargo_lock_sha256": "aaf0f521d13f2db8cfc04d5a8c10d7c9a4c3f9426bcdd54841c9f4f58f08c2ac",
+        "rust_toolchain": {
+          "channel": "nightly-2026-05-28",
+          "profile": "minimal",
+          "components": ["clippy", "rustfmt"],
+          "targets": ["x86_64-unknown-linux-gnu"]
+        },
+        "target_triple": "x86_64-unknown-linux-gnu",
+        "workspace_package": "asupersync",
+        "features": ["test-internals"],
+        "proof_lane_family": "module-microharness",
+        "env": {
+          "CARGO_BUILD_JOBS": "2",
+          "RUSTFLAGS": "-C debuginfo=0"
+        },
+        "repo": {
+          "branch": "main",
+          "head_sha": "d08109030105560112e9f57796e1f476a1260486",
+          "ref_kind": "branch"
+        }
+      }
+    }
+  ]
+}

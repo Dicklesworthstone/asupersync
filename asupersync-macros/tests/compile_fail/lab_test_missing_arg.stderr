@@ -1,0 +1,7 @@
+error: lab_test expects exactly one argument: `&mut LabRuntime` or `&Cx`
+ --> tests/compile_fail/lab_test_missing_arg.rs:3:1
+  |
+3 | #[lab_test]
+  | ^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `lab_test` (in Nightly builds, run with -Z macro-backtrace for more info)

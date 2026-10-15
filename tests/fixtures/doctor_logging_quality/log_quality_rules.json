@@ -1,0 +1,145 @@
+{
+  "schema_version": "doctor-log-quality-rules-v1",
+  "description": "Logging-quality validator rules for doctor_asupersync structured events",
+  "bead_id": "asupersync-2b4jj.6.7",
+  "baseline_contract_version": "doctor-logging-v1",
+  "observability_contract_version": "doctor-observability-v1",
+  "envelope_rules": [
+    {
+      "rule_id": "LQ-ENV-01",
+      "field": "contract_version",
+      "constraint": "exact_match",
+      "expected": "doctor-logging-v1",
+      "severity": "error",
+      "description": "Contract version must be exactly doctor-logging-v1"
+    },
+    {
+      "rule_id": "LQ-ENV-02",
+      "field": "flow_id",
+      "constraint": "one_of",
+      "expected": ["execution", "replay", "remediation", "integration"],
+      "severity": "error",
+      "description": "Flow ID must be one of the four core flows"
+    },
+    {
+      "rule_id": "LQ-ENV-03",
+      "field": "outcome_class",
+      "constraint": "one_of",
+      "expected": ["cancelled", "failed", "success"],
+      "severity": "error",
+      "description": "Outcome class must be one of the three canonical outcomes"
+    },
+    {
+      "rule_id": "LQ-ENV-04",
+      "field": "run_id",
+      "constraint": "regex",
+      "expected": "^run-[a-z0-9._:/-]+$",
+      "severity": "error",
+      "description": "Run ID must match run- prefix format"
+    },
+    {
+      "rule_id": "LQ-ENV-05",
+      "field": "scenario_id",
+      "constraint": "regex",
+      "expected": "^[a-z0-9._:/-]+$",
+      "severity": "error",
+      "description": "Scenario ID must match slug format"
+    },
+    {
+      "rule_id": "LQ-ENV-06",
+      "field": "trace_id",
+      "constraint": "regex",
+      "expected": "^trace-[a-z0-9._:/-]+$",
+      "severity": "error",
+      "description": "Trace ID must match trace- prefix format"
+    },
+    {
+      "rule_id": "LQ-ENV-07",
+      "field": "artifact_pointer",
+      "constraint": "non_empty",
+      "severity": "warning",
+      "description": "Artifact pointer should be non-empty for traceability"
+    },
+    {
+      "rule_id": "LQ-ENV-08",
+      "field": "command_provenance",
+      "constraint": "non_empty",
+      "severity": "warning",
+      "description": "Command provenance should be non-empty for replay"
+    }
+  ],
+  "correlation_rules": [
+    {
+      "rule_id": "LQ-COR-01",
+      "description": "All events in a stream must share the same run_id",
+      "scope": "stream",
+      "severity": "error"
+    },
+    {
+      "rule_id": "LQ-COR-02",
+      "description": "trace_id must be unique per event within a stream",
+      "scope": "stream",
+      "severity": "error"
+    },
+    {
+      "rule_id": "LQ-COR-03",
+      "description": "Events must be ordered by (flow_id, event_kind, trace_id) lexically",
+      "scope": "stream",
+      "severity": "error"
+    }
+  ],
+  "taxonomy_rules": [
+    {
+      "rule_id": "LQ-TAX-01",
+      "description": "event_kind must be a member of the flow's event_kinds list",
+      "severity": "error"
+    },
+    {
+      "rule_id": "LQ-TAX-02",
+      "description": "Fields declared in flow required_fields must all be present",
+      "severity": "error"
+    },
+    {
+      "rule_id": "LQ-TAX-03",
+      "description": "No unknown fields outside required + optional for a flow",
+      "severity": "warning"
+    }
+  ],
+  "severity_classification": {
+    "levels": ["info", "warning", "error", "critical"],
+    "escalation_order": ["info", "warning", "error", "critical"],
+    "outcome_defaults": {
+      "success": "info",
+      "cancelled": "warning",
+      "failed": "error"
+    },
+    "conflict_escalation": "critical"
+  },
+  "suppression_policy": {
+    "description": "Rules for suppressing known-benign violations in CI",
+    "suppression_entries": [
+      {
+        "suppression_id": "SUP-001",
+        "rule_id": "LQ-ENV-07",
+        "reason": "Artifact pointer may be empty for dry-run replay events",
+        "scope": "flow_id=replay",
+        "expires": "2026-06-01"
+      }
+    ],
+    "governance": {
+      "max_suppressions": 10,
+      "review_cadence_days": 30,
+      "expiry_required": true
+    }
+  },
+  "quality_scoring": {
+    "max_score": 100,
+    "deductions": {
+      "error_violation": 10,
+      "warning_violation": 3,
+      "suppressed_violation": 0
+    },
+    "pass_threshold": 80,
+    "warn_threshold": 60
+  }
+}

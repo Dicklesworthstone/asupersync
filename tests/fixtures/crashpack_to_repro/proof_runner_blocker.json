@@ -1,0 +1,32 @@
+{
+  "artifact_id": "proof-runner-blocker-console-report-002",
+  "bead_id": "asupersync-xeh8m0.5",
+  "failure": {
+    "first_blocker": "proof console rejected unknown rch outcome class",
+    "summary": "proof-runner blocker row captured during operator report contract validation"
+  },
+  "proof_runner": {
+    "cargo_args": [
+      "cargo",
+      "test",
+      "-p",
+      "asupersync",
+      "--test",
+      "proof_console_report_contract",
+      "rejects_unknown_rch_outcome_class",
+      "--",
+      "--nocapture"
+    ],
+    "lane_id": "proof-console-report-contract"
+  },
+  "repo": {
+    "commit": "fc8b7488a",
+    "cwd": "."
+  },
+  "schema_version": "crashpack-to-repro-input-v1",
+  "source_kind": "proof_runner_blocker",
+  "touched_files": [
+    "artifacts/proof_console_report_contract_v1.json",
+    "tests/proof_console_report_contract.rs"
+  ]
+}

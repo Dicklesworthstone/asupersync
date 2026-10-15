@@ -1,0 +1,478 @@
+# Base64 capability inventory
+
+<!-- BEGIN BASE64 CAPABILITY INVENTORY -->
+
+This is the operator-readable companion to
+`artifacts/base64_capability_inventory_v1.json`. It freezes the direct and
+colliding Base64 surfaces for `CAP-BASE64-CODEC` and
+`asupersync-d24mms.10.1`. The historical authority revision remains
+`470dab2839742dc36cbb1241ff219e1c8d2f451b`; the September release review
+records current source pins and relations separately.
+
+The disposition remains **KEEP_INCUMBENT** and dependency cutover remains
+`BLOCKED_PENDING_EVIDENCE`. A1 is a static inventory: its execution state is
+`NOT_RUN_BY_A1`. It authorizes no implementation, migration, manifest edit,
+dependency removal, release claim, or downstream implementation/cutover
+closure. A1 itself may close only when this static inventory satisfies its
+exact relation acceptance criteria.
+
+The 2026-08-06 source-only refresh preserves the exact direct Rust census at
+36 paths and 166 literal tokens. It refreshes seven changed source pins, adds
+six previously omitted policy/dependency/cross-runtime pins, removes the ignored
+`fuzz/Cargo.lock` from repository-pinned authority, and records one
+behavioral inventory change: native HTTP/2 gRPC binary metadata now uses the
+same decoder for initial headers and request trailers under one post-decode
+dispatch/retention budget. That budget does not bound HPACK or header-list
+allocation. None of these static checks is an execution receipt.
+
+The 2026-09-09 release review records 40 paths, 176 literal tokens, and 132
+external expressions. PostgreSQL's six test expressions moved to
+`src/database/postgres_tests.rs`. New expressions comprise five native gRPC
+client metadata operations, one HTTP/1 WebSocket handoff decode, one retained
+H2 oracle artifact encode, and two ATP command-redaction test operations through
+the existing imported engine. The historical authority, August refresh receipt,
+KEEP disposition, and execution limits remain unchanged.
+
+## Dependency and graph boundary
+
+The root manifest selects `base64 = 0.23` with default features disabled and
+only `std` enabled. The lockfile resolves `base64 0.23.0` at checksum
+`b25655df2c3cdd83c5e5b293b88acd880332b2ddadd7c30ac43144fdc0033da9`.
+This deliberately excludes upstream's default `simd-unsafe` feature and keeps
+the safe scalar `GeneralPurpose` engine.
+
+That is an unsafe-code boundary, not a timing guarantee. The incumbent scalar
+engine explicitly makes no constant-time claim. Credential callers must retain
+that no-claim boundary unless separate evidence establishes something stronger.
+
+Four additional dependency/version boundaries are present:
+
+- The root lock also retains transitive `base64 0.22.1` through
+  `opentelemetry-proto 0.32.0`, `sqlx-core 0.9.0`, and `tonic 0.14.6`.
+- The excluded fuzz workspace selects `0.22`. Its now-tracked `Cargo.lock`
+  pins `0.22.1` under the explicit `.gitignore` exception. This is current
+  dependency provenance; it does not establish fuzz execution or parity.
+- The standalone RaptorQ differential workspace selects `0.22` but has no
+  repository lockfile, so its exact patch is not pinned.
+- The excluded, non-canonical `asupersync-wasm` scaffold requests
+  `asupersync ^0.4.11`; the current local path package is `0.4.11`. Its lock is
+  likewise ignored and absent from repository authority; a stale local snapshot records
+  `asupersync 0.3.2` and `base64 0.22.1`, but it is not evidence about a clean
+  checkout or the root production graph.
+
+`base64ct 1.8.3` is a distinct dependency and is not this replacement edge.
+Removing the direct root `base64 0.23` edge therefore would not remove every
+Base64 package from the locked root graph.
+The retained dependency marginal ledger covers 13 canonical profiles across four
+targets, for 52 cells: 12 synthesized-consumer profiles plus one full-workspace
+dev/build audit profile. Each root-edge removal cell loses exactly
+`base64@0.23.0`. Those historical ledger cells are not a fresh graph execution.
+
+## Four exact engines
+
+All engines reject whitespace, the other alphabet's divergent symbols,
+one-character tails, and non-zero trailing bits. Empty input maps to empty
+output. Padded engines require canonical padding when a tail needs padding;
+complete four-character groups need no `=`. No-pad engines reject `=` and
+accept terminal lengths modulo four of 0, 2, or 3.
+
+| Capability engine | Upstream name | Alphabet tail | Encode | Decode rule |
+| --- | --- | --- | --- | --- |
+| `B64-ENGINE-STANDARD-PAD` | `STANDARD` | `+/` | padded | canonical padding |
+| `B64-ENGINE-STANDARD-NO-PAD` | `STANDARD_NO_PAD` | `+/` | unpadded | no padding |
+| `B64-ENGINE-URL-SAFE-PAD` | `URL_SAFE` | `-_` | padded | canonical padding |
+| `B64-ENGINE-URL-SAFE-NO-PAD` | `URL_SAFE_NO_PAD` | `-_` | unpadded | no padding |
+
+Owned encode returns a newly allocated `String`. Owned decode returns a newly
+allocated `Vec<u8>` and does not publish partial output on error. No direct
+destination/slice API is used in the repository census. Encoded length is
+`4 * ceil(input_len / 3)` before terminal padding is omitted by no-pad
+engines. There is no application-level global input or allocation cap, and
+allocation failure is outside the codec's `Result` contract.
+
+The machine artifact freezes the complete RFC 4648 section 10 sequence:
+empty, `f`, `fo`, `foo`, `foob`, `fooba`, and `foobar`. Each corpus row carries
+provenance. It also records a sections 4/5 divergent-alphabet vector and
+source-reviewed strict expectations for whitespace, mixed alphabet, padding,
+length, and trailing-bit failures. The RFC vectors are independent normative
+inputs for standard padded output. The no-pad and URL-safe expectations are
+derived variants; derived rejection expectations are not a second
+implementation oracle or an execution receipt.
+
+## Error contract and version skew
+
+The root `0.23` error variants are:
+
+- `InvalidByte(usize, u8)`
+- `InvalidLength(usize)`
+- `InvalidLastSymbol { offset, symbol, symbol_value }`
+- `InvalidPadding`
+
+The `0.22` boundary represents the last-symbol variant as
+`InvalidLastSymbol(usize, u8)`. A5 and A6 must not assume debug shape or display
+text is identical across versions.
+
+No public signature exposes `base64::DecodeError`. Callers translate failures
+into owned boundaries:
+
+- signed runtime profiles append a verification refusal reason;
+- NATS uses `NatsError::InvalidAuth` with field context;
+- PostgreSQL SCRAM uses `PgError::AuthenticationFailed`, with salt and server
+  signature bounds layered over decode;
+- certificate pins use `TlsError::Certificate` and require exactly 32 decoded
+  bytes;
+- gRPC-Web uses `GrpcError::protocol`; native gRPC server initial and trailing
+  binary metadata uses `Status::invalid_argument` with the metadata key;
+- the native unary gRPC client maps final metadata/status-details decode failure
+  to `Status::internal`, after trying padded then unpadded standard engines;
+- WebSocket handshake and extraction collapse syntax and decoded-length failure
+  into `HandshakeError::InvalidKey` or a bad-request `ExtractionError`; the
+  native HTTP/1 handoff uses `HttpError::Io` with `InvalidData`;
+- browser storage key decode becomes `Option`, while value decode becomes an
+  owned `String` error;
+- ATP CLI surfaces command-context errors.
+
+Those mappings are parity requirements. They are not endorsements of the
+current wording or proof that every embedding is secure.
+
+## Complete literal census
+
+The current pinned snapshot contains 40 Rust paths and 176 literal `base64::` tokens.
+The contract rescans `src`, `tests`, `fuzz`, `examples`, `benches`, and
+`conformance`, plus the dependency-only `asupersync-wasm/src` scaffold, and
+fails on any path or per-path token-count drift.
+
+| Root | Paths | Literal tokens |
+| --- | ---: | ---: |
+| `src` | 23 | 97 |
+| `tests` | 10 | 21 |
+| `fuzz` | 7 | 58 |
+| `examples` | 0 | 0 |
+| `benches` | 0 | 0 |
+| `conformance` | 0 | 0 |
+| `asupersync-wasm/src` | 0 | 0 |
+
+Literal tokens are not dynamic call counts: imports, fully qualified calls,
+local modules, and comments produce different ratios. The independently
+classified external call-expression census is:
+
+| Class | Encode | Decode | Total |
+| --- | ---: | ---: | ---: |
+| active production | 24 | 25 | 49 |
+| tests, fixtures, fuzz, and reference workspaces | 54 | 29 | 83 |
+| all external call expressions | 78 | 54 | 132 |
+
+The exact engine split is:
+
+| Engine | Encode | Decode |
+| --- | ---: | ---: |
+| `STANDARD` | 59 | 39 |
+| `STANDARD_NO_PAD` | 5 | 7 |
+| `URL_SAFE` | 0 | 2 |
+| `URL_SAFE_NO_PAD` | 14 | 6 |
+
+### A3 per-operation checkpoint
+
+The first historical matrix tranche recorded 22 of 123 external call expressions as
+exact one-operation rows for `B64-A3-AUTH`. Each row
+pins its call/path relation, source anchor and line, engine, direction,
+production classification, compilation profile, migration group, stable
+security-role and owned-error IDs, capability IDs, consumer, and acceptance
+rule. Every recorded row has `count = 1`.
+
+| A3 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| PostgreSQL SCRAM (`CALL-009`, fixtures now `CALL-037`) | 3 / 2 | 5 / 1 | 11 |
+| NATS authentication (`CALL-017`) | 1 / 2 | 3 / 0 | 6 |
+| signed runtime profile (`CALL-024`) | 1 / 1 | 0 / 0 | 2 |
+| TLS pins (`CALL-025`) | 1 / 2 | 0 / 0 | 3 |
+| **A3 total** | **6 / 7** | **8 / 1** | **22** |
+
+The A3 registry subset contains 12 stable A3 security-role IDs and
+7 stable A3 owned-error IDs. All 22 recorded operations reference registered
+IDs, and every registered A3 role/error is used. Encode-only rows use the explicit
+infallible allocating-output boundary; decode rows name the owned runtime
+profile, NATS, PostgreSQL, TLS, or deterministic-test boundary. No row exposes
+the upstream codec error type.
+
+That first tranche was a source-only checkpoint, not a completed A1 matrix.
+The A4 checkpoint below advanced the matrix, and the A5 completion section
+records the final static relation state.
+
+### A4 per-operation checkpoint
+
+The second bounded tranche added all 33 `B64-A4-WEB-GRPC` expressions. At that
+checkpoint the machine artifact recorded 55 of 123 external call expressions,
+with 68 A5 expressions remaining.
+
+| A4 call | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| native gRPC server metadata (`CALL-012`) | 2 / 2 | 0 / 0 | 4 |
+| gRPC status snapshot (`CALL-013`) | 0 / 0 | 1 / 0 | 1 |
+| gRPC-Web (`CALL-014`) | 2 / 5 | 1 / 1 | 9 |
+| HTTP Basic (`CALL-015`) | 2 / 0 | 0 / 0 | 2 |
+| browser persistence (`CALL-016`) | 5 / 3 | 0 / 0 | 8 |
+| WebSocket handshake (`CALL-018`) | 2 / 1 | 2 / 2 | 7 |
+| debug WebSocket (`CALL-026`) | 1 / 0 | 0 / 0 | 1 |
+| web extractor WebSocket (`CALL-027`) | 0 / 1 | 0 / 0 | 1 |
+| **A4 total** | **14 / 12** | **4 / 3** | **33** |
+
+At that historical checkpoint, the registry contained 29 stable security-role IDs and
+14 stable owned-error IDs. Every one is referenced by the 55 recorded
+operations without an orphan. The private gRPC status snapshot is linked to
+the explicit `B64-CONSUMER-GRPC-STATUS-SNAPSHOT` nonpublic fixture relation;
+it is not silently promoted into a public journey or execution receipt.
+
+The native gRPC metadata rows preserve the existing scope qualification: the
+shared budget applies after decode to handler dispatch and retained metadata;
+it does not bound HPACK or header-list allocation. The debug WebSocket encode
+row likewise records that it hashes the trimmed key without locally decoding
+or enforcing the public 16-byte key requirement.
+
+This remains source-only evidence. A5 completes the static relations below; it
+does not retroactively turn A3 or A4 into executed evidence.
+
+### A5 per-operation and relation completion
+
+The historical final tranche recorded 68 `B64-A5-REMAINING` expressions.
+The current review adds three A5 and six A4 expressions. Together the three
+reservation groups account for all 132 external operations at unique source
+locations: production 24 encode / 25 decode and nonproduction 54 encode /
+29 decode. A3 still has 22 expressions; A4 now has 39 and A5 has 71.
+
+| A5 surface family | Production encode/decode | Nonproduction encode/decode | Recorded operations |
+| --- | ---: | ---: | ---: |
+| excluded fuzz targets (`CALL-001` through `CALL-007`) | 0 / 0 | 24 / 17 | 41 |
+| ATP CLI (`CALL-008`) | 3 / 1 | 2 / 2 | 8 |
+| legacy database fixtures (`CALL-010/011`) | 0 / 0 | 2 / 0 | 2 |
+| H3 and unwired WebSocket sources (`CALL-020/022/023`) | 0 / 0 | 4 / 2 | 6 |
+| unwired H2C settings (`CALL-028`) | 0 / 0 | 0 / 1 | 1 |
+| standalone RaptorQ fixtures (`CALL-029`) | 0 / 0 | 2 / 2 | 4 |
+| root conformance/golden/perf fixtures (`CALL-030/031/033/034/035/036`) | 0 / 0 | 7 / 1 | 8 |
+| H2 oracle artifact export (`CALL-040`) | 0 / 0 | 1 / 0 | 1 |
+| **A5 total** | **3 / 1** | **42 / 25** | **71** |
+
+The five new native gRPC client operations encode request binary metadata
+without padding and decode response metadata/status details using padded then
+unpadded engines. Generic metadata checks a case-sensitive `-bin` suffix;
+status details use a case-insensitive name and reject duplicates before decode.
+The client does not inherit the server's post-decode metadata budget. The new
+HTTP/1 handoff decode requires exactly 16 bytes before negotiated upgrade
+validation; it does not repair the separate debug WebSocket path.
+
+H2 artifact export belongs to the Linux x86_64 `external_h2spec` test module
+under `test-internals`. The ignored opt-in oracle test's retained-file encoder
+checks a 32 MiB per-file limit before reading; encoder presence proves no
+oracle execution. ATP's added test operations inspect a generated UTF-16LE
+script and encoded protected-stdin marker without executing PowerShell.
+
+`CALL-019`, `CALL-021`, and `CALL-032` remain explicit zero-operation rows:
+two hand-written local helpers and one comment-only source. They are linked to
+`B64-CONSUMER-EXCLUDED-LOCAL-HELPERS`; no synthetic codec call was invented.
+
+The current registry contains 47 stable roles and 23 owned error mappings.
+Every operation references one registered role and error, and every manual or
+cross-runtime collision plus all 11 public and 18 explicit nonpublic consumer
+records carry stable role/error references. The 14 profile-gate contracts pin
+manifest/workspace boundary, target, Cargo feature, Rust cfg semantics,
+consumers, groups, and no-claim text. Their call IDs partition all 40 call rows
+exactly once; the excluded wasm scaffold is the sole dependency-only zero-call
+profile. A parallel 14-row profile-baseline relation joins each profile to its
+exact capability and partial evidence-ID set without promoting that baseline
+to execution proof.
+
+Two paths named `base64` are local modules, not the dependency:
+
+- `src/observability/otel_conformance_tests.rs` contains a hand-written
+  standard encoder.
+- `src/real_net_websocket_handshake_http_h1_server_integration_e2e_tests.rs`
+  returns a `mock_base64_<len>` marker.
+
+`tests/grpc_server_metadata_bin_encoding_audit.rs` contains one comment-only
+token. All three paths stay in the literal census but contribute zero external
+calls and cannot serve as parity oracles.
+
+## Production roles
+
+| Surface | Engines | Current acceptance and owned mapping |
+| --- | --- | --- |
+| signed runtime profile | `STANDARD_NO_PAD` | strict no-pad; decode failure becomes refusal; signature verification rejects empty material |
+| NATS credentials | `URL_SAFE_NO_PAD`, then `URL_SAFE` | no-pad encode; decode tries no-pad before padded fallback; `NatsError::InvalidAuth` |
+| PostgreSQL SCRAM | `STANDARD` | canonical padded; salt must be 1..=64 bytes and server signature exactly 32 bytes; `PgError::AuthenticationFailed` |
+| certificate pins | `STANDARD` | canonical padded and exactly 32 bytes; `TlsError::Certificate` |
+| HTTP Basic | `STANDARD` plus a manual encoder | canonical padded origin and proxy credentials |
+| WebSocket | `STANDARD` | padded key and accept digest; public validation requires a 16-byte decoded key |
+| debug WebSocket | `STANDARD` | padded accept digest, but the local path does not decode and length-check the supplied key |
+| gRPC-Web | `STANDARD`, `STANDARD_NO_PAD` | padded one-shot; stream retains quartets and accepts a 2- or 3-character no-pad final tail; `GrpcError::protocol` |
+| gRPC server | `STANDARD`, `STANDARD_NO_PAD` | case-insensitive `-bin` initial headers and request trailers decode padded then no-pad under one post-decode dispatch/retention budget; that budget does not bound HPACK or header-list allocation; binary response metadata/status details encode no-pad |
+| native gRPC client | `STANDARD`, `STANDARD_NO_PAD` | request binary metadata encodes no-pad; response metadata/status details decode padded then no-pad, ending in `Status::internal`; no server-budget inheritance |
+| HTTP/1 upgrade handoff | `STANDARD` | requires exactly 16 decoded key bytes before handoff; syntax or length failure becomes `HttpError::Io InvalidData` |
+| browser storage | `URL_SAFE_NO_PAD` | LocalStorage persists namespace, key, and value as URL-safe no-pad text; IndexedDB uses it only for namespace/key and stores values as raw binary; decoded keys must also be UTF-8 |
+| ATP CLI | `STANDARD` | delta target manifest and command transport |
+
+The production URL-safe padded engine is decode-only: it is the NATS fallback.
+A2 therefore needs an independent `URL_SAFE` encode corpus rather than deriving
+parity from production traffic.
+
+## Structured downstream obligations
+
+Each public or persisted surface now points to exact call/collision IDs, its
+applicable capability ID set, one compilation profile, one reservation group, and
+one consumer obligation. Every obligation remains `BLOCKED`; evidence listed
+below is partial rather than terminal journey proof.
+
+| Consumer | Direct/collision refs | Current evidence | Implementation / evidence owner |
+| --- | --- | --- | --- |
+| gRPC-Web | `CALL-014` | `EVD-CONSUMER-DEFAULT`, `EVD-BASE64-PROTOCOL` | A4 / A6 |
+| native gRPC metadata | `CALL-012` | none | A4 / A6 |
+| native gRPC client metadata | `CALL-038` | none | A4 / A6 |
+| TLS pins | `CALL-025`, `COLLISION-TLS-PIN-TEST` | none | A3 / A6 |
+| HTTP Basic | `CALL-015`, `COLLISION-HTTP-REQUEST` | none | A4 / A6 |
+| WebSocket | `CALL-018/026/027/039` | none | A4 / A6 |
+| browser persistence | `CALL-016`, `COLLISION-BROWSER-TS/SERVICE-WORKER-NODE` | none | A4 / A6 |
+| signed runtime profile | `CALL-024` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
+| NATS authentication | `CALL-017`, `COLLISION-JETSTREAM-TEST` | `EVD-NKEY-SIGNED-PROFILE` | A3 / A6 |
+| PostgreSQL SCRAM | `CALL-009/037` | `EVD-AUTH-POLICY` | A3 / A6 |
+| ATP CLI transport | `CALL-008`, `COLLISION-ATP-POWERSHELL` | none | A5 / A6 |
+
+The bead authority maps both `CAP-BASE64-CODEC` and
+`CAP-AUTH-CREDENTIALS`. The artifact therefore pins both baseline rows and
+their exact evidence-ID sets; no consumer treats those partial baselines as a
+cutover receipt.
+
+## Compilation profiles
+
+The inventory assigns every call path to one of these explicit profiles and
+freezes a machine-readable gate contract for each:
+
+- portable library;
+- native messaging;
+- native gRPC and gRPC-Web;
+- native PostgreSQL;
+- wasm32 browser;
+- native `atp-cli`;
+- embedded and root integration tests;
+- legacy internal harnesses;
+- feature-gated H3 WebSocket source;
+- unwired legacy or nested source;
+- standalone RaptorQ differential workspace;
+- excluded fuzz workspace;
+- dependency-only excluded non-canonical wasm scaffold compilation gate, with
+  no direct call path, an absent ignored lock, and a stale local snapshot;
+- local mock or comment-only text.
+
+The 40 call IDs appear exactly once across the profile contracts. Each contract
+names its manifest or workspace boundary, target and feature admission, Rust
+cfg relationship, consumers, reservation groups, static state, and no-claim
+boundary. The excluded wasm scaffold has an empty call set by design.
+Each profile also has one exact baseline relation: `CAP-BASE64-CODEC` and,
+where credential consumers apply, `CAP-AUTH-CREDENTIALS`, with the existing
+`EXECUTABLE_PARTIAL_BLOCKING` evidence IDs and an explicit scope boundary.
+
+Unwired sources remain inventory obligations. They do not become executed or
+compiled evidence merely because they are source-pinned. One unwired legacy
+WebSocket source uses deprecated free functions that remain present in 0.23;
+A5 owns its warning-policy and wiring disposition before any attempt to rewire
+it.
+
+## Collision-free reservation groups
+
+The literal-census digest input is byte-sorted
+`path<TAB>literal_token_count\n`. The reservation digest input is the
+byte-sorted union of direct call paths and separately routed collision paths as
+`path\n`. Every one of the 48 unique reservation paths belongs to exactly one
+group.
+
+| Group | Owner | Literal paths/tokens | Literal projection SHA-256 | Reserved paths | Reservation SHA-256 |
+| --- | --- | ---: | --- | ---: | --- |
+| `B64-A3-AUTH` | `asupersync-d24mms.10.3` | 4/30 | `1e0520609721b817965200dd5ff2aa9638741031419bf69ca992af2000a86f7d` | 4 | `3aaf1e2c1ad283472492a551fd6257e849b1d7a84fbea677f6be83af167e3b2f` |
+| `B64-A4-WEB-GRPC` | `asupersync-d24mms.10.4` | 8/41 | `e53d130f142c50c9680c6631f033f9cbc7829c64a93bb8f0c0133589713af824` | 10 | `c1eb690f101dbd4e61f5861c74e91466fa5aa435712e9b14fbf1f7c310d9a5d9` |
+| `B64-A5-REMAINING` | `asupersync-d24mms.10.5` | 24/95 | `c612bc272fed1ae20c15e850f615c54e3b28c8b8a58885f715107f31d4a0093b` | 30 | `9280ba65b9811a6128343be1517fdf6e9679c080ce7aff4fdb253fe6f20d53b7` |
+
+A2 owns only the scalar kernel, checked sizing, owned error, and four-engine
+semantics. A3 owns runtime profile, NATS, PostgreSQL, and TLS pin migration.
+A4 owns HTTP, WebSocket, gRPC, and browser persistence migration. A5 owns CLI,
+tests, fuzz/reference workspaces, local/mock/comment disposition, dependency
+version skew, and authority reconciliation. A6 owns independent journeys and
+terminal cutover evaluation.
+
+## Manual and cross-runtime collisions
+
+The literal Rust census is not the entire compatibility surface:
+
+- `src/http/h1/types.rs` has a separate hand-written standard padded HTTP
+  Basic encoder.
+- `src/messaging/jetstream.rs` and `tests/tls_pin_mismatch_e2e.rs` contain
+  hand-written test encoders.
+- `packages/browser/src/index.ts` converts through host `btoa`/`atob` and
+  URL-safe no-pad text for storage, service-worker state, and archive payloads.
+  Host permissiveness is not a Rust parity authority; A6 must pin canonical
+  re-encode behavior.
+- `scripts/capture_baseline.sh` invokes a host decoder whose whitespace and
+  trailing-data behavior is platform-defined for this purpose. It is an
+  operational input, not parity evidence.
+- `fuzz/create_postgres_scram_seeds.py` and `fuzz/create_tls_seeds.py` use
+  Python's standard-padded encoder for fixtures. They are input generators,
+  not independent acceptance oracles.
+- `tests/wasm_service_worker_broker_contract.rs` embeds Node `Buffer`-backed
+  `atob`/`btoa` host functions. That mock is not a Rust parity oracle.
+- `src/bin/atp.rs` emits a PowerShell `.NET FromBase64String` decoder for
+  command transport. Its host acceptance behavior does not define the Rust
+  contract.
+
+The artifact pins all 11 manual/cross-runtime collision rows. These rows are
+separate from the current 40-path direct Rust dependency census.
+
+## Routed gaps
+
+The machine artifact routes every observed gap; none is left unowned:
+
+- A1: the current 40 call rows aggregate 132 external expressions. All three
+  tranches now have exact operation rows, the three zero-operation rows remain
+  explicit, all collision/consumer role-error references resolve, and the 14
+  manifest/feature/target/cfg profile contracts partition the calls. The A1
+  static relation gaps are resolved; execution remains outside A1.
+- A2: checked global sizing/allocation policy and the explicit no-constant-time
+  boundary.
+- A3: credential/certificate migration and the URL-safe padded decode-only
+  production surface.
+- A4: the duplicate HTTP encoder, gRPC stream buffering bound, and debug
+  WebSocket key validation difference.
+- A5: incomplete registry source/profile ownership, `0.22`/`0.23` skew, the
+  excluded wasm scaffold's stale lock, host tool semantics, unwired sources,
+  and remaining fixtures.
+- A6: the partial baseline, browser canonicalization, rejection of local mocks
+  as oracles, independent protocol journeys, and cutover decision.
+
+The existing registry baseline is `EXECUTABLE_PARTIAL_BLOCKING` and names only
+the `consumer-default` downstream profile. It does not cover the complete
+four-engine and protocol portfolio. The verification matrix remains
+`BLOCKED_PENDING_EVIDENCE` for A1 through A6; this inventory does not promote
+those rows.
+
+## Static contract and no-claim boundary
+
+`tests/base64_capability_inventory_contract.rs` is a fail-closed static
+contract for artifact structure, zero `UNKNOWN` values, 80 tracked source hashes
+and line counts, the literal census, all 132 operation semantics, exact
+call totals, engine/profile/group ownership, role/error/consumer/collision
+closure, the 14 profile-gate relations, governance-source state,
+documentation markers, and the `.gitignore` exception. It deliberately
+performs no external process, network, timing, or environment-dependent work.
+
+For this A1 tranche, that contract was written but **not executed**. Static
+JSON parsing, digest recomputation, literal recounting, and Git diff checks are
+not behavioral execution evidence.
+
+This packet does not prove compilation, runtime correctness, protocol or
+authentication security, certificate or framing security, constant-time
+behavior, bounded memory, denial-of-service resistance, throughput, wasm
+parity, cross-version parity, release readiness, downstream tracker closure, or
+permission to remove the dependency. That tracker boundary applies to
+downstream implementation and cutover beads; it does not prevent A1 from
+closing once its static acceptance criteria are met. Browser, Python, Node,
+shell, and .NET host codecs are collision surfaces rather than independent
+parity receipts. Only A6 may attach independently reproduced journey evidence
+and evaluate cutover eligibility.
+
+<!-- END BASE64 CAPABILITY INVENTORY -->

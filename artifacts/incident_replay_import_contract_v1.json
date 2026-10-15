@@ -1,0 +1,367 @@
+{
+  "schema_version": "incident-replay-import-contract-v1",
+  "bead_id": "asupersync-lkygsb.2",
+  "module": "src/trace/incident.rs",
+  "description": "Contract for converting validated incident bundles into deterministic replay packages for LabRuntime and trace tooling without silently downgrading unsupported or unsafe sources.",
+  "package_schema_version": 1,
+  "import_verdicts": [
+    "imported",
+    "blocked",
+    "malformed"
+  ],
+  "block_reason_kinds": [
+    "malformed_json",
+    "validation_issue",
+    "unsupported_source_kind",
+    "missing_source_payload",
+    "stale_content_hash",
+    "redaction_required_but_missing"
+  ],
+  "supported_replay_source_roles": [
+    "crash_pack",
+    "trace_log",
+    "support_bundle",
+    "readme_claim_failure",
+    "conformance_failure",
+    "rch_proof_failure",
+    "repro_notes"
+  ],
+  "required_supported_fixture_roles": [
+    "crash_pack",
+    "trace_log",
+    "rch_proof_failure",
+    "readme_claim_failure"
+  ],
+  "determinism_contract": {
+    "package_id": "incident-replay-v1:<16 lowercase hex FNV-1a digest>",
+    "source_order": "canonical role/content-hash/source-id order, independent of bundle source order",
+    "trace_metadata": "uses existing trace::replay::TraceMetadata with deterministic seed, config hash digest, description, and virtual-time recorded_at",
+    "ambient_inputs": "no wall-clock, randomness, network, host path traversal, hidden downloads, or best-effort mock replay"
+  },
+  "fixtures": {
+    "accepted": [
+      {
+        "scenario_id": "import-crashpack-and-trace",
+        "expected_roles": [
+          "crash_pack",
+          "trace_log"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-replay-fixture-crashpack-trace",
+          "sources": [
+            {
+              "source_id": "crashpack-main",
+              "kind": "crash_pack",
+              "artifact_path": "artifacts/crashpacks/fixture.json",
+              "content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "content_bytes": 512,
+              "redaction_status": "redacted",
+              "payload_snippet": "panic after deterministic schedule seed 42",
+              "metadata": {
+                "trace_fingerprint": "0xfeedbeef",
+                "observed_content_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            },
+            {
+              "source_id": "trace-log-main",
+              "kind": "trace_log",
+              "artifact_path": "artifacts/traces/fixture.ndjson",
+              "content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+              "content_bytes": 384,
+              "redaction_status": "redacted",
+              "metadata": {
+                "trace_fingerprint": "0xbead",
+                "observed_content_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+              }
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "replay_e2e_suite"
+            ],
+            "env": [
+              {
+                "key": "RUSTFLAGS",
+                "value": "-C debuginfo=0"
+              }
+            ],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 42,
+            "schedule_seed": 42,
+            "virtual_time_nanos": 0,
+            "config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "feature_flags": [
+              "test-internals"
+            ],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "capture-crashpack-trace",
+            "origin": "support_bundle",
+            "reporter": "operator",
+            "captured_commit": "d24b554bd",
+            "related_bead_id": "asupersync-lkygsb.2"
+          },
+          "metadata": {
+            "scenario": "accepted-crashpack-trace"
+          }
+        }
+      },
+      {
+        "scenario_id": "import-readme-rch-failure",
+        "expected_roles": [
+          "readme_claim_failure",
+          "rch_proof_failure"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-replay-fixture-readme-rch",
+          "sources": [
+            {
+              "source_id": "readme-claim-main",
+              "kind": "readme_claim_failure",
+              "artifact_path": "artifacts/readme_claims/fixture.json",
+              "content_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+              "content_bytes": 256,
+              "redaction_status": "redacted",
+              "metadata": {
+                "claim": "region close implies quiescence",
+                "observed_content_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+              }
+            },
+            {
+              "source_id": "rch-proof-main",
+              "kind": "rch_proof_failure",
+              "artifact_path": "artifacts/rch/fixture.json",
+              "content_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+              "content_bytes": 320,
+              "redaction_status": "redacted",
+              "payload_snippet": "remote cargo test failed with deterministic replay assertion",
+              "metadata": {
+                "observed_content_hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+              }
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "semantic_failure_replay_cookbook"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 7,
+            "schedule_seed": 7,
+            "virtual_time_nanos": 10,
+            "config_hash": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "feature_flags": [
+              "test-internals"
+            ],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "capture-readme-rch",
+            "origin": "rch_failure",
+            "reporter": "operator",
+            "captured_commit": "d24b554bd",
+            "related_bead_id": "asupersync-lkygsb.2"
+          },
+          "metadata": {
+            "scenario": "accepted-readme-rch"
+          }
+        }
+      }
+    ],
+    "rejected": [
+      {
+        "scenario_id": "missing-source-payload",
+        "expected_block_reason_kinds": [
+          "missing_source_payload"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-replay-fixture-missing-payload",
+          "sources": [
+            {
+              "source_id": "trace-empty",
+              "kind": "trace_log",
+              "content_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+              "content_bytes": 0,
+              "redaction_status": "redacted"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 11,
+            "config_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "capture-missing-payload",
+            "origin": "support_bundle",
+            "reporter": "operator"
+          }
+        }
+      },
+      {
+        "scenario_id": "stale-hash",
+        "expected_block_reason_kinds": [
+          "stale_content_hash"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-replay-fixture-stale-hash",
+          "sources": [
+            {
+              "source_id": "crashpack-stale",
+              "kind": "crash_pack",
+              "artifact_path": "artifacts/crashpacks/stale.json",
+              "content_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+              "content_bytes": 128,
+              "redaction_status": "redacted",
+              "metadata": {
+                "observed_content_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+              }
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 13,
+            "config_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "internal",
+            "redaction_status": "redacted",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "capture-stale-hash",
+            "origin": "support_bundle",
+            "reporter": "operator"
+          }
+        }
+      },
+      {
+        "scenario_id": "redaction-required",
+        "expected_block_reason_kinds": [
+          "redaction_required_but_missing"
+        ],
+        "bundle": {
+          "schema_version": 1,
+          "bundle_id": "incident-replay-fixture-redaction-required",
+          "sources": [
+            {
+              "source_id": "support-secret",
+              "kind": "support_bundle",
+              "artifact_path": "artifacts/support/secret-redacted.json",
+              "content_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+              "content_bytes": 512,
+              "redaction_status": "required_but_missing"
+            }
+          ],
+          "command": {
+            "program": "rch",
+            "args": [
+              "exec",
+              "--",
+              "cargo",
+              "test"
+            ],
+            "env": [],
+            "working_dir": "."
+          },
+          "determinism": {
+            "seed": 17,
+            "config_hash": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "feature_flags": [],
+            "target_triple": "x86_64-unknown-linux-gnu"
+          },
+          "privacy": {
+            "classification": "secret",
+            "redaction_status": "required_but_missing",
+            "redaction_policy_id": "incident-redaction-v1"
+          },
+          "provenance": {
+            "capture_id": "capture-redaction-required",
+            "origin": "support_bundle",
+            "reporter": "operator"
+          }
+        }
+      }
+    ],
+    "malformed": "{not-json"
+  },
+  "e2e_script": "scripts/validate_incident_replay_import.sh",
+  "required_log_fields": [
+    "scenario_id",
+    "bead_id",
+    "bundle_id",
+    "verdict",
+    "package_id",
+    "block_reason_kinds",
+    "artifact_path"
+  ],
+  "proof_commands": [
+    "rch exec -- rustfmt --edition 2024 --check src/trace/incident.rs tests/incident_replay_import.rs",
+    "bash scripts/validate_incident_replay_import.sh --output-root target/incident-replay-import --run-id asupersync-lkygsb.2",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_import CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test incident_replay_import --features test-internals -- --nocapture",
+    "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_incident_replay_unit CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib trace::incident::tests --features test-internals -- --nocapture"
+  ]
+}

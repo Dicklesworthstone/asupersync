@@ -1,0 +1,126 @@
+//! Async filesystem operations.
+//!
+//! This module provides async file I/O operations that mirror the `std::fs` API
+//! but with async/await support. In Phase 0 (single-threaded runtime), operations
+//! are synchronous internally but exposed through async interfaces.
+//!
+//! # Cancel Safety
+//!
+//! - `File::open`: A started open may complete; its discarded handle is closed
+//! - `File::create`/`create_new`: A started call may still create or truncate
+//! - Poll-based read/write/seek operations: bounded blocking-pool syscalls;
+//!   started operations may complete after the borrowing future is dropped
+//! - Owned cursor operations: soft-cancelled syscalls may still commit, but a
+//!   per-file completion gate prevents later cursor access from overtaking them
+//! - Direct path mutations: soft-cancelled work may commit after future drop
+//! - `write_atomic`: cancellation can discard staging, while the target rename
+//!   occurs only in a synchronous commit step with no async cancellation point
+//! - `WritePermit`: an in-memory two-phase writer pattern, not filesystem
+//!   rollback for path operations
+//! - `sync_all`, `sync_data`: A started sync may finish after its future drops
+//! - Owned seek/read cancellation is ordered, not rollback-safe
+//! - [`scoped::ScopedFs`]: explicit I/O + spawn authority and region-owned
+//!   blocking work; bounded reads checkpoint between fixed-size reads and
+//!   reject oversized input rather than returning a truncated success
+//!
+//! File I/O retains its inherited blocking-pool placement when task-spawn
+//! authority is restricted. `RuntimeBuilder` configures an on-demand pool by
+//! default; a runtime built with `blocking_threads(0, 0)` has none, uses the
+//! inline fallback, and can block its async worker on filesystem calls.
+//!
+//! # Example
+//!
+//! ```no_run
+//! use asupersync::fs::File;
+//! use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+//!
+//! async fn example() -> std::io::Result<()> {
+//!     // Create and write
+//!     let mut file = File::create("test.txt").await?;
+//!     file.write_all(b"hello").await?;
+//!     file.sync_all().await?;
+//!     drop(file);
+//!
+//!     // Read back
+//!     let mut file = File::open("test.txt").await?;
+//!     let mut contents = String::new();
+//!     file.read_to_string(&mut contents).await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! # Platform Strategy
+//!
+//! - **Phase 0**: Synchronous I/O wrapped in async interface
+//! - **Phase 1+**: Use `spawn_blocking` for thread pool offload
+//! - **Future**: io_uring on Linux for true async I/O
+
+mod buf_reader;
+mod buf_writer;
+mod dir;
+mod file;
+#[cfg(test)]
+mod file_concurrent_test;
+mod lines;
+mod metadata;
+mod open_options;
+mod path_ops;
+pub mod platform;
+mod read_dir;
+pub mod scoped;
+pub mod vfs;
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub mod uring;
+
+pub use buf_reader::BufReader;
+pub use buf_writer::BufWriter;
+pub use dir::{create_dir, create_dir_all, remove_dir, remove_dir_all};
+pub use file::File;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub use file::FileCursorOperationProbe;
+pub use lines::Lines;
+pub use metadata::{FileType, Metadata, Permissions};
+pub use open_options::OpenOptions;
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub use path_ops::{
+    FilesystemOperationProbe, stage_write_atomic_with_probe_for_test,
+    write_atomic_offloaded_with_probe_for_test, write_with_probe_for_test,
+};
+pub use path_ops::{
+    StagedAtomicWrite, SymlinkKind, canonicalize, copy, hard_link, metadata, read, read_link,
+    read_to_string, remove_file, rename, set_permissions, stage_write_atomic, symlink_metadata,
+    symlink_typed, write, write_atomic, write_atomic_offloaded,
+};
+pub use platform::{
+    CapabilityProbe, CapabilityStatus, FilesystemCapabilityProfile,
+    NativePlatformCapabilityProvider, NetworkCapabilityProfile, PLATFORM_CAPABILITY_REPORT_SCHEMA,
+    PlatformCapabilityProvider, PlatformCapabilityReport, PlatformDegradationPolicy,
+    PlatformTarget, ProbeSource, ServiceCapabilityProfile, build_platform_capability_report,
+    detect_platform_capabilities,
+};
+pub use read_dir::{DirEntry, ReadDir, read_dir};
+
+#[cfg(all(target_os = "linux", feature = "io-uring"))]
+pub use uring::IoUringFile;
+
+#[cfg(unix)]
+pub use path_ops::symlink;
+
+#[cfg(windows)]
+pub use path_ops::{symlink, symlink_dir, symlink_file};
+
+pub use std::io::SeekFrom;
+
+pub use vfs::{UnixVfs, UnixVfsFile, Vfs, VfsFile};
+
+/// Checks whether a path exists with explicit error reporting.
+///
+/// Unlike `Path::exists`, this preserves I/O errors instead of collapsing them
+/// to `false`. Behavior mirrors Tokio's `fs::try_exists`.
+pub async fn try_exists(path: impl AsRef<std::path::Path>) -> std::io::Result<bool> {
+    let path = path.as_ref().to_owned();
+    crate::cx::io_gate::spawn_blocking_io(move || path.try_exists()).await
+}

@@ -1,0 +1,63 @@
+{
+  "schema_version": "proof-traffic-blocked-loop-e2e-v1",
+  "bead_id": "asupersync-proof-traffic-control-kuyx64.5",
+  "parent_bead_id": "asupersync-proof-traffic-control-kuyx64",
+  "status": "contract_guarded",
+  "generated_at": "2026-06-15T07:20:00Z",
+  "source_of_truth": {
+    "artifact": "artifacts/proof_traffic_blocked_loop_e2e_v1.json",
+    "operator_doc": "docs/proof_traffic_control.md",
+    "contract_test": "tests/proof_traffic_blocked_loop_e2e_contract.rs",
+    "rust_module": "src/audit/proof_traffic_blocked_loop_e2e.rs",
+    "admission_module": "src/audit/proof_traffic_receipt.rs",
+    "overlay_handshake_module": "src/audit/proof_traffic_overlay_handshake.rs",
+    "parking_lot_module": "src/audit/proof_traffic_parking_lot.rs"
+  },
+  "required_fixture_coverage": [
+    "owned-dirty-path",
+    "peer-poison-path",
+    "missing-overlay-capability",
+    "active-project-refusal",
+    "progress-stale-peer-build",
+    "admitted-command-positive-control"
+  ],
+  "required_structured_log_fields": [
+    "input_command",
+    "selected_paths",
+    "reservation_state",
+    "queue_snapshot",
+    "decision",
+    "rendered_handoff",
+    "no_claim_boundary",
+    "replay_or_resume_command"
+  ],
+  "artifact_bundle_fields": [
+    "json_receipt",
+    "markdown_report",
+    "agent_mail_body",
+    "br_comment_body",
+    "replay_resume_command"
+  ],
+  "forbidden_admitted_command_surface": [
+    "local Cargo fallback",
+    "branch creation",
+    "worktree creation",
+    "scratch clone",
+    "peer poison path",
+    "peer build cancellation",
+    "file deletion",
+    "git clean",
+    "git reset"
+  ],
+  "live_fleet_state_rule": "Live RCH fleet state may be attached only as operator evidence; deterministic fixtures are the correctness source.",
+  "no_claim_boundaries": [
+    "No release-readiness claim.",
+    "No broad workspace-health claim.",
+    "No runtime-correctness claim.",
+    "No performance-improvement claim.",
+    "No live RCH fleet-availability claim.",
+    "No local Cargo fallback approval.",
+    "No peer-owned build cancellation authority.",
+    "No permission to delete files, clean worktrees, create branches, or create worktrees."
+  ]
+}

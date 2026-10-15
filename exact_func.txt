@@ -1,0 +1,49 @@
+    fn read_entries_from_file(&self, file_path: &Path) -> Outcome<Vec<JournalEntry>, JournalError> {
+        let file = match File::open(file_path) {
+            Ok(file) => file,
+            Err(e) => return Outcome::Err(JournalError::FileOpen(e.to_string())),
+        };
+        let mut reader = BufReader::new(file);
+        let mut entries = Vec::new();
+
+        loop {
+            // Read length prefix
+            let mut length_bytes = [0u8; 4];
+            match reader.read_exact(&mut length_bytes) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Outcome::Err(JournalError::ReadFailure(e.to_string())),
+            }
+
+            let length = u32::from_le_bytes(length_bytes) as usize;
+
+            // Prevent OOM from corrupted length prefix (max 16 MB)
+            if length > 16 * 1024 * 1024 {
+                return Outcome::Err(JournalError::ReadFailure(format!(
+                    "Entry length too large: {}",
+                    length
+                )));
+            }
+
+            // Read entry data
+            let mut entry_data = vec![0u8; length];
+            if let Err(e) = reader.read_exact(&mut entry_data) {
+                return Outcome::Err(JournalError::ReadFailure(e.to_string()));
+            }
+
+            // Deserialize entry
+            let entry = match JournalEntry::decode(&entry_data) {
+                Ok(entry) => entry,
+                Err(e) => return Outcome::Err(e),
+            };
+
+            // Validate checksum
+            if !entry.validate_checksum() {
+                return Outcome::Err(JournalError::ChecksumMismatch(entry.sequence));
+            }
+
+            entries.push(entry);
+        }
+
+        Outcome::Ok(entries)
+    }

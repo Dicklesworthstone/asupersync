@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "artifact_id": "kafka-k0-baseline-disposition-v1",
+  "program_id": "asupersync-ir2uf0",
+  "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
+  "capability_id": "CAP-KAFKA",
+  "captured_date_utc": "2026-08-03",
+  "baseline_revision": "d4db2d3f072bd92281f35829dc1a5c92bc69f376",
+  "current_source_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "owner_bead": "asupersync-ghxhvm",
+    "scope": "CURRENT_SOURCE_STATIC_AGGREGATION_ONLY",
+    "historical_receipts_preserved": true,
+    "new_execution_receipts": 0,
+    "interpretation": "Original capture and baseline revisions, authority, KEEP_INCUMBENT disposition, feature and migration prohibitions, independent terminal gates, and child evidence receipts remain unchanged. Current child pins and projections include each child's explicit current-source review; the retained historical baseline is not a claim that current files are identical to that revision.",
+    "reviewed_changes": [
+      "K0.1 adds the now-tracked fuzz/Cargo.lock pin and three consumer diagnostic type groups. K0.2 adds producer/consumer raw-property configuration, rebalance protocol, rebalance diagnostics, and transient-error diagnostics. The aggregate contains 912 primary IDs, including 901 core definitions and 11 historical contradiction inputs, with 135 exact authority references.",
+      "The source rollup contains 267 rows across 248 unique paths. Its 15 overlap groups still contain 34 rows, with no conflicting current hashes. The 67-path fixture union and eight historical fixture profiles remain unchanged; K0.4 explicitly qualifies the mixed SASL audit source separately.",
+      "Twelve existing semantic usage rows now have reviewed local references in the real-broker, native-constructor, or SASL-audit source. Their preservation and K14 synthesis requirements remain true; the remaining 40 UNKNOWN semantic usages and all seven external-search UNKNOWN rows still block migration.",
+      "The declared call-site grammar contains 249 name-collision exclusions in the same 34 groups. K0.3's current documentation census retains 9279 owned unresolved occurrences, including five added by the reviewed ADR and DEFLATE source annotations; no UNKNOWN is removed merely because a hash changed.",
+      "All 87 route rows, 126 owner edges, 49 owners, and seven aggregate claim states are retained. The full-row route digest includes K0.2's explicit current-source secret-redaction disposition while preserving its original finding. Child claim projection changes include reviewed current source locators; they do not promote source or test declarations to runtime evidence."
+    ]
+  },
+  "inventory_state": "K0_5_AGGREGATE_FROZEN_KEEP_INCUMBENT",
+  "authority": {
+    "adr_id": "DEP-ADR-009",
+    "registry_disposition": "KEEP_UNTIL_PARITY",
+    "current_action": "KEEP_INCUMBENT",
+    "aggregate_owner_bead": "asupersync-dep-p7-kafka-removal-sarszu.1.5",
+    "native_epic_bead": "asupersync-dep-p7-kafka-removal-sarszu.2",
+    "first_contract_gate_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.1",
+    "verification_terminal_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.12.5",
+    "real_service_terminal_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.13.6",
+    "claim_time_refresh_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.14.1",
+    "conditional_cutover_bead": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "file_deletion_allowed": false
+  },
+  "policy": {
+    "mode": "STATIC_ONLY_FAIL_CLOSED",
+    "child_rows_duplicated": false,
+    "canonicalization_id": "KAFKA_K0_5_CANONICAL_PROJECTION_V1",
+    "missing_row_state": "BLOCKING_MISSING",
+    "unowned_row_state": "BLOCKING_UNOWNED",
+    "unexpected_collision_state": "BLOCKING_UNDECLARED_COLLISION",
+    "unknown_rule": "UNKNOWN is admissible only for a stable identified row selected by the declared ledger, with an exact owner and later resolution gate; it remains migration-blocking.",
+    "blocked_rule": "BLOCKED never defaults to supported, executed, or migration-eligible.",
+    "planned_counts_as_executed": false,
+    "silent_skip_counts_as_pass": false,
+    "static_counts_as_runtime": false,
+    "internal_k0_handoff_rule": "A route into an included K0.1-K0.4 child is satisfied only as an inventory handoff; executable authority must continue through that child's later-owner routes."
+  },
+  "child_packets": [
+    {
+      "packet_id": "K0.1",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.1",
+      "artifact_id": "kafka-capability-inventory-v1",
+      "schema_version": 1,
+      "baseline_revision": "2d811170e956966e960db122a0d634a5b60c56e0",
+      "authority_revision": "2d811170e956966e960db122a0d634a5b60c56e0",
+      "authority_revision_state": "PRESENT_MATCHES_BASELINE",
+      "inventory_state": "K0_1_SOURCE_REACHABILITY_FROZEN",
+      "files": [
+        {"role":"ARTIFACT","path":"artifacts/kafka_capability_inventory_v1.json","byte_count":47361,"record_count":1087,"sha256":"b90709fc2453f1aee9c281a52e8189e306cd2702e50c22c6c318855bcc1d5bac"},
+        {"role":"DOCUMENT","path":"docs/kafka_capability_inventory.md","byte_count":11083,"record_count":221,"sha256":"ce886a8581eb735b30f38b59d4707ab3739aac9d9774c19bdc0416b710bc69fc"},
+        {"role":"CONTRACT","path":"tests/kafka_capability_inventory_contract.rs","byte_count":29435,"record_count":867,"sha256":"1b9e744169d9d7bddcf49c8378a3578a166655d4d54aaada4a635a8fa1b3230d"}
+      ]
+    },
+    {
+      "packet_id": "K0.2",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.2",
+      "artifact_id": "kafka-incumbent-semantics-matrix-v1",
+      "schema_version": 1,
+      "baseline_revision": "b4997e8fe4de098a5a30ff468418460b59ca414a",
+      "authority_revision": "b4997e8fe4de098a5a30ff468418460b59ca414a",
+      "authority_revision_state": "PRESENT_MATCHES_BASELINE",
+      "inventory_state": "K0_2_INCUMBENT_SEMANTICS_FROZEN",
+      "files": [
+        {"role":"ARTIFACT","path":"artifacts/kafka_incumbent_semantics_matrix_v1.json","byte_count":244004,"record_count":2687,"sha256":"a5045d8d466677ac052e3faa8279eb6e990b7e9b89f18e164da2de0b3a4bf780"},
+        {"role":"DOCUMENT","path":"docs/kafka_incumbent_semantics_matrix.md","byte_count":34580,"record_count":580,"sha256":"614de775f7b4a6c9c81f9cfc7b916fd5e7fdc9dc52985e608029fdc049791553"},
+        {"role":"CONTRACT","path":"tests/kafka_incumbent_semantics_matrix_contract.rs","byte_count":72831,"record_count":1777,"sha256":"724831535bc3f1e3f138607cd472e493791e34197ee4756042096e5cbe631104"}
+      ]
+    },
+    {
+      "packet_id": "K0.3",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.3",
+      "artifact_id": "kafka-downstream-user-journey-inventory-v1",
+      "schema_version": 1,
+      "baseline_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "authority_revision": "ae22e710d87412b38e546b32e9702106619481d5",
+      "authority_revision_state": "PRESENT_MATCHES_BASELINE",
+      "inventory_state": "K0_3_LOCAL_STATIC_AND_CALL_SITE_CENSUS_FROZEN_EXTERNAL_UNKNOWN",
+      "files": [
+        {"role":"ARTIFACT","path":"artifacts/kafka_downstream_user_journey_inventory_v1.json","byte_count":1295370,"record_count":19932,"sha256":"14dc8c84ffd985f8a8291ff3b99da8e7e542f3adf7974d04bf109205d08c5240"},
+        {"role":"DOCUMENT","path":"docs/kafka_downstream_user_journey_inventory.md","byte_count":42914,"record_count":641,"sha256":"93311de5cdb5d5cff036e0d65eea4ad27d8ca38338eb253397c25700f3314f62"},
+        {"role":"CONTRACT","path":"tests/kafka_downstream_user_journey_inventory_contract.rs","byte_count":219718,"record_count":5452,"sha256":"c557cf3d8e25ed01f8d82c57fd169eb847840c934926f92fad1dd597380ccc5e"}
+      ]
+    },
+    {
+      "packet_id": "K0.4",
+      "bead_id": "asupersync-dep-p7-kafka-removal-sarszu.1.4",
+      "artifact_id": "kafka-broker-fixture-provenance-matrix-v1",
+      "schema_version": 1,
+      "baseline_revision": "012c13714db267a4fba928db9f900b70d6c1d25a",
+      "authority_revision": null,
+      "authority_revision_state": "ABSENT_BY_CHILD_SCHEMA",
+      "inventory_state": "K0_4_STATIC_FIXTURE_AND_PROVENANCE_MATRIX_FROZEN_RUNTIME_UNKNOWN",
+      "files": [
+        {"role":"ARTIFACT","path":"artifacts/kafka_broker_fixture_provenance_matrix_v1.json","byte_count":122592,"record_count":2214,"sha256":"08ed98695621a137e5268828193f454ec53016aa2076448fdc4c30c1898da0bd"},
+        {"role":"DOCUMENT","path":"docs/kafka_broker_fixture_provenance_matrix.md","byte_count":26498,"record_count":364,"sha256":"23b278530c81ef134c9a15c7e71ce3d1a8900f3abaaff2287daaa7138fab9196"},
+        {"role":"CONTRACT","path":"tests/kafka_broker_fixture_provenance_matrix_contract.rs","byte_count":133727,"record_count":3567,"sha256":"2ff32ea546079ddd819aa3e2a1063d846ee0012d2055840dffd64405bf52dd74"}
+      ]
+    }
+  ],
+  "coverage_sets": {
+    "canonicalization": {
+      "record_count_semantics": "Rust str::lines semantics: one record per logical line, with no synthetic empty record after a final LF.",
+      "file_hash_semantics": "SHA-256 of exact repository bytes.",
+      "id_set_semantics": "Bytewise sort unique UTF-8 IDs and serialize each ID followed by one LF.",
+      "typed_primary_semantics": "Serialize bytewise-sorted stage<TAB>collection<TAB>id records with one trailing LF per record.",
+      "canonical_json_semantics": "Recursively sort object keys, emit compact JSON, bytewise sort records by child, collection, and id, and append one LF per record.",
+      "source_pin_row_semantics": "Wrap each source-pin row as an object with child, collection, id, and row fields; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
+      "route_row_semantics": "Wrap each child route row as an object with child, collection, id, and row fields; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
+      "route_edge_semantics": "Bytewise sort unique stage<TAB>gap-or-finding-id<TAB>owner records and append one LF per record.",
+      "aggregate_claim_semantics": "Sort claims by claim_id, recursively sort each claim object's keys, emit one compact JSON object per claim, and append one LF per record."
+    },
+    "child_file_count": 12,
+    "source_pin_rollup": {
+      "row_count": 267,
+      "stage_counts": {"K0.1":14,"K0.2":8,"K0.3":225,"K0.4":20},
+      "canonical_json_sha256": "e1bc2bd62823f8c5c8bb5593d4acb75c1f88a140efb85a80f638cfa955549efa",
+      "unique_path_count": 248,
+      "unique_path_set_sha256": "c9f1f8ae0ce140c27e05919606a947d93c660f9aa978e762f1cbcc232c200ddb",
+      "overlap_group_count": 15,
+      "overlap_pin_row_count": 34,
+      "overlap_pin_tuple_rule": "For each source-pin row whose path occurs in more than one child packet, serialize path<TAB>child<TAB>pin_id<TAB>sha256; bytewise sort the records and append one LF per row.",
+      "overlap_pin_projection_sha256": "ccd6f96f55bc053948b8a675814a17408548f36d81af37fac89dceaf87d35a19",
+      "conflicting_overlap_groups": []
+    },
+    "primary_stable_ids": {
+      "stage_counts": {"K0.1":100,"K0.2":152,"K0.3":469,"K0.4":191},
+      "core_definition_count": 901,
+      "core_definition_typed_tuple_sha256": "cf110029938e34e3830462a68441d3f678708137242c69a40657aa1e107a01d1",
+      "contradiction_input_count": 11,
+      "contradiction_input_typed_tuple_sha256": "60a656176b398a9b045b8c5cc1c2f2cede611683d3330c2a519a70ebf9bb72f0",
+      "primary_stable_id_count": 912,
+      "typed_unique_count": 912,
+      "raw_unique_count": 912,
+      "all_primary_typed_tuple_sha256": "cb03e74dd5a207aaf082664741fb629d4330bcec76a3edd0958969c6a064b729"
+    },
+    "public_symbol_ids": {"count":33,"id_set_sha256":"2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a"},
+    "semantic_ids": {"count":102,"configuration_count":45,"enum_count":8,"operation_count":40,"helper_count":9,"id_set_sha256":"c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121"},
+    "downstream_journey_ids": {"count":15,"id_set_sha256":"c5a9f1947a5ecf55898c61414bb39bf753cd236fe33157083994acd63176367f"},
+    "k0_4_vector_ids": {"count":36,"locked_dependency_count":3,"native_build_count":5,"broker_api_version_count":7,"compression_count":5,"transport_auth_count":6,"topology_count":4,"fault_lifecycle_count":6,"id_set_sha256":"73491562ae3df3f7ea6729c30834cf3cb134a002ec5d682255277df5e508e73f"},
+    "fixture_ids": {"count":67,"id_set_sha256":"bb8f922cc63f97efcfb0c76a6e26fdf923775650af8cd613f50da55c95cbb376","path_set_sha256":"d9542095b391dbd44a0f8d855d6cfb87e41b981642430a0de662a2965ad26db0"},
+    "fixture_profile_ids": {"count":8,"id_set_sha256":"b1848945221e425d78007ee47bced23e62b700a5e43fc6a8300124d42c8d8d09"},
+    "environment_ids": {"count":8,"id_set_sha256":"372de832a4de112e3ee8bc45b3af978d749b24c3f825416bd8e8b2d4523d831e"}
+  },
+  "exact_joins": [
+    {"join_id":"KAFKA-K0-5-JOIN-001-PUBLIC-DISPOSITION","join_kind":"AUTHORITY_REFERENCE","left_locator":"K0.1.public_symbols[].symbol_id","right_locator":"K0.3.k0_1_symbol_dispositions[].symbol_id","left_count":33,"right_count":33,"unique_target_count":33,"mapping_count":33,"id_set_sha256":"2577930d3f6f249339e6007449a9430384068b52d097d31b00f32b7f3f3a9c9a","status":"EXACT"},
+    {"join_id":"KAFKA-K0-5-JOIN-002-SEMANTIC-DISPOSITION","join_kind":"AUTHORITY_REFERENCE","left_locator":"K0.2 configuration_fields+enum_semantics+operations+callable_helpers semantic_id","right_locator":"K0.3.k0_2_semantic_dispositions[].semantic_id","left_count":102,"right_count":102,"unique_target_count":102,"mapping_count":102,"id_set_sha256":"c9ad8fca534267c9383d7fb9c914d3f2d05ee927278e43ec42fcd0c857ad5121","status":"EXACT"},
+    {"join_id":"KAFKA-K0-5-JOIN-003-COMPILATION-PROFILES","join_kind":"TYPED_REFERENCE","left_locator":"K0.1.compilation_profiles[].profile_id","right_locator":"K0.3.compilation_profiles[].k0_1_profile_id","left_count":13,"right_count":17,"unique_target_count":13,"mapping_count":17,"id_set_sha256":"882b6f73ee7c5abfe73080804fcd082c05dddd9c4002ee61ff9336f0a0d439eb","mapping_rule":"Bytewise sort unique k0_1_profile_id<TAB>profile_id records and append one LF per row.","mapping_sha256":"535d71b0db091352aa1b1df6418af9f0989b34c7c89584fe5e15b3614dce0438","status":"EXACT_WITH_FOUR_DECLARED_DOUBLE_MAPPINGS","limitation":"DOWNSTREAM-NO-KAFKA, NATIVE-KAFKA-RELEASE, TEST-INTERNALS-NO-KAFKA, and UNIT-WITH-KAFKA each map to two K0.3 profiles."},
+    {"join_id":"KAFKA-K0-5-JOIN-004-FIXTURE-PINS","join_kind":"TYPED_REFERENCE","left_locator":"K0.3.source_pins or K0.4.direct_source_pins","right_locator":"K0.4.fixture_census[].source_pin_id","left_count":245,"right_count":67,"unique_target_count":67,"mapping_count":67,"mapping_rule":"Bytewise sort unique pin_origin<TAB>source_pin_id<TAB>fixture_id<TAB>path records and append one LF per row.","mapping_sha256":"f0200bd742a0a7a6374cd7dc87d9b1832c8f6d5a79e1f363db6464acfbe2bba2","status":"EXACT_48_INHERITED_19_DIRECT","limitation":"The twentieth K0.4 direct pin is the K0.3 authority artifact and is intentionally outside the fixture census."},
+    {"join_id":"KAFKA-K0-5-JOIN-005-FIXTURE-PROFILES","join_kind":"TYPED_REFERENCE","left_locator":"K0.4.fixture_classification_profiles[].classification_profile_id","right_locator":"K0.4.fixture_census[].classification_profile_id","left_count":8,"right_count":67,"unique_target_count":8,"mapping_count":67,"mapping_rule":"Bytewise sort unique classification_profile_id<TAB>fixture_id<TAB>path records and append one LF per row.","mapping_sha256":"0c1a77c6b9db4bc3efc478ba4313a65193ab849f7020d5f1f3b2fa4d73c1be9d","status":"EXACT"},
+    {"join_id":"KAFKA-K0-5-JOIN-006-ROUTE-OWNERS","join_kind":"TRACKER_OWNER_REFERENCE","left_locator":"K0.1-K0.4 routed gap/finding owner edges","right_locator":"unique route-owner IDs matched against .beads/issues.jsonl issue IDs","left_count":126,"right_count":49,"unique_target_count":49,"mapping_count":126,"mapping_sha256":"78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc","status":"EXACT"}
+  ],
+  "collision_groups": {
+    "authority_id_joins": {"group_count":2,"row_count":135,"combined_id_set_sha256":"90457aa8811909a088df43b6f0984b1b8cc262afd5e113f80bc8fcbfdf3bf76e","mapping_rule":"For each authority reference, serialize left_child<TAB>left_collection<TAB>id<TAB>K0.3<TAB>right_collection<TAB>id; bytewise sort the records and append one LF per row.","mapping_sha256":"83a474e63511cb717689f5f5c9d7206bca7752ebd44c642e277eb0d423d057aa"},
+    "typed_reference_joins": {"compilation_profile_reference_count":17,"cross_child_fixture_pin_reference_count":48,"direct_fixture_pin_reference_count":19,"fixture_profile_reference_count":67,"definition_collision_count":0},
+    "lexical_name_collisions": {"group_count":34,"site_count":249,"group_id_set_sha256":"e6a23cd6c436c1dd6b775481d2683eb53ca860a928572306f2ea910af3c8231b","site_id_set_sha256":"408cc618c56e83440ad07efe3750dc2c3a021ffbb6c4b32b5bd07e4759623e1f","mapping_rule":"For every atomic site classified EXCLUDED_NAME_COLLISION, recursively key-sort and compactly serialize an object with the parent group_id, parent path, and the complete site object; bytewise sort the records and append one LF per row.","mapping_sha256":"3ab6e3b2a8ff90e21ed78cb25aa391ec1722dfbc347eb58fc35e938296844889","classification":"NON_KAFKA_LEXICAL_EXCLUSIONS"},
+    "shared_authority_references": ["program_id","capability_id","DEP-ADR-009","child artifact paths and IDs"],
+    "unexpected_definition_collisions": []
+  },
+  "unknown_disposition": {
+    "missing_or_unowned_blocks": true,
+    "unexpected_unknown_blocks": true,
+    "explicit_owned_unknowns": {"count":17,"id_set_sha256":"33c9cdf3dca86570c906c46a902b2ec7ad8ee19aa074b0375afda36d64e63d20","owner_edge_count":17,"owner_edge_tuple_rule":"Bytewise sort unique unknown_id<TAB>resolution_owner_bead records and append one LF per row.","owner_edge_sha256":"7b36d67eb6a635bf112838ea0104aab9b45ad918798af627ec176d01c61e554c","resolution_owner_count":7,"resolution_owner_id_set_sha256":"54a6d2f9844b771aed0b2b714d4682ea2ba40092447beeef08df0231c9e08df4"},
+    "selector_projection": {"row_count":130,"selection_rule":"Scan every top-level array row in K0.3 and K0.4 and select rows with any direct string-valued field exactly UNKNOWN, BLOCKED, or BLOCKED_EXTERNAL; additionally select every K0.3 owned_unknowns row with synthetic matched state OWNED_UNKNOWN.","tuple_rule":"For each selected row, lexically sort and deduplicate matched states, join them with commas, then bytewise-sort stage<TAB>section<TAB>id<TAB>owner<TAB>matched-states records and append one LF per row.","sha256":"4db0a2323e257d602025afc0647109df63c1a401f2bb323a5a1a3f95bc8c8f4a"},
+    "selectors": [
+      {"selector_id":"K0.1-NO-UNKNOWN","locator":"coverage_receipt source_unknown_rows+manifest_unknown_rows+public_surface_unknown_rows+unowned_gap_rows","matched_count":0,"required_owner":"NONE_BECAUSE_EMPTY","blocking":true},
+      {"selector_id":"K0.2-NO-UNKNOWN","locator":"coverage_receipt unknown_rows+unowned_semantic_rows+implicit_operation_rows","matched_count":0,"required_owner":"NONE_BECAUSE_EMPTY","blocking":true},
+      {"selector_id":"K0.3-PUBLIC-USAGE-UNKNOWN","locator":"k0_1_symbol_dispositions[usage_knowledge_state=UNKNOWN]","matched_count":13,"id_field":"symbol_id","id_set_sha256":"19de29fa24f8d298f24adb4e81de5ab835ef74c13b516279a2d824a6d5fb0771","owner_field":"owner_bead","required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","blocking":true},
+      {"selector_id":"K0.3-SEMANTIC-USAGE-UNKNOWN","locator":"k0_2_semantic_dispositions[usage_knowledge_state=UNKNOWN]","matched_count":40,"id_field":"semantic_id","id_set_sha256":"a2250ed7e57cd991d1b50f327af483d3b9f91de11cdd5fd05bcb521ac7e0c1f4","owner_field":"owner_bead","required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","blocking":true},
+      {"selector_id":"K0.3-EXTERNAL-SEARCH-UNKNOWN","locator":"external_searches[knowledge_state=UNKNOWN]","matched_count":7,"id_field":"external_id","id_set_sha256":"59297614f447d10871b58b172c05635b5b791c36e0d93b194c8c2ec2f303d06f","owner_field":"resolution_owner_bead","required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","blocking":true},
+      {"selector_id":"K0.3-DOCUMENTATION-UNKNOWN","locator":"documentation_claim_occurrence_groups.derived_remainder_groups","matched_count":9279,"id_field":"derived occurrence ID","id_set_sha256":"7832fa790e0e79ec6a0b404f6f28b480b869edf4d0543bc23e05dbd0c229c4d1","required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.10.5","refresh_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","blocking":true},
+      {"selector_id":"K0.3-FEATURE-CELLS-NONPASS","locator":"feature_platform_cells[execution_state!=PASS]","matched_count":8,"id_field":"cell_id","id_set_sha256":"021bcdf10af9b68a57a52d401124830cc884f4a1a8165a3f9440da92b398f68d","owner_field":"owner_bead","required_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.12.5","refresh_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","blocking":true},
+      {"selector_id":"K0.3-OWNED-UNKNOWN","locator":"owned_unknowns","matched_count":8,"id_field":"unknown_id","id_set_sha256":"0dd1f13bfb3d018f73e299ad4f8a24c7d654dd6dc09d25852c074f719d2b3278","owner_field":"resolution_owner_bead","blocking":true},
+      {"selector_id":"K0.4-FIXTURE-PROFILE-BLOCKED","locator":"fixture_classification_profiles[knowledge_state in UNKNOWN|BLOCKED]","matched_count":1,"id_field":"classification_profile_id","id_set_sha256":"854442fb990364ed9a5cab191305743b95b790be9ee263df8f1f0087557178ca","owner_field":"executable_owner","blocking":true},
+      {"selector_id":"K0.4-ENVIRONMENT-UNRESOLVED","locator":"environment_identities[knowledge_state in UNKNOWN|BLOCKED]","matched_count":5,"id_field":"environment_id","id_set_sha256":"b38364137fa24dcb19607c1ff137716ac33884e77bf1b2a5e557006364f20bb7","owner_join":"owned_unknowns by subject plus executable vectors by environment_ids","blocking":true},
+      {"selector_id":"K0.4-VECTOR-UNRESOLVED","locator":"native+broker_api+compression+transport_auth+topology+fault vectors[knowledge_state in UNKNOWN|BLOCKED]","matched_count":23,"id_field":"vector_id","id_set_sha256":"2fa4c57fe931c5528d8ec49305490f7ace1084d9d848642e3471294f342e583b","owner_field":"executable_owner","blocking":true},
+      {"selector_id":"K0.4-OWNED-UNKNOWN","locator":"owned_unknowns[knowledge_state=BLOCKED]","matched_count":9,"id_field":"unknown_id","id_set_sha256":"99a6c6fd294d433f026e7866935f3afa338c78df04fc93172ba5d55c68fed61e","owner_field":"resolution_owner_bead","blocking":true}
+    ],
+    "indirect_owner_joins": [
+      {"row_id":"KAFKA-K0-3-EVIDENCE-005","row_locator":"K0.3.evidence_claims","inventory_handoff_route_id":"KAFKA-K0-3-GAP-007","inventory_handoff_owner":"asupersync-dep-p7-kafka-removal-sarszu.1.4","later_route_ids":["KAFKA-K0-4-GAP-009-FIXTURE","KAFKA-K0-4-GAP-013-AUTH-FAULT","KAFKA-K0-4-GAP-014-TERMINAL-REAL-BROKER"],"later_owner_beads":["asupersync-dep-p7-kafka-removal-sarszu.2.13.1","asupersync-dep-p7-kafka-removal-sarszu.2.13.5","asupersync-dep-p7-kafka-removal-sarszu.2.13.6"],"claim_time_refresh_owner":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","state":"OWNED_BLOCKING_MULTI_ROUTE"}
+    ],
+    "owner_join_rule": "Every selected row has a direct owner field, the declared environment-to-vector/owned-unknown join, or an explicit indirect_owner_joins row; every resulting owner exists in the routed owner set or an independent terminal gate.",
+    "promotion_rule": "UNKNOWN, BLOCKED, NOT_RUN, UNPINNED, planned, static, compile-only, local-model, wire-only, proof-only, opt-in, or silent-skip state cannot become PASS, REAL_BROKER_RECEIPT, ACTUAL_BINARY_RECEIPT, or migration evidence without a new terminal receipt."
+  },
+  "gap_routing": {
+    "route_row_count": 87,
+    "route_stage_counts": {"K0.1":15,"K0.2":23,"K0.3":23,"K0.4":26},
+    "route_projection_rule": "Wrap each child route row as an object with child, collection, id, and row fields; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
+    "route_projection_sha256": "6703f44f112d96e80907809e56c0fbfdb6a3f3719a7a29fa7cf9ec2cf27a3ba2",
+    "route_edge_count": 126,
+    "route_edge_projection_rule": "Bytewise sort unique stage<TAB>gap-or-finding-id<TAB>owner records and append one LF per row.",
+    "route_edge_projection_sha256": "78ac2d846c8c21a1ed741ddb6a17c13c73cc57da86ae97a28577d2a061670dbc",
+    "owner_id_count": 49,
+    "owner_id_set_sha256": "8eb70d75bda5b08007d844cee45bca48383d875ddf795610c9e0f936d1f92e88",
+    "internal_k0_handoffs": [
+      {"from":"K0.1","to":"K0.2","edge_count":6,"state":"SATISFIED_BY_INCLUDED_CHILD_AND_ROUTED_ONWARD"},
+      {"from":"K0.1","to":"K0.3","edge_count":2,"state":"SATISFIED_BY_INCLUDED_CHILD_AND_ROUTED_ONWARD"},
+      {"from":"K0.1","to":"K0.4","edge_count":2,"state":"SATISFIED_BY_INCLUDED_CHILD_AND_ROUTED_ONWARD"},
+      {"from":"K0.3","to":"K0.4","edge_count":1,"state":"SATISFIED_BY_INCLUDED_CHILD_AND_ROUTED_ONWARD"}
+    ],
+    "internal_k0_handoff_edge_count": 11,
+    "internal_k0_handoff_projection_rule": "Select route-owner edges whose owner is the included K0.2, K0.3, or K0.4 child bead; bytewise sort unique stage<TAB>gap-or-finding-id<TAB>owner records and append one LF per row.",
+    "internal_k0_handoff_projection_sha256": "461050ab95066ce754a177798c2c22453a008992ff5c9c1e98d807383a240851",
+    "inventory_input_only_count": 3,
+    "unresolved_internal_handoffs": [],
+    "missing_owner_rows": [],
+    "unowned_route_rows": []
+  },
+  "claims_projection": {
+    "canonicalization_id": "KAFKA_K0_5_CANONICAL_JSON_CLAIMS_V1",
+    "canonicalization_rule": "Sort claims by claim_id, recursively sort each claim object's keys, emit one compact JSON object per claim, and append one LF per record.",
+    "child_claim_record_count": 93,
+    "child_claim_canonicalization_rule": "Wrap each child claim or no-claim row as an object with child, collection, id, and row fields; use the zero-based numeric array index as id for no-claim rows and the child's declared claim or evidence ID otherwise; sort by child, collection, and id; recursively sort object keys; emit compact JSON with one LF per record.",
+    "child_claim_projection_sha256": "a4dc21b49e344bd9c8ba43adabd2c2551b33f7e029494347e1c8f30059ef2f50",
+    "child_claim_groups": {"K0.1_no_claim":6,"K0.2_no_claim":8,"K0.3_documentation_claim":31,"K0.3_evidence_claim":6,"K0.3_no_claim":14,"K0.4_evidence_claim":6,"K0.4_no_claim":22},
+    "aggregate_claims": [
+      {"claim_id":"KAFKA-K0-5-CLAIM-001","subject":"source reachability","state":"STATIC_SOURCE_PINNED","source_packets":["K0.1"],"limitation":"No semantic or runtime claim."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-002","subject":"incumbent semantics","state":"STATIC_SOURCE_PINNED","source_packets":["K0.2"],"limitation":"No broker or lifecycle claim."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-003","subject":"repository-local downstream census","state":"STATIC_SOURCE_PINNED_EXTERNAL_UNKNOWN","source_packets":["K0.3"],"limitation":"External downstream population remains UNKNOWN."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-004","subject":"broker build and fixture provenance","state":"STATIC_SOURCE_PINNED_RUNTIME_BLOCKED","source_packets":["K0.4"],"limitation":"No actual native-binary or real-broker receipt exists."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-005","subject":"migration eligibility","state":"BLOCKED","source_packets":["K0.1","K0.2","K0.3","K0.4"],"limitation":"UNKNOWN and independent terminal gates remain."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-006","subject":"incumbent disposition","state":"KEEP_INCUMBENT","source_packets":["K0.1","K0.2","K0.3","K0.4"],"limitation":"No cutover or removal authority."},
+      {"claim_id":"KAFKA-K0-5-CLAIM-007","subject":"native scope","state":"PREEXISTING_NATIVE_EPIC_INVESTIGATION_ONLY","source_packets":["K0.1","K0.2","K0.3","K0.4"],"limitation":"Experimentation is quarantined from production and cannot retire the incumbent."}
+    ],
+    "aggregate_claim_count": 7,
+    "aggregate_claim_projection_sha256": "2a4867239016cef413e38d68bc1d788de89a23bac7ac08890632256013b4d1b6"
+  },
+  "disposition_receipt": {
+    "incumbent_disposition": "KEEP_INCUMBENT",
+    "native_scope": "PREEXISTING_NATIVE_EPIC_INVESTIGATION_ONLY",
+    "native_scope_owner": "asupersync-dep-p7-kafka-removal-sarszu.2",
+    "first_native_contract_gate": "asupersync-dep-p7-kafka-removal-sarszu.2.1",
+    "migration_eligible": false,
+    "production_wiring_allowed": false,
+    "dependency_exit_allowed": false,
+    "feature_removal_allowed": false,
+    "api_removal_allowed": false,
+    "capability_removal_allowed": false,
+    "file_deletion_allowed": false,
+    "oracle_retirement_allowed": false,
+    "cutover_allowed": false,
+    "sole_conditional_cutover_owner": "asupersync-dep-p7-kafka-removal-sarszu.2.15",
+    "on_missing_unowned_unknown_or_regression": "KEEP_INCUMBENT"
+  },
+  "independent_terminal_gates": [
+    {"gate_id":"K12.5","bead_id":"asupersync-dep-p7-kafka-removal-sarszu.2.12.5","scope":"independent protocol, state, corpus, and oracle verification","state":"REQUIRED_NOT_PROVEN_BY_K0"},
+    {"gate_id":"K13.6","bead_id":"asupersync-dep-p7-kafka-removal-sarszu.2.13.6","scope":"terminal immutable real-service receipts and teardown","state":"REQUIRED_NOT_PROVEN_BY_K0"},
+    {"gate_id":"K14.1","bead_id":"asupersync-dep-p7-kafka-removal-sarszu.2.14.1","scope":"claim-time source, downstream, fixture, owner, and receipt refresh","state":"REQUIRED_NOT_PROVEN_BY_K0"},
+    {"gate_id":"K15","bead_id":"asupersync-dep-p7-kafka-removal-sarszu.2.15","scope":"conditional no-loss cutover or terminal KEEP","state":"SOLE_CUTOVER_AUTHORITY"},
+    {"gate_id":"VF5","bead_id":"asupersync-validation-frontier-v2-b5cjsv.5","scope":"external downstream-consumer proof ownership only; not Kafka runtime evidence","state":"CLOSED_OWNER_ONLY_DOES_NOT_RESOLVE_KAFKA_UNKNOWN"}
+  ],
+  "no_claim_boundaries": [
+    "This aggregate proves only the exact static joins, hashes, ownership, collision accounting, and fail-closed disposition recorded from K0.1 through K0.4.",
+    "It does not prove protocol correctness or supported API-version behavior.",
+    "It does not prove native linkage, actual native capability flags, broker interoperability, or broker-version support.",
+    "It does not prove complete TLS, SASL, credential, security, fault, restart, rolling-version, or recovery coverage.",
+    "It does not prove cancellation, shutdown, rebalance, transaction, lifecycle, teardown, or residue correctness.",
+    "It does not prove performance, resource bounds, reliability, absence of defects, release readiness, or broad workspace health.",
+    "It records no compiler, formatter, test, runtime, broker, external-search, network, service, container, or remote-execution evidence from this aggregate session.",
+    "It does not authorize migration, production wiring, oracle retirement, feature or dependency removal, API or capability removal, file deletion, or cutover."
+  ],
+  "coverage_receipt": {
+    "child_packet_count": 4,
+    "child_file_pin_count": 12,
+    "source_pin_rollup_complete": true,
+    "source_pin_conflict_count": 0,
+    "primary_ids_complete_and_unique": true,
+    "authority_reference_joins_complete": true,
+    "typed_reference_joins_complete": true,
+    "lexical_collision_groups_accounted": true,
+    "unexpected_definition_collisions": [],
+    "unknown_and_blocked_rows_accounted": true,
+    "unowned_unknown_rows": [],
+    "route_owner_edges_complete": true,
+    "internal_handoffs_resolved": true,
+    "claims_projection_complete": true,
+    "migration_eligible": false,
+    "disposition": "KEEP_INCUMBENT",
+    "validation_mode": "STATIC_JSON_HASH_AND_EXACT_DIFF_ONLY",
+    "dynamic_execution_claimed": false
+  }
+}

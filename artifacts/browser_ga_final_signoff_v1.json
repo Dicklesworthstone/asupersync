@@ -1,0 +1,323 @@
+{
+  "schema_version": "browser-ga-final-signoff-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.4.4",
+  "parent_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.4",
+  "source_of_truth": {
+    "signoff_artifact": "artifacts/browser_ga_final_signoff_v1.json",
+    "human_report": "docs/browser_ga_final_signoff.md",
+    "rollback_drill_fixture": "tests/fixtures/browser_ga_final_signoff/rollback_drill.json",
+    "contract_test": "tests/browser_ga_final_signoff_contract.rs",
+    "readiness_matrix": "artifacts/browser_edition_readiness_matrix_v1.json",
+    "package_integrity_gate": "artifacts/browser_package_integrity_gate_v1.json",
+    "consumer_compatibility_matrix": "artifacts/browser_consumer_compatibility_matrix_v1.json",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "readme": "README.md"
+  },
+  "signoff_lane": {
+    "lane_id": "browser-ga-final-signoff",
+    "guarantee_id": "browser-ga-final-signoff",
+    "proof_status_claim_id": "browser-ga-final-signoff",
+    "proof_command_id": "browser-ga-final-signoff-contract",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture"
+  },
+  "decision": {
+    "decision_id": "browser-ga-js-ts-scoped-2026-06-12",
+    "reviewed_as_of": "2026-06-12",
+    "release_channel": "stable",
+    "candidate_package_version": "0.4.9",
+    "final_verdict": "pass_scoped_js_ts_ga",
+    "js_ts_package_ga_allowed": true,
+    "rust_browser_api_stable_allowed": false,
+    "service_worker_direct_runtime_allowed": false,
+    "shared_worker_direct_runtime_allowed": false,
+    "npm_publish_executed": false,
+    "scope_summary": "Browser Edition JS/TS packages may be cited as GA for browser main-thread, React client, Next client, vanilla/Vite, Webpack, and dedicated-worker consumers when B1 readiness, B2 package integrity, B3 consumer compatibility, and this B4 final signoff lane are green for the same candidate window."
+  },
+  "freshness_policy": {
+    "policy_id": "browser-ga-final-signoff-freshness-v1",
+    "reviewed_as_of": "2026-06-12",
+    "readiness_review_window_days": 30,
+    "required_source_evidence": [
+      "browser_edition_readiness_matrix",
+      "browser_package_integrity_gate",
+      "browser_consumer_compatibility_matrix"
+    ],
+    "required_contract_status": "artifact-contract-present",
+    "required_remote_prefix": "RCH_REQUIRE_REMOTE=1 rch exec -- env ",
+    "reject_transcript_markers": [
+      "[RCH] local",
+      "Executing command locally",
+      "local fallback accepted",
+      "falling back to local execution"
+    ],
+    "artifact_hash_algorithm": "sha256"
+  },
+  "source_evidence_rows": [
+    {
+      "row_id": "browser-edition-readiness-matrix",
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.4.1",
+      "evidence_id": "browser_edition_readiness_matrix",
+      "current_evidence_status": "artifact-contract-present",
+      "artifact_paths": [
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "tests/browser_edition_readiness_matrix_contract.rs",
+        "docs/browser_edition_readiness_matrix.md"
+      ],
+      "claim_boundary": "Support-class table, rollback status, row freshness, and no-claim boundaries only."
+    },
+    {
+      "row_id": "browser-package-integrity-gate",
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.4.2",
+      "evidence_id": "browser_package_integrity_gate",
+      "current_evidence_status": "artifact-contract-present",
+      "artifact_paths": [
+        "artifacts/browser_package_integrity_gate_v1.json",
+        "tests/browser_package_integrity_gate_contract.rs",
+        "tests/fixtures/browser_package_integrity_gate/failure_rehearsals.json",
+        "docs/wasm_release_channel_strategy.md"
+      ],
+      "claim_boundary": "Package metadata, ABI, integrity, SBOM/provenance, bundle-budget, rollback, and readiness aggregation only; does not execute npm publish."
+    },
+    {
+      "row_id": "browser-consumer-compatibility-matrix",
+      "owner_bead": "asupersync-idea-wizard-fifth-wave-3gaiun.4.3",
+      "evidence_id": "browser_consumer_compatibility_matrix",
+      "current_evidence_status": "artifact-contract-present",
+      "artifact_paths": [
+        "artifacts/browser_consumer_compatibility_matrix_v1.json",
+        "tests/browser_consumer_compatibility_matrix_contract.rs",
+        "tests/fixtures/browser_consumer_compatibility_matrix/failure_bundles.json",
+        "docs/browser_consumer_compatibility_matrix.md"
+      ],
+      "claim_boundary": "Consumer fixture compatibility and fail-closed unsupported rows only; does not promote preview Rust, service-worker direct runtime, or shared-worker direct runtime."
+    }
+  ],
+  "support_class_table": [
+    {
+      "support_class": "direct_runtime_supported",
+      "public_label": "Direct-runtime supported",
+      "ga_effect": "eligible_for_js_ts_browser_ga_when_row_and_consumer_evidence_are_green"
+    },
+    {
+      "support_class": "package_abi_boundary",
+      "public_label": "Package ABI boundary",
+      "ga_effect": "required_package_artifact_boundary_but_not_a_stable_external_rust_runtime"
+    },
+    {
+      "support_class": "preview_public_lane",
+      "public_label": "Preview public lane",
+      "ga_effect": "preview_only_no_js_ts_ga_promotion"
+    },
+    {
+      "support_class": "broker_coordinator_only",
+      "public_label": "Broker/coordinator-only",
+      "ga_effect": "broker_or_coordinator_claim_only_no_direct_runtime_promotion"
+    },
+    {
+      "support_class": "bridge_only",
+      "public_label": "Bridge-only",
+      "ga_effect": "bridge_claim_only_no_direct_runtime_promotion"
+    },
+    {
+      "support_class": "impossible_unsupported",
+      "public_label": "Impossible / unsupported",
+      "ga_effect": "fail_closed_no_browser_ga_claim"
+    }
+  ],
+  "current_package_review": {
+    "reviewed_date_utc": "2026-09-09",
+    "package_version": "0.4.11",
+    "status": "RELEASE_CANDIDATE_NOT_GA_SIGNOFF",
+    "historical_signoff_reissued": false,
+    "npm_publish_executed": false,
+    "wasm_source_commit": "7029dce317243366823453928119bddd9e27b126",
+    "scope": "Current candidate package versions and hashes only. The original decision, candidate window, package rows, and GA authority remain historical and do not authorize this candidate's publication or GA promotion.",
+    "current_hashes": {
+      "packages/browser-core/package.json": "e3007336e5420c5e912744dbdc0874ada1977d61761b81d3ca6cf039aa0ea006",
+      "packages/browser-core/index.js": "b56619dd48edf7564d0742719b13bc83e028c778ec177482cd083dc838959abe",
+      "packages/browser-core/index.d.ts": "7b4c9697f9bee810f467b99c83bc22f1ad508e76349f1353e0f60a4f60142442",
+      "packages/browser-core/asupersync.js": "7e2b71cc51108487491728418b8827a17f4666369cefe791328457730daf696c",
+      "packages/browser-core/asupersync.d.ts": "6fa9bdc6f4221bd7417c434755a322a855e7e5dbfff18abceb73532d6732499a",
+      "packages/browser-core/asupersync_bg.wasm": "62fcd770accbb4dd7328b9bf30b74575409ec912c8a02a2173053fca0df3a7a5",
+      "packages/browser-core/asupersync_bg.wasm.d.ts": "f88c411796cc2c9d5811ac714b5e51a7a11726c5ab5a49cf5df95a888b819e43",
+      "packages/browser-core/abi-metadata.json": "2dd67a5868e0c557b42e1c13295bb33df9776d9ba5d91755a5bdf29be7410dea",
+      "packages/browser-core/debug-metadata.json": "c4a8a145177163d2d97e0feacf18cb7907675cc2aa3e5b3b70e8560526394d1e",
+      "packages/browser/package.json": "ffff63a780e9c4ec87c17d6cb8f95014c5d2e56056899a389c2c9a8324ac4660",
+      "packages/browser/src/index.ts": "b347ae03365060d55482f9ae2e5ceea86c5741e57d64b8c091f0c29500d1e0cf",
+      "packages/react/package.json": "ade0dd97c4dc0124625076f392d52cb0189dda1fd4f0a1b0b968d3a9ad18e61e",
+      "packages/next/package.json": "57c7d4a31bb460c927f30a0baf5b63343ecc3d5323e8c8a9650cfd3e2e754aae"
+    }
+  },
+  "package_versions": [
+    {
+      "package_name": "@asupersync/browser-core",
+      "version": "0.4.9",
+      "manifest": "packages/browser-core/package.json",
+      "manifest_sha256": "0c6ee067050655dcc6565e2c99aaf0f945bd04c1cec0e0332fc891125dd54fbb",
+      "artifact_hashes": [
+        {
+          "path": "packages/browser-core/index.js",
+          "sha256": "13cac4230f8eeb574d74133379814c8234803e8fa7c8c7b0b7940346a4a591b5"
+        },
+        {
+          "path": "packages/browser-core/index.d.ts",
+          "sha256": "45ecd7db8149042ab1b28f51641b93d490d1afc9b76af6d8ceefd8e42a498a19"
+        },
+        {
+          "path": "packages/browser-core/asupersync.js",
+          "sha256": "547f6a607032e08c07e06fbfa172bf800f4821db725fea0956a5f42accee27f0"
+        },
+        {
+          "path": "packages/browser-core/asupersync.d.ts",
+          "sha256": "d19cd91c0544a0a6e3120f49231fff16ca16e58effd84b24e11282f312b3272b"
+        },
+        {
+          "path": "packages/browser-core/types.d.ts",
+          "sha256": "4e1e172a1eb86594af4f2818bbe30a53badc9a87f924752390ecbd61cf861678"
+        },
+        {
+          "path": "packages/browser-core/asupersync_bg.wasm",
+          "sha256": "2206f641a0d2a83d7968aa301e8c30552539b6330050deb87708fd000868951a"
+        },
+        {
+          "path": "packages/browser-core/asupersync_bg.wasm.d.ts",
+          "sha256": "77c67b3be2083c45aec8cc57930e903236ce584bbdf7e263b4e4fdabed422211"
+        },
+        {
+          "path": "packages/browser-core/abi-metadata.json",
+          "sha256": "bcded5f10c7139e0da6ce24990a85efae071b353697b85314cfaad44c1ac790b"
+        },
+        {
+          "path": "packages/browser-core/debug-metadata.json",
+          "sha256": "a01ddbc4fbe173778e55d366f3d4e0bed22f2b0abaefceaa8337aa6aeca5f784"
+        }
+      ]
+    },
+    {
+      "package_name": "@asupersync/browser",
+      "version": "0.4.9",
+      "manifest": "packages/browser/package.json",
+      "manifest_sha256": "441f13164faa91cb210fc1f272f8f14119d061591b4145a1f4d4529f261eb2fa",
+      "artifact_hashes": [
+        {
+          "path": "packages/browser/src/index.ts",
+          "sha256": "a9efd084a34978f6828d206ec549d263c78e68fd6acabb418f0d9436ee226aaf"
+        },
+        {
+          "path": "packages/browser/src/tracing.ts",
+          "sha256": "f80c38651c98f4fe15f477be2bf109a3500d73d8161d8ac314f205f39ca25c18"
+        },
+        {
+          "path": "packages/browser/tsconfig.json",
+          "sha256": "688fb0b5d814f276af08d52d85382197ef1df58bf1366c7b2483f560402e0092"
+        }
+      ]
+    },
+    {
+      "package_name": "@asupersync/react",
+      "version": "0.4.9",
+      "manifest": "packages/react/package.json",
+      "manifest_sha256": "f7cf567b7d9ac3ec8eb6b905c3390f52f49d31bf284f1432dd9e2fa0cf0cd7b7",
+      "artifact_hashes": [
+        {
+          "path": "packages/react/src/index.ts",
+          "sha256": "d764f6409c747d100772bddf38a2b76b1578466e597bc0d1fa78923e9349a356"
+        },
+        {
+          "path": "packages/react/tsconfig.json",
+          "sha256": "5f3ed0b07dd84e187276a1bb4bce3118ecca38764b83e9593ccef4a65d89ac88"
+        }
+      ]
+    },
+    {
+      "package_name": "@asupersync/next",
+      "version": "0.4.9",
+      "manifest": "packages/next/package.json",
+      "manifest_sha256": "3360fece8ff1aac7ec6fab5426c4e431a52d0cc12118c6c330af27641790f84c",
+      "artifact_hashes": [
+        {
+          "path": "packages/next/src/index.ts",
+          "sha256": "0d4c0b84c37d5dfa0478e4f653c17909c62ced435e2e639d99c089100c3b76e7"
+        },
+        {
+          "path": "packages/next/tsconfig.json",
+          "sha256": "5f3ed0b07dd84e187276a1bb4bce3118ecca38764b83e9593ccef4a65d89ac88"
+        }
+      ]
+    }
+  ],
+  "release_channel_decision": {
+    "channel": "stable",
+    "promotion_source": "canary",
+    "release_strategy_doc": "docs/wasm_release_channel_strategy.md",
+    "package_ga_scope": [
+      "@asupersync/browser-core",
+      "@asupersync/browser",
+      "@asupersync/react",
+      "@asupersync/next"
+    ],
+    "required_same_window_artifacts": [
+      "artifacts/browser_edition_readiness_matrix_v1.json",
+      "artifacts/browser_package_integrity_gate_v1.json",
+      "artifacts/browser_consumer_compatibility_matrix_v1.json",
+      "artifacts/browser_ga_final_signoff_v1.json"
+    ],
+    "rollback_default": "block_package_ga_and_demote_public_claim_to_previous_channel"
+  },
+  "rollback_drill": {
+    "fixture_path": "tests/fixtures/browser_ga_final_signoff/rollback_drill.json",
+    "required_scenarios": [
+      "bad_browser_core_wasm_digest",
+      "abi_metadata_mismatch",
+      "consumer_compatibility_regression",
+      "rust_preview_stable_overclaim"
+    ],
+    "expected_default_action": "block_package_ga"
+  },
+  "docs_claim_freshness": {
+    "required_docs": [
+      "README.md",
+      "docs/browser_ga_final_signoff.md",
+      "docs/browser_consumer_compatibility_matrix.md",
+      "docs/browser_edition_readiness_matrix.md",
+      "docs/wasm_release_channel_strategy.md"
+    ],
+    "required_readme_markers": [
+      "artifacts/browser_ga_final_signoff_v1.json",
+      "docs/browser_ga_final_signoff.md",
+      "JS/TS packages GA for browser main-thread and dedicated-worker consumers; Rust browser API preview-only"
+    ],
+    "required_report_markers": [
+      "pass_scoped_js_ts_ga",
+      "Rust browser API remains preview-only",
+      "does not execute npm publish",
+      "browser-ga-final-signoff"
+    ]
+  },
+  "current_operator_report": {
+    "report_id": "browser-ga-final-signoff-current",
+    "final_verdict": "pass_scoped_js_ts_ga",
+    "release_channel": "stable",
+    "first_failing_row": "none",
+    "required_log_fields": [
+      "owner_bead",
+      "evidence_id",
+      "artifact_sha256",
+      "package_name",
+      "package_version",
+      "release_channel",
+      "final_verdict"
+    ],
+    "summary": "B1 readiness, B2 package integrity, and B3 consumer compatibility are aggregated for scoped Browser Edition JS/TS package GA. The signoff preserves no-claim boundaries for npm publish, full workspace health, Rust browser stable parity, service-worker direct runtime, and shared-worker direct runtime."
+  },
+  "non_claims": [
+    "does not execute npm publish",
+    "does not prove broad workspace health",
+    "does not prove full release readiness outside Browser Edition JS/TS package GA",
+    "does not promote Rust browser API from preview to stable",
+    "does not promote service-worker direct runtime",
+    "does not promote shared-worker direct runtime",
+    "does not claim native-only browser capability parity"
+  ]
+}

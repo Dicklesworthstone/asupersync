@@ -1,0 +1,9 @@
+---
+source: src/grpc/status.rs
+expression: status_wire_snapshot(&status)
+---
+{
+  "grpc-message": "field \\\"display_name\\\"\\ncontains invalid UTF-8: 🚀",
+  "grpc-status": "3",
+  "grpc-status-details-bin": "AGdycGMtZGV0YWlsc/8="
+}

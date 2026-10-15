@@ -1,0 +1,58 @@
+//! HTTP/1.1 protocol implementation.
+//!
+//! This module provides request parsing, response serialization, and
+//! connection handling for HTTP/1.1.
+//!
+//! - [`codec`]: [`Http1Codec`] for framed request/response I/O
+//! - [`types`]: [`Method`], [`Version`], [`Request`], [`Response`]
+//! - [`server`]: [`Http1Server`] for serving connections
+//! - [`client`]: [`Http1Client`] for sending requests
+//! - [`stream`]: Streaming body types for incremental I/O
+
+pub mod client;
+pub mod codec;
+pub mod http_client;
+// Server-side HTTP/1.1 modules depend on crate::server (native listener/shutdown).
+// Excluded from wasm32 browser builds where HTTP goes through fetch/WebSocket.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod listener;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod server;
+pub mod stream;
+pub mod types;
+
+#[cfg(test)]
+mod obs_text_test;
+#[cfg(test)]
+mod request_line_tests;
+
+pub use client::{ClientIncomingBody, ClientStreamingResponse, Http1Client, Http1ClientCodec};
+pub use codec::{
+    BorrowedHeader, BorrowedHeaders, BorrowedMethod, BorrowedRequestHead, Http1Codec, HttpError,
+};
+
+// Export for conformance testing
+#[cfg(test)]
+pub use codec::parse_header_line_test as parse_header_line;
+pub use http_client::{
+    ClientError, ClientRequestBuilder, HttpClient, HttpClientBuilder, HttpClientConfig, ParsedUrl,
+    RedirectPolicy, RetryPolicy, Scheme,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use listener::{Http1Listener, Http1ListenerConfig};
+#[cfg(not(target_arch = "wasm32"))]
+pub use server::{
+    ConnectionPhase, ConnectionState, Http1Config, Http1Response, Http1Server,
+    Http1StreamingConfig, Http1StreamingServer, Http1Upgrade, Http1UpgradeFuture, Http1UpgradedIo,
+    IntoHttp1Response,
+};
+pub use stream::{
+    BodyKind, ChunkedEncoder, Http1ProducedResponse, IncomingBody, IncomingBodyError,
+    IncomingBodyWriter, IncomingRequestBody, IncomingRequestBodyWriter, OutgoingBody,
+    OutgoingBodySender, RequestHead, ResponseHead, StreamingRequest, StreamingResponse,
+    StreamingServerRequest,
+};
+pub use types::{
+    Method, MultipartError, MultipartForm, Request, RequestBuilder, Response, ResponseBuilder,
+    StatusCode, Version,
+};

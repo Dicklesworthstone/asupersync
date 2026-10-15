@@ -1,0 +1,701 @@
+{
+  "artifact_id": "dependency-api-adr-phase3-signoff-v1",
+  "schema_version": 1,
+  "program_id": "asupersync-ir2uf0",
+  "phase_id": "asupersync-dep-p3-api-adrs-h3jspm",
+  "aggregate_bead_id": "asupersync-dep-p3-api-adrs-h3jspm.13",
+  "adr_registry_path": "artifacts/dependency_api_adr_registry_v1.json",
+  "capability_registry_path": "artifacts/dependency_capability_registry_v1.json",
+  "doc_path": "docs/dependency_api_adr_phase3_signoff.md",
+  "adr_doc_dir": "docs/adr",
+  "policy": {
+    "purpose": "Terminal Phase-3 decision gate. Reconciles all twelve owner ADRs against the live capability registry, feature graph, platform matrix, downstream consumers and documented user journeys, and emits a deterministic decision matrix plus a negative-fixture review.",
+    "no_loss_rule": "No resolved ADR may authorize removal or narrowing of any accepted API, feature, format, protocol, platform cell, diagnostic, third-party integration or user journey. KEEP_UNTIL_PARITY is a valid terminal decision.",
+    "authority_rule": "Every capability has exactly one primary cutover authority. Secondary compatibility consumers are declared explicitly and are disjoint from the primary set.",
+    "evidence_rule": "Naming an evidence owner or scenario id asserts ownership, never that the evidence has run. Every ADR carries evidence state, owners, scenario ids and required evidence classes; each must reconcile with the capability registry.",
+    "no_implementation_rule": "This gate authorizes no source change and no dependency cutover. It proves only that downstream campaigns have unambiguous, no-loss contracts to start from.",
+    "gap_rule": "Every known gap is owned by a live tracker bead and is marked non-wideable. A gap records a limit of the current implementation; it never licenses narrowing the frozen surface.",
+    "truthful_baseline_rule": "Where an ADR found the plan or its own bead factually wrong, the correction is recorded in the ADR's supersedes list rather than silently carried forward.",
+    "aggregate_rule": "This artifact is derived. Every row is re-derived from the live registries by the contract test; a stale row is a test failure, not documentation drift."
+  },
+  "expected_adr_count": 12,
+  "expected_capability_count": 17,
+  "expected_fixture_count": 20,
+  "allowed_terminal_decisions": [
+    "KEEP_UNTIL_PARITY",
+    "ADDITIVE_COEXISTENCE"
+  ],
+  "allowed_preserve_cutover_states": [
+    "KEEP_INCUMBENT",
+    "BLOCKED_PENDING_EVIDENCE"
+  ],
+  "allowed_surface_states": [
+    "SHIPPED_OWNED",
+    "SHIPPED_VIA_DEPENDENCY",
+    "SHIPPED_OWNED_INPROCESS",
+    "TEST_ONLY",
+    "NOT_SHIPPED"
+  ],
+  "allowed_platform_support": [
+    "supported",
+    "unsupported",
+    "not-applicable",
+    "planned"
+  ],
+  "decision_matrix": [
+    {
+      "adr_id": "DEP-ADR-001",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.1",
+      "capability_ids": [
+        "CAP-SERDE-GENERIC",
+        "CAP-PERSISTED-TRACE-SNAPSHOT"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "cutover_states": [
+        "BLOCKED_PENDING_EVIDENCE",
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 2,
+        "SHIPPED_VIA_DEPENDENCY": 5
+      },
+      "known_gap_count": 9,
+      "user_journey_count": 7,
+      "platform_cell_count": 2,
+      "supersedes_count": 3,
+      "doc_path": "docs/adr/dep_plan_adr_001_serde_generic_formats.md"
+    },
+    {
+      "adr_id": "DEP-ADR-002",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.2",
+      "capability_ids": [
+        "CAP-PROTOBUF-GENERIC"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 3,
+        "SHIPPED_VIA_DEPENDENCY": 1
+      },
+      "known_gap_count": 6,
+      "user_journey_count": 6,
+      "platform_cell_count": 2,
+      "supersedes_count": 3,
+      "doc_path": "docs/adr/dep_plan_adr_002_protobuf_generic.md"
+    },
+    {
+      "adr_id": "DEP-ADR-003",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.3",
+      "capability_ids": [
+        "CAP-OTLP-ECOSYSTEM"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "SHIPPED_OWNED": 1,
+        "SHIPPED_OWNED_INPROCESS": 1,
+        "SHIPPED_VIA_DEPENDENCY": 2
+      },
+      "known_gap_count": 7,
+      "user_journey_count": 6,
+      "platform_cell_count": 2,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_003_otlp_ecosystem.md"
+    },
+    {
+      "adr_id": "DEP-ADR-004",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.4",
+      "capability_ids": [
+        "CAP-CONFIG-TOML-JSON",
+        "CAP-SCENARIO-YAML-JSON"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 3,
+        "SHIPPED_VIA_DEPENDENCY": 3
+      },
+      "known_gap_count": 6,
+      "user_journey_count": 6,
+      "platform_cell_count": 2,
+      "supersedes_count": 1,
+      "doc_path": "docs/adr/dep_plan_adr_004_config_scenario_formats.md"
+    },
+    {
+      "adr_id": "DEP-ADR-005",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.5",
+      "capability_ids": [
+        "CAP-CLI-ASUPERSYNC",
+        "CAP-CLI-ATP",
+        "CAP-CLI-ATPD",
+        "CAP-CLI-OFFLINE-TUNER"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 3,
+        "SHIPPED_VIA_DEPENDENCY": 4,
+        "TEST_ONLY": 1
+      },
+      "known_gap_count": 10,
+      "user_journey_count": 7,
+      "platform_cell_count": 4,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_005_cli_contract.md"
+    },
+    {
+      "adr_id": "DEP-ADR-006",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.6",
+      "capability_ids": [
+        "CAP-HTTP-COMPRESSION"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 3,
+        "SHIPPED_VIA_DEPENDENCY": 2
+      },
+      "known_gap_count": 7,
+      "user_journey_count": 7,
+      "platform_cell_count": 1,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_006_brotli_compression.md"
+    },
+    {
+      "adr_id": "DEP-ADR-007",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.7",
+      "capability_ids": [
+        "CAP-NKEY-AUTH"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 1,
+        "SHIPPED_VIA_DEPENDENCY": 4
+      },
+      "known_gap_count": 8,
+      "user_journey_count": 7,
+      "platform_cell_count": 1,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_007_nkey_auth.md"
+    },
+    {
+      "adr_id": "DEP-ADR-008",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.8",
+      "capability_ids": [
+        "CAP-FUTURES-STREAMS"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "BLOCKED_PENDING_EVIDENCE"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 1,
+        "SHIPPED_VIA_DEPENDENCY": 4
+      },
+      "known_gap_count": 7,
+      "user_journey_count": 6,
+      "platform_cell_count": 1,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_008_futures_streams.md"
+    },
+    {
+      "adr_id": "DEP-ADR-009",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.9",
+      "capability_ids": [
+        "CAP-KAFKA"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 2,
+        "SHIPPED_VIA_DEPENDENCY": 4
+      },
+      "known_gap_count": 8,
+      "user_journey_count": 6,
+      "platform_cell_count": 4,
+      "supersedes_count": 1,
+      "doc_path": "docs/adr/dep_plan_adr_009_kafka_client.md"
+    },
+    {
+      "adr_id": "DEP-ADR-010",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.10",
+      "capability_ids": [
+        "CAP-SQLITE"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 2,
+        "SHIPPED_VIA_DEPENDENCY": 4
+      },
+      "known_gap_count": 8,
+      "user_journey_count": 6,
+      "platform_cell_count": 4,
+      "supersedes_count": 2,
+      "doc_path": "docs/adr/dep_plan_adr_010_sqlite_frankensqlite.md"
+    },
+    {
+      "adr_id": "DEP-ADR-011",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.11",
+      "capability_ids": [
+        "CAP-TIME-UTC-RFC3339"
+      ],
+      "decision": "ADDITIVE_COEXISTENCE",
+      "cutover_states": [
+        "BLOCKED_PENDING_EVIDENCE"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 2,
+        "SHIPPED_VIA_DEPENDENCY": 4
+      },
+      "known_gap_count": 9,
+      "user_journey_count": 7,
+      "platform_cell_count": 1,
+      "supersedes_count": 3,
+      "doc_path": "docs/adr/dep_plan_adr_011_time_utc.md"
+    },
+    {
+      "adr_id": "DEP-ADR-012",
+      "bead_id": "asupersync-dep-p3-api-adrs-h3jspm.12",
+      "capability_ids": [
+        "CAP-REGEX-PRIVACY"
+      ],
+      "decision": "KEEP_UNTIL_PARITY",
+      "cutover_states": [
+        "KEEP_INCUMBENT"
+      ],
+      "dependency_exit_allowed": false,
+      "evidence_state": "BASELINE_PLANNED",
+      "surface_states": {
+        "NOT_SHIPPED": 2,
+        "SHIPPED_OWNED": 2,
+        "SHIPPED_VIA_DEPENDENCY": 2
+      },
+      "known_gap_count": 7,
+      "user_journey_count": 6,
+      "platform_cell_count": 2,
+      "supersedes_count": 1,
+      "doc_path": "docs/adr/dep_plan_adr_012_regex_privacy.md"
+    }
+  ],
+  "capability_coverage": [
+    {
+      "capability_id": "CAP-CLI-ASUPERSYNC",
+      "adr_id": "DEP-ADR-005",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.7"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-CLI-ATP",
+      "adr_id": "DEP-ADR-005",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.7"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-CLI-ATPD",
+      "adr_id": "DEP-ADR-005",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.7"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-CLI-OFFLINE-TUNER",
+      "adr_id": "DEP-ADR-005",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.7"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-CONFIG-TOML-JSON",
+      "adr_id": "DEP-ADR-004",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.4",
+        "asupersync-5z2scg.5"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-FUTURES-STREAMS",
+      "adr_id": "DEP-ADR-008",
+      "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "primary_authorities": [
+        "asupersync-d24mms.6"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-HTTP-COMPRESSION",
+      "adr_id": "DEP-ADR-006",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-0h6myr.5"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-KAFKA",
+      "adr_id": "DEP-ADR-009",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-dep-p7-kafka-removal-sarszu"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-NKEY-AUTH",
+      "adr_id": "DEP-ADR-007",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-dep-p4-nkeys-poc60v"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-OTLP-ECOSYSTEM",
+      "adr_id": "DEP-ADR-003",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.2"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-5z2scg.8",
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-PERSISTED-TRACE-SNAPSHOT",
+      "adr_id": "DEP-ADR-001",
+      "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "primary_authorities": [
+        "asupersync-5z2scg.3"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-PROTOBUF-GENERIC",
+      "adr_id": "DEP-ADR-002",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.1"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-REGEX-PRIVACY",
+      "adr_id": "DEP-ADR-012",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.8"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13",
+        "asupersync-d24mms.11"
+      ]
+    },
+    {
+      "capability_id": "CAP-SCENARIO-YAML-JSON",
+      "adr_id": "DEP-ADR-004",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.4",
+        "asupersync-5z2scg.5"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-SERDE-GENERIC",
+      "adr_id": "DEP-ADR-001",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-5z2scg.3"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-SQLITE",
+      "adr_id": "DEP-ADR-010",
+      "disposition": "KEEP_UNTIL_PARITY",
+      "cutover_state": "KEEP_INCUMBENT",
+      "primary_authorities": [
+        "asupersync-ym2wtv"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13"
+      ]
+    },
+    {
+      "capability_id": "CAP-TIME-UTC-RFC3339",
+      "adr_id": "DEP-ADR-011",
+      "disposition": "PRESERVE_AND_REPLACE_IF_PARITY",
+      "cutover_state": "BLOCKED_PENDING_EVIDENCE",
+      "primary_authorities": [
+        "asupersync-5z2scg.6"
+      ],
+      "secondary_compatibility_consumers": [
+        "asupersync-dep-p3-api-adrs-h3jspm.13",
+        "asupersync-d24mms.4"
+      ]
+    }
+  ],
+  "negative_fixture_review": {
+    "verdict": "COMPLETE",
+    "method": "Each fixture names prohibited text plus the loss class it belongs to. The ADR-registry contract asserts that no resolved ADR's prose contains any prohibited text, so every fixture fails the decision gate for its intended reason. This aggregate additionally asserts that every ADR is covered by at least one fixture and that fixture ids and prohibited texts are unique.",
+    "coverage_rule": "every_resolved_adr_has_at_least_one_fixture",
+    "fixtures": [
+      {
+        "fixture_id": "adr-authorizes-dependency-exit",
+        "adr_id": "DEP-ADR-003",
+        "expected_error": "cutover authorization without evidence"
+      },
+      {
+        "fixture_id": "brotli-capability-removal",
+        "adr_id": "DEP-ADR-006",
+        "expected_error": "accepted format loss: Brotli"
+      },
+      {
+        "fixture_id": "cli-command-removal",
+        "adr_id": "DEP-ADR-005",
+        "expected_error": "user journey loss: CLI command"
+      },
+      {
+        "fixture_id": "cli-parser-swap-without-goldens",
+        "adr_id": "DEP-ADR-005",
+        "expected_error": "cutover authorization without evidence"
+      },
+      {
+        "fixture_id": "config-toml-acceptance-loss",
+        "adr_id": "DEP-ADR-004",
+        "expected_error": "accepted format loss: TOML"
+      },
+      {
+        "fixture_id": "futures-public-stream-removal",
+        "adr_id": "DEP-ADR-008",
+        "expected_error": "third-party ecosystem loss: Stream trait"
+      },
+      {
+        "fixture_id": "kafka-feature-removal-on-count",
+        "adr_id": "DEP-ADR-009",
+        "expected_error": "functionality loss: kafka client"
+      },
+      {
+        "fixture_id": "nkey-credential-form-loss",
+        "adr_id": "DEP-ADR-007",
+        "expected_error": "credential form loss: NKey prefix"
+      },
+      {
+        "fixture_id": "otlp-external-sdk-removal",
+        "adr_id": "DEP-ADR-003",
+        "expected_error": "third-party ecosystem loss: OTLP provider bridge"
+      },
+      {
+        "fixture_id": "otlp-logs-omission",
+        "adr_id": "DEP-ADR-003",
+        "expected_error": "signal loss: OTLP logs"
+      },
+      {
+        "fixture_id": "otlp-tokio-in-metrics-graph",
+        "adr_id": "DEP-ADR-003",
+        "expected_error": "no-tokio guarantee violation: metrics production graph"
+      },
+      {
+        "fixture_id": "otlp-traces-feature-gating",
+        "adr_id": "DEP-ADR-003",
+        "expected_error": "default-feature surface loss: OTLP traces"
+      },
+      {
+        "fixture_id": "persisted-artifact-readback-loss",
+        "adr_id": "DEP-ADR-001",
+        "expected_error": "persisted artifact loss: historical corpus"
+      },
+      {
+        "fixture_id": "protobuf-feature-gating",
+        "adr_id": "DEP-ADR-002",
+        "expected_error": "default-feature surface loss: Protobuf"
+      },
+      {
+        "fixture_id": "protobuf-finite-message-set",
+        "adr_id": "DEP-ADR-002",
+        "expected_error": "generic API narrowing: Protobuf"
+      },
+      {
+        "fixture_id": "regex-language-narrowing",
+        "adr_id": "DEP-ADR-012",
+        "expected_error": "generic API narrowing: regex"
+      },
+      {
+        "fixture_id": "scenario-yaml-acceptance-loss",
+        "adr_id": "DEP-ADR-004",
+        "expected_error": "accepted format loss: YAML scenarios"
+      },
+      {
+        "fixture_id": "serde-format-variant-removal",
+        "adr_id": "DEP-ADR-001",
+        "expected_error": "generic API narrowing: Serde"
+      },
+      {
+        "fixture_id": "sqlite-cycle-violation",
+        "adr_id": "DEP-ADR-010",
+        "expected_error": "cycle violation: sqlite"
+      },
+      {
+        "fixture_id": "time-persisted-readback-loss",
+        "adr_id": "DEP-ADR-011",
+        "expected_error": "persisted artifact loss: timestamp corpus"
+      }
+    ]
+  },
+  "gap_ledger": {
+    "total_known_gaps": 92,
+    "distinct_owner_beads": 46,
+    "all_marked_non_wideable": true,
+    "all_owner_beads_live": true,
+    "note": "Ninety-two recorded gaps across twelve ADRs is a finding, not a defect of the ADRs. Most are missing evidence rather than missing capability: absent baselines, unimplemented scenario ids, and registry source-owner rows that name module facades instead of implementations."
+  },
+  "downstream_dependents": [
+    {
+      "bead_id": "asupersync-5z2scg.10",
+      "relation": "blocks",
+      "title": "Phase 5 S1: aggregate codec, observability, format, time, CLI, regex and futures no-loss signoff"
+    },
+    {
+      "bead_id": "asupersync-mnotoo.5",
+      "relation": "blocks",
+      "title": "Program S1: aggregate capability, verification, graph, security, performance, UX and rollback signoff"
+    }
+  ],
+  "registry_defect_ledger": {
+    "owner_bead": "asupersync-dvgpji",
+    "wrong_or_incomplete_source_owner_rows": 18,
+    "capabilities_affected": 14,
+    "fully_correct_rows_among_adr_capabilities": 1,
+    "root_cause": "The api_surface_snapshot selectors map module-name words rather than actual imports, so a capability is credited to whatever module shares its name. Secondary pattern: rows naming a mod.rs facade instead of the implementation file.",
+    "proposed_structural_checks": [
+      "a source_owners file must reference at least one of the row's dependency_owners",
+      "every file importing a dependency_owner must appear in source_owners",
+      "every dependency_owners entry must resolve to a package in Cargo.lock"
+    ],
+    "note": "Recorded here because the ADR sweep is what surfaced it: twelve ADRs read the source directly and only one source-owner row was fully correct. The aggregate does not fix the registry; it fixes the record of what is wrong with it."
+  },
+  "validation": {
+    "contract_test": "tests/dependency_api_adr_phase3_signoff_contract.rs",
+    "e2e_scenario_id": "api-adr-phase3-signoff",
+    "proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' CARGO_TARGET_DIR=\"${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_dependency_api_adr_phase3_signoff\" cargo test -p asupersync --test dependency_api_adr_phase3_signoff_contract -- --nocapture",
+    "checks": [
+      "metadata, policy and allowed vocabularies are present and fail-closed",
+      "all twelve roster ADRs are owner-resolved with zero PENDING",
+      "the decision matrix re-derives exactly from the live ADR registry",
+      "capability coverage is exact against the live bead mapping rules and no capability is claimed twice",
+      "no ADR row is UNKNOWN: capabilities, surfaces, feature flags, platform cells, ecosystem integration and user journeys are all populated from allowed vocabularies",
+      "every capability has exactly one primary authority, disjoint from its secondary consumers",
+      "every ADR declares evidence state, owners and scenario ids that reconcile with the capability registry",
+      "every ADR declares a terminal decision, forbids compatibility shims, and carries a complete rollback policy",
+      "no resolved ADR authorizes a dependency exit, a non-preserving cutover state, or a wideable gap",
+      "the negative-fixture review covers every ADR with unique ids and prohibited texts",
+      "every known-gap owner bead is live in the tracker",
+      "the declared downstream dependents are live and actually depend on this aggregate",
+      "the human summary block is deterministic and current"
+    ],
+    "no_claim_boundary": "This aggregate certifies decision completeness and internal consistency only. It does not prove that any planned evidence has run, that any capability is correctly implemented, that any replacement could reach parity, that the capability registry's source-owner rows are accurate, that performance is unchanged, or that any dependency may be removed. It authorizes no source change and no dependency cutover."
+  }
+}

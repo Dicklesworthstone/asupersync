@@ -1,0 +1,50 @@
+{
+  "schema": "semantic-verification-report-v1",
+  "profile": "full",
+  "overall_status": "failed",
+  "results": [
+    {
+      "suite": "docs",
+      "status": "passed",
+      "duration_s": 2,
+      "required": true
+    },
+    {
+      "suite": "golden",
+      "status": "failed",
+      "duration_s": 3,
+      "required": true
+    },
+    {
+      "suite": "lean_validation",
+      "status": "passed",
+      "duration_s": 1,
+      "required": true
+    },
+    {
+      "suite": "tla_validation",
+      "status": "passed",
+      "duration_s": 1,
+      "required": true
+    },
+    {
+      "suite": "logging_schema",
+      "status": "failed",
+      "duration_s": 1,
+      "required": true
+    },
+    {
+      "suite": "coverage_gate",
+      "status": "passed",
+      "duration_s": 1,
+      "required": true
+    }
+  ],
+  "profile_contract": {
+    "required_artifacts": [
+      "docs_output.txt",
+      "golden_output.txt"
+    ]
+  },
+  "report_dir": "report_artifacts"
+}

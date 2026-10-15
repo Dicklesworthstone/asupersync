@@ -1,0 +1,33 @@
+---
+source: src/cancel/protocol_validator_test_suite.rs
+expression: suite.generate_report()
+---
+
+# Cancel Protocol Validator Test Suite Results
+
+## Summary
+- Total tests run: 16
+- False positives: 1
+- Bug detection rate: 75.00%
+
+## Bug Injection Testing
+- Bugs injected: 4
+- Bugs detected: 3
+- Detection rate: 75.00%
+
+## Performance Testing
+- Validation overhead: 6.25%
+- Memory overhead: 2048 bytes
+- Average latency: 128 ns
+- P99 latency: 512 ns
+- Throughput: 4096 ops/sec
+
+## Performance Targets
+- Debug overhead target: <5% (actual: 6.25%)
+- Production overhead target: <0.1% (estimated from debug)
+- Memory overhead: acceptable if <1MB per 1000 entities
+
+## Recommendations
+- Improve bug detection: some injected violations were not caught
+- Optimize validation performance: overhead exceeds 5% target
+- Fix false positives: valid operations should never trigger assertions

@@ -1,0 +1,10 @@
+---
+source: src/record/finalizer.rs
+expression: budget_configuration_table()
+---
+poll_quota=100
+cost_quota=None
+priority=128
+deadline=None
+constants.poll_budget=100
+constants.time_budget_ns=5000000000

@@ -1,0 +1,131 @@
+{
+  "contract_version": "failure-corpus-manifest-v1",
+  "bead_id": "asupersync-9u057b.3",
+  "created_date": "2026-05-24",
+  "description": "Canonical deterministic corpus for promoting red proof, concurrency, protocol, and E2E failures into scrubbed replay artifacts.",
+  "source_of_truth": {
+    "manifest": "artifacts/failure_corpus_manifest_v1.json",
+    "contract_test": "tests/failure_corpus_manifest_contract.rs",
+    "replay_helper": "scripts/proof_runner.py",
+    "operator_docs": "docs/proof_runner_usage.md"
+  },
+  "scrub_rules": [
+    {
+      "rule_id": "iso-timestamp",
+      "replacement": "[TIMESTAMP]",
+      "purpose": "Remove wall-clock time while preserving event order."
+    },
+    {
+      "rule_id": "repo-root",
+      "replacement": "[REPO]",
+      "purpose": "Remove machine-specific checkout paths."
+    },
+    {
+      "rule_id": "tmp-path",
+      "replacement": "[TMP]",
+      "purpose": "Remove temporary artifact directory names."
+    },
+    {
+      "rule_id": "sha256-value",
+      "replacement": "sha256:[HASH]",
+      "purpose": "Preserve hash presence without pinning unrelated artifact bytes."
+    },
+    {
+      "rule_id": "rch-command-field",
+      "replacement": "command=[RCH_COMMAND]",
+      "purpose": "Preserve the proof-command class without freezing local target paths."
+    },
+    {
+      "rule_id": "worker-field",
+      "replacement": "worker=[WORKER]",
+      "purpose": "Remove ephemeral worker names."
+    },
+    {
+      "rule_id": "active-project-exclusion-count",
+      "replacement": "active_project_exclusion=[COUNT]",
+      "purpose": "Preserve the refusal reason without depending on swarm size."
+    },
+    {
+      "rule_id": "duration-value",
+      "replacement": "[DURATION]",
+      "purpose": "Remove timing noise while keeping latency-bearing lines visible."
+    }
+  ],
+  "promotion_policy": {
+    "promote_when": [
+      "A red rch proof names a first blocker that future agents are likely to hit again.",
+      "A no-mock E2E or protocol failure has enough stage logs to replay without contacting the original service.",
+      "A concurrency, lab, crashpack, or trace failure can be reduced to a deterministic seed or fixture."
+    ],
+    "do_not_promote_when": [
+      "The only evidence is a prose summary without raw stage logs.",
+      "The replay requires live credentials, external services, or a peer-owned dirty checkout.",
+      "The scrubbed fixture would hide the failing file, lane, or decision class."
+    ],
+    "required_case_fields": [
+      "case_id",
+      "title",
+      "failure_kind",
+      "seed",
+      "external_services_required",
+      "raw_event_log",
+      "expected_scrubbed_log",
+      "expected_markers",
+      "first_failure",
+      "stage_logs",
+      "replay.command"
+    ]
+  },
+  "cases": [
+    {
+      "case_id": "FC-RCH-ADMISSION-001",
+      "title": "RCH remote-required admission refusal is preserved as a replayable blocker",
+      "failure_kind": "rch_admission_refusal",
+      "seed": "failure-corpus-v1-rch-admission-001",
+      "status": "active",
+      "external_services_required": false,
+      "origin": {
+        "source": "proof-runner closeout transcript",
+        "source_bead": "asupersync-9u057b.3",
+        "source_lane": "proof-runner-contract"
+      },
+      "touched_files": [
+        "scripts/proof_runner.py",
+        "tests/failure_corpus_manifest_contract.rs",
+        "artifacts/failure_corpus_manifest_v1.json"
+      ],
+      "raw_event_log": "2026-05-24T02:45:21.777777Z worker=ts2 command=RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_failure_corpus cargo test --test proof_runner_contract proof_status_dashboard source=/data/projects/asupersync/scripts/proof_runner.py digest=sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa duration=115404ms\n[RCH] local (no admissible workers: active_project_exclusion=2)\n[RCH] remote required; refusing local fallback (no worker assigned)\nfirst_failure file=/data/projects/asupersync/tests/proof_runner_contract.rs line=0 artifact=/tmp/failure-corpus/session-123.log elapsed=37ms\n",
+      "expected_scrubbed_log": "[TIMESTAMP] worker=[WORKER] command=[RCH_COMMAND]\n[RCH] local (no admissible workers: active_project_exclusion=[COUNT])\n[RCH] remote required; refusing local fallback (no worker assigned)\nfirst_failure file=[REPO]/tests/proof_runner_contract.rs line=0 artifact=[TMP] elapsed=[DURATION]\n",
+      "expected_markers": [
+        "remote required",
+        "refusing local fallback",
+        "active_project_exclusion=[COUNT]"
+      ],
+      "first_failure": {
+        "decision": "blocked-external",
+        "error_class": "rch_admission_refusal",
+        "proof_lane_id": "proof-runner-contract",
+        "file": "rch:admission",
+        "line": 0,
+        "summary": "RCH_REQUIRE_REMOTE=1 refused local fallback before the proof lane ran."
+      },
+      "stage_logs": [
+        {
+          "stage": "remote-admission",
+          "status": "blocked_external",
+          "scrubbed_excerpt": "[RCH] remote required; refusing local fallback (no worker assigned)"
+        }
+      ],
+      "replay": {
+        "kind": "proof-runner-failure-corpus",
+        "command": "python3 scripts/proof_runner.py --failure-corpus-replay FC-RCH-ADMISSION-001 --output json",
+        "uses_external_services": false,
+        "expected_verdict": "pass"
+      },
+      "promotion_output": {
+        "validation_frontier_decision": "blocked-external",
+        "closeout_language": "blocked-external: intended remote proof lane did not run because RCH_REQUIRE_REMOTE=1 refused local fallback; cite the refusal exactly and preserve the supplemental proof that did run."
+      }
+    }
+  ]
+}

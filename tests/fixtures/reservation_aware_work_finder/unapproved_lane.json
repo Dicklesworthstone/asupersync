@@ -1,0 +1,31 @@
+{
+  "agent_mail": {
+    "status": "fixture",
+    "reservations": []
+  },
+  "beads": {
+    "status": "fixture",
+    "ready": []
+  },
+  "dirty_tree": {
+    "status": "ok",
+    "entries": []
+  },
+  "fallback_lanes": [
+    {
+      "candidate_id": "custom-scan:src",
+      "lane": "custom-scan",
+      "title": "Unapproved custom scan",
+      "priority": 1,
+      "paths": ["src"]
+    },
+    {
+      "candidate_id": "testing-fuzzing:bare-cargo-proof",
+      "lane": "testing-fuzzing",
+      "title": "Fallback candidate with unsafe local Cargo proof",
+      "priority": 2,
+      "paths": ["fuzz/fuzz_targets/h2_ping.rs"],
+      "proof_commands": ["cargo check --manifest-path fuzz/Cargo.toml --bin h2_ping"]
+    }
+  ]
+}

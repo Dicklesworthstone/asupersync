@@ -1,0 +1,275 @@
+{
+  "bead_id": "asupersync-2oh2u.3.8",
+  "title": "[T3.8] Migration playbook for fs/process/signal users",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_beads": [
+    "asupersync-2oh2u.3.3",
+    "asupersync-2oh2u.3.4",
+    "asupersync-2oh2u.3.5",
+    "asupersync-2oh2u.3.7",
+    "asupersync-2oh2u.3.9",
+    "asupersync-2oh2u.3.10"
+  ],
+  "domains": ["filesystem", "process", "signal", "cross-domain"],
+  "migration_recipes": [
+    {
+      "id": "MR-FS-01",
+      "domain": "filesystem",
+      "title": "File open/create/read/write",
+      "tokio_api": "tokio::fs::File::{open,create}",
+      "asupersync_api": "asupersync::fs::File::{open,create}",
+      "change_type": "direct_rename",
+      "breaking": false
+    },
+    {
+      "id": "MR-FS-02",
+      "domain": "filesystem",
+      "title": "Convenience path operations",
+      "tokio_api": "tokio::fs::{read,write,copy,rename,remove_file}",
+      "asupersync_api": "asupersync::fs::{read,write,copy,rename,remove_file}",
+      "change_type": "direct_rename",
+      "breaking": false
+    },
+    {
+      "id": "MR-FS-03",
+      "domain": "filesystem",
+      "title": "Directory operations",
+      "tokio_api": "tokio::fs::{create_dir,create_dir_all,remove_dir,read_dir}",
+      "asupersync_api": "asupersync::fs::{create_dir,create_dir_all,remove_dir,read_dir}",
+      "change_type": "direct_rename",
+      "breaking": false
+    },
+    {
+      "id": "MR-FS-04",
+      "domain": "filesystem",
+      "title": "Buffered I/O",
+      "tokio_api": "tokio::io::{BufReader,BufWriter}",
+      "asupersync_api": "asupersync::fs::{BufReader,BufWriter}",
+      "change_type": "module_move",
+      "breaking": false,
+      "note": "Moved from io module to fs module"
+    },
+    {
+      "id": "MR-FS-05",
+      "domain": "filesystem",
+      "title": "Async read/write traits",
+      "tokio_api": "tokio::io::{AsyncReadExt,AsyncWriteExt}",
+      "asupersync_api": "asupersync::io::{AsyncReadExt,AsyncWriteExt}",
+      "change_type": "direct_rename",
+      "breaking": false
+    },
+    {
+      "id": "MR-PR-01",
+      "domain": "process",
+      "title": "Command builder",
+      "tokio_api": "tokio::process::Command",
+      "asupersync_api": "asupersync::process::Command",
+      "change_type": "direct_rename",
+      "breaking": false
+    },
+    {
+      "id": "MR-PR-02",
+      "domain": "process",
+      "title": "Child wait methods",
+      "tokio_api": "child.wait().await, child.wait_with_output().await",
+      "asupersync_api": "child.wait() [blocking] or child.wait_async().await",
+      "change_type": "signature_change",
+      "breaking": true,
+      "note": "Blocking by default; use _async variants for async semantics"
+    },
+    {
+      "id": "MR-PR-03",
+      "domain": "process",
+      "title": "Command output/status",
+      "tokio_api": "command.output().await, command.status().await",
+      "asupersync_api": "command.output() [blocking] or command.output_async().await",
+      "change_type": "signature_change",
+      "breaking": true,
+      "note": "Blocking by default; use _async variants for async semantics"
+    },
+    {
+      "id": "MR-PR-04",
+      "domain": "process",
+      "title": "Stdio pipe accessors",
+      "tokio_api": "child.stdin.take()",
+      "asupersync_api": "child.stdin()",
+      "change_type": "api_change",
+      "breaking": true,
+      "note": "Method call instead of field access with .take()"
+    },
+    {
+      "id": "MR-PR-05",
+      "domain": "process",
+      "title": "Error type",
+      "tokio_api": "std::io::Error",
+      "asupersync_api": "ProcessError {Io, NotFound, PermissionDenied, Signaled}",
+      "change_type": "type_change",
+      "breaking": true,
+      "note": "Structured error enum replaces io::Error"
+    },
+    {
+      "id": "MR-SG-01",
+      "domain": "signal",
+      "title": "Signal listener creation",
+      "tokio_api": "tokio::signal::unix::signal(SignalKind::terminate()) or tokio::signal::windows::{ctrl_c, ctrl_break}",
+      "asupersync_api": "asupersync::signal::signal(SignalKind::Terminate)",
+      "change_type": "api_change",
+      "breaking": true,
+      "note": "Enum variants instead of constructor functions; Windows supports SIGINT, SIGTERM, and SIGBREAK via SignalKind::quit()"
+    },
+    {
+      "id": "MR-SG-02",
+      "domain": "signal",
+      "title": "Ctrl+C",
+      "tokio_api": "tokio::signal::ctrl_c().await",
+      "asupersync_api": "asupersync::signal::ctrl_c()",
+      "change_type": "signature_change",
+      "breaking": true,
+      "note": "Not async; remove .await"
+    },
+    {
+      "id": "MR-SG-03",
+      "domain": "signal",
+      "title": "Graceful shutdown",
+      "tokio_api": "(no direct equivalent)",
+      "asupersync_api": "ShutdownController + with_graceful_shutdown",
+      "change_type": "new_api",
+      "breaking": false,
+      "note": "New structured shutdown primitive; adopt for cleaner shutdown paths"
+    }
+  ],
+  "breaking_changes": [
+    {
+      "id": "BC-01",
+      "domain": "process",
+      "title": "wait/output/status methods are blocking",
+      "severity": "high",
+      "recipes": ["MR-PR-02", "MR-PR-03"]
+    },
+    {
+      "id": "BC-02",
+      "domain": "process",
+      "title": "Stdio accessors are methods, not fields",
+      "severity": "medium",
+      "recipes": ["MR-PR-04"]
+    },
+    {
+      "id": "BC-03",
+      "domain": "process",
+      "title": "ProcessError replaces io::Error",
+      "severity": "medium",
+      "recipes": ["MR-PR-05"]
+    },
+    {
+      "id": "BC-04",
+      "domain": "signal",
+      "title": "SignalKind uses enum variants, not constructor functions",
+      "severity": "medium",
+      "recipes": ["MR-SG-01"]
+    },
+    {
+      "id": "BC-05",
+      "domain": "signal",
+      "title": "ctrl_c is synchronous",
+      "severity": "low",
+      "recipes": ["MR-SG-02"]
+    }
+  ],
+  "platform_support": {
+    "linux": { "fs": "full", "process": "full", "signal": "full", "io_uring": "optional" },
+    "macos": { "fs": "full", "process": "full", "signal": "full", "io_uring": "unsupported" },
+    "windows": {
+      "fs": "full",
+      "process": "partial",
+      "signal": "SIGINT_SIGTERM_SIGBREAK_streams",
+      "io_uring": "unsupported"
+    }
+  },
+  "rollback_strategies": [
+    {
+      "id": "RB-01",
+      "title": "Incremental via compat crate",
+      "description": "Use asupersync-tokio-compat to bridge specific callsites"
+    },
+    {
+      "id": "RB-02",
+      "title": "Per-module migration",
+      "description": "Migrate signal first, then process, then FS"
+    },
+    {
+      "id": "RB-03",
+      "title": "Feature-flagged dual runtime",
+      "description": "Gate usage behind Cargo feature for A/B comparison"
+    }
+  ],
+  "evidence_refs": [
+    {
+      "file": "tests/tokio_fs_process_signal_parity_matrix.rs",
+      "domain": "parity",
+      "tests": 36,
+      "bead": "T3.1"
+    },
+    {
+      "file": "tests/tokio_process_lifecycle_parity.rs",
+      "domain": "process",
+      "tests": 36,
+      "bead": "T3.4"
+    },
+    {
+      "file": "tests/tokio_cancel_safe_fs_process_signal.rs",
+      "domain": "cancel-safety",
+      "tests": 24,
+      "bead": "T3.6"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_conformance.rs",
+      "domain": "conformance",
+      "tests": 34,
+      "bead": "T3.7"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_unit_matrix.rs",
+      "domain": "unit-matrix",
+      "tests": 30,
+      "bead": "T3.9"
+    },
+    {
+      "file": "tests/tokio_fs_process_signal_e2e.rs",
+      "domain": "e2e",
+      "tests": 20,
+      "bead": "T3.10"
+    }
+  ],
+  "drift_detection": [
+    {
+      "id": "DRIFT-MP1",
+      "trigger": "New public API in fs/process/signal",
+      "action": "Add migration recipe"
+    },
+    { "id": "DRIFT-MP2", "trigger": "Gap closed", "action": "Update gap table and remove caveat" },
+    {
+      "id": "DRIFT-MP3",
+      "trigger": "Phase 1+ reactor changes",
+      "action": "Review Phase 0 caveats"
+    },
+    {
+      "id": "DRIFT-MP4",
+      "trigger": "New before/after pattern",
+      "action": "Add to relevant section"
+    },
+    { "id": "DRIFT-MP5", "trigger": "Error type change", "action": "Update rollback guidance" }
+  ],
+  "summary": {
+    "total_recipes": 13,
+    "breaking_recipes": 5,
+    "non_breaking_recipes": 8,
+    "total_breaking_changes": 5,
+    "domains_covered": 4,
+    "rollback_strategies": 3,
+    "platform_count": 3,
+    "total_evidence_tests": 180,
+    "overall_verdict": "COMPLETE"
+  }
+}

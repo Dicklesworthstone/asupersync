@@ -1,0 +1,141 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 435
+expression: golden
+---
+{
+  "scenario": "cancellation_chain",
+  "input_metadata": {
+    "event_count": 7,
+    "event_kinds": [
+      "region_created",
+      "spawn",
+      "obligation_reserve",
+      "cancel_request",
+      "cancel_ack",
+      "obligation_abort",
+      "region_cancelled"
+    ],
+    "unique_tasks": 1,
+    "unique_regions": 1,
+    "description": "Cancellation protocol propagation chain"
+  },
+  "canonical_output": {
+    "depth": 7,
+    "len": 7,
+    "layers": [
+      [
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "region_created",
+          "sort_key": {
+            "kind": 10,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        }
+      ],
+      [
+        {
+          "seq": 2,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1"
+        }
+      ],
+      [
+        {
+          "seq": 3,
+          "time_ns": 2,
+          "kind": "obligation_reserve",
+          "sort_key": {
+            "kind": 12,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 4294967296
+          },
+          "data_summary": "O1/T1/R1/send_permit"
+        }
+      ],
+      [
+        {
+          "seq": 4,
+          "time_ns": 3,
+          "kind": "cancel_request",
+          "sort_key": {
+            "kind": 6,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1/cancel"
+        }
+      ],
+      [
+        {
+          "seq": 5,
+          "time_ns": 4,
+          "kind": "cancel_ack",
+          "sort_key": {
+            "kind": 7,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 0
+          },
+          "data_summary": "T1/R1/cancel"
+        }
+      ],
+      [
+        {
+          "seq": 6,
+          "time_ns": 5,
+          "kind": "obligation_abort",
+          "sort_key": {
+            "kind": 14,
+            "primary": 4294967296,
+            "secondary": 4294967296,
+            "tertiary": 4294967296
+          },
+          "data_summary": "O1/T1/R1/send_permit"
+        }
+      ],
+      [
+        {
+          "seq": 7,
+          "time_ns": 6,
+          "kind": "region_cancelled",
+          "sort_key": {
+            "kind": 11,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/cancel"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 7,
+      "events_per_layer": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "max_parallelism": 1,
+      "independent_pairs": 0
+    }
+  }
+}

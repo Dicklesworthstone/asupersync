@@ -1,0 +1,29 @@
+{
+  "expected": {
+    "citable": true,
+    "exit_code": 0,
+    "first_blocker_contains": [],
+    "first_blocker_forbidden": [],
+    "lifecycle_state": "terminal_pass",
+    "max_first_blocker_lines": 0,
+    "outcome_status": "pass",
+    "proof_evidence_status": "fresh-rch-pass",
+    "refusal_reason_codes": [],
+    "terminal_classification": "pass"
+  },
+  "fixture_id": "terminal-pass",
+  "rch_outcome": {
+    "build_id": "29879655498514498",
+    "detector_heartbeat_stale": false,
+    "detector_progress_stale": false,
+    "exit_code": 0,
+    "finished_at": "2026-06-09T09:11:01Z",
+    "location": "remote",
+    "started_at": "2026-06-09T09:08:18Z",
+    "status": "completed",
+    "submitted_at": "2026-06-09T09:07:23Z",
+    "worker_id": "vmi1227854"
+  },
+  "stderr": "",
+  "stdout": "running 9 tests\ntest result: ok. 9 passed; 0 failed; finished in 0.18s\n"
+}

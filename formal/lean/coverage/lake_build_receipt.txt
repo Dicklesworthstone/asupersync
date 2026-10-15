@@ -1,0 +1,13 @@
+schema=lean.build.receipt.v1
+recorded_by=SapphireHill (claude-code) 2026-09-02T05:50:44Z, local elan install, no CI runner involved
+git_commit=c1d84852cf3eb05a3fd61e6647a0c30e11b078de
+toolchain=leanprover/lean4:v4.27.0
+lean_version=Lean (version 4.27.0, x86_64-unknown-linux-gnu, commit db93fe1608548721853390a10cd40580fe7d22ae, Release)
+command=lake build   (cwd formal/lean; lake-manifest.json: no packages beyond the toolchain)
+result=success: "Built Asupersync (6.1s)", exit status 0; warnings only (unusedVariables, unnecessarySimpa linters), zero errors
+theorems=189   (grep -cE '^theorem|^lemma' Asupersync.lean)
+sorry_count=0  (grep -c sorry Asupersync.lean)
+sha256 88d818426d00f228528908d7c33bfe9bda05a52a37d99ccacd5df803b6a0e4cf  Asupersync.lean
+sha256 7a21d8e9d5c5714ca2b9e45c55d1cd8bad1a840f92fba7fab8cbf0c9c766c3cb  lakefile.lean
+sha256 d55ca0039a5479db5b38919d005b2c427b89b3be4f0184a20f2f4eae931f5bdb  lean-toolchain
+no_claim=this receipt binds one local build to the hashes above; the CI job `lean-build` in .github/workflows/ci.yml produces the recurring receipt as an artifact. It does not prove the Lean model matches the Rust runtime (see the refinement lanes).

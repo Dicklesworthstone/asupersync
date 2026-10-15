@@ -1,0 +1,246 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+//! Connect-compatible gRPC test server
+//!
+//! This binary provides a standalone gRPC server that implements the Connect
+//! protocol for conformance testing. It can be used as a reference server
+//! or target for external conformance test suites.
+
+use anyhow::{Context, Result, bail};
+use asupersync::grpc::{Server, ServerBuilder};
+use clap::{Arg, Command};
+use grpc_conformance_suite::service::create_conformance_test_service;
+use std::net::SocketAddr;
+use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize tracing
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "grpc_conformance_suite=info,asupersync=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let matches = Command::new("grpc-connect-server")
+        .version("0.1.0")
+        .about("Connect-compatible gRPC test server for conformance testing")
+        .arg(
+            Arg::new("address")
+                .short('a')
+                .long("address")
+                .value_name("ADDRESS")
+                .help("Server bind address")
+                .default_value("127.0.0.1"),
+        )
+        .arg(
+            Arg::new("port")
+                .short('p')
+                .long("port")
+                .value_name("PORT")
+                .help("Server port")
+                .default_value("8080"),
+        )
+        .arg(
+            Arg::new("max-message-size")
+                .long("max-message-size")
+                .value_name("BYTES")
+                .help("Maximum message size")
+                .default_value("4194304"), // 4MB
+        )
+        .arg(
+            Arg::new("enable-compression")
+                .long("enable-compression")
+                .help("Enable gzip compression")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("enable-tls")
+                .long("enable-tls")
+                .help("Enable TLS/SSL")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("connect-protocol")
+                .long("connect-protocol")
+                .help("Enable Connect protocol support")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("reflection")
+                .long("reflection")
+                .help("Enable gRPC reflection")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("health-check")
+                .long("health-check")
+                .help("Enable health check service")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .get_matches();
+
+    let address = matches.get_one::<String>("address").unwrap();
+    let port: u16 = matches
+        .get_one::<String>("port")
+        .unwrap()
+        .parse()
+        .context("Invalid port number")?;
+
+    let bind_addr: SocketAddr = format!("{}:{}", address, port)
+        .parse()
+        .context("Invalid bind address")?;
+
+    let max_message_size: usize = matches
+        .get_one::<String>("max-message-size")
+        .unwrap()
+        .parse()
+        .context("Invalid max message size")?;
+
+    let enable_compression = matches.get_flag("enable-compression");
+    let enable_tls = matches.get_flag("enable-tls");
+    let connect_protocol = matches.get_flag("connect-protocol");
+    let enable_reflection = matches.get_flag("reflection");
+    let enable_health = matches.get_flag("health-check");
+
+    info!("Starting Connect-compatible gRPC test server");
+    info!("Bind address: {}", bind_addr);
+    info!("Max message size: {} bytes", max_message_size);
+    info!("Compression: {}", enable_compression);
+    info!("TLS: {}", enable_tls);
+    info!("Connect protocol: {}", connect_protocol);
+    info!("Reflection: {}", enable_reflection);
+    info!("Health check: {}", enable_health);
+
+    validate_server_options(connect_protocol, enable_tls)?;
+
+    // Create the conformance test service
+    let test_service = create_conformance_test_service();
+
+    // Build the server
+    let mut server_builder = ServerBuilder::new()
+        .max_recv_message_size(max_message_size)
+        .max_send_message_size(max_message_size)
+        .add_service(test_service);
+
+    // Add optional services
+    if enable_reflection {
+        info!("Adding gRPC reflection service");
+        let reflection_service = asupersync::grpc::ReflectionService::new().allow_anonymous();
+        server_builder = server_builder.add_service(reflection_service);
+    }
+
+    if enable_health {
+        info!("Adding health check service");
+        let health_service = asupersync::grpc::HealthService::new();
+        server_builder = server_builder.add_service(health_service);
+    }
+
+    let server = server_builder.build();
+
+    // Set up graceful shutdown
+    let shutdown_signal = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install Ctrl+C handler");
+        info!("Received Ctrl+C, initiating graceful shutdown");
+    };
+
+    info!("🚀 gRPC Connect test server listening on {}", bind_addr);
+    info!("Available services:");
+    info!(
+        "  - conformance.TestService (UnaryCall, ServerStreamingCall, ClientStreamingCall, BidirectionalStreamingCall, ErrorTestCall)"
+    );
+
+    if enable_health {
+        info!("  - grpc.health.v1.Health (Check, Watch)");
+    }
+
+    let bind_addr_string = bind_addr.to_string();
+    info!("Press Ctrl+C to shutdown");
+
+    // Start the server
+    tokio::select! {
+        result = server.serve(&bind_addr_string) => {
+            match result {
+                Ok(_) => info!("Server shutdown cleanly"),
+                Err(e) => {
+                    eprintln!("Server error: {:?}", e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ = shutdown_signal => {
+            info!("Shutdown signal received");
+        }
+    }
+
+    info!("Server stopped");
+    Ok(())
+}
+
+fn validate_server_options(connect_protocol: bool, enable_tls: bool) -> Result<()> {
+    if connect_protocol {
+        bail!(
+            "--connect-protocol requires a server-side Connect transport adapter; \
+             this conformance binary currently serves gRPC over HTTP/2 only"
+        );
+    }
+    if enable_tls {
+        bail!(
+            "--enable-tls requires a rustls ServerConfig and a TLS-enabled \
+             asupersync dependency; this conformance binary currently serves plaintext only"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_cli_parsing() {
+        let app = Command::new("test")
+            .arg(
+                Arg::new("address")
+                    .long("address")
+                    .default_value("127.0.0.1"),
+            )
+            .arg(Arg::new("port").long("port").default_value("8080"));
+
+        let matches = app.try_get_matches_from(&["test"]).unwrap();
+        assert_eq!(matches.get_one::<String>("address").unwrap(), "127.0.0.1");
+        assert_eq!(matches.get_one::<String>("port").unwrap(), "8080");
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_bind_address_parsing() {
+        let addr: Result<SocketAddr, _> = "127.0.0.1:8080".parse();
+        assert!(addr.is_ok());
+        assert_eq!(addr.unwrap().port(), 8080);
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn rejects_unwired_connect_transport_flag() {
+        let err = validate_server_options(true, false).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("--connect-protocol"), "{text}");
+        assert!(text.contains("gRPC over HTTP/2 only"), "{text}");
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn rejects_unwired_tls_flag() {
+        let err = validate_server_options(false, true).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("--enable-tls"), "{text}");
+        assert!(text.contains("plaintext only"), "{text}");
+    }
+}

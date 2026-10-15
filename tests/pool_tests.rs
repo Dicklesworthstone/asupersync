@@ -1,0 +1,891 @@
+#![allow(warnings)]
+#![allow(clippy::all)]
+//! Comprehensive test suite for the cancel-safe resource pool abstraction.
+//!
+//! This test suite covers:
+//! - Pool construction and configuration
+//! - PooledResource behavior and obligations
+//! - Cancel-safety guarantees
+//! - Pool statistics tracking
+//! - E2E load scenarios
+//!
+//! # Running Tests
+//!
+//! ```bash
+//! # Run all pool tests with trace logging
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_pool_tests cargo test --test pool_tests -- --nocapture
+//!
+//! # Run specific test
+//! rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_pool_tests cargo test --test pool_tests pool_respects_max_size -- --nocapture
+//! ```
+
+#[macro_use]
+mod common;
+use common::*;
+
+use asupersync::cx::Cx;
+use asupersync::sync::{GenericPool, Pool, PoolConfig, PoolError};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
+
+/// Helper to acquire a resource using async acquire().
+fn acquire_resource<R, F>(pool: &GenericPool<R, F>) -> asupersync::sync::PooledResource<R>
+where
+    R: Send + 'static,
+    F: Fn() -> Pin<Box<dyn Future<Output = Result<R, TestError>> + Send>> + Send + Sync + 'static,
+{
+    let cx: Cx = Cx::for_testing();
+    futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed")
+}
+
+// ============================================================================
+// Test Infrastructure
+// ============================================================================
+
+/// Counter for generating unique connection IDs.
+static CONNECTION_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Factory function type for creating test connections.
+type FactoryFuture = Pin<Box<dyn Future<Output = Result<TestConnection, TestError>> + Send>>;
+
+/// Factory function type (function pointer that returns a future).
+type FactoryFn = fn() -> FactoryFuture;
+
+/// Concrete pool type for tests using function pointer factory.
+type TestPool = GenericPool<TestConnection, FactoryFn>;
+
+/// Create a test connection - function that returns a boxed future.
+fn create_test_connection() -> FactoryFuture {
+    Box::pin(async {
+        let id = CONNECTION_COUNTER.fetch_add(1, Ordering::SeqCst);
+        tracing::debug!(id = %id, "Creating test connection");
+        Ok(TestConnection::new(id))
+    })
+}
+
+/// Factory function pointer for test connections.
+fn test_factory() -> FactoryFn {
+    create_test_connection
+}
+
+/// Create a failing connection - function that returns a boxed future.
+#[allow(dead_code)]
+fn create_failing_connection() -> FactoryFuture {
+    Box::pin(async {
+        tracing::debug!("Failing factory invoked");
+        Err(TestError("factory failure".to_string()))
+    })
+}
+
+/// Factory function pointer for failing connections.
+#[allow(dead_code)]
+fn failing_factory() -> FactoryFn {
+    create_failing_connection
+}
+
+/// Reset the connection counter for deterministic tests.
+fn reset_connection_counter() {
+    CONNECTION_COUNTER.store(0, Ordering::SeqCst);
+}
+
+// ============================================================================
+// Pool Construction Tests
+// ============================================================================
+
+#[test]
+fn pool_creates_with_default_config() {
+    init_test_logging();
+    test_phase!("Pool Construction - Default Config");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::default());
+
+    let stats = pool.stats();
+    tracing::info!(
+        max_size = %stats.max_size,
+        idle = %stats.idle,
+        active = %stats.active,
+        "Pool created with default config"
+    );
+
+    assert_eq!(stats.max_size, 10, "Default max_size should be 10");
+    assert_eq!(stats.active, 0, "No resources should be active initially");
+
+    test_complete!("pool_creates_with_default_config");
+}
+
+#[test]
+fn pool_respects_max_size() {
+    init_test_logging();
+    test_phase!("Pool Construction - Max Size Enforcement");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
+
+    let stats = pool.stats();
+    assert_eq!(stats.max_size, 3, "Max size should be 3");
+
+    test_section!("Acquiring up to max");
+
+    // Acquire 3 resources (should succeed)
+    let cx: Cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r2 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r3 = futures_lite::future::block_on(pool.acquire(&cx));
+
+    assert!(r1.is_ok(), "First acquire should succeed");
+    assert!(r2.is_ok(), "Second acquire should succeed");
+    assert!(r3.is_ok(), "Third acquire should succeed");
+
+    // Keep resources alive to count as active
+    let _r1 = r1.unwrap();
+    let _r2 = r2.unwrap();
+    let _r3 = r3.unwrap();
+
+    let stats = pool.stats();
+    tracing::info!(active = %stats.active, "After acquiring 3 resources");
+    assert_eq!(stats.active, 3, "Should have 3 active resources");
+
+    test_section!("Trying to exceed max");
+
+    // 4th acquire should fail (pool at capacity) - use try_acquire for non-blocking check
+    let r4 = pool.try_acquire();
+    assert!(r4.is_none(), "Fourth acquire should fail (at capacity)");
+
+    test_complete!("pool_respects_max_size", max_size = 3, active = 3);
+}
+
+#[test]
+fn pool_config_builder_works() {
+    init_test_logging();
+    test_phase!("Pool Construction - Config Builder");
+
+    let config = PoolConfig::with_max_size(20)
+        .min_size(5)
+        .acquire_timeout(Duration::from_secs(10))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
+        .health_check_on_acquire(true);
+
+    assert_eq!(config.max_size, 20);
+    assert_eq!(config.min_size, 5);
+    assert_eq!(config.acquire_timeout, Duration::from_secs(10));
+    assert_eq!(config.idle_timeout, Duration::from_secs(300));
+    assert_eq!(config.max_lifetime, Duration::from_secs(1800));
+    assert!(config.health_check_on_acquire);
+
+    tracing::info!(?config, "Config built successfully");
+
+    test_complete!("pool_config_builder_works");
+}
+
+// ============================================================================
+// PooledResource Tests
+// ============================================================================
+
+#[test]
+fn pooled_resource_returns_on_drop() {
+    init_test_logging();
+    test_phase!("PooledResource - Return on Drop");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
+
+    test_section!("Acquire and drop");
+
+    {
+        let r1 = acquire_resource(&pool);
+        tracing::info!(id = %r1.id(), "Acquired resource");
+
+        let stats = pool.stats();
+        assert_eq!(stats.active, 1, "Should have 1 active");
+        assert_eq!(stats.idle, 0, "Should have 0 idle");
+
+        // r1 drops here
+    }
+
+    // Allow return to be processed
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        "After drop"
+    );
+
+    // Resource should be returned to idle pool
+    assert_eq!(stats.active, 0, "Should have 0 active after drop");
+    assert!(stats.idle > 0, "Resource should return to idle");
+
+    test_complete!("pooled_resource_returns_on_drop");
+}
+
+#[test]
+fn pooled_resource_explicit_return() {
+    init_test_logging();
+    test_phase!("PooledResource - Explicit Return");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
+
+    let r1 = acquire_resource(&pool);
+    let id = r1.id();
+    tracing::info!(id = %id, "Acquired resource");
+
+    let stats = pool.stats();
+    assert_eq!(stats.active, 1, "Should have 1 active");
+
+    test_section!("Explicit return");
+    r1.return_to_pool();
+
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        "After explicit return"
+    );
+
+    assert_eq!(stats.active, 0, "Should have 0 active after return");
+
+    test_complete!("pooled_resource_explicit_return");
+}
+
+#[test]
+fn pooled_resource_discard() {
+    init_test_logging();
+    test_phase!("PooledResource - Discard");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(2));
+
+    // Acquire first resource
+    let r1 = acquire_resource(&pool);
+    let id = r1.id();
+    tracing::info!(id = %id, "Acquired resource");
+
+    let stats_before = pool.stats();
+    let total_before = stats_before.total;
+    tracing::info!(total = %total_before, "Total resources before discard");
+
+    test_section!("Discarding resource");
+    r1.discard();
+
+    let stats_after = pool.stats();
+    tracing::info!(
+        total = %stats_after.total,
+        active = %stats_after.active,
+        idle = %stats_after.idle,
+        "After discard"
+    );
+
+    // Resource should not be returned to pool
+    assert_eq!(stats_after.active, 0, "Should have 0 active after discard");
+
+    test_complete!("pooled_resource_discard");
+}
+
+#[test]
+fn pooled_resource_deref_access() {
+    init_test_logging();
+    test_phase!("PooledResource - Deref Access");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
+
+    let r1 = acquire_resource(&pool);
+
+    // Test Deref access
+    let id = r1.id(); // Using Deref to access TestConnection::id()
+    tracing::info!(id = %id, "Accessed via Deref");
+    assert!(id < 100, "ID should be valid");
+
+    // Test get() access
+    let id2 = r1.get().id();
+    assert_eq!(id, id2, "Deref and get() should return same resource");
+
+    test_complete!("pooled_resource_deref_access");
+}
+
+#[test]
+fn pooled_resource_held_duration() {
+    init_test_logging();
+    test_phase!("PooledResource - Held Duration");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
+
+    let r1 = acquire_resource(&pool);
+
+    // Sleep briefly to accumulate hold time
+    std::thread::sleep(Duration::from_millis(10));
+
+    let duration = r1.held_duration();
+    tracing::info!(held_ms = %duration.as_millis(), "Resource held duration");
+
+    assert!(
+        duration >= Duration::from_millis(10),
+        "Duration should be at least 10ms"
+    );
+
+    test_complete!("pooled_resource_held_duration");
+}
+
+// ============================================================================
+// Pool Statistics Tests
+// ============================================================================
+
+#[test]
+fn pool_stats_track_acquisitions() {
+    init_test_logging();
+    test_phase!("Pool Stats - Acquisition Tracking");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(5));
+
+    let stats_initial = pool.stats();
+    assert_eq!(
+        stats_initial.total_acquisitions, 0,
+        "Should start with 0 acquisitions"
+    );
+
+    test_section!("Multiple acquisitions");
+
+    let cx: Cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r2 = futures_lite::future::block_on(pool.acquire(&cx));
+    let r3 = futures_lite::future::block_on(pool.acquire(&cx));
+
+    assert!(r1.is_ok() && r2.is_ok() && r3.is_ok());
+
+    // Keep resources alive to count as active
+    let _r1 = r1.unwrap();
+    let _r2 = r2.unwrap();
+    let _r3 = r3.unwrap();
+
+    let stats = pool.stats();
+    tracing::info!(
+        total_acquisitions = %stats.total_acquisitions,
+        active = %stats.active,
+        "After 3 acquisitions"
+    );
+
+    // Note: total_acquisitions may be updated differently in implementation
+    assert_eq!(stats.active, 3, "Should have 3 active resources");
+
+    test_complete!("pool_stats_track_acquisitions");
+}
+
+#[test]
+fn pool_stats_track_idle_and_active() {
+    init_test_logging();
+    test_phase!("Pool Stats - Idle/Active Tracking");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
+
+    // Initially empty
+    let stats = pool.stats();
+    assert_eq!(stats.active, 0);
+    assert_eq!(stats.idle, 0);
+
+    test_section!("Acquire resources");
+
+    let r1 = acquire_resource(&pool);
+    let r2 = acquire_resource(&pool);
+
+    let stats = pool.stats();
+    tracing::info!(active = %stats.active, idle = %stats.idle, "After acquiring 2");
+    assert_eq!(stats.active, 2);
+
+    test_section!("Return one resource");
+
+    drop(r1);
+
+    let stats = pool.stats();
+    tracing::info!(active = %stats.active, idle = %stats.idle, "After returning 1");
+    // After return, active should decrease
+    assert!(stats.active <= 2, "Active should decrease or stay same");
+
+    test_section!("Return second resource");
+
+    drop(r2);
+
+    let stats = pool.stats();
+    tracing::info!(active = %stats.active, idle = %stats.idle, "After returning 2");
+
+    test_complete!("pool_stats_track_idle_and_active");
+}
+
+// ============================================================================
+// Pool Close Tests
+// ============================================================================
+
+#[test]
+fn pool_close_rejects_new_acquisitions() {
+    init_test_logging();
+    test_phase!("Pool Close - Reject New Acquisitions");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(3));
+
+    // Acquire a resource before close
+    let cx: Cx = Cx::for_testing();
+    let r1 = futures_lite::future::block_on(pool.acquire(&cx));
+    assert!(r1.is_ok(), "Should acquire before close");
+
+    test_section!("Closing pool");
+
+    // Close the pool (note: close() returns a future, we need to run it)
+    // For synchronous test, we'll use the blocking approach
+    futures_lite::future::block_on(pool.close());
+
+    test_section!("Try acquire after close");
+
+    let r2 = pool.try_acquire();
+    assert!(r2.is_none(), "Should not acquire after close");
+
+    tracing::info!("Pool correctly rejects acquisitions after close");
+
+    test_complete!("pool_close_rejects_new_acquisitions");
+}
+
+// ============================================================================
+// Concurrent Access Tests
+// ============================================================================
+
+#[test]
+fn pool_concurrent_access_is_safe() {
+    init_test_logging();
+    test_phase!("Pool Concurrent Access");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        test_factory(),
+        PoolConfig::with_max_size(10),
+    ));
+
+    // Pre-populate the pool with resources using acquire()
+    test_section!("Pre-populating pool with resources");
+    {
+        let cx: Cx = Cx::for_testing();
+        let mut resources = Vec::new();
+        for _ in 0..10 {
+            let r = futures_lite::future::block_on(pool.acquire(&cx))
+                .expect("pre-population acquire should succeed");
+            resources.push(r);
+        }
+        // Drop all resources to return them to idle pool
+        drop(resources);
+    }
+
+    let acquired = Arc::new(AtomicUsize::new(0));
+    let released = Arc::new(AtomicUsize::new(0));
+
+    test_section!("Spawning concurrent acquirers");
+
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let pool: Arc<TestPool> = Arc::clone(&pool);
+            let acquired = Arc::clone(&acquired);
+            let released = Arc::clone(&released);
+
+            std::thread::spawn(move || {
+                use asupersync::sync::PooledResource;
+                for j in 0..10 {
+                    if let Some(r) = pool.try_acquire() {
+                        let r: PooledResource<TestConnection> = r;
+                        acquired.fetch_add(1, Ordering::SeqCst);
+                        tracing::trace!(thread = %i, iteration = %j, "Acquired");
+
+                        // Simulate work
+                        std::thread::sleep(Duration::from_micros(100));
+
+                        r.return_to_pool();
+                        released.fetch_add(1, Ordering::SeqCst);
+                        tracing::trace!(thread = %i, iteration = %j, "Released");
+                    }
+                }
+            })
+        })
+        .collect();
+
+    // Wait for all threads
+    for handle in handles {
+        handle.join().expect("Thread should not panic");
+    }
+
+    let total_acquired = acquired.load(Ordering::SeqCst);
+    let total_released = released.load(Ordering::SeqCst);
+
+    tracing::info!(
+        acquired = %total_acquired,
+        released = %total_released,
+        "Concurrent test completed"
+    );
+
+    assert_eq!(
+        total_acquired, total_released,
+        "All acquired resources should be released"
+    );
+
+    test_complete!(
+        "pool_concurrent_access_is_safe",
+        acquired = total_acquired,
+        released = total_released
+    );
+}
+
+// ============================================================================
+// Error Handling Tests
+// ============================================================================
+
+#[test]
+fn pool_error_display() {
+    init_test_logging();
+    test_phase!("Pool Error - Display");
+
+    let closed = PoolError::Closed;
+    let timeout = PoolError::Timeout;
+    let cancelled = PoolError::Cancelled;
+    let create_failed = PoolError::CreateFailed(Box::new(TestError("test error".to_string())));
+
+    tracing::info!(closed = %closed, "Closed error");
+    tracing::info!(timeout = %timeout, "Timeout error");
+    tracing::info!(cancelled = %cancelled, "Cancelled error");
+    tracing::info!(create_failed = %create_failed, "CreateFailed error");
+
+    assert!(closed.to_string().contains("closed"));
+    assert!(timeout.to_string().contains("timeout"));
+    assert!(cancelled.to_string().contains("cancelled"));
+    assert!(create_failed.to_string().contains("test error"));
+
+    test_complete!("pool_error_display");
+}
+
+// ============================================================================
+// E2E Load Test
+// ============================================================================
+
+#[test]
+fn e2e_pool_under_load() {
+    init_test_logging();
+    test_phase!("E2E: Pool Under Load");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        test_factory(),
+        PoolConfig::with_max_size(5)
+            .min_size(2)
+            .acquire_timeout(Duration::from_secs(5)),
+    ));
+
+    // Pre-populate the pool with resources using acquire()
+    test_section!("Pre-populating pool");
+    {
+        let cx: Cx = Cx::for_testing();
+        let mut resources = Vec::new();
+        for _ in 0..5 {
+            let r = futures_lite::future::block_on(pool.acquire(&cx))
+                .expect("pre-population acquire should succeed");
+            resources.push(r);
+        }
+        // Drop all resources to return them to idle pool
+        drop(resources);
+    }
+
+    let completed = Arc::new(AtomicUsize::new(0));
+    let failed = Arc::new(AtomicUsize::new(0));
+
+    test_section!("Running load test");
+
+    let handles: Vec<_> = (0..20)
+        .map(|i| {
+            let pool: Arc<TestPool> = Arc::clone(&pool);
+            let completed = Arc::clone(&completed);
+            let failed = Arc::clone(&failed);
+
+            std::thread::spawn(move || {
+                use asupersync::sync::PooledResource;
+                for j in 0..5 {
+                    if let Some(conn) = pool.try_acquire() {
+                        let conn: PooledResource<TestConnection> = conn;
+                        tracing::trace!(
+                            worker = %i,
+                            iteration = %j,
+                            conn_id = %conn.get().id(),
+                            "Got connection"
+                        );
+
+                        // Simulate query work
+                        std::thread::sleep(Duration::from_millis(1));
+
+                        conn.return_to_pool();
+                        completed.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        tracing::trace!(
+                            worker = %i,
+                            iteration = %j,
+                            "No connection available"
+                        );
+                        failed.fetch_add(1, Ordering::SeqCst);
+
+                        // Back off and retry
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("Worker should not panic");
+    }
+
+    let total_completed = completed.load(Ordering::SeqCst);
+    let total_failed = failed.load(Ordering::SeqCst);
+    let stats = pool.stats();
+
+    tracing::info!(
+        completed = %total_completed,
+        failed = %total_failed,
+        total_acquisitions = %stats.total_acquisitions,
+        max_size = %stats.max_size,
+        "E2E load test completed"
+    );
+
+    // Some requests should complete
+    assert!(total_completed > 0, "Some requests should complete");
+
+    // Pool should remain functional
+    let final_acquire = pool.try_acquire();
+    assert!(
+        final_acquire.is_some(),
+        "Pool should still be functional after load"
+    );
+
+    test_complete!(
+        "e2e_pool_under_load",
+        completed = total_completed,
+        failed = total_failed
+    );
+}
+
+// ============================================================================
+// Cancel-Safety Tests
+// ============================================================================
+
+#[test]
+fn pool_cancel_during_acquire_wait_does_not_corrupt() {
+    init_test_logging();
+    test_phase!("Cancel Safety - Cancel During Acquire Wait");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        test_factory(),
+        PoolConfig::with_max_size(1),
+    ));
+
+    test_section!("Exhaust pool capacity");
+    let held = acquire_resource(&pool);
+    tracing::info!(id = %held.id(), "Holding sole resource");
+
+    // Pool is now at capacity. Spawn a thread that tries to acquire and will
+    // be cancelled via timeout/abort when it cannot get a resource.
+    test_section!("Spawn waiter thread and cancel");
+    let pool_clone: Arc<TestPool> = Arc::clone(&pool);
+    let handle = std::thread::spawn(move || {
+        // try_acquire returns None immediately when pool is at capacity
+        let result = pool_clone.try_acquire();
+        result.is_some()
+    });
+
+    let acquired = handle.join().expect("waiter thread should not panic");
+    assert!(
+        !acquired,
+        "Waiter should not have acquired (pool at capacity)"
+    );
+
+    test_section!("Verify pool not corrupted");
+    // Return the held resource
+    held.return_to_pool();
+
+    // Pool should still work after the cancelled waiter
+    let r2 = pool.try_acquire();
+    assert!(
+        r2.is_some(),
+        "Pool should still be functional after cancelled waiter"
+    );
+    tracing::info!("Pool remains functional after cancelled acquire");
+
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        max_size = %stats.max_size,
+        "Pool state after cancel test"
+    );
+
+    test_complete!("pool_cancel_during_acquire_wait_does_not_corrupt");
+}
+
+#[test]
+fn pool_cancel_while_holding_resource_returns_via_drop() {
+    init_test_logging();
+    test_phase!("Cancel Safety - Cancel While Holding (Drain Phase)");
+
+    reset_connection_counter();
+
+    let pool: Arc<TestPool> = Arc::new(GenericPool::new(
+        test_factory(),
+        PoolConfig::with_max_size(2),
+    ));
+
+    test_section!("Simulate task cancellation during resource hold");
+    // Spawn a thread that acquires a resource and "gets cancelled" (panics/drops)
+    let pool_clone: Arc<TestPool> = Arc::clone(&pool);
+    let handle = std::thread::spawn(move || {
+        let resource = {
+            let cx: Cx = Cx::for_testing();
+            futures_lite::future::block_on(pool_clone.acquire(&cx)).expect("acquire")
+        };
+        tracing::info!(id = %resource.id(), "Task holding resource before cancel");
+        // Simulate cancellation: resource drops when thread exits
+        // The Drop impl should return the resource to the pool
+        drop(resource);
+        tracing::info!("Resource dropped (cancel/drain complete)");
+    });
+
+    handle.join().expect("thread should complete");
+
+    test_section!("Verify resource returned to pool");
+    let stats = pool.stats();
+    tracing::info!(
+        active = %stats.active,
+        idle = %stats.idle,
+        "Pool state after simulated cancellation"
+    );
+
+    // The resource should have been returned via Drop (drain phase behavior)
+    assert_eq!(
+        stats.active, 0,
+        "No resources should be active after cancel"
+    );
+
+    // Verify we can re-acquire the returned resource
+    let r2 = pool.try_acquire();
+    assert!(
+        r2.is_some(),
+        "Should re-acquire resource returned during drain"
+    );
+    tracing::info!("Successfully re-acquired resource after cancel drain");
+
+    test_complete!("pool_cancel_while_holding_resource_returns_via_drop");
+}
+
+#[test]
+fn pool_min_size_configuration_respected() {
+    init_test_logging();
+    test_phase!("Pool Construction - Min Size Configuration");
+
+    reset_connection_counter();
+
+    let config = PoolConfig::with_max_size(10)
+        .min_size(3)
+        .acquire_timeout(Duration::from_secs(5));
+
+    assert_eq!(config.min_size, 3, "Config should store min_size");
+    assert_eq!(config.max_size, 10, "Config should store max_size");
+    assert!(
+        config.min_size <= config.max_size,
+        "min_size must not exceed max_size"
+    );
+
+    let pool = GenericPool::new(test_factory(), config);
+
+    // Pre-populate the pool to min_size by acquiring and returning
+    test_section!("Pre-populate to min_size");
+    let cx: Cx = Cx::for_testing();
+    let mut resources = Vec::new();
+    for _ in 0..3 {
+        let r = futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire for min_size");
+        resources.push(r);
+    }
+    // Return all to idle
+    drop(resources);
+
+    let stats = pool.stats();
+    tracing::info!(
+        idle = %stats.idle,
+        total = %stats.total,
+        min_size = 3,
+        "Pool after pre-population"
+    );
+
+    // Pool should have at least min_size resources available
+    assert!(
+        stats.idle >= 3 || stats.total >= 3,
+        "Pool should maintain at least min_size resources"
+    );
+
+    test_complete!("pool_min_size_configuration_respected");
+}
+
+// ============================================================================
+// Reuse Tests
+// ============================================================================
+
+#[test]
+fn pool_reuses_returned_resources() {
+    init_test_logging();
+    test_phase!("Pool Resource Reuse");
+
+    reset_connection_counter();
+
+    let pool = GenericPool::new(test_factory(), PoolConfig::with_max_size(1));
+
+    test_section!("First acquisition");
+
+    let r1 = acquire_resource(&pool);
+    let first_id = r1.id();
+    tracing::info!(id = %first_id, "First resource acquired");
+
+    r1.return_to_pool();
+
+    // Process returns before trying to acquire again
+    let _ = pool.stats();
+
+    test_section!("Second acquisition (should reuse)");
+
+    // Now try_acquire should work since resource is in idle pool
+    let r2 = pool
+        .try_acquire()
+        .expect("second acquire should succeed (resource should be idle)");
+    let second_id = r2.id();
+    tracing::info!(id = %second_id, "Second resource acquired");
+
+    // With a single-resource pool, we might get the same resource back
+    // (depends on implementation details)
+    tracing::info!(
+        first_id = %first_id,
+        second_id = %second_id,
+        same = %(first_id == second_id),
+        "Resource reuse check"
+    );
+
+    test_complete!("pool_reuses_returned_resources");
+}

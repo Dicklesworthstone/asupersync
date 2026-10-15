@@ -1,0 +1,820 @@
+# Asupersync Browser Edition (WASM)
+
+This document describes the WASM/browser support in Asupersync: what works
+today, what the architecture looks like, what the known limitations are, and
+what is planned for future phases.
+
+## What Works Today
+
+### JS/TS consumers via wasm-bindgen (Phase 1 -- shipped)
+
+Asupersync ships a Browser Edition that compiles the core runtime to
+`wasm32-unknown-unknown` and exposes it to JavaScript and TypeScript through
+`wasm-bindgen`. This is the primary supported path.
+
+The npm package stack (sources in `packages/`; not yet published to the npm
+registry -- use workspace-local references for now):
+
+| Package | Role |
+|---|---|
+| `@asupersync/browser-core` | Low-level wasm-bindgen bindings, compiled `.wasm` artifact, ABI types |
+| `@asupersync/browser` | High-level SDK: typed handles, outcome helpers, lifecycle management |
+| `@asupersync/react` | React hooks and provider for structured concurrency in React apps |
+| `@asupersync/next` | Next.js App Router bootstrap adapter with server/edge boundary handling |
+
+From JavaScript, you get:
+
+- **Structured concurrency scopes**: `runtimeCreate()`, `scopeEnter()`, `scopeClose()`
+- **Task lifecycle**: `taskSpawn()`, `taskJoin()`, `taskCancel()`
+- **Cancel-correct fetch**: `fetchRequest()` with automatic `AbortController` integration
+- **WebSocket management**: `websocketOpen()`, `websocketSend()`, `websocketRecv()`, `websocketClose()`
+- **Capability-gated WebTransport datagrams**: `openWebTransport()`, `sendDatagram()`, `recvDatagram()`, `close()`, `cancel()` in `@asupersync/browser`, plus raw `webtransportOpen()`/`webtransportSend()` helpers in `@asupersync/browser-core`
+- **Four-valued outcomes**: every operation returns `ok | err | cancelled | panicked`
+- **ABI versioning**: `abiVersion()`, `abiFingerprint()` for compatibility checking
+
+Quick example (vanilla JS):
+
+```js
+import init, { runtimeCreate, scopeEnter, scopeClose, runtimeClose } from "@asupersync/browser";
+
+await init();
+
+const rt = runtimeCreate();
+if (rt.outcome !== "ok") throw new Error(rt.failure.message);
+
+const scope = scopeEnter({ parent: rt.value });
+if (scope.outcome !== "ok") throw new Error(scope.failure.message);
+
+// This example creates and closes handles; it does not execute task bodies.
+const closed = scopeClose(scope.value);
+if (closed.outcome !== "ok") throw new Error(closed.failure.message);
+const stopped = runtimeClose(rt.value);
+if (stopped.outcome !== "ok") throw new Error(stopped.failure.message);
+```
+
+### Browser ownership and lifecycle scope
+
+The browser boundary records structured ownership and validates lifecycle
+transitions. In `src/types/wasm_abi.rs`, `task_spawn` allocates and pins a task
+handle; it accepts no Rust future. `task_join` accepts the caller's outcome
+and releases that handle. These operations do not run or independently observe
+an arbitrary task body.
+
+The SDK connects specific host operations to those handles, including fetch,
+WebSocket and WebTransport lifecycle/cancellation paths. The guarantees of
+each adapter require its actual host-operation tests. Closing a ledger scope
+is not proof that unrelated JavaScript promises, browser callbacks or Rust
+futures have completed; arbitrary browser globals remain accessible to the
+embedding application. Native no-orphan, obligation and cancellation proofs
+cannot be transferred to that application merely by using these handles.
+
+The native-style browser scheduler and full structured task execution remain
+implementation goals in
+[`PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md`](../PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md).
+The ownership ledger is useful existing functionality, not completion of those
+goals.
+
+### Build profiles
+
+Four canonical browser profiles control the wasm compilation surface:
+
+| Profile | Feature flag | Use case |
+|---|---|---|
+| Minimal | `wasm-browser-minimal` | ABI boundary checks, smallest artifact |
+| Dev | `wasm-browser-dev` | Local development with browser I/O |
+| Prod | `wasm-browser-prod` | Production builds with browser I/O |
+| Deterministic | `wasm-browser-deterministic` | Replay-safe builds with browser trace |
+
+Build command (example for dev profile):
+
+```bash
+rustup target add wasm32-unknown-unknown
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-dev
+```
+
+Native-only features (`cli`, `io-uring`, `tls`, `sqlite`, `postgres`, `mysql`,
+`kafka`) are compile-time rejected on `wasm32`.
+
+## Rust-Authored Browser Contract (Current Truthful Scope)
+
+The shipped Browser Edition product today is the JS/TS package stack. The
+Rust-authored lane is narrower and should be described in terms of what the
+live tree actually supports, not what is architecturally plausible later.
+
+| Goal | Current contract | Live-tree evidence | Non-goals / caveats |
+|---|---|---|---|
+| Compile the semantic core under `wasm32` with one canonical browser profile | Supported today for contributors, CI, and contract validation | root `Cargo.toml` browser profile features; `src/lib.rs` compile-error gates; wasm profile commands in this doc and `docs/wasm_quickstart_migration.md` | This proves cfg/feature closure, not a public browser runtime bootstrap API |
+| Maintain the wasm ABI and package boundary from Rust | Supported today inside the repository; `asupersync-browser-core` is the canonical owner and `asupersync-wasm` is a retained non-canonical scaffold | `asupersync-browser-core/Cargo.toml`, `asupersync-wasm/Cargo.toml`, `packages/browser-core/`, `packages/browser/` | These crates exist to feed the JS/TS Browser Edition surface; they are not the ergonomic public Browser Edition API for external Rust consumers |
+| Build a browser app that creates Browser Edition runtimes directly from Rust consumer code | Preview public lane | `RuntimeBuilder::browser()`, `RuntimeBuilder::inspect_browser_execution_ladder(...)`, `tests/wasm_browser_feasibility_matrix.rs`, and `src/runtime/builder.rs` | Document this as a preview dispatcher-backed lane with truthful fail-closed diagnostics, not as stable parity with the JS/TS Browser Edition packages |
+
+Current rule of thumb:
+
+- Treat `@asupersync/browser`, `@asupersync/react`, and `@asupersync/next` as
+  the shipped public Browser Edition product surfaces.
+- Treat `asupersync-browser-core` as the canonical Rust workspace owner of the
+  shipped JS/WASM boundary.
+- Treat `asupersync-wasm` as a retained non-canonical scaffold for future or
+  alternative binding strategies, not as a second live boundary.
+- Treat `asupersync` plus exactly one `wasm-browser-*` profile as the way to
+  validate browser-safe semantic-core closure, not as a guarantee of native
+  `RuntimeBuilder` parity on `wasm32`.
+- Treat `RuntimeBuilder::browser()` plus
+  `RuntimeBuilder::inspect_browser_execution_ladder(...)` as the current
+  preview public Rust surface: the builder constructs a dispatcher-backed
+  browser runtime on supported hosts and fail-closes to structured diagnostics
+  elsewhere, without claiming full native-thread parity.
+- Treat the remaining Rust-authored browser gap as a real runtime bootstrap
+  problem, not as a naming/docs cleanup: startup now has an explicit
+  `RuntimeHostServices` seam, but only the native std-thread host
+  implementation ships today.
+
+### Browser host-services seam
+
+`src/runtime/builder.rs` now makes the remaining Rust-authored browser blocker
+explicit instead of implicit:
+
+- `RuntimeHostServices` is the startup seam used by `RuntimeBuilder`.
+- `BrowserHostServicesContract` pins the current browser requirements:
+  host-turn wakeups, worker bootstrap hooks, timer/deadline driving, and
+  lane-health callbacks for threadless startup.
+- `NativeThreadHostServices` is the only shipped full runtime host
+  implementation today, so the preview Rust browser builder remains
+  dispatcher-backed and fail-closed instead of pretending the browser already
+  has native-thread parity.
+- The maintained smoke harness remains
+  `tests/fixtures/rust-browser-consumer/` plus
+  `scripts/validate_rust_browser_consumer.sh`; use that fixture for end-to-end
+  diagnostics even though the preview public Rust browser builder now exists.
+
+### Practical lane selection for Rust authors
+
+If you are touching browser-facing Rust today, choose one of these concrete
+lanes and avoid blending them together:
+
+| Need | Use | Live-tree evidence |
+|---|---|---|
+| Inspect the truthful browser execution ladder from Rust before deciding how to wire a browser entrypoint | `RuntimeBuilder::inspect_browser_execution_ladder()` or `RuntimeBuilder::inspect_browser_execution_ladder_with_preferred_lane(...)` | `src/runtime/builder.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Prove that the semantic core still closes under browser-safe cfg/profile rules | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check --target wasm32-unknown-unknown --no-default-features --features wasm-browser-<profile>` against `asupersync` | root `Cargo.toml`, `src/lib.rs`, `tests/wasm_browser_feasibility_matrix.rs` |
+| Maintain the Rust-side ABI/package boundary that feeds the JS/TS Browser Edition packages | `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_docs cargo check -p asupersync-browser-core --target wasm32-unknown-unknown --no-default-features --features dev`; use `asupersync-wasm` only when you need to keep the retained scaffold honest | `asupersync-browser-core/Cargo.toml`, `asupersync-browser-core/src/lib.rs`, `asupersync-wasm/Cargo.toml`, `asupersync-wasm/src/lib.rs` |
+| Validate the maintained browser-facing Rust example that the repository actually proves end-to-end | `PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh` | `tests/fixtures/rust-browser-consumer/`, `scripts/validate_rust_browser_consumer.sh`, `tests/wasm_rust_browser_example_contract.rs` |
+| Build a browser app that constructs Browser Edition runtimes directly from external Rust consumer code | Preview public lane | `RuntimeBuilder::browser()` now exposes truthful automatic lane negotiation, explicit lane pinning, and structured fail-closed diagnostics; treat it as a preview dispatcher-backed path rather than broad native-runtime parity |
+
+For the command-first version of this workflow, see
+`docs/wasm_quickstart_migration.md`.
+
+The release-review Browser Edition readiness matrix lives in
+`artifacts/browser_edition_readiness_matrix_v1.json`, with the human review
+table in `docs/browser_edition_readiness_matrix.md`. It records Direct-runtime
+supported, Package ABI boundary, Preview public lane, Broker/coordinator-only,
+Bridge-only, and Impossible / unsupported rows, including vanilla/Vite and
+Webpack consumer fixtures, without widening the support classes below.
+
+## Authoritative Support Matrix (live tree)
+
+This section is the canonical browser-feasibility classification for the
+current tree. If `README.md`, package diagnostics, or older design notes lag,
+this matrix wins and follow-on beads should align the other surfaces to it.
+
+The shipped JS/TS diagnostics expose this matrix directly:
+
+- `packages/browser/src/index.ts` reports
+  `supportClass: "direct_runtime_supported" | "unsupported"` and
+  `runtimeContext: "browser_main_thread" | "dedicated_worker" | "service_worker" | "shared_worker" | "unknown"`.
+- `packages/next/src/index.ts` preserves the browser diagnostics for client
+  boundaries and adds `supportClass: "bridge_only"` plus explicit bridge-only
+  reasons for Next `server` and `edge` targets.
+- Bead `asupersync-rckwas` pins the cross-surface support boundary in
+  `artifacts/wasm_browser_support_boundary_contract_v1.json`, enforced by
+  `tests/wasm_browser_support_boundary_contract.rs`.
+
+### Execution Ladder Contract
+
+Bead `asupersync-2jhnk.6.1` makes the policy artifact authoritative:
+
+- Canonical machine-readable source:
+  `.github/wasm_worker_offload_policy.json` under `execution_ladder`
+- Canonical prose source: this section
+- Canonical executable guards:
+  `tests/wasm_browser_feasibility_matrix.rs` and
+  `tests/wasm_js_exports_coverage_contract.rs`
+
+Stable lane identifiers:
+
+| Lane id | Kind | Rank | Admitted host roles | Selection law |
+|---|---|---:|---|---|
+| `lane.browser.main_thread.direct_runtime` | `direct_runtime` | 10 | `browser_main_thread` | Use only when the current host is the browser main thread and the normal Browser Edition prerequisites are present |
+| `lane.browser.dedicated_worker.direct_runtime` | `direct_runtime` | 20 | `dedicated_worker` | Use only when the current host is already a dedicated worker bootstrap |
+| `lane.next.server.bridge` | `bridge_only` | 30 | `next_server` | Downgrade to serialized server bridge instead of pretending direct runtime exists |
+| `lane.next.edge.bridge` | `bridge_only` | 40 | `next_edge` | Downgrade to serialized edge bridge instead of pretending direct runtime exists |
+| `lane.unsupported` | `unsupported` | 99 | `service_worker`, `shared_worker`, `non_browser_or_unknown` | Terminal fail-closed lane |
+
+Host-role classification and downgrade order:
+
+- `browser_main_thread`:
+  `lane.browser.main_thread.direct_runtime` -> `lane.unsupported`
+- `dedicated_worker`:
+  `lane.browser.dedicated_worker.direct_runtime` -> `lane.unsupported`
+- `next_server`:
+  `lane.next.server.bridge` -> `lane.unsupported`
+- `next_edge`:
+  `lane.next.edge.bridge` -> `lane.unsupported`
+- `service_worker`:
+  `lane.unsupported`
+- `shared_worker`:
+  `lane.unsupported`
+- `non_browser_or_unknown`:
+  `lane.unsupported`
+
+The important boundary is that the ladder is host-adaptive, not magical:
+
+- We do not silently "upgrade" a main-thread entrypoint into a dedicated worker
+  lane for the caller.
+- We do not silently "upgrade" service-worker or shared-worker hosts into
+  direct-runtime support.
+- A bridge lane is a downgrade, not partial direct-runtime parity.
+
+Canonical reason-code schema:
+
+- `supported`:
+  `supported`
+- `skip`:
+  `candidate_host_role_mismatch`, `candidate_prerequisite_missing`,
+  `candidate_lane_unhealthy`
+- `downgrade`:
+  `downgrade_to_server_bridge`, `downgrade_to_edge_bridge`,
+  `downgrade_to_websocket_or_fetch`, `downgrade_to_export_bytes_for_download`
+- `health`:
+  `demote_due_to_lane_health`
+- `policy_denial`:
+  `service_worker_direct_runtime_not_shipped`,
+  `shared_worker_direct_runtime_not_shipped`,
+  `shared_array_buffer_requires_cross_origin_isolation`
+- `unsupported`:
+  `missing_global_this`, `missing_webassembly`,
+  `unsupported_runtime_context`, `non_browser_runtime`
+
+Current package diagnostics are narrower than the canonical ladder contract.
+Until bead `asupersync-2jhnk.6.2` lands, treat this alias mapping as the source
+of truth for cross-surface comparisons:
+
+| Current package reason | Canonical ladder reason |
+|---|---|
+| `service_worker_not_yet_shipped` | `service_worker_direct_runtime_not_shipped` |
+| `shared_worker_not_yet_shipped` | `shared_worker_direct_runtime_not_shipped` |
+| `bridge_only_server_target` | `downgrade_to_server_bridge` |
+| `bridge_only_edge_target` | `downgrade_to_edge_bridge` |
+
+Required log/event fields for all later ladder-selection artifacts:
+
+- `lane_id`
+- `lane_kind`
+- `lane_rank`
+- `host_role`
+- `support_class`
+- `reason_code`
+- `fallback_lane_id`
+- `lane_health_status`
+- `lane_health_failure_count`
+- `lane_health_retry_budget_remaining`
+- `lane_health_cooldown_until_ms`
+- `lane_health_last_trigger`
+- `demoted_lane_id`
+- `policy_schema_version`
+- `repro_command`
+
+Lane health is part of the execution-ladder contract as well, not an
+implementation detail:
+
+- demotion behavior: `bounded_retry_then_fail_closed`
+- demotion fallback lane: `lane.unsupported`
+- default policy: `max_consecutive_failures=2`, `cooldown_ms=30000`
+- failure triggers:
+  `runtime_init_failure`, `worker_bootstrap_timeout`, `worker_crash`,
+  `replay_integrity_failure`, `prerequisite_drift`,
+  `overload_instability`
+- manual reset trigger:
+  `manual_reset`
+
+Required repro-command convention for later e2e scripts:
+
+```text
+pnpm --filter <package> test:e2e -- --lane <lane_id> --host-role <host_role> --reason <reason_code>
+```
+
+Every persisted `repro_command` must include the tokens `--lane`,
+`--host-role`, and `--reason` exactly so logs and fixtures can be compared
+mechanically.
+
+### Optional-lane operator decision inputs
+
+Treat every advanced browser lane as an explicit operator decision, not as an
+ambient runtime upgrade. The minimum decision tuple is:
+
+1. `support_class`
+2. `reason_code`
+3. `fallback_lane_id`
+4. `lane_health_status`
+5. `lane_health_failure_count`
+6. `lane_health_retry_budget_remaining`
+7. `lane_health_cooldown_until_ms`
+8. `lane_health_last_trigger`
+9. `demoted_lane_id`
+10. `repro_command`
+11. the surface ceiling from `docs/wasm_release_channel_strategy.md`
+
+Interpret the tuple with this law:
+
+- `direct_runtime_supported` + `supported` only means the current host may
+  attempt the lane. It does not authorize a `stable` claim unless the
+  surface-specific ceiling and evidence bundle are green.
+- `candidate_prerequisite_missing` is a current-window no-go. Keep the lane at
+  `preview_only`, `guarded canary-only`, or `nightly-only` until the missing
+  prerequisite is explicit in logs and operator evidence.
+- `candidate_lane_unhealthy` or `demote_due_to_lane_health` means the lane has
+  already tripped health policy. Publish the fallback lane as the truth and do
+  not widen exposure until a fresh green evidence window exists.
+- Any `downgrade_*` reason means operators must communicate the fallback as the
+  supported path, not as a soft warning or temporary caveat.
+- Any `policy_denial` or `unsupported` reason keeps the lane disabled or
+  fail-closed regardless of package pressure or channel ambitions.
+
+Use this shorthand when reading Browser Edition diagnostics:
+
+| Surface | Highest truthful public label today | Healthy tuple required before widening exposure | Immediate operator action when tuple is not healthy |
+|---|---|---|---|
+| Dedicated worker direct-runtime lane | may be `stable` when the worker evidence bundle stays green | `support_class=direct_runtime_supported`, `reason_code=supported`, `lane_health_status=healthy`, no demotion marker | keep browser main-thread direct runtime as the stable fallback and treat worker-specific regressions as lane-local until worker evidence recovers |
+| Shared-worker bounded coordinator attach | `guarded canary-only` | fail-closed shared-worker direct-runtime truth plus green attach/reuse/fallback evidence from `scripts/validate_shared_worker_consumer.sh` | fall back to the truthful dedicated-worker or browser main-thread lane when attach is denied, mismatched, or the coordinator crashes before handshake |
+| `WebTransport` datagrams | `guarded canary-only` | direct-runtime support plus explicit `WebTransport` prerequisite satisfaction and healthy lane state | fall back to `WebSocket` or `fetch` when the tuple carries `candidate_prerequisite_missing`, `downgrade_to_websocket_or_fetch`, or any lane-health demotion |
+| Rust-authored browser path | `preview_only` | maintained fixture evidence plus the dispatcher-backed `RuntimeBuilder::browser()` lane | keep public docs explicit that this remains a preview Rust-authored browser bootstrap path, not broad parity with the JS/TS Browser Edition packages |
+| Browser-native messaging (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | `guarded canary-only` | guarded public Browser Edition helpers plus explicit API contract tests | construct only through `detectBrowserNativeMessagingSupport()` / `assertBrowserNativeMessagingSupport()` with an explicit `BrowserNativeMessagingCapability`; this is not an asupersync channel, raw transport, or cross-origin bridge |
+| `SharedArrayBuffer` / worker offload / parallel executor lanes | `nightly-only` | explicit cross-origin isolation, worker-offload policy green, replay/perf evidence green, and no lane-health demotion | disable the lane immediately on missing isolation, replay drift, chaos regression, or performance instability; preserve the single-threaded browser runtime as the supported default |
+| Service-worker direct runtime | `broker/coordinator-only` | bounded broker contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the broker registration / durable handoff contract instead of pretending the service worker owns a runtime |
+| Shared-worker direct runtime | `broker/coordinator-only` | bounded coordinator contract and browser-run evidence stay green; direct runtime remains unsupported | fail closed for direct runtime and route operators to the coordinator attach/detach/fallback contract instead of pretending the shared worker owns a runtime |
+
+Explicit non-goals of the current ladder contract:
+
+- `service_worker_general_runtime_without_bounded_broker_contract`
+- `shared_worker_general_runtime_without_tenancy_and_lifecycle_contract`
+- `ambient_message_channel_promotion`
+- `shared_array_buffer_multi_worker_default_lane`
+- `raw_socket_filesystem_process_parity`
+
+This is stricter than the broad feasibility matrix on purpose. Service-worker
+direct runtime is classified as broker/coordinator-only: the bounded broker
+contract in `docs/wasm_service_worker_broker_contract.md` is the supported
+service-worker surface, and direct `BrowserRuntime` creation in
+`ServiceWorkerGlobalScope` remains fail-closed unless a future separate
+promotion bead proves browser-lifetime region ownership. Shared-worker direct
+runtime is classified as broker/coordinator-only: the bounded coordinator
+contract in `docs/wasm_shared_worker_tenancy_lifecycle_contract.md` is the
+supported shared-worker surface, and direct `BrowserRuntime` creation in
+`SharedWorkerGlobalScope` remains fail-closed unless a future separate
+promotion bead proves browser-lifetime region ownership, client fanout
+cancellation, drain/finalize, replay, and durable recovery semantics.
+
+### Runtime contexts
+
+| Context | Classification | Live-tree evidence | Notes |
+|---|---|---|---|
+| Browser main thread (`window` + `document` + `WebAssembly`) | Direct-runtime supported | `packages/browser/src/index.ts`, `tests/wasm_js_exports_coverage_contract.rs` | Primary shipped JS/TS Browser Edition lane |
+| Dedicated Web Worker (`DedicatedWorkerGlobalScope`) | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core/src/lib.rs`, `tests/wasm_js_exports_coverage_contract.rs` | Shipped: SDK detects `DedicatedWorkerGlobalScope`, fetch routes through `WorkerGlobalScope.fetch()`; examples and QA are catching up |
+| Service worker direct runtime | Broker/coordinator-only; direct runtime unsupported | `packages/browser/src/index.ts` detects service-worker-like hosts and returns `service_worker_not_yet_shipped`; `src/runtime/builder.rs` maps `ServiceWorkerGlobalScope` to `service_worker_direct_runtime_not_shipped` | Governed by `docs/wasm_service_worker_broker_contract.md`; direct runtime remains fail-closed, while the package exposes `detectBrowserServiceWorkerBrokerSupport()` and `BrowserServiceWorkerBrokerStore` only for bounded registration/durable-handoff orchestration |
+| Shared worker direct runtime | Broker/coordinator-only; direct runtime unsupported | `src/runtime/builder.rs` explicitly detects `SharedWorkerGlobalScope` and returns `shared_worker_direct_runtime_not_shipped`; `packages/browser/src/index.ts` still rejects it as an unsupported direct-runtime host while exposing bounded coordinator helpers | Governed by `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`; direct runtime remains fail-closed, while the package exposes `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` only for bounded coordinator attach/handshake/fallback from browser main-thread or dedicated-worker callers. The maintained browser-run proof lives in `tests/fixtures/shared-worker-consumer/` and `scripts/validate_shared_worker_consumer.sh`. |
+| Node / SSR / edge direct runtime via `@asupersync/browser` | Impossible for direct browser runtime; bridge-only or unsupported | `packages/browser/src/index.ts`, `packages/next/src/index.ts` | Browser package fails closed; Next diagnostics classify server/edge as bridge-only targets |
+| Rust-authored `wasm32-unknown-unknown` consumer path | Preview public lane | `src/runtime/builder.rs` exposes `RuntimeBuilder::browser()` with truthful execution-ladder selection over the wasm dispatcher, while `docs/wasm_quickstart_migration.md` and `tests/wasm_rust_browser_example_contract.rs` pin the supported usage and evidence flow | Preview public support, not broad stable parity with the JS/TS Browser Edition packages |
+| Multi-worker / `SharedArrayBuffer` parallel execution | Guarded optional, not shipped | browser model is single-threaded today; true parallelism requires cross-origin isolation | Explicitly non-default even if pursued later |
+
+### Capability families
+
+| Surface | Classification | Live-tree evidence | Notes |
+|---|---|---|---|
+| Structured scopes, task lifecycle, four-valued outcomes | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core` ABI exports | Core shipped Browser Edition surface |
+| Browser `fetch` | Direct-runtime supported | `packages/browser/src/index.ts`, `asupersync-browser-core/src/lib.rs` | Main-thread and dedicated-worker hosts are both wired |
+| Browser `WebSocket` | Direct-runtime supported | `asupersync-browser-core/src/lib.rs` | Shipped public JS/TS surface |
+| Browser-safe persistence via public Browser Edition APIs | Direct-runtime supported in `@asupersync/browser` | `src/io/browser_storage.rs`, `src/io/cap.rs`, `packages/browser/src/index.ts` | Public `BrowserStorage` now exposes backend selection, support detection, actionable diagnostics, and the artifact store builds on top of it rather than inventing ambient persistence |
+| `IndexedDB` durable storage | Direct-runtime supported in `@asupersync/browser` on browser main thread and dedicated workers | `src/io/cap.rs`, `src/io/browser_storage.rs`, `packages/browser/src/index.ts` | Rust `IndexedDbHostBackend` host backend is complete; the public JS/TS surface adds blocked-open/quota/transaction diagnostics |
+| `localStorage` host-backed storage substrate | Guarded package-level support in `@asupersync/browser` on browser main thread | `src/io/browser_storage.rs`, `packages/browser/src/index.ts` | Exposed as an explicit backend, but intentionally remains non-worker and less durable than IndexedDB |
+| Browser-hosted trace / crash / evidence artifacts | Direct-runtime supported through explicit `BrowserArtifactStore` export flows | `packages/browser/src/index.ts` | Persisted artifacts are opt-in, quota-bounded, retained through explicit policy, exportable via `exportArtifact()` / `exportArchive()`, and directly downloadable only on the browser main thread |
+| Service-worker bounded broker registration and durable handoff | Guarded package-level support on service-worker hosts | `packages/browser/src/index.ts`, `docs/wasm_service_worker_broker_contract.md`, `tests/fixtures/service-worker-broker-consumer/` | `detectBrowserServiceWorkerBrokerSupport()`, `BrowserServiceWorkerBrokerStore`, `registerBroker()`, `persistBrokerWork()`, and `persistDurableHandoff()` keep direct runtime fail-closed while persisting broker manifests, restartable work descriptors, and fallback metadata; the maintained browser-run lifecycle proof lives in `tests/fixtures/service-worker-broker-consumer/` and `scripts/validate_service_worker_broker_consumer.sh` |
+| Shared-worker bounded coordinator attach, version handshake, and downgrade | Guarded package-level support from browser main-thread or dedicated-worker callers | `packages/browser/src/index.ts`, `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`, `tests/fixtures/shared-worker-consumer/` | `detectBrowserSharedWorkerCoordinatorSupport()` and `createBrowserSharedWorkerCoordinatorSelection()` keep direct runtime fail-closed on shared-worker hosts while negotiating a same-origin coordinator, attaching a per-client port, checking protocol/features, and downgrading mechanically to the truthful fallback lane on denial or loss. Validate the maintained browser-run fixture with `scripts/validate_shared_worker_consumer.sh`. |
+| Browser-native transport: `WebTransport` datagrams | Guarded direct-runtime support | `src/io/cap.rs`, `packages/browser-core/index.js`, `packages/browser-core/index.d.ts`, `packages/browser/src/index.ts` | Shipped as an explicit, capability-gated datagram lane when the browser exposes `globalThis.WebTransport`; this does not imply raw-socket parity. Fall back to `WebSocket` or `fetch` when the browser/runtime lacks WebTransport support or rejects the session. |
+| Browser-native messaging surfaces (`MessageChannel`, `MessagePort`, `BroadcastChannel`) | Guarded public Browser Edition helpers | `src/io/cap.rs`, `src/runtime/reactor/browser.rs`, `packages/browser/src/index.ts` | The Rust/browser substrate models explicit authority and the public package now exposes guarded `BrowserMessageChannel`, `BrowserMessagePort`, and `BrowserBroadcastChannel` helpers. Construction requires explicit BrowserNativeMessagingCapability authority through the `BrowserNativeMessagingCapability` token or prior support assertion, denies degraded-mode capability, and keeps lifecycle errors deterministic. These helpers stay at the browser application boundary; they are not asupersync channels, raw transports, cross-origin bridges, or server/edge adapters. |
+| WHATWG `ReadableStream` / `WritableStream` browser-native helpers | Guarded public Browser Edition helpers | `src/io/browser_stream.rs`, `packages/browser/src/index.ts` | `BrowserReadableStream`, `BrowserWritableStream`, `detectBrowserNativeStreamSupport()`, and `assertBrowserNativeStreamSupport()` expose byte-oriented browser-native wrappers for application-boundary streams. Construction requires explicit BrowserNativeStreamCapability authority, denies degraded-mode capability, and pins read/write byte limits, cancel, abort, close, and lock-release behavior. The Rust `AsyncRead` / `AsyncWrite` browser-core ABI remains substrate-only; these helpers do not claim wasm ABI parity. |
+| Raw TCP/UDP, Unix sockets, filesystem, process/signal | Impossible for direct browser runtime | `cfg`-gated native surfaces in core/runtime/docs | Must remain bridge-only or unsupported |
+
+The browser-native messaging/stream promotion class is
+`guarded-public-browser-boundary`: public same-browser package helpers with
+explicit capability grants, not a broader runtime lane. The machine-checked
+contract reads this guide, `docs/integration.md`, the README, package
+source/types, the registry, and
+`artifacts/wave2/browser_native_message_and_stream_apis_evidence.json`; the
+maintained proof runner is `scripts/run_browser_native_message_stream_evidence.sh`.
+Stable operator markers are `capability_not_granted`,
+`degraded_mode_denied`, `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED`,
+`ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED`,
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
+`ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED`.
+
+### Other substrate-only capabilities (Rust layer complete, no public JS/TS API)
+
+These items have real Rust implementations but are not yet exposed in the
+`@asupersync/browser` or `@asupersync/browser-core` public packages.
+Follow-on beads should decide whether to ship, defer, or remove each one.
+
+| Surface | Rust evidence | Gap | Follow-on |
+|---|---|---|---|
+| Rust `AsyncRead`/`AsyncWrite` browser-core stream ABI | `src/io/browser_stream.rs` — maps WHATWG Streams to Asupersync `AsyncRead`/`AsyncWrite` with cancel semantics | Rust substrate-only; the public JS/TS wrappers are browser-native byte helpers and do not exercise a wasm ABI bridge | Tracked by follow-on proof/ABI beads before any stronger Rust bridge claim |
+| Storage policy/capability layer | `src/io/cap.rs` — `StorageConsistencyPolicy`, `StorageIoCap`, `StorageBackend` enum, policy validation for namespace/size/consistency | Complete but only used internally by host backends | Tracked by `asupersync-3ak5y` |
+
+### Live contradictions (2026-03-15, bead asupersync-1tte9)
+
+These are concrete mismatches between what code, docs, and packages
+currently claim. Each should be resolved by the referenced follow-on bead.
+
+The previous browser-storage contradiction is now resolved: `@asupersync/browser`
+exports `BrowserStorage`, `detectBrowserStorageSupport()`, and actionable
+operation diagnostics on top of the complete Rust `IndexedDbHostBackend` and
+`LocalStorageHostBackend` substrate in `src/io/browser_storage.rs`.
+
+The browser artifact lane is now explicit as well: `BrowserArtifactStore`
+persists trace/crash/evidence payloads only when callers opt in, keeps
+retention policy visible in the package API, supports `exportArtifact()` and
+`exportArchive()` in workers or main-thread contexts, and limits direct
+download helpers to browser main-thread DOM runtimes.
+
+1. **Dedicated worker: shipped, but onboarding/examples are still catching up.**
+   The browser SDK (`packages/browser/src/index.ts`) correctly detects
+   `DedicatedWorkerGlobalScope` and returns `direct_runtime_supported`.
+   The browser-core fetch host routes through `WorkerGlobalScope.fetch()`.
+   The remaining gap is maintained onboarding/example coverage rather than
+   runtime support semantics. **Follow-on:** `asupersync-2w5tu`.
+
+2. **Browser-native messaging surfaces are guarded public package helpers, not
+   silent ambient transports.** `src/io/cap.rs` grants explicit authority for
+   `MessageChannel`, `MessagePort`, and `BroadcastChannel`, and
+   `src/runtime/reactor/browser.rs` wires `register_message_port()` /
+   `register_broadcast_channel()` to real host listeners. The public package
+   contract is now deliberate: `detectBrowserNativeMessagingSupport()` reports
+   `surface`, `runtimeContext`, `capabilityGranted`, `degradedMode`,
+   `supportClass`, `reasonCode`, guidance, and redaction policy before any
+   constructor touches ambient browser APIs. `createBrowserMessageChannel()`,
+   `createBrowserMessagePort()`, and `createBrowserBroadcastChannel()` require
+   an explicit `BrowserNativeMessagingCapability` or a prior supported
+   diagnostic assertion. Keep same-origin `MessageChannel`, `MessagePort`, and
+   `BroadcastChannel` usage at the browser application boundary; this is not
+   an asupersync channel, raw transport, or cross-origin bridge.
+
+3. **Browser-native WHATWG stream helpers are public package helpers, while
+   Rust `AsyncRead`/`AsyncWrite` wasm ABI parity remains substrate-only.**
+   `src/io/browser_stream.rs` still bridges WHATWG `ReadableStream`/
+   `WritableStream` to Asupersync `AsyncRead`/`AsyncWrite` with cancel
+   semantics, byte accounting, and state-machine lifecycle. The public package
+   now exposes guarded `BrowserReadableStream` and `BrowserWritableStream`
+   helpers for byte-oriented browser application boundaries. Construction
+   requires explicit BrowserNativeStreamCapability authority through the
+   `BrowserNativeStreamCapability` token or prior support assertion, denies
+   degraded-mode capability, and keeps read/write limit, cancel, abort, close,
+   and lock-release failures deterministic. These helpers do not claim Rust
+   `AsyncRead`/`AsyncWrite` browser-core ABI support.
+
+4. **Storage policy layer: mature but still mostly internal.**
+   `src/io/cap.rs` has a complete `StorageConsistencyPolicy` with
+   `allowed_backends`, `max_key_len`, `max_value_len`, and
+   `namespace_pattern` validation. This is used internally by the host
+   backends and exposed indirectly through `BrowserStorage` diagnostics,
+   but is not yet surfaced as a first-class configurable public API.
+   **Follow-on:** part of `asupersync-3ak5y`.
+
+### Contract test enforcement
+
+The authoritative support matrix is encoded in executable contract tests:
+
+```
+tests/wasm_browser_feasibility_matrix.rs
+```
+
+These tests validate that the four-bucket classification matches the live
+tree. If a contradiction is resolved (e.g. IndexedDB ships in the browser
+package), the corresponding test assertion must be updated.
+
+### Host-capability fallback rules
+
+1. **WebTransport is optional, not ambient.**
+   When `globalThis.WebTransport` is absent, the runtime is not HTTPS-backed,
+   or the browser rejects the session/datagram setup, treat that as a guarded
+   lane denial and fall back to `WebSocket` or `fetch`. Do not widen the
+   direct-runtime support claim just because a particular browser exposes a
+   partial constructor.
+2. **Browser-native messaging is a guarded browser-application boundary, not a
+   raw transport lane.**
+   If you need direct off-main-thread runtime execution, start the runtime
+   inside a dedicated worker. If you need same-origin coordination between UI
+   and worker/browser contexts, use the public `BrowserMessageChannel`,
+   transferred `BrowserMessagePort`, or `BrowserBroadcastChannel` helpers only
+   after `detectBrowserNativeMessagingSupport()` / `assertBrowserNativeMessagingSupport()`
+   sees an explicit `BrowserNativeMessagingCapability`. Pass serialized data
+   into Asupersync-owned scopes/tasks. If the hop leaves the browser runtime
+   boundary entirely (server, edge, Node, another process), use an explicit
+   bridge-only adapter instead of pretending the browser SDK exports a native
+   cross-origin or process transport. Operator-facing failures use
+   `capability_not_granted`, `degraded_mode_denied`,
+   `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_UNSUPPORTED`, and
+   `ASUPERSYNC_BROWSER_NATIVE_MESSAGING_OPERATION_FAILED`.
+3. **Browser-native WHATWG streams are guarded byte helpers, not Rust I/O ABI
+   parity.**
+   Use `BrowserReadableStream` and `BrowserWritableStream` only after
+   `detectBrowserNativeStreamSupport()` / `assertBrowserNativeStreamSupport()`
+   sees an explicit `BrowserNativeStreamCapability`. Treat `ReadableStream`
+   and `WritableStream` as browser application-boundary byte flows with
+   explicit read/write limits, cancellation, abort, close, and lock-release
+   semantics. The Rust `AsyncRead` / `AsyncWrite` browser-core ABI bridge
+   remains substrate-only until a separate proof bead exposes and validates it.
+   Operator-facing failures use `capability_not_granted`,
+   `degraded_mode_denied`, `ASUPERSYNC_BROWSER_NATIVE_STREAM_UNSUPPORTED`, and
+   `ASUPERSYNC_BROWSER_NATIVE_STREAM_OPERATION_FAILED`.
+
+## Maintainer Admission Rule For New Browser Surfaces
+
+Use this rule for every future Browser Edition feature request:
+
+1. If the browser security model makes the surface impossible as a direct
+   runtime capability, classify it as **impossible** and keep it
+   bridge-only or unsupported. Do not add fake parity layers for raw
+   sockets, ambient filesystem/process access, or native reactor semantics.
+2. If the surface is browser-feasible but depends on explicit deployment or
+   runtime prerequisites, classify it as **guarded optional** and name those
+   prerequisites up front. `SharedArrayBuffer` worker pools, cross-origin
+   isolation, and other special-host assumptions must never be treated as the
+   default Browser Edition story.
+3. If the surface is browser-feasible under ordinary browser constraints and
+   preserves Asupersync's invariants, it should become real product work, not
+   policy-only scaffolding. Classify it as **direct-runtime supported** if it
+   is already shipped, or **direct-runtime feasible but not yet shipped** if
+   code substrate exists ahead of public packaging, diagnostics, docs, or
+   tests.
+
+Invariant gate for steps 2 and 3:
+
+- Preserve structured concurrency and explicit region ownership.
+- Preserve cancellation as `request -> drain -> finalize`, including loser
+  drain semantics.
+- Preserve explicit capability boundaries; browser support must not smuggle
+  in ambient authority.
+- Preserve fail-closed diagnostics when a surface is outside the supported
+  direct-runtime boundary.
+
+## What Does Not Work Yet
+
+### Rust-to-WASM compilation path (preview public lane, still narrower than JS/TS)
+
+**Truthful current rule:** external Rust consumers do have a preview public
+Browser Edition runtime-construction API through `RuntimeBuilder::browser()`,
+but it is dispatcher-backed, fail-closed, and intentionally narrower than the
+shipped JS/TS Browser Edition packages.
+
+> For a focused, code-grounded how-to on this lane (target, features, build
+> steps, a minimal `RuntimeBuilder::browser()` example, and the explicit list of
+> what is and is not supported), see
+> [`wasm_rust_browser_lane.md`](./wasm_rust_browser_lane.md) (draft, issue #51).
+
+This matters because "the semantic core is portable" is weaker than "you can
+ship a stable browser app that constructs Asupersync runtimes directly from
+Rust consumer code." Today the repository supports a preview version of the
+latter, but not broad stable parity with the JS/TS product lane.
+
+What Rust authors can rely on today:
+
+- `asupersync` can be compiled for `wasm32-unknown-unknown` with exactly one
+  canonical browser profile (`wasm-browser-minimal`, `wasm-browser-dev`,
+  `wasm-browser-prod`, or `wasm-browser-deterministic`) to validate cfg/feature
+  closure and browser-safe semantic-core surfaces.
+- `RuntimeBuilder::browser()` exposes preview truthful lane negotiation, while
+  `RuntimeBuilder::inspect_browser_execution_ladder(...)` and
+  `BrowserRuntimeBuilder::build_selection()` expose structured fail-closed
+  diagnostics for Rust-authored browser startup.
+- `asupersync-browser-core` is the canonical Rust-side binding/export crate
+  that generates and maintains the shipped Browser Edition ABI and package
+  artifacts consumed by `@asupersync/browser` and friends.
+- `asupersync-wasm` is a retained non-canonical scaffold for future or
+  alternative binding strategies; it is not a second shipped ABI owner.
+- The maintained fixture workflow at `tests/fixtures/rust-browser-consumer/`
+  plus `scripts/validate_rust_browser_consumer.sh` remains the authoritative
+  end-to-end evidence bundle for this preview lane. The refreshed
+  `asupersync-j1xbon.4` support decision keeps the lane
+  artifact-contract-backed preview, not stable external Rust Browser Edition
+  API parity.
+
+What Rust authors cannot rely on yet:
+
+- a stable ergonomic Rust browser SDK parallel to `@asupersync/browser`,
+- stable parity between the preview Rust builder lane and the shipped JS/TS
+  Browser Edition packages,
+- native-runtime parity on `wasm32`, including raw OS/network/process surfaces
+  or ambient browser runtime discovery,
+- service-worker or shared-worker direct runtime lanes.
+
+When you use the preview Rust lane, inspect these fields first:
+
+- `selected_lane`
+- `host_role`
+- `reason_code`
+- `preferred_lane`
+- `downgrade_order`
+- `message` / `guidance`
+
+For end-to-end validation, keep using:
+
+```bash
+PATH=/usr/bin:$PATH bash scripts/validate_rust_browser_consumer.sh
+```
+
+The core semantic layer (structured scopes, cancellation state machine,
+obligation accounting, combinators) is architecturally target-agnostic and
+should be portable. However:
+
+- The runtime scheduler and I/O reactor have native-specific code paths
+  (`epoll`, `io_uring`, `polling`, `socket2`, `signal-hook`) that are
+  `cfg`-gated for `not(target_arch = "wasm32")`.
+- A browser-specific scheduler pump (driven by `queueMicrotask` /
+  `MessageChannel` / `setTimeout`) exists in the design but is not yet
+  exposed as a Rust-callable API.
+- The public Rust browser builder path is preview-only and dispatcher-backed;
+  it should not be described as stable parity for external Rust consumers.
+
+If and when a public Rust-authored browser lane ships, it should start from
+explicit browser-safe capability constructors and the same support matrix used
+for JS/TS consumers. It should not be framed as "native Asupersync, but in the
+browser now" or as an ambient-global parity story.
+
+This path is on the roadmap but not prioritized. If you need it, please
+comment on [issue #11](https://github.com/Dicklesworthstone/asupersync/issues/11).
+
+## Architectural Boundary
+
+The cleanest way to think about the WASM story:
+
+```
++-----------------------------------------------+
+|          Shared Semantic Core                  |
+|  (scopes, cancellation, combinators,           |
+|   obligation accounting, trace, types)         |
++-----------------------------------------------+
+         |                          |
+         v                          v
++------------------+    +--------------------+
+| Native Executor  |    | Browser Executor   |
+| (epoll/io_uring, |    | (event-loop pump,  |
+|  threads, OS I/O)|    |  Web APIs, fetch,  |
+|                  |    |  WebSocket)        |
++------------------+    +--------------------+
+```
+
+The semantic core is the same code compiled to both targets. The executor
+layer is environment-specific:
+
+- **Native**: multi-threaded work-stealing scheduler, OS-level I/O reactor,
+  real TCP/UDP sockets, filesystem, process/signal handling.
+- **Browser**: single-threaded cooperative scheduler driven by the JS event
+  loop, browser `fetch()`, `WebSocket`, and capability-gated `WebTransport`
+  APIs, and browser-safe host integration points for storage and transport
+  expansion.
+
+The `asupersync-browser-core` crate is the concrete bridge: it instantiates
+`WasmExportDispatcher` (the core ABI surface) and wires it to browser APIs
+via `web-sys` and `wasm-bindgen-futures`.
+
+## Browser Runtime Model
+
+The current browser runtime model (Phase 1) is:
+
+- **Single-threaded**: all Asupersync-registered work runs on the browser
+  main thread or inside a single dedicated Web Worker.
+- **Ledger, not scheduler**: the shipped wasm ABI (`asupersync-browser-core`
+  over `src/types/wasm_abi.rs`) records regions, scopes, and task handles and
+  enforces fail-closed scope-close ordering; it does not poll Rust futures.
+  `task_spawn` takes no future and `task_join` takes the outcome from the
+  caller. The browser-specific scheduler pump described earlier in this
+  document is designed but not exposed, so there is no wasm-side scheduling
+  loop that "yields between steps" yet.
+- **Event-loop driven**: browser timer APIs, `fetch` completions,
+  WebSocket events, and WebTransport session/stream events complete on the
+  host's own promises; the package never blocks the JS event loop.
+
+### What this means for guarantees
+
+| Guarantee | Native | Browser | Notes |
+|---|---|---|---|
+| No orphan tasks | Runtime-owned tasks under structured scopes | Ledger ownership plus adapter-specific host cleanup | Handle completion alone does not prove an arbitrary host task stopped |
+| Cancel-correctness | Covered primitives and their documented partial effects | Covered browser adapters and lifecycle transitions | Requires execution/cleanup evidence for each adapter; no blanket promise cancellation |
+| Bounded cleanup | Conditional on cooperation and the applicable budget | Conditional on host-operation and application cooperation | Neither lane preempts arbitrary synchronous user code |
+| Deterministic scheduling | LabRuntime controls modeled work | ABI transition tests; host event loop remains external | No full browser task scheduler or host-event replay follows from a deterministic ledger |
+| CPU parallelism | Full (work-stealing) | None (single-threaded) | See "Future: threaded WASM" below |
+
+## Known Limitations and Constraints
+
+### Browser environment constraints
+
+- **No raw TCP/UDP**: networking is limited to browser APIs (`fetch`,
+  `WebSocket`, and capability-gated `WebTransport` datagrams). Native
+  TCP/UDP, Unix sockets, and raw I/O are unavailable.
+- **No filesystem access**: `fs` module surfaces are `cfg`-gated out on
+  wasm32. Browser-safe persistence is exposed through `BrowserStorage` in
+  `@asupersync/browser`: `IndexedDB` is the durable default backed by the
+  complete Rust `IndexedDbHostBackend`, while `localStorage` remains an
+  explicit main-thread-only backend for smaller, less durable data. Runtime
+  artifacts ride on top of that surface through `BrowserArtifactStore`, which
+  keeps persistence opt-in and export-oriented rather than silently durable.
+  Neither backend implies ambient filesystem semantics.
+- **No process/signal handling**: the `process` and `signal` modules are
+  native-only.
+- **No multi-threading by default**: the Phase 1 browser runtime is
+  single-threaded. Supported direct-runtime lanes are the browser main thread
+  and a single dedicated Web Worker; service-worker direct runtime is
+  broker/coordinator-only behind
+  `docs/wasm_service_worker_broker_contract.md`, and shared-worker direct
+  runtime is broker/coordinator-only behind
+  `docs/wasm_shared_worker_tenancy_lifecycle_contract.md`. True parallelism
+  requires additional workers plus the Phase 2 model below.
+
+### Cross-origin isolation for SharedArrayBuffer
+
+Multi-threaded WASM (using `SharedArrayBuffer` + Atomics) requires
+cross-origin isolation headers:
+
+```
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+This is a significant deployment constraint: many web applications cannot
+enable these headers due to third-party embed requirements. Phase 1
+intentionally avoids this dependency.
+
+### Artifact size budgets
+
+Browser Edition artifacts are size-budgeted:
+
+| Profile | Raw `.wasm` budget | Gzip budget |
+|---|---|---|
+| `core-min` | 650 KiB | 220 KiB |
+| `core-trace` | 900 KiB | 320 KiB |
+| `full-dev` | 1300 KiB | 480 KiB |
+
+### BrowserArtifactStore defaults
+
+Persisted browser runtime artifacts are bounded separately from `.wasm` size:
+
+| Policy field | Default | Meaning |
+|---|---|---|
+| `maxArtifacts` | `32` | Maximum retained artifact records in the store |
+| `maxArtifactBytes` | `512 KiB` | Largest single persisted trace/crash/evidence payload |
+| `maxTotalBytes` | `4 MiB` | Total retained bytes before eviction/failure |
+| `quotaStrategy` | `evict_oldest` | Oldest retained artifacts are evicted first unless callers choose `fail` |
+
+Operational rules:
+
+- `BrowserArtifactStore` is explicit. Nothing is persisted unless application
+  or tooling code calls `persistTraceRecord()`, `persistCrashArtifact()`, or
+  `persistEvidenceArtifact()`.
+- `exportArtifact()` and `exportArchive()` work in main-thread and
+  dedicated-worker runtimes because they return bytes/Blob-oriented payloads.
+- `downloadArtifact()` and `downloadArchive()` are intentionally limited to
+  browser main-thread DOM runtimes with `document` and `URL.createObjectURL()`.
+
+## Future: Threaded WASM Executor (Phase 2)
+
+A future phase may add a multi-threaded WASM executor using:
+
+- `SharedArrayBuffer` + Atomics for shared memory between workers
+- A native-style scheduler inside WASM (potentially in a `SharedWorker`)
+- Work-stealing across Web Worker threads
+
+This would enable closer parity with native scheduling semantics but requires:
+
+1. Cross-origin isolation (see above)
+2. Careful message-passing design (Workers don't share JS state)
+3. A different cancellation propagation model across worker boundaries
+
+This is explicitly Phase 2 and will only be pursued if demand materializes.
+The current single-threaded boundary provides handle ownership and explicit
+adapter lifecycle operations. Full task-execution and cleanup guarantees still
+require the implementation and browser proof described above.
+
+## Crate Map
+
+| Crate | Purpose | Browser role |
+|---|---|---|
+| `asupersync` | Core runtime library | Compiles to wasm32 with browser feature profiles |
+| `asupersync-browser-core` | Canonical wasm-bindgen export boundary | Bridges core runtime to JS via the shipped ABI symbol table |
+| `asupersync-wasm` | Retained non-canonical scaffold | Honest placeholder for future or alternative binding strategies; not a second live boundary |
+| `asupersync-tokio-compat` | Tokio bridge adapters | Native-only; not applicable to browser |
+
+## Further Reading
+
+- [`PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md`](../PLAN_TO_BUILD_ASUPERSYNC_IN_WASM_FOR_USE_IN_BROWSERS.md) -- full execution blueprint
+- [`docs/wasm_quickstart_migration.md`](./wasm_quickstart_migration.md) -- onboarding commands and profile selection
+- [`docs/wasm_canonical_examples.md`](./wasm_canonical_examples.md) -- vanilla/React/Next.js example catalog
+- [`docs/wasm_browser_scheduler_semantics.md`](./wasm_browser_scheduler_semantics.md) -- scheduler/event-loop contract
+- [`docs/wasm_platform_trait_seams.md`](./wasm_platform_trait_seams.md) -- seam contracts between semantic core and backends
+- [`docs/wasm_troubleshooting_compendium.md`](./wasm_troubleshooting_compendium.md) -- failure recipes and diagnostics
+- [Issue #11](https://github.com/Dicklesworthstone/asupersync/issues/11) -- WASM support discussion and architectural questions

@@ -1,0 +1,2 @@
+  2026-05-08T05:00:01.000000Z  INFO rch::hook: RCH_REQUIRE_REMOTE=1 and no healthy remote worker is available; refusing local fallback
+  2026-05-08T05:00:01.000417Z ERROR rch::hook: remote execution required; no remote worker selected; local fallback disabled

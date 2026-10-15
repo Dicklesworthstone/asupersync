@@ -1,0 +1,178 @@
+# Advanced Features Worth Exploiting
+
+Once the basic migration is native, the next gains come from using Asupersync as more than a runtime replacement.
+
+## Contents
+
+- [High-Leverage Deep Dives](#start-with-the-three-high-leverage-deep-dives)
+- [Supervision, AppSpec, and Spork](#supervision-appspec-and-spork)
+- [Resilience Combinators and Plan Rewrites](#resilience-combinators-and-plan-rewrites)
+- [Remote and Distributed Surfaces](#remote--distributed-surfaces)
+- [Advanced Service-Edge Design](#advanced-service-edge-design)
+- [Protocol Breadth and Maturity](#protocol-breadth-and-maturity)
+- [Guidance for Ambitious Systems](#guidance-for-ambitious-systems)
+
+## Start With The Three High-Leverage Deep Dives
+
+- runtime shaping and operator controls,
+- supervised/stateful application design,
+- diagnostics, metrics, and failure forensics.
+
+Those are where most "we switched runtimes but still think like Tokio" gaps show up.
+
+Read:
+
+- `LEVERAGE-PLAYBOOK.md`
+- `RUNTIME-CONTROLS.md`
+- `OBSERVABILITY-FORENSICS.md`
+- `GREENFIELD-PATTERNS.md`
+
+## Supervision, AppSpec, And Spork
+
+The highest-value advanced app-model story is:
+
+- `AppSpec` for application topology,
+- `supervision` for restart policy and deterministic child ordering,
+- `actor` / `GenServer` / Spork for stateful internal services,
+- registry capability plus name leases for named components.
+
+This is the right promotion path when a system has always-on workers, caches,
+control loops, subscription pumps, or restart domains. It is usually cleaner
+than trying to fake those concerns with detached tasks and ad hoc channels.
+
+## Resilience Combinators And Plan Rewrites
+
+Do not reimplement resilience policy with open-coded loops and ad hoc `select!` logic if the system needs real orchestration.
+
+High-value native surfaces include:
+
+- `quorum`
+- `hedge`
+- `adaptive_hedge`
+- `bulkhead`
+- `rate_limit`
+- `retry`
+- `bracket`
+- `pipeline`
+- `map_reduce`
+- `circuit_breaker`
+
+Why they matter:
+
+- they are already cancel-aware,
+- loser-drain semantics are part of the design,
+- budget and outcome behavior are explicit,
+- the plan rewrite engine can optimize combinator DAGs without silently breaking cancel/drain/quiescence invariants.
+
+Use these when building:
+
+- gateways,
+- parallel fan-out request paths,
+- consensus/quorum workflows,
+- data pipelines,
+- rate-limited external integrations.
+
+Relevant sources:
+
+- `src/combinator/`
+- `src/combinator/laws.rs`
+- `src/plan/rewrite.rs`
+- `src/plan/analysis.rs`
+
+Also remember:
+
+- keep `Outcome::Cancelled` and `Outcome::Panicked` distinct at policy boundaries,
+- since v0.4.4, ordinary `Cx::spawn*` preserves a task's typed result after it
+  acknowledges cancellation (a concurrent abort no longer erases it into a
+  generic join cancellation); cancellation-dominant combinators keep their
+  separately documented semantics,
+- since v0.4.5, explicit cancellation wakes a timer-parked native task and
+  retires the timer registration; `Sleep` completes with `()` while timeout and
+  deadline combinators own their classifications,
+- for a nonzero quorum, any observed panic (including a drained loser's panic)
+  remains `QuorumError::Panicked`; enough `Ok` branches do not override it,
+- use tighter budgets for hedges, cleanup, and adapters,
+- prefer lawful orchestration surfaces over open-coded select forests.
+
+## Remote / Distributed Surfaces
+
+Asupersync has more than local task orchestration.
+
+Important advanced surfaces include:
+
+- named remote spawn instead of closure shipping,
+- obligation-backed leases,
+- idempotency store for retry-safe remote execution,
+- session-typed protocol state machines,
+- logical-time envelopes for causal correlation,
+- saga compensation flow,
+- distribution with quorum and optional hedging,
+- RaptorQ-backed snapshot/distribution machinery.
+
+Use these only when the target system actually has distributed semantics. They are not decorative features.
+
+Relevant sources:
+
+- `src/remote.rs`
+- `src/distributed/`
+- `src/raptorq/`
+
+## Advanced Service Edge Design
+
+At the service edge, the high-value move is not just "port the router." It is:
+
+- request-as-region isolation,
+- least-privilege `Cx` narrowing,
+- service/combinator composition instead of tower-first thinking,
+- deadlines and cancellation made visible at the boundary.
+
+Relevant references live in the skill entrypoint:
+
+- web and gRPC patterns,
+- runtime controls.
+
+This is also where capability security becomes real instead of rhetorical:
+
+- narrowed `Cx` for handlers,
+- read-only contexts where appropriate,
+- no hidden runtime globals or service locators,
+- background components promoted into supervised app structure rather than booted from handlers.
+
+## Protocol Breadth And Maturity
+
+Implemented native surfaces, each still subject to its feature flag and exact
+support class:
+
+- HTTP/1.1
+- HTTP/2
+- TLS
+- WebSocket
+- SQLite, PostgreSQL, and MySQL clients
+- service/middleware composition
+
+Surfaces to validate before promising downstream parity:
+
+- QUIC / HTTP3 (feature-gated; the native driver now does in-handshake X.509
+  verification and fails closed, but the row is still not a generic-QUIC
+  interoperability or release-readiness claim)
+- messaging integrations (Redis/NATS/Kafka are still classified early)
+- filesystem (an early blocking-backed facade, not full `tokio::fs` parity)
+- some browser/wasm adapters
+- niche distributed paths
+
+That means the skill should steer users toward native breadth confidently, but still verify the exact advanced path they need against the README coverage map and `docs/platform_capability_matrix.md`.
+
+Notable v0.4.x additions on this frontier: an explicit Linux io_uring
+capability control plane (probed modes, not performance claims), first-party
+bounded Base64/hex codecs and a parked `block_on` kernel, typed redacted
+configuration models, and bounded HTTP/1 streaming-body controls
+(`Http1StreamingConfig`, v0.4.4).
+
+## Guidance For Ambitious Systems
+
+- Use child-region budgets and root-region limits deliberately.
+- Promote long-lived state into supervised structures instead of background task soup.
+- Use diagnostics and lab forensics before issues become production folklore.
+- Prefer native combinators and service layers over carrying tower/Tokio-era abstractions forever.
+- Measure with real metrics or benches when tuning runtime knobs.
+- Treat obligation-tracked channels, reply obligations, and lease cleanup as application-design tools, not only runtime internals.

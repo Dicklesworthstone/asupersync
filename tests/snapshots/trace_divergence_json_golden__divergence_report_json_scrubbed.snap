@@ -1,0 +1,51 @@
+---
+source: tests/trace_divergence_json_golden.rs
+expression: scrub_divergence_json(value)
+---
+{
+  "actual": {
+    "details": "task=CompactTaskId(3) tick=1",
+    "event_type": "TaskScheduled",
+    "index": 1,
+    "task_id": 3
+  },
+  "affected": {
+    "regions": [],
+    "scheduler_lane": "ready (expected task CompactTaskId(2), got CompactTaskId(3))",
+    "tasks": [
+      2,
+      3
+    ],
+    "timers": []
+  },
+  "category": "SchedulingOrder",
+  "context_after": [
+    {
+      "details": "task=CompactTaskId(2) outcome=Ok",
+      "event_type": "TaskCompleted",
+      "index": 2,
+      "task_id": 2
+    }
+  ],
+  "context_before": [
+    {
+      "details": "task=CompactTaskId(1) tick=0",
+      "event_type": "TaskScheduled",
+      "index": 0,
+      "task_id": 1
+    }
+  ],
+  "divergence_index": 1,
+  "expected": {
+    "details": "task=CompactTaskId(2) tick=1",
+    "event_type": "TaskScheduled",
+    "index": 1,
+    "task_id": 2
+  },
+  "explanation": "Scheduler chose task CompactTaskId(3) at tick 1 instead of expected task CompactTaskId(2) at tick 1. The ready queue ordering diverged.",
+  "minimal_prefix_len": 2,
+  "replay_progress_pct": 33.33333333333333,
+  "seed": "[SEED]",
+  "suggestion": "Check for non-deterministic task readiness (e.g., I/O completion order, timer resolution). Use a fixed seed and verify the scheduler configuration matches the recording. Focus on task(s): [2, 3].",
+  "trace_length": 3
+}

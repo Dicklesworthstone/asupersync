@@ -1,0 +1,30 @@
+{
+  "fixture_id": "golden-t6-db-e2e-success",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "T6",
+  "description": "Representative success trace for database/messaging e2e data-path",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "t6_pool_query_lifecycle",
+    "correlation_id": "t6-db-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "Connection pool acquire-query-release lifecycle verified with drain",
+    "replay_pointer": "cargo test --test e2e_t6_data_path -- t6_pool_query --nocapture"
+  },
+  "required_fields": [
+    "schema_version",
+    "scenario_id",
+    "correlation_id",
+    "phase",
+    "outcome",
+    "detail",
+    "replay_pointer"
+  ],
+  "invariants": [
+    "All 7 schema fields present",
+    "correlation_id matches slug format",
+    "phase is one of: setup, execute, verify, teardown",
+    "outcome is one of: pass, fail, skip, error"
+  ]
+}

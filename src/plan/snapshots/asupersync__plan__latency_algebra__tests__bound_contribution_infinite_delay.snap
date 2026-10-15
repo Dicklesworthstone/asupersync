@@ -1,0 +1,6 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2707
+expression: "format!(\"{contribution}\")"
+---
+node[7]: infs — bottleneck node with no service curve

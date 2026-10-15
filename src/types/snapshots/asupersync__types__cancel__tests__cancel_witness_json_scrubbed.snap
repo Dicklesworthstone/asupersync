@@ -1,0 +1,35 @@
+---
+source: src/types/cancel.rs
+expression: |-
+  scrub_cancel_snapshot(json!({
+      "phase_label": format!("{:?}", witness.phase), "witness": witness,
+  }))
+---
+{
+  "phase_label": "Finalizing",
+  "witness": {
+    "epoch": 3,
+    "phase": "Finalizing",
+    "reason": {
+      "cause": {
+        "cause": null,
+        "kind": "Timeout",
+        "message": "deadline budget expired",
+        "origin_region": "[REGION_ID]",
+        "origin_task": "[TASK_ID]",
+        "timestamp": "[TIME]",
+        "truncated": false,
+        "truncated_at_depth": null
+      },
+      "kind": "ParentCancelled",
+      "message": "closing subtree",
+      "origin_region": "[REGION_ID]",
+      "origin_task": "[TASK_ID]",
+      "timestamp": "[TIME]",
+      "truncated": false,
+      "truncated_at_depth": null
+    },
+    "region_id": "[REGION_ID]",
+    "task_id": "[TASK_ID]"
+  }
+}

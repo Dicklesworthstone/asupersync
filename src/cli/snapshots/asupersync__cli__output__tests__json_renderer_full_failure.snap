@@ -1,0 +1,10 @@
+---
+source: src/cli/output.rs
+expression: snapshot
+---
+{
+  "error_kind": "InvalidData",
+  "error_message": "synthetic serialize failure",
+  "written_raw": "",
+  "written_bytes": 0
+}

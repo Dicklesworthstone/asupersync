@@ -1,0 +1,28 @@
+{
+  "agent_mail": {
+    "messages": [],
+    "reservations": []
+  },
+  "beads": {
+    "issues": [
+      {
+        "id": "asupersync-no-mail",
+        "status": "closed"
+      }
+    ]
+  },
+  "closeout": {
+    "agent": "GentleCitadel",
+    "bead_id": "asupersync-no-mail",
+    "commit": "aaa999bbb",
+    "mode": "bead-backed",
+    "slice_id": "asupersync-no-mail",
+    "thread_id": "asupersync-no-mail",
+    "validation_reported": true
+  },
+  "git": {
+    "main_head": "aaa999bbb",
+    "origin_main": "aaa999bbb",
+    "origin_master": "aaa999bbb"
+  }
+}

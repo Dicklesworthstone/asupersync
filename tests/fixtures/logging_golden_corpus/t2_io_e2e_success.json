@@ -1,0 +1,31 @@
+{
+  "fixture_id": "golden-t2-io-e2e-success",
+  "schema_version": "e2e-suite-summary-v3",
+  "track_id": "T2",
+  "description": "Representative success trace for async I/O e2e parity audit",
+  "entry": {
+    "schema_version": "e2e-suite-summary-v3",
+    "scenario_id": "t2_io_codec_roundtrip",
+    "correlation_id": "t2-io-001",
+    "phase": "verify",
+    "outcome": "pass",
+    "detail": "Async I/O codec roundtrip completed with byte-level parity",
+    "replay_pointer": "cargo test --test tokio_io_parity_audit -- t2_io_codec_roundtrip --nocapture"
+  },
+  "required_fields": [
+    "schema_version",
+    "scenario_id",
+    "correlation_id",
+    "phase",
+    "outcome",
+    "detail",
+    "replay_pointer"
+  ],
+  "invariants": [
+    "All 7 schema fields present",
+    "correlation_id matches slug format [a-zA-Z0-9._:-]+",
+    "phase is one of: setup, execute, verify, teardown",
+    "outcome is one of: pass, fail, skip, error",
+    "replay_pointer starts with cargo test"
+  ]
+}

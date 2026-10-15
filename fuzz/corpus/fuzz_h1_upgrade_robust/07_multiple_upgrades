@@ -1,0 +1,7 @@
+GET /upgrade HTTP/1.1
+Host: localhost
+Connection: Upgrade
+Upgrade: websocket, h2c
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+Sec-WebSocket-Version: 13
+

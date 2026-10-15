@@ -1,0 +1,26 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 318
+expression: golden
+---
+{
+  "scenario": "empty_trace",
+  "input_metadata": {
+    "event_count": 0,
+    "event_kinds": [],
+    "unique_tasks": 0,
+    "unique_regions": 0,
+    "description": "Empty trace sequence - boundary case"
+  },
+  "canonical_output": {
+    "depth": 0,
+    "len": 0,
+    "layers": [],
+    "independence_stats": {
+      "layer_count": 0,
+      "events_per_layer": [],
+      "max_parallelism": 0,
+      "independent_pairs": 0
+    }
+  }
+}

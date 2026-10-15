@@ -1,0 +1,217 @@
+{
+  "artifact_id": "raptorq-controlled-rollout-policy-v1",
+  "schema_version": "raptorq-controlled-rollout-policy-v1",
+  "track_bead_id": "asupersync-23kd4",
+  "parent_track_bead_id": "asupersync-2cyx5",
+  "external_ref": "bd-2frfp",
+  "generated_at_utc": "2026-02-20T04:00:00Z",
+  "prerequisite_gates": {
+    "required_beads": [
+      {
+        "bead_id": "asupersync-3ltrv",
+        "name": "G3 optimization decision records",
+        "required_statuses": [
+          "in_progress",
+          "closed"
+        ]
+      },
+      {
+        "bead_id": "asupersync-3ec61",
+        "name": "G2 CI regression gates",
+        "required_statuses": [
+          "closed"
+        ]
+      },
+      {
+        "bead_id": "asupersync-1xbzk",
+        "name": "G6 validation report and triage playbook",
+        "required_statuses": [
+          "closed"
+        ]
+      }
+    ],
+    "rollout_entry_requirements": [
+      "Decision card status for target lever is approved or approved_guarded.",
+      "Deterministic unit and deterministic E2E bundles pass with structured log artifacts.",
+      "Rollback rehearsal command and post-rollback checklist are present and reproducible.",
+      "CI regression gate artifact pointers are attached."
+    ]
+  },
+  "command_policy": {
+    "cargo_heavy_commands_must_use_rch": true,
+    "required_prefix": "rch exec --"
+  },
+  "staged_rollout": [
+    {
+      "stage": "shadow_observe",
+      "order": 0,
+      "description": "Observe optimized path telemetry without user-impacting behavior change.",
+      "entry_criteria": [
+        "Prerequisite gates satisfied for selected lever.",
+        "Conservative comparator mode remains active."
+      ],
+      "hold_requirements": [
+        "No correctness mismatch against conservative replay runs.",
+        "No unexplained trace/schema drift."
+      ],
+      "stop_conditions": [
+        "Any deterministic mismatch or proof inconsistency.",
+        "Missing artifact pointer for scenario replay."
+      ]
+    },
+    {
+      "stage": "canary",
+      "order": 1,
+      "description": "Enable optimized path for a small controlled slice under strict monitoring.",
+      "entry_criteria": [
+        "shadow_observe completed with green checklist.",
+        "Operator response packet prepared and reachable."
+      ],
+      "hold_requirements": [
+        "No correctness regressions across deterministic canary scenarios.",
+        "Performance budgets remain within approved guardrails."
+      ],
+      "stop_conditions": [
+        "Correctness regression in any deterministic canary replay.",
+        "Sustained p95/p99 regression beyond approved budget."
+      ]
+    },
+    {
+      "stage": "guarded_ramp",
+      "order": 2,
+      "description": "Increase exposure in bounded increments with explicit pause points.",
+      "entry_criteria": [
+        "canary stage completed and documented.",
+        "Rollback rehearsal command validated in current release window."
+      ],
+      "hold_requirements": [
+        "No repeated fallback oscillation across the current ramp window.",
+        "All required telemetry fields remain populated and parseable."
+      ],
+      "stop_conditions": [
+        "Two consecutive ramp windows breach regression budget.",
+        "Fallback reason changes to unknown/unclassified."
+      ]
+    },
+    {
+      "stage": "broad_default",
+      "order": 3,
+      "description": "Promote optimized path to default while keeping conservative rollback available.",
+      "entry_criteria": [
+        "guarded_ramp completed with stable evidence bundle.",
+        "Track-G decision contract fields are complete."
+      ],
+      "hold_requirements": [
+        "Continuous CI gate pass for correctness and performance.",
+        "Operator packet and replay commands stay current."
+      ],
+      "stop_conditions": [
+        "Any CI gate correctness failure for covered lever.",
+        "Emergency rollback rehearsal fails."
+      ]
+    }
+  ],
+  "rollback_automation": {
+    "trigger_classes": [
+      {
+        "class": "correctness_regression",
+        "examples": [
+          "decode mismatch for deterministic fixture",
+          "proof trace replay mismatch"
+        ],
+        "action": "force conservative comparator and emit incident packet"
+      },
+      {
+        "class": "performance_budget_breach",
+        "examples": [
+          "p95 regression above budget threshold",
+          "p99 regression above budget threshold"
+        ],
+        "action": "pause rollout stage and revert to prior stage policy"
+      },
+      {
+        "class": "instability_signal",
+        "examples": [
+          "fallback oscillation exceeds threshold",
+          "unclassified fallback reason recurrence"
+        ],
+        "action": "rollback to conservative mode and require triage sign-off"
+      }
+    ],
+    "rollback_steps": [
+      "Set lever policy to conservative comparator mode.",
+      "Run deterministic replay command bundle with fixed seed 424242.",
+      "Attach unit + deterministic E2E + benchmark artifacts to incident packet.",
+      "Publish user-impact communication update."
+    ]
+  },
+  "operator_response_packet": {
+    "required_fields": [
+      "symptom",
+      "exposure_scope",
+      "affected_levers",
+      "mitigation_executed",
+      "replay_command",
+      "artifact_path",
+      "eta",
+      "user_impact_message_template"
+    ],
+    "communication_template_required_sections": [
+      "Symptom",
+      "User scope",
+      "Mitigation in place",
+      "Current fallback mode",
+      "Next update ETA"
+    ]
+  },
+  "lever_matrix": [
+    {
+      "lever_code": "E4",
+      "decision_id": "g3-e4-fused-gf256-guarded",
+      "lever_bead_id": "asupersync-348uw",
+      "conservative_comparator_mode": "sequential kernels"
+    },
+    {
+      "lever_code": "E5",
+      "decision_id": "g3-e5-profile-pack-dispatch",
+      "lever_bead_id": "asupersync-36m6p",
+      "conservative_comparator_mode": "scalar-conservative-v1 profile pack"
+    },
+    {
+      "lever_code": "C5",
+      "decision_id": "g3-c5-block-schur-low-rank",
+      "lever_bead_id": "asupersync-zfn8v",
+      "conservative_comparator_mode": "baseline dense elimination path"
+    },
+    {
+      "lever_code": "C6",
+      "decision_id": "g3-c6-peeling-dense-core",
+      "lever_bead_id": "asupersync-2qfjd",
+      "conservative_comparator_mode": "direct conservative dense solve without peeling"
+    },
+    {
+      "lever_code": "F5",
+      "decision_id": "g3-f5-runtime-policy-engine",
+      "lever_bead_id": "asupersync-324sc",
+      "conservative_comparator_mode": "static baseline strategy"
+    },
+    {
+      "lever_code": "F6",
+      "decision_id": "g3-f6-regime-shift-retuning",
+      "lever_bead_id": "asupersync-j96j4",
+      "conservative_comparator_mode": "static policy with retuning disabled"
+    },
+    {
+      "lever_code": "F7",
+      "decision_id": "g3-f7-factor-cache-reuse",
+      "lever_bead_id": "asupersync-n5fk6",
+      "conservative_comparator_mode": "no-cache rebuild path"
+    },
+    {
+      "lever_code": "F8",
+      "decision_id": "g3-f8-wavefront-overlap",
+      "lever_bead_id": "asupersync-2zu9p",
+      "conservative_comparator_mode": "sequential assembly->GF256->solve pipeline"
+    }
+  ]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "drop_unwrap_finder"
+version = "0.1.0"
+edition = "2024"
+publish = false
+# "MIT License (with OpenAI/Anthropic Rider)" (see ../LICENSE), expressed as SPDX LicenseRef.
+license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
+
+[dependencies]
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+syn = { version = "3.0", features = ["full", "fold", "visit"] }
+walkdir = "2.5.0"

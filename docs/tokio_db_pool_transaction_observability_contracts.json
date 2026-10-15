@@ -1,0 +1,409 @@
+{
+  "schema_version": "1.0.0",
+  "document_id": "tokio_db_pool_transaction_observability_contracts",
+  "bead_id": "asupersync-2oh2u.6.5",
+  "track": "T6",
+  "title": "Pool, Transaction, and Observability Contracts Across Databases",
+  "contracts": {
+    "pool": [
+      {
+        "id": "C-POOL-01",
+        "title": "Acquire/Release Lifecycle",
+        "domain": "pool",
+        "operations": ["acquire", "release", "discard", "evict", "lifetime_check"],
+        "backends": ["postgresql", "mysql", "sqlite"],
+        "cancel_safe": true,
+        "status": "defined"
+      },
+      {
+        "id": "C-POOL-02",
+        "title": "Configuration Parity",
+        "domain": "pool",
+        "parameters": [
+          { "name": "min_idle", "type": "usize", "default": 1 },
+          { "name": "max_size", "type": "usize", "default": 10 },
+          { "name": "connection_timeout", "type": "Duration", "default_secs": 30 },
+          { "name": "idle_timeout", "type": "Duration", "default_secs": 600 },
+          { "name": "max_lifetime", "type": "Duration", "default_secs": 3600 },
+          { "name": "validate_on_checkout", "type": "bool", "default": true }
+        ],
+        "backends": ["postgresql", "mysql", "sqlite"],
+        "status": "defined"
+      },
+      {
+        "id": "C-POOL-03",
+        "title": "Health Check Protocol",
+        "domain": "pool",
+        "health_checks": {
+          "postgresql": "SELECT 1",
+          "mysql": "SELECT 1 or COM_PING",
+          "sqlite": "SELECT 1"
+        },
+        "requirements": [
+          "complete_within_connection_timeout",
+          "no_lock_contention",
+          "discard_on_failure"
+        ],
+        "status": "defined"
+      },
+      {
+        "id": "C-POOL-04",
+        "title": "Statistics Contract",
+        "domain": "pool",
+        "required_fields": [
+          { "name": "active", "type": "usize" },
+          { "name": "idle", "type": "usize" },
+          { "name": "total", "type": "usize" },
+          { "name": "max_size", "type": "usize" },
+          { "name": "waiters", "type": "usize" },
+          { "name": "total_acquisitions", "type": "u64" },
+          { "name": "total_timeouts", "type": "u64" },
+          { "name": "total_validation_failures", "type": "u64" }
+        ],
+        "status": "partial"
+      },
+      {
+        "id": "C-POOL-05",
+        "title": "Cancel-Safety",
+        "domain": "pool",
+        "phases": [
+          { "phase": "wait", "guarantee": "no_resource_leak" },
+          { "phase": "hold", "guarantee": "drop_returns_to_pool" },
+          { "phase": "transaction", "guarantee": "rollback_before_return" }
+        ],
+        "status": "defined"
+      },
+      {
+        "id": "C-POOL-06",
+        "title": "Backpressure",
+        "domain": "pool",
+        "requirements": [
+          "fifo_queue_ordering",
+          "respect_connection_timeout",
+          "timeout_returns_error",
+          "no_exceed_max_size"
+        ],
+        "status": "defined"
+      },
+      {
+        "id": "C-POOL-07",
+        "title": "Graceful Drain",
+        "domain": "pool",
+        "steps": [
+          "stop_new_acquires",
+          "wait_active_returns",
+          "disconnect_all",
+          "return_after_destroy"
+        ],
+        "status": "defined"
+      }
+    ],
+    "transaction": [
+      {
+        "id": "C-TXN-01",
+        "title": "Lifecycle",
+        "domain": "transaction",
+        "lifecycle": ["begin", "execute", "commit_or_rollback"],
+        "implicit_rollback_on_drop": true,
+        "backends": ["postgresql", "mysql", "sqlite"],
+        "status": "implemented"
+      },
+      {
+        "id": "C-TXN-02",
+        "title": "Closure-Based Wrapper",
+        "domain": "transaction",
+        "pattern": "with_transaction(conn, cx, closure)",
+        "outcome_mapping": {
+          "Ok": "commit",
+          "Err": "rollback",
+          "Cancelled": "rollback_and_propagate"
+        },
+        "backends": ["postgresql", "mysql", "sqlite"],
+        "status": "implemented"
+      },
+      {
+        "id": "C-TXN-03",
+        "title": "Savepoint Support",
+        "domain": "transaction",
+        "sql_patterns": {
+          "postgresql": ["SAVEPOINT name", "RELEASE SAVEPOINT name", "ROLLBACK TO SAVEPOINT name"],
+          "mysql": ["SAVEPOINT name", "RELEASE SAVEPOINT name", "ROLLBACK TO SAVEPOINT name"],
+          "sqlite": ["SAVEPOINT name", "RELEASE name", "ROLLBACK TO name"]
+        },
+        "auto_cleanup": true,
+        "backends": ["postgresql", "mysql", "sqlite"],
+        "status": "implemented"
+      },
+      {
+        "id": "C-TXN-04",
+        "title": "Retry Policy",
+        "domain": "transaction",
+        "policy_fields": ["max_retries", "base_delay", "max_delay"],
+        "delay_formula": "min(base_delay * 2^attempt, max_delay)",
+        "retry_eligibility": {
+          "postgresql": "SQLSTATE 40001",
+          "mysql": "Error 1213, Error 1205",
+          "sqlite": "SQLITE_BUSY"
+        },
+        "backends_with_retry": ["postgresql", "mysql", "sqlite"],
+        "backends_missing_retry": [],
+        "status": "implemented"
+      },
+      {
+        "id": "C-TXN-05",
+        "title": "Isolation Level Contract",
+        "domain": "transaction",
+        "isolation_support": {
+          "postgresql": {
+            "ReadUncommitted": true,
+            "ReadCommitted": true,
+            "RepeatableRead": true,
+            "Serializable": true,
+            "default": "ReadCommitted"
+          },
+          "mysql": {
+            "ReadUncommitted": true,
+            "ReadCommitted": true,
+            "RepeatableRead": true,
+            "Serializable": true,
+            "default": "RepeatableRead"
+          },
+          "sqlite": {
+            "ReadUncommitted": false,
+            "ReadCommitted": false,
+            "RepeatableRead": false,
+            "Serializable": true,
+            "default": "Serializable"
+          }
+        },
+        "status": "defined"
+      }
+    ],
+    "timeout": [
+      {
+        "id": "C-TMO-01",
+        "title": "Connection Timeout",
+        "domain": "timeout",
+        "default_secs": 30,
+        "error": "PoolError::Timeout",
+        "respects_cx_cancel": true,
+        "status": "defined"
+      },
+      {
+        "id": "C-TMO-02",
+        "title": "Query Timeout",
+        "domain": "timeout",
+        "status": "not_implemented",
+        "cancel_mechanisms": {
+          "postgresql": "cancel_key",
+          "mysql": "KILL QUERY",
+          "sqlite": "sqlite3_interrupt"
+        }
+      },
+      {
+        "id": "C-TMO-03",
+        "title": "Idle Timeout",
+        "domain": "timeout",
+        "default_secs": 600,
+        "enforcement": "sweep_or_acquire",
+        "status": "defined"
+      },
+      {
+        "id": "C-TMO-04",
+        "title": "Max Lifetime",
+        "domain": "timeout",
+        "default_secs": 3600,
+        "enforcement": "check_on_release",
+        "clock": "monotonic_instant",
+        "status": "defined"
+      }
+    ],
+    "observability": [
+      {
+        "id": "C-OBS-01",
+        "title": "Connection Lifecycle Events",
+        "domain": "observability",
+        "events": [
+          { "name": "connection.created", "fields": ["backend", "pool_id", "conn_id"] },
+          { "name": "connection.acquired", "fields": ["pool_id", "conn_id", "wait_ms"] },
+          { "name": "connection.released", "fields": ["pool_id", "conn_id", "held_ms"] },
+          { "name": "connection.evicted", "fields": ["pool_id", "conn_id", "reason"] },
+          { "name": "connection.validation_failed", "fields": ["pool_id", "conn_id"] }
+        ],
+        "status": "not_implemented"
+      },
+      {
+        "id": "C-OBS-02",
+        "title": "Transaction Lifecycle Events",
+        "domain": "observability",
+        "events": [
+          { "name": "transaction.begin", "fields": ["backend", "isolation", "conn_id"] },
+          { "name": "transaction.commit", "fields": ["conn_id", "duration_ms"] },
+          { "name": "transaction.rollback", "fields": ["conn_id", "duration_ms", "reason"] },
+          { "name": "transaction.retry", "fields": ["conn_id", "attempt", "error"] }
+        ],
+        "status": "not_implemented"
+      },
+      {
+        "id": "C-OBS-03",
+        "title": "Pool Health Metrics",
+        "domain": "observability",
+        "derived_metrics": [
+          { "name": "pool_utilization", "formula": "active / max_size" },
+          { "name": "wait_queue_depth", "formula": "waiters" },
+          { "name": "timeout_rate", "formula": "total_timeouts / total_acquisitions" },
+          {
+            "name": "validation_failure_rate",
+            "formula": "total_validation_failures / total_acquisitions"
+          }
+        ],
+        "status": "partial"
+      },
+      {
+        "id": "C-OBS-04",
+        "title": "Slow Query Detection",
+        "domain": "observability",
+        "default_threshold_ms": 1000,
+        "log_fields": ["query_text_sanitized", "duration_ms", "backend", "conn_id"],
+        "status": "not_implemented"
+      }
+    ],
+    "error_normalization": [
+      {
+        "id": "C-ERR-01",
+        "title": "Common Error Categories",
+        "domain": "error",
+        "categories": [
+          {
+            "category": "ConnectionFailed",
+            "postgresql": "TCP/TLS error",
+            "mysql": "TCP/TLS error",
+            "sqlite": "File I/O error"
+          },
+          {
+            "category": "AuthenticationFailed",
+            "postgresql": "SQLSTATE 28xxx",
+            "mysql": "Error 1045",
+            "sqlite": "N/A"
+          },
+          {
+            "category": "QuerySyntax",
+            "postgresql": "SQLSTATE 42xxx",
+            "mysql": "Error 1064",
+            "sqlite": "SQLITE_ERROR"
+          },
+          {
+            "category": "ConstraintViolation",
+            "postgresql": "SQLSTATE 23xxx",
+            "mysql": "Error 1062/1451/1452",
+            "sqlite": "SQLITE_CONSTRAINT"
+          },
+          {
+            "category": "SerializationFailure",
+            "postgresql": "SQLSTATE 40001",
+            "mysql": "Error 1213",
+            "sqlite": "SQLITE_BUSY"
+          },
+          {
+            "category": "DeadlockDetected",
+            "postgresql": "SQLSTATE 40P01",
+            "mysql": "Error 1205",
+            "sqlite": "SQLITE_BUSY"
+          },
+          {
+            "category": "Timeout",
+            "postgresql": "Pool timeout",
+            "mysql": "Pool timeout",
+            "sqlite": "Pool/busy timeout"
+          },
+          {
+            "category": "PoolExhausted",
+            "postgresql": "All in use",
+            "mysql": "All in use",
+            "sqlite": "All in use"
+          },
+          {
+            "category": "Cancelled",
+            "postgresql": "Outcome::Cancelled",
+            "mysql": "Outcome::Cancelled",
+            "sqlite": "Outcome::Cancelled"
+          }
+        ],
+        "status": "defined"
+      },
+      {
+        "id": "C-ERR-02",
+        "title": "Error Method Parity",
+        "domain": "error",
+        "required_methods": [
+          "is_connection_error",
+          "is_serialization_failure",
+          "is_deadlock",
+          "is_unique_violation",
+          "is_constraint_violation",
+          "is_retryable"
+        ],
+        "status": "implemented"
+      }
+    ]
+  },
+  "summary": {
+    "total_contracts": 22,
+    "domains": {
+      "pool": { "count": 7, "implemented": 0, "partial": 1, "defined": 6, "not_implemented": 0 },
+      "transaction": {
+        "count": 5,
+        "implemented": 4,
+        "partial": 0,
+        "defined": 1,
+        "not_implemented": 0
+      },
+      "timeout": { "count": 4, "implemented": 0, "partial": 0, "defined": 3, "not_implemented": 1 },
+      "observability": {
+        "count": 4,
+        "implemented": 0,
+        "partial": 1,
+        "defined": 0,
+        "not_implemented": 3
+      },
+      "error_normalization": {
+        "count": 2,
+        "implemented": 1,
+        "partial": 0,
+        "defined": 1,
+        "not_implemented": 0
+      }
+    },
+    "backends": ["postgresql", "mysql", "sqlite"],
+    "pool_integration_status": {
+      "postgresql": "not_wired",
+      "mysql": "not_wired",
+      "sqlite": "internal_only"
+    },
+    "blocking_gaps": [
+      { "id": "PG-G4", "severity": "critical", "description": "PostgreSQL pool integration" },
+      { "id": "MY-G3", "severity": "critical", "description": "MySQL pool integration" },
+      { "id": "POOL-G1", "severity": "high", "description": "Async pool to database adapter" },
+      { "id": "POOL-G2", "severity": "high", "description": "ConnectionManager implementations" }
+    ]
+  },
+  "source_modules": {
+    "pool_sync": "src/database/pool.rs",
+    "pool_async": "src/sync/pool.rs",
+    "transaction": "src/database/transaction.rs",
+    "postgres": "src/database/postgres.rs",
+    "mysql": "src/database/mysql.rs",
+    "sqlite": "src/database/sqlite.rs"
+  },
+  "dependencies": {
+    "blocked_by": [
+      { "bead": "asupersync-2oh2u.6.2", "reason": "PostgreSQL hardening in progress" },
+      { "bead": "asupersync-2oh2u.6.3", "reason": "MySQL hardening", "status": "closed" },
+      { "bead": "asupersync-2oh2u.6.4", "reason": "SQLite hardening", "status": "closed" }
+    ],
+    "blocks": [
+      { "bead": "asupersync-2oh2u.6.9", "reason": "Retry/idempotency/failure contracts" },
+      { "bead": "asupersync-2oh2u.6.12", "reason": "Exhaustive unit tests" }
+    ]
+  }
+}

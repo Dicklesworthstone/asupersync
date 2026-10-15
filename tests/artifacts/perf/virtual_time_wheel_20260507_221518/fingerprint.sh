@@ -1,0 +1,12 @@
+#!/bin/bash
+echo "=== VIRTUAL TIME WHEEL PROFILING FINGERPRINT ==="
+echo "Timestamp: $(date -Iseconds)"
+echo "Git SHA: $(git rev-parse HEAD)"
+echo "Host: $(uname -n)"
+echo "Kernel: $(uname -r)"
+echo "CPU: $(cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2 | xargs)"
+echo "Cores: $(nproc)"
+echo "RAM: $(free -h | grep Mem | awk '{print $2}')"
+echo "Rust: $(rustc --version)"
+echo "Target: release-perf profile"
+echo "Scenario: 10K timers, 90% cancel storm, advance_to() stress test"

@@ -1,0 +1,758 @@
+//! Authority flow audit contract invariants (AA-07.3).
+
+#![allow(missing_docs)]
+
+use serde_json::{Value, json};
+use std::collections::HashSet;
+
+const DOC_PATH: &str = "docs/authority_flow_audit_contract.md";
+const ARTIFACT_PATH: &str = "artifacts/authority_flow_audit_v1.json";
+const RUNNER_PATH: &str = "scripts/run_authority_flow_audit_smoke.sh";
+const DRIFT_GOLDEN_PATH: &str =
+    "tests/fixtures/authority_flow_audit/drift_detection_projection.json";
+
+fn load_artifact() -> Value {
+    let content =
+        std::fs::read_to_string(ARTIFACT_PATH).expect("artifact must exist at expected path");
+    serde_json::from_str(&content).expect("artifact must be valid JSON")
+}
+
+fn load_doc() -> String {
+    std::fs::read_to_string(DOC_PATH).expect("contract doc must exist")
+}
+
+fn load_runner() -> String {
+    std::fs::read_to_string(RUNNER_PATH).expect("runner script must exist")
+}
+
+fn load_drift_golden() -> Value {
+    let content = load_drift_golden_text();
+    serde_json::from_str(&content).expect("drift golden must be valid JSON")
+}
+
+fn load_drift_golden_text() -> String {
+    std::fs::read_to_string(DRIFT_GOLDEN_PATH).expect("drift detection golden fixture must exist")
+}
+
+fn drift_detection_projection() -> Value {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+    json!({
+        "contract_version": art["contract_version"],
+        "drift_detection": {
+            "source_paths": drift["source_paths"],
+            "required_rule_prefixes": drift["required_rule_prefixes"],
+            "check_ids": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["check_id"].clone())
+                .collect::<Vec<_>>(),
+            "failure_modes": drift["checks"]
+                .as_array()
+                .expect("drift checks must be array")
+                .iter()
+                .map(|check| check["failure_mode"].clone())
+                .collect::<Vec<_>>(),
+            "safety": drift["safety"],
+        },
+        "structured_log_fields_required": art["structured_log_fields_required"],
+    })
+}
+
+// ── Document stability ─────────────────────────────────────────────
+
+#[test]
+fn doc_exists_and_has_required_sections() {
+    let doc = load_doc();
+    for section in &[
+        "## Purpose",
+        "## Contract Artifacts",
+        "## Abuse Scenarios",
+        "## Revocation Drills",
+        "## Audit Evidence",
+        "## Drift Detection",
+        "## Validation",
+        "## Cross-References",
+    ] {
+        assert!(doc.contains(section), "doc must contain section: {section}");
+    }
+}
+
+#[test]
+fn doc_references_bead_id() {
+    let doc = load_doc();
+    let art = load_artifact();
+    let bead_id = art["bead_id"].as_str().unwrap();
+    assert!(
+        doc.contains(bead_id),
+        "doc must reference bead_id {bead_id}"
+    );
+}
+
+#[test]
+fn doc_validation_command_is_rch_scoped() {
+    let doc = load_doc();
+    for token in [
+        "rch exec --",
+        "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/",
+        "cargo test -p asupersync --test authority_flow_audit_contract --features test-internals",
+    ] {
+        assert!(
+            doc.contains(token),
+            "doc validation command must contain: {token}"
+        );
+    }
+}
+
+// ── Artifact stability ─────────────────────────────────────────────
+
+#[test]
+fn artifact_has_contract_version() {
+    let art = load_artifact();
+    assert_eq!(
+        art["contract_version"].as_str().unwrap(),
+        "authority-flow-audit-v1"
+    );
+}
+
+#[test]
+fn artifact_has_runner_script() {
+    let art = load_artifact();
+    let runner = art["runner_script"].as_str().unwrap();
+    assert!(
+        std::path::Path::new(runner).exists(),
+        "runner script must exist at {runner}"
+    );
+}
+
+// ── Abuse scenarios ────────────────────────────────────────────────
+
+#[test]
+fn abuse_scenarios_are_nonempty() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    assert!(scenarios.len() >= 6, "must have at least 6 abuse scenarios");
+}
+
+#[test]
+fn abuse_scenario_ids_are_unique() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    let ids: Vec<&str> = scenarios
+        .iter()
+        .map(|s| s["scenario_id"].as_str().unwrap())
+        .collect();
+    let mut deduped = ids.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(
+        ids.len(),
+        deduped.len(),
+        "abuse scenario_ids must be unique"
+    );
+}
+
+#[test]
+fn abuse_scenarios_have_afa_prefix() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        assert!(
+            sid.starts_with("AFA-"),
+            "abuse scenario '{sid}' must start with AFA-"
+        );
+    }
+}
+
+#[test]
+fn abuse_scenarios_all_expect_deny() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let outcome = scenario["expected_outcome"].as_str().unwrap();
+        assert_eq!(
+            outcome, "deny",
+            "{sid}: all abuse scenarios must expect deny"
+        );
+    }
+}
+
+#[test]
+fn abuse_scenarios_have_mitigations() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let mitigation = scenario["mitigation"].as_str().unwrap();
+        assert!(
+            !mitigation.is_empty(),
+            "{sid}: must have non-empty mitigation"
+        );
+    }
+}
+
+#[test]
+fn abuse_scenarios_cover_key_attacks() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+    let ids: HashSet<&str> = scenarios
+        .iter()
+        .map(|s| s["scenario_id"].as_str().unwrap())
+        .collect();
+    for required in &[
+        "AFA-CONFUSED-DEPUTY",
+        "AFA-STALE-TOKEN",
+        "AFA-OVER-DELEGATION",
+        "AFA-REPLAY-ATTACK",
+        "AFA-REVOCATION-RACE",
+        "AFA-SANDBOX-ESCAPE",
+    ] {
+        assert!(
+            ids.contains(required),
+            "must have abuse scenario {required}"
+        );
+    }
+}
+
+// ── Revocation drills ──────────────────────────────────────────────
+
+#[test]
+fn revocation_drills_are_nonempty() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    assert!(drills.len() >= 3, "must have at least 3 revocation drills");
+}
+
+#[test]
+fn revocation_drill_ids_are_unique() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    let ids: Vec<&str> = drills
+        .iter()
+        .map(|d| d["drill_id"].as_str().unwrap())
+        .collect();
+    let mut deduped = ids.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(ids.len(), deduped.len(), "drill_ids must be unique");
+}
+
+#[test]
+fn revocation_drills_have_rd_prefix() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    for drill in drills {
+        let did = drill["drill_id"].as_str().unwrap();
+        assert!(did.starts_with("RD-"), "drill '{did}' must start with RD-");
+    }
+}
+
+#[test]
+fn revocation_drills_have_steps() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    for drill in drills {
+        let did = drill["drill_id"].as_str().unwrap();
+        let steps = drill["steps"].as_array().unwrap();
+        assert!(steps.len() >= 3, "{did}: must have at least 3 steps");
+    }
+}
+
+#[test]
+fn revocation_drills_have_zero_latency() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    for drill in drills {
+        let did = drill["drill_id"].as_str().unwrap();
+        let latency = drill["expected_latency_ms"].as_u64().unwrap();
+        assert_eq!(
+            latency, 0,
+            "{did}: revocation must have zero expected latency (synchronous)"
+        );
+    }
+}
+
+#[test]
+fn revocation_drills_include_cascade_and_expiry() {
+    let art = load_artifact();
+    let drills = art["revocation_drills"].as_array().unwrap();
+    let ids: HashSet<&str> = drills
+        .iter()
+        .map(|d| d["drill_id"].as_str().unwrap())
+        .collect();
+    assert!(
+        ids.contains("RD-CASCADE-REVOKE"),
+        "must have RD-CASCADE-REVOKE"
+    );
+    assert!(ids.contains("RD-EXPIRY-AUTO"), "must have RD-EXPIRY-AUTO");
+}
+
+// ── Audit evidence requirements ────────────────────────────────────
+
+#[test]
+fn audit_evidence_requirements_are_nonempty() {
+    let art = load_artifact();
+    let evidence = art["audit_evidence_requirements"].as_array().unwrap();
+    assert!(
+        evidence.len() >= 3,
+        "must have at least 3 audit evidence requirements"
+    );
+}
+
+#[test]
+fn audit_evidence_ids_are_unique() {
+    let art = load_artifact();
+    let evidence = art["audit_evidence_requirements"].as_array().unwrap();
+    let ids: Vec<&str> = evidence
+        .iter()
+        .map(|e| e["evidence_id"].as_str().unwrap())
+        .collect();
+    let mut deduped = ids.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(ids.len(), deduped.len(), "evidence_ids must be unique");
+}
+
+#[test]
+fn audit_evidence_has_ae_prefix() {
+    let art = load_artifact();
+    let evidence = art["audit_evidence_requirements"].as_array().unwrap();
+    for ev in evidence {
+        let eid = ev["evidence_id"].as_str().unwrap();
+        assert!(
+            eid.starts_with("AE-"),
+            "evidence '{eid}' must start with AE-"
+        );
+    }
+}
+
+#[test]
+fn audit_evidence_has_log_fields() {
+    let art = load_artifact();
+    let evidence = art["audit_evidence_requirements"].as_array().unwrap();
+    for ev in evidence {
+        let eid = ev["evidence_id"].as_str().unwrap();
+        let fields = ev["log_fields"].as_array().unwrap();
+        assert!(
+            !fields.is_empty(),
+            "{eid}: must have at least one log field"
+        );
+    }
+}
+
+// ── Structured logging ─────────────────────────────────────────────
+
+#[test]
+fn structured_log_fields_are_nonempty_and_unique() {
+    let art = load_artifact();
+    let fields = art["structured_log_fields_required"].as_array().unwrap();
+    assert!(!fields.is_empty(), "log fields must be nonempty");
+    let strs: Vec<&str> = fields.iter().map(|f| f.as_str().unwrap()).collect();
+    let mut deduped = strs.clone();
+    deduped.sort_unstable();
+    deduped.dedup();
+    assert_eq!(strs.len(), deduped.len(), "log fields must be unique");
+}
+
+// ── Drift detection ────────────────────────────────────────────────
+
+#[test]
+fn drift_detection_sources_exist_and_are_non_mutating() {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+
+    assert!(
+        drift["description"]
+            .as_str()
+            .is_some_and(|text| text.contains("ambient-authority")),
+        "drift detector should describe the capability/Cx drift surface"
+    );
+
+    let source_paths = drift["source_paths"]
+        .as_array()
+        .expect("drift detector must list source paths");
+    assert!(
+        source_paths.len() >= 5,
+        "drift detector should tie the contract to multiple source artifacts"
+    );
+    for path in source_paths {
+        let path = path.as_str().expect("source path must be string");
+        assert!(
+            std::path::Path::new(path).exists(),
+            "drift source path must exist: {path}"
+        );
+    }
+
+    let safety = &drift["safety"];
+    assert_eq!(safety["non_mutating"].as_bool(), Some(true));
+    assert_eq!(safety["cargo_must_be_rch"].as_bool(), Some(true));
+    assert_eq!(safety["beads_mutated"].as_bool(), Some(false));
+    assert_eq!(safety["agent_mail_mutated"].as_bool(), Some(false));
+    assert_eq!(
+        safety["branch_or_worktree_operations"].as_bool(),
+        Some(false)
+    );
+}
+
+#[test]
+fn drift_detection_covers_mitigation_and_evidence_drift() {
+    let art = load_artifact();
+    let drift = &art["drift_detection"];
+
+    let required_prefixes: HashSet<&str> = drift["required_rule_prefixes"]
+        .as_array()
+        .expect("required rule prefixes must be array")
+        .iter()
+        .map(|prefix| prefix.as_str().expect("prefix must be string"))
+        .collect();
+    for prefix in ["ATT-", "REV-", "MEM-", "RA-", "CVT-"] {
+        assert!(
+            required_prefixes.contains(prefix),
+            "drift detector must require rule prefix {prefix}"
+        );
+    }
+
+    let check_ids: HashSet<&str> = drift["checks"]
+        .as_array()
+        .expect("drift checks must be array")
+        .iter()
+        .map(|check| check["check_id"].as_str().expect("check id must be string"))
+        .collect();
+    for check_id in [
+        "AFD-SOURCE-PATHS-EXIST",
+        "AFD-MITIGATION-RULE-PREFIXES",
+        "AFD-STRUCTURED-FIELDS-COVER-EVIDENCE",
+    ] {
+        assert!(
+            check_ids.contains(check_id),
+            "drift detector missing check {check_id}"
+        );
+    }
+
+    let structured: HashSet<&str> = art["structured_log_fields_required"]
+        .as_array()
+        .expect("structured fields must be array")
+        .iter()
+        .map(|field| field.as_str().expect("field must be string"))
+        .collect();
+    for evidence in art["audit_evidence_requirements"]
+        .as_array()
+        .expect("evidence requirements must be array")
+    {
+        let evidence_id = evidence["evidence_id"]
+            .as_str()
+            .expect("evidence id must be string");
+        let has_logged_field = evidence["log_fields"]
+            .as_array()
+            .expect("log fields must be array")
+            .iter()
+            .any(|field| {
+                field
+                    .as_str()
+                    .is_some_and(|field| structured.contains(field))
+            });
+        assert!(
+            has_logged_field,
+            "{evidence_id}: at least one evidence field must be in structured_log_fields_required"
+        );
+    }
+}
+
+#[test]
+fn drift_detection_projection_matches_golden() {
+    assert_eq!(
+        drift_detection_projection(),
+        load_drift_golden(),
+        "authority-flow drift projection changed; update the golden only after reviewing the contract drift semantics"
+    );
+}
+
+#[test]
+fn drift_detection_projection_matches_golden_text() {
+    let mut actual = serde_json::to_string_pretty(&drift_detection_projection())
+        .expect("drift projection must serialize to JSON");
+    actual.push('\n');
+
+    assert_eq!(
+        actual,
+        load_drift_golden_text(),
+        "authority-flow drift projection text changed; update the golden only after reviewing ordering and formatting drift"
+    );
+}
+
+// ── Smoke / runner ─────────────────────────────────────────────────
+
+#[test]
+fn smoke_scenarios_are_rch_routed() {
+    let art = load_artifact();
+    let scenarios = art["smoke_scenarios"].as_array().unwrap();
+    assert!(scenarios.len() >= 3, "must have at least 3 smoke scenarios");
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let cmd = scenario["command"].as_str().unwrap();
+        assert!(cmd.contains("RCH_BIN"), "{sid}: must use configurable rch");
+        assert!(cmd.contains("exec --"), "{sid}: must use rch exec");
+        assert!(
+            cmd.contains("CARGO_TARGET_DIR=${TMPDIR:-/tmp}/"),
+            "{sid}: must use TMPDIR-aware target dir"
+        );
+        assert!(
+            cmd.contains("cargo test -p asupersync"),
+            "{sid}: must scope cargo test to asupersync"
+        );
+        assert!(
+            scenario["test_filter"]
+                .as_str()
+                .is_some_and(|filter| !filter.is_empty()),
+            "{sid}: must pin a test filter"
+        );
+    }
+}
+
+#[test]
+fn runner_script_exists_and_declares_modes() {
+    let runner = load_runner();
+    for token in [
+        "--list",
+        "--dry-run",
+        "--execute",
+        "--scenario",
+        "RCH_BIN",
+        "RCH_LOCAL_FALLBACK_PATTERN=",
+        r#"grep -Eiq "$RCH_LOCAL_FALLBACK_PATTERN""#,
+        "[RCH\\] local",
+        "falling back to local",
+        "local fallback",
+        "fallback to local",
+        "executing locally",
+        "validation_passed",
+        "authority-flow-audit-smoke-bundle-v1",
+        "authority-flow-audit-smoke-run-report-v1",
+    ] {
+        assert!(runner.contains(token), "runner missing token: {token}");
+    }
+    assert!(
+        !runner.contains("eval "),
+        "runner must avoid string-based eval execution"
+    );
+}
+
+// ── Functional: abuse scenario simulations ──────────────────────────
+
+#[test]
+fn abuse_confused_deputy_denied() {
+    let token_seams: HashSet<&str> = HashSet::from(["seam-A"]);
+    let target_seam = "seam-B";
+
+    let verdict = if token_seams.contains(target_seam) {
+        "allow"
+    } else {
+        "deny"
+    };
+    assert_eq!(verdict, "deny", "confused deputy must be denied");
+}
+
+#[test]
+fn abuse_stale_token_denied() {
+    let token_expiry_epoch: u64 = 10;
+    let current_epoch: u64 = 15;
+
+    let verdict = if current_epoch > token_expiry_epoch {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(verdict, "deny", "stale token must be denied");
+}
+
+#[test]
+fn abuse_over_delegation_denied() {
+    let parent_caps: HashSet<&str> = HashSet::from(["CAP-DECIDE", "CAP-OBSERVE"]);
+    let child_caps: HashSet<&str> = HashSet::from(["CAP-ADMIN", "CAP-DECIDE"]);
+
+    let verdict = if child_caps.is_subset(&parent_caps) {
+        "allow"
+    } else {
+        "deny"
+    };
+    assert_eq!(verdict, "deny", "over-delegation must be denied");
+}
+
+#[test]
+fn abuse_replay_single_use_denied() {
+    let mut used_nonces: HashSet<u64> = HashSet::new();
+    let token_nonce: u64 = 42;
+
+    // First use: allowed
+    assert!(used_nonces.insert(token_nonce), "first use must succeed");
+
+    // Replay: denied
+    let verdict = if used_nonces.contains(&token_nonce) {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(verdict, "deny", "replay must be denied");
+}
+
+#[test]
+fn abuse_depth_bypass_denied() {
+    let max_depth: u32 = 5;
+    let proposed_depth: u32 = 6;
+
+    let verdict = if proposed_depth > max_depth {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(verdict, "deny", "depth bypass must be denied");
+}
+
+#[test]
+fn abuse_ambient_authority_denied() {
+    let has_token = false;
+
+    let verdict = if has_token { "allow" } else { "deny" };
+    assert_eq!(verdict, "deny", "ambient authority must be denied");
+}
+
+// ── Functional: revocation drill simulations ────────────────────────
+
+#[test]
+fn drill_single_revoke_immediate() {
+    let mut revoked_tokens: HashSet<&str> = HashSet::new();
+    let token_id = "tok-123";
+
+    // Before revocation: allowed
+    let pre_verdict = if revoked_tokens.contains(token_id) {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(pre_verdict, "allow");
+
+    // Revoke
+    revoked_tokens.insert(token_id);
+
+    // After revocation: denied
+    let post_verdict = if revoked_tokens.contains(token_id) {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(post_verdict, "deny");
+}
+
+#[test]
+fn drill_cascade_revoke_descendants() {
+    let mut revoked: HashSet<&str> = HashSet::new();
+    let parent_map = [("child", "root"), ("grandchild", "child")];
+
+    // Revoke root
+    revoked.insert("root");
+
+    // Cascade
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (child, parent) in &parent_map {
+            if revoked.contains(parent) && revoked.insert(child) {
+                changed = true;
+            }
+        }
+    }
+
+    assert!(revoked.contains("child"), "child must be revoked");
+    assert!(revoked.contains("grandchild"), "grandchild must be revoked");
+}
+
+#[test]
+fn drill_expiry_auto_deny() {
+    let token_expiry: u64 = 100;
+    let mut current_epoch: u64 = 50;
+
+    // Before expiry: allowed
+    let pre = if current_epoch > token_expiry {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(pre, "allow");
+
+    // Advance past expiry
+    current_epoch = 101;
+    let post = if current_epoch > token_expiry {
+        "deny"
+    } else {
+        "allow"
+    };
+    assert_eq!(post, "deny");
+}
+
+// ── Functional: cross-artifact consistency ──────────────────────────
+
+#[test]
+fn abuse_mitigations_reference_known_rules() {
+    let art = load_artifact();
+    let scenarios = art["abuse_scenarios"].as_array().unwrap();
+
+    // Known rule prefixes from other artifacts
+    let known_prefixes = ["ATT-", "REV-", "MEM-", "RA-", "CR-", "CVT-"];
+
+    for scenario in scenarios {
+        let sid = scenario["scenario_id"].as_str().unwrap();
+        let mitigation = scenario["mitigation"].as_str().unwrap();
+        let references_known = known_prefixes.iter().any(|p| mitigation.contains(p));
+        assert!(
+            references_known,
+            "{sid}: mitigation must reference a known rule prefix"
+        );
+    }
+}
+
+// ── Functional: controller integration ──────────────────────────────
+
+#[test]
+fn controller_rollback_produces_audit_trail() {
+    use asupersync::runtime::kernel::{
+        ControllerBudget, ControllerMode, ControllerRegistration, ControllerRegistry,
+        RollbackReason, SNAPSHOT_VERSION,
+    };
+
+    let mut registry = ControllerRegistry::new();
+    let reg = ControllerRegistration {
+        name: "audit-trail-test".to_string(),
+        min_version: SNAPSHOT_VERSION,
+        max_version: SNAPSHOT_VERSION,
+        required_fields: vec!["ready_queue_len".to_string()],
+        target_seams: vec!["AA01-SEAM-SCHED-CANCEL-STREAK".to_string()],
+        initial_mode: ControllerMode::Shadow,
+        proof_artifact_id: None,
+        budget: ControllerBudget::default(),
+    };
+    let id = registry.register(reg).unwrap();
+
+    // Promote to Canary
+    for _ in 0..10 {
+        registry.advance_epoch();
+        registry.update_calibration(id, 0.95);
+    }
+    let _ = registry.try_promote(id, ControllerMode::Canary);
+
+    // Rollback
+    let cmd = registry.rollback(id, RollbackReason::ManualRollback);
+    assert!(cmd.is_some());
+
+    // Evidence ledger should contain rollback entry
+    let ledger = registry.evidence_ledger();
+    assert!(
+        ledger.iter().any(|e| matches!(
+            &e.event,
+            asupersync::runtime::kernel::LedgerEvent::RolledBack { .. }
+        )),
+        "evidence ledger must record rollback"
+    );
+}

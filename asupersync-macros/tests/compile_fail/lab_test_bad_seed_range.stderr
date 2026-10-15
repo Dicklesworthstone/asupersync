@@ -1,0 +1,5 @@
+error: lab_test seeds range must contain at least one seed
+ --> tests/compile_fail/lab_test_bad_seed_range.rs:3:20
+  |
+3 | #[lab_test(seeds = 4..4)]
+  |                    ^

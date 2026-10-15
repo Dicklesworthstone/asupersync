@@ -1,0 +1,24 @@
+---
+source: src/trace/event.rs
+expression: scrub_browser_trace_fields(&fields)
+---
+{
+  "capture_host_time_ns": "[capture_host_time_ns]",
+  "capture_host_turn_seq": "61",
+  "capture_replay_key": "[capture_replay_key]",
+  "capture_source": "runtime",
+  "capture_source_seq": "61",
+  "event_kind": "exit_delivered",
+  "failure_vt": "[failure_vt]",
+  "from": "[from]",
+  "link_ref": "77",
+  "reason": "normal",
+  "schema_version": "browser-trace-schema-v1",
+  "seq": "[seq]",
+  "sequence_group": "[sequence_group]",
+  "time_ns": "[time_ns]",
+  "to": "[to]",
+  "trace_id": "[trace_id]",
+  "validation_failure_category": "none",
+  "validation_status": "valid"
+}

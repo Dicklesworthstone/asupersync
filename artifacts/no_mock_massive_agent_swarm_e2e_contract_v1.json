@@ -1,0 +1,196 @@
+{
+  "contract_version": "no-mock-massive-agent-swarm-e2e-v1",
+  "run_report_schema_version": "asupersync.no-mock-massive-agent-swarm-e2e.run-report.v1",
+  "bead_id": "asupersync-vssefs.6",
+  "description": "RCH-only no-mock e2e runner contract for bounded massive-agent swarm scenarios that execute through the committed swarm replay lab runtime API and emit operator-grade evidence.",
+  "runner_script": "scripts/run_no_mock_massive_agent_swarm_e2e.sh",
+  "contract_test": "tests/no_mock_massive_agent_swarm_e2e_contract.rs",
+  "scenario_corpus": "artifacts/swarm_workload_scenario_corpus_v1.json",
+  "scenario_source": {
+    "runtime_scenario_type": "asupersync::lab::SwarmReplayScenario",
+    "runtime_runner": "asupersync::lab::run_swarm_replay_scenario",
+    "runtime_summary_type": "asupersync::lab::SwarmReplaySummary",
+    "runtime_source": "src/lab/swarm_replay.rs"
+  },
+  "execution_policy": {
+    "default_profile": "small",
+    "dry_run_mode": "writes a manifest and exits without invoking cargo or rch",
+    "execute_mode": "requires RCH_REQUIRE_REMOTE=1 and invokes cargo test through rch exec",
+    "local_fallback_allowed": false,
+    "larger_profiles": "medium and large are runnable with the same script; large is explicitly expensive and may be skipped during closeout unless requested",
+    "negative_scenarios": "blocked-cleanup and forced-timeout rows must fail closed or stay manifest-only; they must never be counted as a pass"
+  },
+  "knobs": [
+    {
+      "name": "worker_count",
+      "cli_flag": "--worker-count",
+      "maps_to_replay_field": "worker_count",
+      "type": "positive_integer"
+    },
+    {
+      "name": "region_count",
+      "cli_flag": "--region-count",
+      "maps_to_replay_field": "region_count",
+      "type": "positive_integer"
+    },
+    {
+      "name": "tasks_per_region",
+      "cli_flag": "--tasks-per-region",
+      "maps_to_replay_field": "tasks_per_region",
+      "type": "positive_integer"
+    },
+    {
+      "name": "channel_fanout",
+      "cli_flag": "--channel-fanout",
+      "maps_to_replay_field": "messages_per_task",
+      "type": "positive_integer"
+    },
+    {
+      "name": "cancellation_rate",
+      "cli_flag": "--cancellation-rate",
+      "maps_to_replay_field": "cancel_after_steps",
+      "type": "ratio_0_to_1"
+    },
+    {
+      "name": "obligation_rate",
+      "cli_flag": "--obligation-rate",
+      "maps_to_replay_field": "obligations_per_task",
+      "type": "positive_integer"
+    }
+  ],
+  "required_log_fields": [
+    "scenario_id",
+    "profile",
+    "command",
+    "git_commit",
+    "rch_worker",
+    "feature_set",
+    "worker_count",
+    "region_count",
+    "task_count",
+    "channel_fanout",
+    "cancellation_rate",
+    "obligation_rate",
+    "p95_latency_us",
+    "p99_latency_us",
+    "memory_envelope_bytes",
+    "quiescence_result",
+    "first_failure",
+    "artifact_path",
+    "proof_status"
+  ],
+  "forbidden_success_markers": [
+    "placeholder_success",
+    "fake_success",
+    "mock_success",
+    "todo_success"
+  ],
+  "required_failure_modes": [
+    "admission_rejection",
+    "cancellation_storm",
+    "channel_backpressure",
+    "blocked_cleanup",
+    "forced_timeout"
+  ],
+  "scenario_matrix": [
+    {
+      "scenario_id": "swarm-minimal-healthy-run",
+      "source_scenario_id": "swarm-minimal-healthy-run",
+      "profile": "small",
+      "scale_class": "small",
+      "execution_mode": "execute",
+      "failure_modes": [
+        "healthy_run"
+      ],
+      "expected_proof_status": "pass"
+    },
+    {
+      "scenario_id": "swarm-cancellation-storm",
+      "source_scenario_id": "swarm-cancellation-storm",
+      "profile": "small",
+      "scale_class": "small",
+      "execution_mode": "execute",
+      "failure_modes": [
+        "cancellation_storm"
+      ],
+      "expected_proof_status": "pass"
+    },
+    {
+      "scenario_id": "swarm-memory-pressure-admission-shed",
+      "source_scenario_id": "swarm-memory-pressure-admission-shed",
+      "profile": "small",
+      "scale_class": "small",
+      "execution_mode": "execute",
+      "failure_modes": [
+        "admission_rejection"
+      ],
+      "expected_proof_status": "pass"
+    },
+    {
+      "scenario_id": "swarm-fanout-healthy-baseline",
+      "source_scenario_id": "swarm-fanout-healthy-baseline",
+      "profile": "medium",
+      "scale_class": "medium",
+      "execution_mode": "execute",
+      "failure_modes": [
+        "channel_backpressure"
+      ],
+      "expected_proof_status": "pass"
+    },
+    {
+      "scenario_id": "swarm-admission-cancel-drain",
+      "source_scenario_id": "swarm-admission-cancel-drain",
+      "profile": "medium",
+      "scale_class": "medium",
+      "execution_mode": "execute",
+      "failure_modes": [
+        "admission_rejection",
+        "cancellation_storm"
+      ],
+      "expected_proof_status": "pass"
+    },
+    {
+      "scenario_id": "swarm-blocked-cleanup-negative",
+      "source_scenario_id": "swarm-minimal-healthy-run",
+      "profile": "small",
+      "scale_class": "negative",
+      "execution_mode": "negative_contract",
+      "failure_modes": [
+        "blocked_cleanup"
+      ],
+      "expected_proof_status": "fail_closed",
+      "expected_first_failure": "blocked cleanup: non-terminal task remained after close"
+    },
+    {
+      "scenario_id": "swarm-forced-timeout-envelope",
+      "source_scenario_id": "swarm-forced-timeout-envelope",
+      "profile": "large",
+      "scale_class": "large",
+      "execution_mode": "manifest_only",
+      "failure_modes": [
+        "forced_timeout"
+      ],
+      "expected_proof_status": "manifest_only",
+      "expected_first_failure": "expensive forced-timeout lane requires explicit execute profile"
+    },
+    {
+      "scenario_id": "swarm-saturated-contract-boundary",
+      "source_scenario_id": "swarm-saturated-contract-boundary",
+      "profile": "large",
+      "scale_class": "large",
+      "execution_mode": "manifest_only",
+      "failure_modes": [
+        "saturated_scale"
+      ],
+      "expected_proof_status": "manifest_only"
+    }
+  ],
+  "proof_command": "timeout 1200 env RCH_REQUIRE_REMOTE=1 scripts/run_no_mock_massive_agent_swarm_e2e.sh --execute --profile small --features test-internals",
+  "dry_run_command": "scripts/run_no_mock_massive_agent_swarm_e2e.sh --dry-run --profile small",
+  "operator_evidence": {
+    "manifest_path": "target/no-mock-massive-agent-swarm-e2e/run_<run_id>/manifest.json",
+    "run_log_path": "target/no-mock-massive-agent-swarm-e2e/run_<run_id>/run.log",
+    "run_report_path": "target/no-mock-massive-agent-swarm-e2e/run_<run_id>/run_report.json",
+    "stdout_event_prefix": "NO_MOCK_MASSIVE_AGENT_SWARM_E2E_EVENT "
+  }
+}

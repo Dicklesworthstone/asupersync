@@ -1,0 +1,39 @@
+{
+  "schema_version": "wasm-abi-policy-v1",
+  "description": "Deterministic policy gate for WASM ABI schema and JS/WASM boundary contract.",
+  "contract": {
+    "contract_id": "asupersync-wasm-abi-v1",
+    "source": "src/types/wasm_abi.rs",
+    "documentation": "docs/wasm_abi_contract.md",
+    "required_doc_markers": [
+      "Contract ID: `asupersync-wasm-abi-v1`",
+      "Concrete Artifact Strategy and Crate Layout",
+      "`asupersync-browser-core`",
+      "Next.js Hydration-safe Bootstrap Contract",
+      "`next.bootstrap_state_machine_contract`",
+      "Drift Detection and CI Gate",
+      "`WASM_ABI_SIGNATURES_V1`",
+      "Migration Notes Ledger",
+      "Current ABI entry:"
+    ]
+  },
+  "expected": {
+    "major_version": 1,
+    "minor_version": 0,
+    "signature_fingerprint": 4558451663113424898,
+    "symbols": [
+      "runtime_create",
+      "runtime_close",
+      "scope_enter",
+      "scope_close",
+      "task_spawn",
+      "task_join",
+      "task_cancel",
+      "fetch_request"
+    ]
+  },
+  "output": {
+    "summary_path": "artifacts/wasm_abi_contract_summary.json",
+    "log_path": "artifacts/wasm_abi_contract_events.ndjson"
+  }
+}

@@ -1,0 +1,440 @@
+{
+  "schema_version": "tracker-graph-drift-contract-v1",
+  "contract_id": "tracker-graph-drift-report-contract",
+  "bead_id": "asupersync-ol11aa.9.2",
+  "helper": "scripts/tracker_graph_drift_report.py",
+  "required_classifications": [
+    "command-provenance-failure",
+    "data-hash-mismatch",
+    "stale-graph-snapshot",
+    "br-ready-bv-empty-divergence",
+    "br-bv-actionable-mismatch",
+    "parent-only-ready-queue",
+    "consistent-actionable",
+    "consistent-no-work"
+  ],
+  "expected_summary": {
+    "scenario_count": 8,
+    "safe_to_claim": 1,
+    "create_child_bead": 1,
+    "refresh_required": 5,
+    "blocked_or_unsafe": 7,
+    "highest_severity_scenario": "command-failure"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_tracker_graph_drift_report\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test tracker_graph_drift_report_contract -- --nocapture",
+    "script_self_check": "python3 scripts/tracker_graph_drift_report.py --fixture artifacts/tracker_graph_drift_report_contract_v1.json --generated-at 2026-06-06T13:40:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "tracker-graph-drift-fixture-v1",
+    "fixture_id": "tracker-graph-drift-contract-fixture",
+    "max_snapshot_age_seconds": 900,
+    "scenarios": [
+      {
+        "scenario_id": "command-failure",
+        "description": "One required tracker command failed, so the snapshot is not admissible.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 2
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": []
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 94
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "data-hash-mismatch",
+        "description": "bv robot outputs came from different graph snapshots.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": []
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 94
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-b",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "stale-snapshot",
+        "description": "The graph snapshot is older than the allowed freshness window.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:00:00Z",
+          "issues": []
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:00:00Z",
+          "open_count": 94
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:00:00Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:00:00Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "br-ready-bv-empty",
+        "description": "br ready lists a concrete task but bv has no top pick.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": [
+            {
+              "id": "asupersync-ol11aa.9.2",
+              "title": "Detect br/bv ready-queue divergence",
+              "issue_type": "task",
+              "touched_paths": [
+                "scripts/tracker_graph_drift_report.py"
+              ]
+            }
+          ]
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 95
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "br-bv-id-mismatch",
+        "description": "Both tools have actionable ideas, but they do not name the same bead.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": [
+            {
+              "id": "asupersync-ol11aa.9.2",
+              "issue_type": "task",
+              "touched_paths": [
+                "scripts/tracker_graph_drift_report.py"
+              ]
+            }
+          ]
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 95
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "id": "asupersync-other-ready"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": [
+                {
+                  "id": "asupersync-other-ready"
+                }
+              ]
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "parent-only-ready",
+        "description": "Live-session shape: br ready exposes only ol11aa parent work while bv next is empty.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": [
+            {
+              "id": "asupersync-ol11aa",
+              "title": "Swarm-scale pressure admission and proof-lane hardening program",
+              "issue_type": "feature",
+              "labels": [
+                "idea-wizard",
+                "proof-lane"
+              ],
+              "touched_paths": []
+            }
+          ]
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 94
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "consistent-actionable",
+        "description": "br ready and bv agree on one concrete task.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": [
+            {
+              "id": "asupersync-ol11aa.9.2",
+              "title": "Detect br/bv ready-queue divergence",
+              "issue_type": "task",
+              "touched_paths": [
+                "scripts/tracker_graph_drift_report.py"
+              ]
+            }
+          ]
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 95
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "id": "asupersync-ol11aa.9.2"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": [
+                {
+                  "id": "asupersync-ol11aa.9.2"
+                }
+              ]
+            },
+            "recommendations": []
+          }
+        }
+      },
+      {
+        "scenario_id": "consistent-no-work",
+        "description": "Both br and bv agree that there is no actionable issue in the snapshot.",
+        "command_provenance": {
+          "br-ready": {
+            "command": "br --no-auto-import ready --json",
+            "exit_code": 0
+          },
+          "br-list": {
+            "command": "br --no-auto-import list --json",
+            "exit_code": 0
+          },
+          "bv-robot-next": {
+            "command": "bv --robot-next",
+            "exit_code": 0
+          },
+          "bv-robot-triage": {
+            "command": "bv --robot-triage",
+            "exit_code": 0
+          }
+        },
+        "br_ready": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "issues": []
+        },
+        "br_list": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "open_count": 0
+        },
+        "bv_next": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "message": "No actionable items available"
+        },
+        "bv_triage": {
+          "generated_at": "2026-06-06T13:39:45Z",
+          "data_hash": "hash-a",
+          "triage": {
+            "quick_ref": {
+              "top_picks": []
+            },
+            "recommendations": []
+          }
+        }
+      }
+    ]
+  }
+}

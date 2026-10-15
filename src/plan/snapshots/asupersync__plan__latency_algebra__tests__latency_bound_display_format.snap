@@ -1,0 +1,11 @@
+---
+source: src/plan/latency_algebra.rs
+assertion_line: 2312
+expression: "format!(\"{bound}\")"
+---
+Latency Bound Analysis
+  delay    <= 0.123456s
+  backlog  <= 42.00 units
+  util     =  75.0%
+  provenance:
+    node[0]: 0.123456s — test node

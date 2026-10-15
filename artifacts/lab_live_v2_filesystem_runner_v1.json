@@ -1,0 +1,64 @@
+{
+  "schema_version": "lab-live-v2-filesystem-runner-artifact-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.5.2",
+  "artifact_path": "artifacts/lab_live_v2_filesystem_runner_v1.json",
+  "surface_family": "filesystem",
+  "adapter_family": "captured_filesystem",
+  "runner_name": "lab_live_v2_filesystem_runner",
+  "runner_contract": {
+    "lab_runtime": "asupersync::lab::DualRunHarness",
+    "live_adapter": "asupersync::lab::run_live_adapter",
+    "normalization": [
+      "compare captured filesystem semantic counters",
+      "redact host paths",
+      "omit mtime, inode, device, and errno values",
+      "classify raw host filesystem probes as skip until a captured or virtualized surface exists"
+    ],
+    "verdicts": [
+      "pass",
+      "fail",
+      "skip"
+    ]
+  },
+  "source_docs": [
+    "docs/lab_live_differential_scope_matrix.md",
+    "docs/lab_live_timing_platform_policy.md",
+    "docs/lab_live_v2_filesystem_runner.md"
+  ],
+  "fixtures": [
+    {
+      "scenario_id": "3gaiun.lab_live_v2.filesystem.atomic_write_pass",
+      "fixture_path": "tests/fixtures/lab_live_v2_filesystem_runner/atomic_write_pass.json",
+      "expected_verdict": "pass"
+    },
+    {
+      "scenario_id": "3gaiun.lab_live_v2.filesystem.rename_visibility_fail",
+      "fixture_path": "tests/fixtures/lab_live_v2_filesystem_runner/rename_visibility_fail.json",
+      "expected_verdict": "fail"
+    },
+    {
+      "scenario_id": "3gaiun.lab_live_v2.filesystem.raw_host_skip",
+      "fixture_path": "tests/fixtures/lab_live_v2_filesystem_runner/raw_host_skip.json",
+      "expected_verdict": "skip"
+    }
+  ],
+  "proof_lane": "RCH_REQUIRE_REMOTE=1 RCH_QUEUE_WHEN_BUSY=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_v2_filesystem_runner CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_v2_filesystem_runner_contract -- --nocapture",
+  "artifact_bundle": {
+    "required_files": [
+      "artifacts/lab_live_v2_filesystem_runner_v1.json",
+      "docs/lab_live_v2_filesystem_runner.md",
+      "tests/lab_live_v2_filesystem_runner_contract.rs",
+      "tests/fixtures/lab_live_v2_filesystem_runner/atomic_write_pass.json",
+      "tests/fixtures/lab_live_v2_filesystem_runner/rename_visibility_fail.json",
+      "tests/fixtures/lab_live_v2_filesystem_runner/raw_host_skip.json"
+    ],
+    "structured_report_schema": "lab-live-v2-filesystem-runner-report-v1"
+  },
+  "no_claims": [
+    "does not prove raw host filesystem parity",
+    "does not prove process or signal adapter support",
+    "does not prove broad workspace health",
+    "does not replace full cargo check, clippy, or workspace tests",
+    "does not claim mtime, inode, device, path, errno, or OS scheduler equivalence"
+  ]
+}

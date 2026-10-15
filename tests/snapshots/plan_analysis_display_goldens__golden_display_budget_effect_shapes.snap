@@ -1,0 +1,9 @@
+---
+source: tests/plan_analysis_display_goldens.rs
+expression: rendered
+---
+leaf: polls=[1, 1]
+unknown: polls=[0, ∞]
+with_deadline(2500µs): polls=[1, 1] deadline=[2ms, 2ms]
+parallel(leaf, leaf): polls=[1, 1] par=2
+sequential(500µs, 750µs): polls=[2, 2] deadline=[500µs, 1ms]

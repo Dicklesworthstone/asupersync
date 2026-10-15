@@ -1,0 +1,41 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [
+      {
+        "agent_name": "BlackDove",
+        "exclusive": true,
+        "expires_ts": "2999-01-01T00:00:00Z",
+        "path_pattern": ".beads/issues.jsonl"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [
+      {
+        "id": "asupersync-ready3",
+        "title": "Ready but tracker locked"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": []
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": []
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  }
+}

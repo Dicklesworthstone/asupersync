@@ -1,0 +1,36 @@
+---
+source: src/plan/mod.rs
+assertion_line: 1497
+expression: dag
+---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "alpha",
+        },
+        Leaf {
+            label: "beta",
+        },
+        Leaf {
+            label: "gamma",
+        },
+        Race {
+            children: [
+                PlanId(
+                    0,
+                ),
+                PlanId(
+                    1,
+                ),
+                PlanId(
+                    2,
+                ),
+            ],
+        },
+    ],
+    root: Some(
+        PlanId(
+            3,
+        ),
+    ),
+}

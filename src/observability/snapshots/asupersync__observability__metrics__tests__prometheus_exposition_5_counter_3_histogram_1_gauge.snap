@@ -1,0 +1,42 @@
+---
+source: src/observability/metrics.rs
+assertion_line: 2708
+expression: metrics.export_prometheus()
+---
+# TYPE bytes_transmitted_total counter
+bytes_transmitted_total 524288
+# TYPE http_requests_total counter
+http_requests_total 1247
+# TYPE region_closures_total counter
+region_closures_total 18446744073709551615
+# TYPE task_spawns_total counter
+task_spawns_total 0
+# TYPE tcp_connections_opened_total counter
+tcp_connections_opened_total 89
+# TYPE active_worker_threads gauge
+active_worker_threads 8
+# TYPE memory_allocation_bytes histogram
+memory_allocation_bytes_bucket{le="1024"} 1
+memory_allocation_bytes_bucket{le="4096"} 2
+memory_allocation_bytes_bucket{le="16384"} 3
+memory_allocation_bytes_bucket{le="65536"} 4
+memory_allocation_bytes_bucket{le="+Inf"} 5
+memory_allocation_bytes_sum 174592
+memory_allocation_bytes_count 5
+# TYPE request_latency_seconds histogram
+request_latency_seconds_bucket{le="0.001"} 1
+request_latency_seconds_bucket{le="0.01"} 1
+request_latency_seconds_bucket{le="0.1"} 2
+request_latency_seconds_bucket{le="1"} 3
+request_latency_seconds_bucket{le="+Inf"} 4
+request_latency_seconds_sum 2.6755
+request_latency_seconds_count 4
+# TYPE task_execution_duration_ms histogram
+task_execution_duration_ms_bucket{le="1"} 1
+task_execution_duration_ms_bucket{le="5"} 2
+task_execution_duration_ms_bucket{le="10"} 3
+task_execution_duration_ms_bucket{le="50"} 4
+task_execution_duration_ms_bucket{le="100"} 5
+task_execution_duration_ms_bucket{le="+Inf"} 6
+task_execution_duration_ms_sum 361
+task_execution_duration_ms_count 6

@@ -1,0 +1,7 @@
+---
+source: tests/opportunity_golden.rs
+expression: rendered
+---
+min:       Impact=1.0 × Confidence=0.2 / Effort=5.0 = 0.04
+threshold: Impact=2.0 × Confidence=1.0 / Effort=1.0 = 2.00
+max:       Impact=5.0 × Confidence=1.0 / Effort=1.0 = 5.00

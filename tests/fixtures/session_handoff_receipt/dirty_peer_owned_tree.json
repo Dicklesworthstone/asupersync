@@ -1,0 +1,43 @@
+{
+  "agent_mail": {
+    "available": true,
+    "reservations": [],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [],
+    "ready": [
+      {
+        "id": "asupersync-ready2",
+        "title": "Ready but overlapping"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [
+      {
+        "action": "coordinate with suspected owner/bead before staging or validation",
+        "cluster": "peer-owned/channel-metamorphic",
+        "path": "src/channel/mod.rs",
+        "status": " M"
+      }
+    ]
+  },
+  "git": {
+    "ahead": 0,
+    "behind": 0,
+    "branch": "main",
+    "upstream": "origin/main"
+  },
+  "proof_runner": {
+    "status": "ok",
+    "suggested_lanes": [
+      "rustfmt-check"
+    ]
+  },
+  "rch": {
+    "available": true,
+    "queue_summary": "queued=0 running=0"
+  }
+}

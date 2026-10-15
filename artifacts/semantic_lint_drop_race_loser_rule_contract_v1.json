@@ -1,0 +1,94 @@
+{
+  "contract_version": "semantic-lint-drop-race-loser-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "drop-based-race-loser-handling",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_drop_race_loser_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_drop_race_loser_rule.md",
+    "positive_fixture": "tests/fixtures/semantic_lint/drop_race_loser/positive_drop_loser.rs",
+    "negative_abort_join_fixture": "tests/fixtures/semantic_lint/drop_race_loser/negative_abort_join.rs",
+    "negative_drop_guard_fixture": "tests/fixtures/semantic_lint/drop_race_loser/negative_documented_drop_guard.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/drop_race_loser/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/drop_race_loser/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "hybrid-rustc-hir-ast-grep",
+    "runner_default_engine": "auto",
+    "result_schema": "semantic-lint-results-v1",
+    "candidate_scanner": true,
+    "requires_future_hir_confirmation": true,
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true
+  },
+  "target_paths": [
+    "src/combinator/",
+    "src/cx/scope.rs",
+    "src/channel/",
+    "src/runtime/task_handle.rs"
+  ],
+  "candidate_policy": {
+    "reports": [
+      "obvious loser-named handle passed to drop(...) without prior abort, join, drain, or cancel evidence",
+      "defuse_drop_abort(...) in loser-named context without nearby loser-drain proof language"
+    ],
+    "accepts": [
+      "loser handles that abort and join with race_loser evidence",
+      "documented drop guards whose local name or comments prove explicit drain",
+      "defuse_drop_abort declarations and non-loser API behavior tests",
+      "allowed fixture-only drop-loser candidates with reason and owner"
+    ],
+    "diagnostic_must_name": "loser-drain invariant"
+  },
+  "allow_marker": {
+    "format": "asupersync-lint:allow drop-based-race-loser-handling reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/drop_race_loser/positive_drop_loser.rs",
+      "expected_verdict": "fail",
+      "expected_kinds": [
+        "drop_based_race_loser",
+        "defuse_without_loser_drain_proof"
+      ]
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/drop_race_loser/negative_abort_join.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/drop_race_loser/negative_documented_drop_guard.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/drop_race_loser/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/drop_race_loser/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not provide complete rustc-HIR type-aware loser handle ownership tracking",
+    "does not prove every race loser in the repository is explicitly cancelled and drained",
+    "does not rewrite source code"
+  ]
+}

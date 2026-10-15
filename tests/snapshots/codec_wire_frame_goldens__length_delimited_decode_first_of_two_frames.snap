@@ -1,0 +1,12 @@
+---
+source: tests/codec_wire_frame_goldens.rs
+expression: "(\n            \"first_payload_hex\",\n            first\n                .iter()\n                .map(|b| format!(\"{b:02x}\"))\n                .collect::<Vec<_>>()\n                .join(\" \"),\n            \"remaining_bytes\",\n            buf.len(),\n            \"remaining_hex\",\n            buf.iter()\n                .map(|b| format!(\"{b:02x}\"))\n                .collect::<Vec<_>>()\n                .join(\" \")\n        )"
+---
+(
+    "first_payload_hex",
+    "61 62",
+    "remaining_bytes",
+    7,
+    "remaining_hex",
+    "00 00 00 03 78 79 7a",
+)

@@ -1,0 +1,1001 @@
+//! Dynamic Partial Order Reduction (DPOR) race detection and backtracking.
+//!
+//! DPOR identifies *races* in a trace — pairs of dependent events that were
+//! executed in a particular order but could have been reordered. Each race
+//! represents a **backtrack point**: an alternative schedule that may reveal
+//! different program behavior.
+//!
+//! # Definitions
+//!
+//! - **Race**: A pair of events (i, j) where i < j in the trace, the events
+//!   are dependent, and no event between them is dependent on both. This means
+//!   swapping i and j is a "minimal" reordering.
+//!
+//! - **Backtrack set**: The set of alternative schedules that DPOR identifies
+//!   for exploration. Each backtrack point specifies which event should be
+//!   executed first at a given decision point.
+//!
+//! - **Sleep set**: Events that have already been explored and need not be
+//!   re-explored at a given state. Reduces redundant exploration.
+//!
+//! # Algorithm sketch
+//!
+//! 1. Execute a trace T
+//! 2. For each pair of events (e_i, e_j) in T:
+//!    - If dependent(e_i, e_j) and no event between them depends on both
+//!      → this is a race
+//! 3. For each race, add a backtrack point: explore the schedule where e_j
+//!    executes before e_i
+//!
+//! # References
+//!
+//! - Flanagan & Godefroid, "Dynamic partial-order reduction" (POPL 2005)
+//! - Abdulla et al., "Optimal dynamic partial order reduction" (POPL 2014)
+
+use crate::trace::canonicalize::trace_event_key;
+use crate::trace::distributed::CausalOrder;
+use crate::trace::event::{TraceData, TraceEvent, TraceEventKind};
+use crate::trace::independence::{Resource, accesses_conflict, independent, resource_footprint};
+use crate::types::TaskId;
+use std::collections::BTreeMap;
+
+/// A race: two dependent events that are adjacent in the happens-before
+/// (no intervening event depends on both).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Race {
+    /// Index of the earlier event in the trace.
+    pub earlier: usize,
+    /// Index of the later event in the trace.
+    pub later: usize,
+}
+
+/// A backtrack point derived from a race.
+#[derive(Debug, Clone)]
+pub struct BacktrackPoint {
+    /// The race that generated this backtrack point.
+    pub race: Race,
+    /// Index in the trace where the alternative schedule diverges.
+    pub divergence_index: usize,
+}
+
+/// Result of DPOR race analysis on a trace.
+#[derive(Debug)]
+pub struct RaceAnalysis {
+    /// All races found in the trace.
+    pub races: Vec<Race>,
+    /// Backtrack points to explore.
+    pub backtrack_points: Vec<BacktrackPoint>,
+}
+
+impl RaceAnalysis {
+    /// Number of races found.
+    #[must_use]
+    pub fn race_count(&self) -> usize {
+        self.races.len()
+    }
+
+    /// True if no races were found (trace is sequential or fully ordered).
+    #[must_use]
+    pub fn is_race_free(&self) -> bool {
+        self.races.is_empty()
+    }
+}
+
+/// The kind of race detected between two events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RaceKind {
+    /// Resource-level conflict (same resource, at least one write).
+    Resource(Resource),
+}
+
+/// A detected happens-before race between two trace events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedRace {
+    /// Indices into the trace.
+    pub race: Race,
+    /// Classification of the race.
+    pub kind: RaceKind,
+    /// Task responsible for the earlier event, if known.
+    pub earlier_task: Option<TaskId>,
+    /// Task responsible for the later event, if known.
+    pub later_task: Option<TaskId>,
+    /// Event kind for the earlier event.
+    pub earlier_kind: TraceEventKind,
+    /// Event kind for the later event.
+    pub later_kind: TraceEventKind,
+}
+
+/// Report of all happens-before races detected in a trace.
+#[derive(Debug, Clone)]
+pub struct RaceReport {
+    /// All detected races.
+    pub races: Vec<DetectedRace>,
+}
+
+impl RaceReport {
+    /// Number of races found.
+    #[must_use]
+    pub fn race_count(&self) -> usize {
+        self.races.len()
+    }
+
+    /// True if no races were found.
+    #[must_use]
+    pub fn is_race_free(&self) -> bool {
+        self.races.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum CausalComponent {
+    Task(TaskId),
+    Event(usize),
+}
+
+#[derive(Debug, Clone, Default)]
+struct CausalVectorClock {
+    entries: BTreeMap<CausalComponent, u64>,
+}
+
+impl CausalVectorClock {
+    fn get(&self, component: CausalComponent) -> u64 {
+        self.entries.get(&component).copied().unwrap_or(0)
+    }
+
+    fn increment(&mut self, component: CausalComponent) {
+        let entry = self.entries.entry(component).or_insert(0);
+        *entry += 1;
+    }
+
+    fn merge(&mut self, other: &Self) {
+        for (&component, &counter) in &other.entries {
+            let entry = self.entries.entry(component).or_insert(0);
+            *entry = (*entry).max(counter);
+        }
+    }
+
+    fn happens_before(&self, other: &Self) -> bool {
+        let mut strictly = false;
+        for component in self.entries.keys().chain(other.entries.keys()) {
+            let a = self.get(*component);
+            let b = other.get(*component);
+            if a > b {
+                return false;
+            }
+            if a < b {
+                strictly = true;
+            }
+        }
+        strictly
+    }
+}
+
+/// Minimal happens-before relation derived from a trace.
+///
+/// Each event receives a causal vector clock. Events assigned to one task's
+/// program-order stream share a task component, which compresses local order;
+/// other events receive a unique event component. A recorded logical
+/// timestamp whose clock proves `Before` merges the predecessor clock into the
+/// successor. The resulting clocks therefore represent forward-edge
+/// reachability and compose local, non-task, and cross-task edges transitively.
+///
+/// Cross-task order is accepted only when the trace contains causal evidence.
+/// Today that means vector logical clocks: scalar Lamport and hybrid clocks can
+/// rule out some invalid orderings, but a lower scalar value does not prove
+/// happens-before and therefore must not suppress a race report.
+#[derive(Debug, Clone)]
+pub struct HappensBeforeGraph {
+    clocks: Vec<CausalVectorClock>,
+}
+
+impl HappensBeforeGraph {
+    /// Build happens-before evidence from task-local order and recorded logical
+    /// timestamps.
+    #[must_use]
+    pub fn from_trace(events: &[TraceEvent]) -> Self {
+        let mut clocks: Vec<CausalVectorClock> = Vec::with_capacity(events.len());
+        let mut task_clocks: BTreeMap<TaskId, CausalVectorClock> = BTreeMap::new();
+
+        for (idx, event) in events.iter().enumerate() {
+            let task = program_order_task_id(event);
+            let mut clock = task
+                .and_then(|task| task_clocks.get(&task).cloned())
+                .unwrap_or_default();
+
+            if let Some(later_time) = event.logical_time.as_ref() {
+                for (earlier_idx, earlier) in events.iter().take(idx).enumerate() {
+                    let Some(earlier_time) = earlier.logical_time.as_ref() else {
+                        continue;
+                    };
+                    if earlier_time.causal_order(later_time) == CausalOrder::Before {
+                        clock.merge(&clocks[earlier_idx]);
+                    }
+                }
+            }
+
+            if let Some(task) = task {
+                clock.increment(CausalComponent::Task(task));
+                task_clocks.insert(task, clock.clone());
+            } else {
+                clock.increment(CausalComponent::Event(idx));
+            }
+            clocks.push(clock);
+        }
+
+        Self { clocks }
+    }
+
+    /// Returns true if event `a` happens before event `b`.
+    #[must_use]
+    pub fn happens_before(&self, a: usize, b: usize) -> bool {
+        if a >= b {
+            return false;
+        }
+
+        matches!(
+            (self.clocks.get(a), self.clocks.get(b)),
+            (Some(clock_a), Some(clock_b)) if clock_a.happens_before(clock_b)
+        )
+    }
+}
+
+/// Race detector using a minimal happens-before relation.
+#[derive(Debug)]
+pub struct RaceDetector {
+    hb: HappensBeforeGraph,
+    races: Vec<DetectedRace>,
+}
+
+impl RaceDetector {
+    /// Build a race detector from a trace and compute races.
+    #[must_use]
+    pub fn from_trace(events: &[TraceEvent]) -> Self {
+        let hb = HappensBeforeGraph::from_trace(events);
+        let footprints: Vec<_> = events.iter().map(resource_footprint).collect();
+        let tasks: Vec<_> = events.iter().map(race_task_id).collect();
+        let mut races = Vec::new();
+
+        for i in 0..events.len() {
+            for j in (i + 1)..events.len() {
+                let Some(task_i) = tasks[i] else { continue };
+                let Some(task_j) = tasks[j] else { continue };
+                if task_i == task_j {
+                    continue;
+                }
+
+                let Some(resource) = conflicting_resource(&footprints[i], &footprints[j]) else {
+                    continue;
+                };
+
+                if hb.happens_before(i, j) {
+                    continue;
+                }
+
+                races.push(DetectedRace {
+                    race: Race {
+                        earlier: i,
+                        later: j,
+                    },
+                    kind: RaceKind::Resource(resource),
+                    earlier_task: Some(task_i),
+                    later_task: Some(task_j),
+                    earlier_kind: events[i].kind,
+                    later_kind: events[j].kind,
+                });
+            }
+        }
+
+        Self { hb, races }
+    }
+
+    /// Returns the detected races.
+    #[must_use]
+    pub fn races(&self) -> &[DetectedRace] {
+        &self.races
+    }
+
+    /// Returns true if no races were detected.
+    #[must_use]
+    pub fn is_race_free(&self) -> bool {
+        self.races.is_empty()
+    }
+
+    /// Returns the happens-before graph.
+    #[must_use]
+    pub fn hb_graph(&self) -> &HappensBeforeGraph {
+        &self.hb
+    }
+
+    /// Converts into a report, consuming the detector.
+    #[must_use]
+    pub fn into_report(self) -> RaceReport {
+        RaceReport { races: self.races }
+    }
+}
+
+/// Detect happens-before races in a trace.
+///
+/// The returned races are deterministic for a fixed trace and are emitted in
+/// trace-index order. Same-task pairs are treated as ordered by
+/// happens-before and are not reported.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::trace::{TraceEvent, detect_hb_races};
+/// use asupersync::types::{CancelReason, RegionId, TaskId, Time};
+///
+/// let region = RegionId::new_for_test(1, 0);
+/// let events = [
+///     TraceEvent::cancel_request(
+///         1,
+///         Time::ZERO,
+///         TaskId::new_for_test(1, 0),
+///         region,
+///         CancelReason::user("left"),
+///     ),
+///     TraceEvent::cancel_request(
+///         2,
+///         Time::ZERO,
+///         TaskId::new_for_test(2, 0),
+///         region,
+///         CancelReason::user("right"),
+///     ),
+/// ];
+///
+/// let report = detect_hb_races(&events);
+/// assert_eq!(report.race_count(), 1);
+/// assert_eq!(report.races[0].race.earlier, 0);
+/// assert_eq!(report.races[0].race.later, 1);
+/// ```
+#[must_use]
+pub fn detect_hb_races(events: &[TraceEvent]) -> RaceReport {
+    RaceDetector::from_trace(events).into_report()
+}
+
+fn race_task_id(event: &TraceEvent) -> Option<TaskId> {
+    match &event.data {
+        TraceData::Task { task, .. }
+        | TraceData::Cancel { task, .. }
+        | TraceData::Obligation { task, .. }
+        | TraceData::Futurelock { task, .. }
+        | TraceData::Worker { task, .. }
+        | TraceData::Chaos {
+            task: Some(task), ..
+        } => Some(*task),
+        _ => None,
+    }
+}
+
+fn program_order_task_id(event: &TraceEvent) -> Option<TaskId> {
+    match &event.data {
+        // Budget events execute on the request task and therefore participate
+        // in its program order. They intentionally remain excluded from
+        // `race_task_id`: their current resource footprint is global fallback
+        // state, which is not precise enough for race-endpoint attribution.
+        TraceData::Budget { task, .. } => Some(*task),
+        _ => race_task_id(event),
+    }
+}
+
+fn conflicting_resource(
+    left: &[crate::trace::independence::ResourceAccess],
+    right: &[crate::trace::independence::ResourceAccess],
+) -> Option<Resource> {
+    for a in left {
+        for b in right {
+            if accesses_conflict(a, b) {
+                return Some(a.resource.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Detect all races in a trace.
+///
+/// A race between events at positions `i` and `j` (i < j) exists when:
+/// 1. The events are dependent (`!independent(e_i, e_j)`)
+/// 2. No event at position k (i < k < j) is dependent on **both** e_i and e_j
+///
+/// Condition 2 ensures we only detect *immediate* races (no transitive
+/// dependencies hide them). These are the races that DPOR can exploit.
+///
+/// # Complexity
+///
+/// O(n³) in the worst case (for each pair, check all intermediaries).
+/// For typical traces this is acceptable; large traces can use the
+/// seed-sweep explorer instead.
+///
+/// # Example
+///
+/// ```
+/// use asupersync::trace::{TraceEvent, detect_races, racing_events};
+/// use asupersync::types::{RegionId, TaskId, Time};
+///
+/// let task = TaskId::new_for_test(7, 0);
+/// let region = RegionId::new_for_test(1, 0);
+/// let events = [
+///     TraceEvent::spawn(1, Time::ZERO, task, region),
+///     TraceEvent::complete(2, Time::ZERO, task, region),
+/// ];
+///
+/// let analysis = detect_races(&events);
+/// assert_eq!(analysis.race_count(), 1);
+/// assert_eq!(analysis.races[0].earlier, 0);
+/// assert_eq!(analysis.races[0].later, 1);
+/// assert_eq!(racing_events(&events), vec![0, 1]);
+/// ```
+#[must_use]
+pub fn detect_races(events: &[TraceEvent]) -> RaceAnalysis {
+    let n = events.len();
+    let mut races = Vec::new();
+
+    for i in 0..n {
+        for j in (i + 1)..n {
+            // Condition 1: events are dependent.
+            if independent(&events[i], &events[j]) {
+                continue;
+            }
+
+            // Condition 2: no intervening event depends on both.
+            let has_intervening = (i + 1..j).any(|k| {
+                !independent(&events[i], &events[k]) && !independent(&events[k], &events[j])
+            });
+
+            if !has_intervening {
+                races.push(Race {
+                    earlier: i,
+                    later: j,
+                });
+            }
+        }
+    }
+
+    // Each race generates a backtrack point at the earlier event's position.
+    let backtrack_points = races
+        .iter()
+        .map(|race| BacktrackPoint {
+            race: race.clone(),
+            divergence_index: race.earlier,
+        })
+        .collect();
+
+    RaceAnalysis {
+        races,
+        backtrack_points,
+    }
+}
+
+/// Compute the set of events involved in at least one race.
+///
+/// These are the "interesting" decision points for schedule exploration.
+#[must_use]
+pub fn racing_events(events: &[TraceEvent]) -> Vec<usize> {
+    let analysis = detect_races(events);
+    let mut indices: Vec<usize> = analysis
+        .races
+        .iter()
+        .flat_map(|r| [r.earlier, r.later])
+        .collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
+}
+
+/// Estimate the number of distinct equivalence classes reachable by
+/// exploring all backtrack points.
+///
+/// This is a lower bound: the actual number may be higher if backtrack
+/// points interact.
+#[must_use]
+pub fn estimated_classes(events: &[TraceEvent]) -> usize {
+    let analysis = detect_races(events);
+    // detect_races intentionally reports immediate same-task dependencies, but
+    // those are already ordered by the minimal happens-before graph and do not
+    // represent schedulable alternatives. Filter them out so the estimate
+    // remains a fail-closed lower bound on reachable equivalence classes.
+    let hb = HappensBeforeGraph::from_trace(events);
+    let mut sorted: Vec<&Race> = analysis
+        .races
+        .iter()
+        .filter(|race| !hb.happens_before(race.earlier, race.later))
+        .collect();
+
+    // Each remaining race can double the number of classes (in the worst
+    // case). But many races are "overlapping" and don't multiply
+    // independently. Conservative estimate: 1 + number of non-overlapping
+    // schedulable races.
+    if sorted.is_empty() {
+        return 1;
+    }
+
+    // Count non-overlapping races (greedy: sort by later index, pick races
+    // whose earlier index > previous race's later index).
+    sorted.sort_by_key(|r| (r.later, r.earlier));
+
+    let mut non_overlapping = 1usize;
+    let mut last_later = 0;
+    for race in &sorted {
+        if race.earlier >= last_later {
+            non_overlapping += 1;
+            last_later = race.later;
+        }
+    }
+
+    non_overlapping
+}
+
+/// Per-resource race counts for coverage analysis.
+#[derive(Debug, Clone, Default)]
+pub struct ResourceRaceDistribution {
+    /// Races per resource type.
+    pub counts: BTreeMap<String, usize>,
+}
+
+impl ResourceRaceDistribution {
+    fn from_report(report: &RaceReport) -> Self {
+        let mut counts = BTreeMap::new();
+        for race in &report.races {
+            let key = match &race.kind {
+                RaceKind::Resource(r) => format!("{r:?}"),
+            };
+            *counts.entry(key).or_insert(0) += 1;
+        }
+        Self { counts }
+    }
+
+    /// Total races across all resources.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.counts.values().sum()
+    }
+
+    /// Number of distinct resource types involved in races.
+    #[must_use]
+    pub fn resource_count(&self) -> usize {
+        self.counts.len()
+    }
+}
+
+/// Comprehensive DPOR coverage analysis for a trace.
+#[derive(Debug, Clone)]
+pub struct TraceCoverageAnalysis {
+    /// Number of events in the trace.
+    pub event_count: usize,
+    /// Races detected (O(n³) immediate races).
+    pub immediate_race_count: usize,
+    /// HB-races detected (vector-clock based).
+    pub hb_race_count: usize,
+    /// Estimated equivalence classes reachable.
+    pub estimated_classes: usize,
+    /// Backtrack points generated.
+    pub backtrack_point_count: usize,
+    /// Events involved in at least one race.
+    pub racing_event_count: usize,
+    /// Fraction of events involved in races.
+    pub race_density: f64,
+    /// Per-resource race distribution.
+    pub resource_distribution: ResourceRaceDistribution,
+}
+
+/// Compute a comprehensive coverage analysis for a trace.
+///
+/// Runs both the O(n³) immediate race detector and the HB-based race
+/// detector, then combines results into a single analysis.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn trace_coverage_analysis(events: &[TraceEvent]) -> TraceCoverageAnalysis {
+    let immediate = detect_races(events);
+    let hb_report = detect_hb_races(events);
+    let est = estimated_classes(events);
+    let racing = racing_events(events);
+    let resource_distribution = ResourceRaceDistribution::from_report(&hb_report);
+
+    let race_density = if events.is_empty() {
+        0.0
+    } else {
+        racing.len() as f64 / events.len() as f64
+    };
+
+    TraceCoverageAnalysis {
+        event_count: events.len(),
+        immediate_race_count: immediate.race_count(),
+        hb_race_count: hb_report.race_count(),
+        estimated_classes: est,
+        backtrack_point_count: immediate.backtrack_points.len(),
+        racing_event_count: racing.len(),
+        race_density,
+        resource_distribution,
+    }
+}
+
+/// Sleep set for DPOR exploration.
+///
+/// Tracks which backtrack points have already been explored, preventing
+/// re-exploration of equivalent schedules. This is an approximation of the
+/// full DPOR sleep set: we hash the divergence point together with the
+/// semantic identity of the raced endpoints so structurally similar traces on
+/// different tasks/resources do not alias, while the same race encountered in
+/// reverse order still deduplicates.
+#[derive(Debug, Clone, Default)]
+pub struct SleepSet {
+    /// Explored (divergence_index, race_hash) pairs.
+    explored: BTreeSet<u64>,
+}
+
+impl SleepSet {
+    /// Create a new empty sleep set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Check if a backtrack point has already been explored.
+    #[must_use]
+    pub fn contains(&self, bp: &BacktrackPoint, events: &[TraceEvent]) -> bool {
+        self.explored.contains(&Self::bp_key(bp, events))
+    }
+
+    /// Mark a backtrack point as explored.
+    pub fn insert(&mut self, bp: &BacktrackPoint, events: &[TraceEvent]) {
+        self.explored.insert(Self::bp_key(bp, events));
+    }
+
+    /// Number of explored entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.explored.len()
+    }
+
+    /// True if no entries have been recorded.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.explored.is_empty()
+    }
+
+    /// Compute a deduplication key for a backtrack point.
+    ///
+    /// Hashes the divergence index together with an order-insensitive pair of
+    /// semantic event keys at the race endpoints to create a stable identifier
+    /// for "we already tried reversing this specific race".
+    fn bp_key(bp: &BacktrackPoint, events: &[TraceEvent]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = crate::util::DetHasher::for_lab();
+        bp.divergence_index.hash(&mut hasher);
+        bp.race.earlier.hash(&mut hasher);
+        bp.race.later.hash(&mut hasher);
+        let earlier_key = events.get(bp.race.earlier).map(trace_event_key);
+        let later_key = events.get(bp.race.later).map(trace_event_key);
+        match (earlier_key, later_key) {
+            (Some(a), Some(b)) => {
+                let a_ord = (a.kind, a.primary, a.secondary, a.tertiary);
+                let b_ord = (b.kind, b.primary, b.secondary, b.tertiary);
+                let (first, second) = if a_ord <= b_ord { (a, b) } else { (b, a) };
+                first.hash(&mut hasher);
+                second.hash(&mut hasher);
+            }
+            (Some(a), None) => a.hash(&mut hasher),
+            (None, Some(b)) => b.hash(&mut hasher),
+            (None, None) => {}
+        }
+        hasher.finish()
+    }
+}
+
+use std::collections::BTreeSet;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::types::{CancelReason, RegionId, TaskId, Time};
+
+    fn tid(n: u32) -> TaskId {
+        TaskId::new_for_test(n, 0)
+    }
+
+    fn rid(n: u32) -> RegionId {
+        RegionId::new_for_test(n, 0)
+    }
+
+    #[test]
+    fn no_races_in_independent_trace() {
+        // Two independent spawns: no races.
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(2, Time::ZERO, tid(2), rid(2)),
+        ];
+        let analysis = detect_races(&events);
+        assert!(analysis.is_race_free());
+        assert_eq!(estimated_classes(&events), 1);
+    }
+
+    #[test]
+    fn race_between_dependent_events() {
+        // Two events on the same task: they're dependent and adjacent.
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let analysis = detect_races(&events);
+        assert_eq!(analysis.race_count(), 1);
+        assert_eq!(analysis.races[0].earlier, 0);
+        assert_eq!(analysis.races[0].later, 1);
+    }
+
+    #[test]
+    fn no_race_with_transitive_dependency() {
+        // A -> B -> C: A and C are dependent but B intervenes.
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::poll(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(3, Time::ZERO, tid(1), rid(1)),
+        ];
+        let analysis = detect_races(&events);
+        // Races: (0,1) and (1,2) are immediate.
+        // (0,2) has intervening event 1 that depends on both -> NOT a race.
+        assert_eq!(analysis.race_count(), 2);
+        // Verify (0,2) is not in the races list.
+        assert!(
+            !analysis
+                .races
+                .iter()
+                .any(|r| r.earlier == 0 && r.later == 2)
+        );
+    }
+
+    #[test]
+    fn races_in_concurrent_task_region_interaction() {
+        // Region create writes R1; spawn in R1 reads R1 -> dependent.
+        // Two such spawns in R1: no direct dependency between spawns.
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+        ];
+        let analysis = detect_races(&events);
+        // (0,1): dependent (write R1 vs read R1), no intervening -> race
+        // (0,2): dependent (write R1 vs read R1), but (1) also depends on (0)
+        //        AND (1) is independent of (2) (different tasks, same region read)
+        //        So no intervening event depends on BOTH (0) and (2) -> race
+        // (1,2): independent (different tasks, both only read R1) -> no race
+        let race_pairs: Vec<(usize, usize)> = analysis
+            .races
+            .iter()
+            .map(|r| (r.earlier, r.later))
+            .collect();
+        assert!(race_pairs.contains(&(0, 1)));
+        assert!(race_pairs.contains(&(0, 2)));
+        assert!(!race_pairs.contains(&(1, 2)));
+    }
+
+    #[test]
+    fn racing_events_deduplicates() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let indices = racing_events(&events);
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn empty_trace_no_races() {
+        let analysis = detect_races(&[]);
+        assert!(analysis.is_race_free());
+    }
+
+    #[test]
+    fn estimated_classes_grows_with_races() {
+        // More races -> more potential classes.
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+        ];
+        let est = estimated_classes(&events);
+        assert!(est >= 2);
+    }
+
+    #[test]
+    fn estimated_classes_fail_closed_for_same_task_sequence() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        assert_eq!(detect_races(&events).race_count(), 1);
+        assert_eq!(estimated_classes(&events), 1);
+    }
+
+    #[test]
+    fn backtrack_points_correspond_to_races() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let analysis = detect_races(&events);
+        assert_eq!(analysis.backtrack_points.len(), analysis.race_count());
+        assert_eq!(analysis.backtrack_points[0].divergence_index, 0);
+    }
+
+    #[test]
+    fn hb_race_detector_ignores_same_task() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let hb = HappensBeforeGraph::from_trace(&events);
+        assert!(hb.happens_before(0, 1));
+        assert!(!hb.happens_before(1, 0));
+        assert!(!hb.happens_before(0, 2));
+
+        let report = detect_hb_races(&events);
+        assert!(report.is_race_free());
+    }
+
+    #[test]
+    fn hb_race_detector_detects_region_conflict() {
+        let reason = CancelReason::user("test");
+        let events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(2), rid(1), reason),
+        ];
+        let report = detect_hb_races(&events);
+        assert_eq!(report.race_count(), 1);
+        assert_eq!(
+            report.races[0].kind,
+            RaceKind::Resource(Resource::Region(rid(1)))
+        );
+    }
+
+    #[test]
+    fn hb_race_detector_skips_non_task_events() {
+        let events = [
+            TraceEvent::timer_scheduled(1, Time::ZERO, 7, Time::from_nanos(10)),
+            TraceEvent::timer_fired(2, Time::from_nanos(10), 7),
+        ];
+        let report = detect_hb_races(&events);
+        assert!(report.is_race_free());
+    }
+
+    #[test]
+    fn trace_coverage_analysis_empty() {
+        let analysis = trace_coverage_analysis(&[]);
+        assert_eq!(analysis.event_count, 0);
+        assert_eq!(analysis.immediate_race_count, 0);
+        assert_eq!(analysis.hb_race_count, 0);
+        assert_eq!(analysis.estimated_classes, 1);
+        assert_eq!(analysis.racing_event_count, 0);
+        assert!((analysis.race_density - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn trace_coverage_analysis_concurrent_tasks() {
+        let events = [
+            TraceEvent::region_created(1, Time::ZERO, rid(1), None),
+            TraceEvent::spawn(2, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::spawn(3, Time::ZERO, tid(2), rid(1)),
+        ];
+        let analysis = trace_coverage_analysis(&events);
+        assert_eq!(analysis.event_count, 3);
+        assert!(analysis.immediate_race_count >= 1);
+        assert!(analysis.estimated_classes >= 2);
+        assert!(analysis.racing_event_count >= 1);
+        assert!(analysis.race_density > 0.0);
+    }
+
+    #[test]
+    fn resource_race_distribution_from_hb() {
+        let reason = CancelReason::user("test");
+        let events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(2), rid(1), reason),
+        ];
+        let report = detect_hb_races(&events);
+        let dist = ResourceRaceDistribution::from_report(&report);
+        assert_eq!(dist.total(), 1);
+        assert_eq!(dist.resource_count(), 1);
+    }
+
+    #[test]
+    fn sleep_set_deduplication() {
+        let events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+        let mut sleep = SleepSet::new();
+        assert!(!sleep.contains(&bp, &events));
+        sleep.insert(&bp, &events);
+        assert!(sleep.contains(&bp, &events));
+        assert_eq!(sleep.len(), 1);
+    }
+
+    #[test]
+    fn sleep_set_distinguishes_same_shape_races_on_different_tasks() {
+        let left_events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(1), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(1), rid(1)),
+        ];
+        let right_events = [
+            TraceEvent::spawn(1, Time::ZERO, tid(2), rid(1)),
+            TraceEvent::complete(2, Time::ZERO, tid(2), rid(1)),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+
+        let mut sleep = SleepSet::new();
+        sleep.insert(&bp, &left_events);
+
+        assert!(
+            !sleep.contains(&bp, &right_events),
+            "sleep-set key must include semantic endpoint identity, not just kind/index shape"
+        );
+    }
+
+    #[test]
+    fn sleep_set_deduplicates_same_race_when_trace_order_is_reversed() {
+        let reason = CancelReason::user("test");
+        let left_events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(1), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(2), rid(1), reason.clone()),
+        ];
+        let right_events = [
+            TraceEvent::cancel_request(1, Time::ZERO, tid(2), rid(1), reason.clone()),
+            TraceEvent::cancel_request(2, Time::ZERO, tid(1), rid(1), reason),
+        ];
+        let bp = BacktrackPoint {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            divergence_index: 0,
+        };
+
+        let mut sleep = SleepSet::new();
+        sleep.insert(&bp, &left_events);
+
+        assert!(
+            sleep.contains(&bp, &right_events),
+            "sleep-set key should treat the same race as explored even when the endpoints swap order"
+        );
+    }
+
+    #[test]
+    fn detected_race_debug_clone_eq() {
+        let race = DetectedRace {
+            race: Race {
+                earlier: 0,
+                later: 1,
+            },
+            kind: RaceKind::Resource(Resource::GlobalClock),
+            earlier_task: None,
+            later_task: None,
+            earlier_kind: TraceEventKind::Spawn,
+            later_kind: TraceEventKind::Spawn,
+        };
+        let cloned = race.clone();
+        assert_eq!(race, cloned);
+        let dbg = format!("{race:?}");
+        assert!(dbg.contains("DetectedRace"));
+    }
+}

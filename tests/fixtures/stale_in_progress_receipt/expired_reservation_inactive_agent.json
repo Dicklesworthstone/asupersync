@@ -1,0 +1,41 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-07T00:00:00Z",
+        "name": "OlderAgent"
+      }
+    ],
+    "available": true,
+    "messages": [],
+    "reservations": [
+      {
+        "agent_name": "OlderAgent",
+        "exclusive": true,
+        "expires_ts": "2026-05-07T01:00:00Z",
+        "path_pattern": "src/old_surface.rs",
+        "reason": "asupersync-stale1"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "OlderAgent",
+        "id": "asupersync-stale1",
+        "title": "Probably stale work",
+        "updated_at": "2026-05-07T00:30:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [],
+    "status": "ok"
+  }
+}

@@ -1,0 +1,17 @@
+---
+source: src/plan/mod.rs
+assertion_line: 1476
+expression: dag
+---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "work",
+        },
+    ],
+    root: Some(
+        PlanId(
+            0,
+        ),
+    ),
+}

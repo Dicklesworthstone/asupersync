@@ -1,0 +1,71 @@
+{
+  "active_dirty_paths": [
+    {
+      "owner": "RubyRobin",
+      "path": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+      "status": " M"
+    }
+  ],
+  "agent": "CopperSpring",
+  "artifact_retrieval_blocker": {
+    "kind": "local-disk-full",
+    "line": 8,
+    "status": "blocked",
+    "text": "rsync: [receiver] write failed on \"/tmp/.rch-target/websocket_frame_fuzzing\": No space left on device (28)"
+  },
+  "authorization": {
+    "automatic_cleanup_performed": false,
+    "cleanup_requires_explicit_user_authorization": true,
+    "delete_command_available": false,
+    "instruction": "Do not delete cleanup candidates unless the user explicitly authorizes the exact cleanup command or paths."
+  },
+  "chosen_next_lane": {
+    "candidate_id": "testing-golden-artifacts:source-only-handoff",
+    "category": "run-fallback-lane",
+    "files_to_reserve": [
+      "scripts/reservation_aware_work_finder.py",
+      "tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json"
+    ],
+    "lane": "testing-golden-artifacts",
+    "paths": [
+      "scripts/reservation_aware_work_finder.py",
+      "tests/fixtures/reservation_aware_work_finder/disk_pressure_autopilot_e2e.json"
+    ],
+    "reason": "first unblocked candidate by kind and priority",
+    "safety_reason": "no active peer reservation or dirty path blocks the candidate; no tracker mutation required",
+    "title": "Materialize disk-pressure autopilot handoff golden",
+    "validation_class": "source-only"
+  },
+  "cleanup_candidates": [
+    {
+      "candidate_id": "rch_target_stale_large",
+      "delete_command": null,
+      "path": "/tmp/rch_target_stale_large",
+      "reclaimable_bytes": 2147483648,
+      "requires_authorization": true,
+      "source": "target_inventory",
+      "title": "stale rch target candidate"
+    }
+  ],
+  "disk_pressure_status": {
+    "available_bytes": 268435456,
+    "ballast_releasable_bytes": 0,
+    "level": "critical",
+    "rch_heavy_work_allowed": false,
+    "source": "sbh-fixture"
+  },
+  "generated_at": "2026-05-10T09:05:00Z",
+  "non_mutating": true,
+  "preserves_peer_dirty_paths": true,
+  "remote_proof_result": {
+    "classification": "passed_after_retrieval_enospc",
+    "decision": "pass-with-retrieval-blocker",
+    "exit_code": 0,
+    "line": 4,
+    "reason": "remote command finished with exit 0",
+    "selected_worker": "rch-worker-17",
+    "status": "pass",
+    "target_dir": "/tmp/rch_target_rubyrobin_websocket"
+  },
+  "schema_version": "disk-pressure-autopilot-handoff-v1"
+}

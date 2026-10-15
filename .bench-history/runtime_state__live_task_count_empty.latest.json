@@ -1,0 +1,12 @@
+{
+  "cv_pct": 19.299611192454215,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 0.44462045408885353,
+  "median_ns": 0.4223064619413337,
+  "name": "runtime_state/live_task_count_empty",
+  "p95_ns": 0.5834606135737471,
+  "p99_ns": 0.6147279158574943,
+  "profile": "release-perf",
+  "std_dev_ns": 0.08581001892127314
+}

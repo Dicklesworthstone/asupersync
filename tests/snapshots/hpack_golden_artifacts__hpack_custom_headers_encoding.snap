@@ -1,0 +1,79 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Custom headers with Huffman encoding",
+  "headers": [
+    {
+      "name": "user-agent",
+      "value": "asupersync/1.0"
+    },
+    {
+      "name": "accept",
+      "value": "text/html,application/xhtml+xml"
+    },
+    {
+      "name": "cache-control",
+      "value": "no-cache"
+    }
+  ],
+  "config": {
+    "use_huffman": true,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    122,
+    138,
+    26,
+    45,
+    172,
+    182,
+    35,
+    213,
+    68,
+    96,
+    43,
+    131,
+    83,
+    151,
+    73,
+    124,
+    165,
+    137,
+    211,
+    77,
+    31,
+    67,
+    174,
+    186,
+    12,
+    65,
+    164,
+    199,
+    169,
+    143,
+    51,
+    166,
+    154,
+    63,
+    223,
+    154,
+    104,
+    88,
+    134,
+    168,
+    235,
+    16,
+    100,
+    156,
+    191
+  ],
+  "encoded_size": 45,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}

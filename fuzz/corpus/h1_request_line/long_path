@@ -1,0 +1,1 @@
+GET /very/long/path/that/approaches/the/maximum/line/length/limit/with/many/segments/and/query/parameters?param1=value1&param2=value2&param3=value3&param4=value4&param5=value5&param6=value6&param7=value7&param8=value8&param9=value9&param10=value10 HTTP/1.1

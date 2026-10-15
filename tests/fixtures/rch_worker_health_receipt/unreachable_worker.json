@@ -1,0 +1,11 @@
+{
+  "workers": [
+    {
+      "name": "worker-offline",
+      "reachable": false,
+      "root_free_gb": 0,
+      "tmp_free_gb": 0,
+      "recent_jobs": []
+    }
+  ]
+}

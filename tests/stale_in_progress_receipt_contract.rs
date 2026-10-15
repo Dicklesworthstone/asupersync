@@ -1,0 +1,447 @@
+//! Contract tests for the stale in-progress bead analysis receipt helper.
+
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use std::path::PathBuf;
+use std::process::{Command, Output};
+
+const SCRIPT_PATH: &str = "scripts/stale_in_progress_receipt.py";
+const FIXTURE_ROOT: &str = "tests/fixtures/stale_in_progress_receipt";
+const GENERATED_AT: &str = "2026-05-08T04:30:00Z";
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn run_receipt(fixture: &str) -> Output {
+    Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--fixture")
+        .arg(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .arg("--repo-path")
+        .arg(repo_root())
+        .arg("--agent")
+        .arg("TopazGoose")
+        .arg("--generated-at")
+        .arg(GENERATED_AT)
+        .arg("--output")
+        .arg("json")
+        .current_dir(repo_root())
+        .output()
+        .expect("run stale receipt script")
+}
+
+fn receipt_json(fixture: &str) -> Value {
+    let output = run_receipt(fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("receipt output must be JSON")
+}
+
+fn fixture_text(fixture: &str) -> String {
+    std::fs::read_to_string(repo_root().join(FIXTURE_ROOT).join(fixture))
+        .unwrap_or_else(|err| panic!("read fixture {fixture}: {err}"))
+}
+
+fn normalize_repo_root(text: &str) -> String {
+    text.replace(
+        repo_root().to_string_lossy().as_ref(),
+        "/data/projects/asupersync",
+    )
+}
+
+fn first_classification(receipt: &Value) -> &Value {
+    receipt["classifications"]
+        .as_array()
+        .expect("classifications must be array")
+        .first()
+        .expect("fixture must contain one classification")
+}
+
+fn assert_output_matches_full_golden(
+    input_fixture: &str,
+    expected_fixture: &str,
+    drift_message: &str,
+) {
+    let output = run_receipt(input_fixture);
+    assert!(
+        output.status.success(),
+        "receipt helper failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let actual = normalize_repo_root(
+        &String::from_utf8(output.stdout).expect("receipt stdout must be UTF-8"),
+    );
+    let expected = fixture_text(expected_fixture);
+    let actual_json: Value = serde_json::from_str(&actual).expect("actual receipt JSON");
+    let expected_json: Value = serde_json::from_str(&expected).expect("golden receipt JSON");
+
+    assert_eq!(
+        actual_json, expected_json,
+        "parsed stale in-progress receipt JSON drifted for {input_fixture}; update {expected_fixture} only after reviewing stale-bead classification semantics"
+    );
+    assert_eq!(actual, expected, "{drift_message}");
+}
+
+#[test]
+fn script_exists_and_help_is_non_mutating() {
+    assert!(
+        repo_root().join(SCRIPT_PATH).exists(),
+        "receipt helper must exist at {SCRIPT_PATH}"
+    );
+    let output = Command::new("python3")
+        .arg(repo_root().join(SCRIPT_PATH))
+        .arg("--help")
+        .current_dir(repo_root())
+        .output()
+        .expect("run helper --help");
+    assert!(output.status.success(), "--help should succeed");
+}
+
+#[test]
+fn live_probe_preserves_porcelain_status_columns_for_unstaged_paths() {
+    let script = r#"
+import importlib.util
+import json
+import pathlib
+import sys
+
+script_path = pathlib.Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location("stale_in_progress_receipt", script_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+class Completed:
+    stdout = " M .beads/issues.jsonl \n"
+
+module.subprocess.run = lambda *args, **kwargs: Completed()
+status, raw = module.run_text(pathlib.Path("."), ["git", "status", "--porcelain=v1"], 1.0)
+dirty_entries = []
+if status == "ok":
+    for line in raw.splitlines():
+        if len(line) >= 4:
+            dirty_entries.append({"status": line[:2], "path": line[3:]})
+print(json.dumps({"status": status, "raw": raw, "dirty_entries": dirty_entries}))
+"#;
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(repo_root().join(SCRIPT_PATH))
+        .current_dir(repo_root())
+        .output()
+        .expect("run stale receipt live probe parser smoke");
+    assert!(
+        output.status.success(),
+        "parser smoke failed: {}\nstdout: {}\nstderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let parsed: Value = serde_json::from_slice(&output.stdout).expect("parser smoke JSON");
+    assert_eq!(parsed["status"].as_str(), Some("ok"));
+    assert_eq!(parsed["raw"].as_str(), Some(" M .beads/issues.jsonl "));
+    assert_eq!(parsed["dirty_entries"][0]["status"].as_str(), Some(" M"));
+    assert_eq!(
+        parsed["dirty_entries"][0]["path"].as_str(),
+        Some(".beads/issues.jsonl ")
+    );
+}
+
+#[test]
+fn fresh_active_peer_is_wait_contact_not_stale() {
+    let receipt = receipt_json("fresh_active_peer.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        receipt["schema_version"].as_str(),
+        Some("stale-in-progress-receipt-v1")
+    );
+    assert_eq!(receipt["generated_at"].as_str(), Some(GENERATED_AT));
+    assert_eq!(receipt["current_date"].as_str(), Some("2026-05-08"));
+    assert_eq!(row["id"].as_str(), Some("asupersync-fresh1"));
+    assert_eq!(row["classification"].as_str(), Some("fresh-active-peer"));
+    assert_eq!(
+        row["proposed_action"]["kind"].as_str(),
+        Some("agent-mail-reply")
+    );
+    assert_ne!(row["classification"].as_str(), Some("probably-stale"));
+    assert_eq!(
+        row["evidence"]["message_created_ts"].as_str(),
+        Some("2026-05-08T04:20:00Z")
+    );
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["active_agents"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["name"].as_str(),
+        Some("CopperSpring")
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["activity"].as_str(),
+        Some("active")
+    );
+}
+
+#[test]
+fn fresh_active_peer_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "fresh_active_peer.json",
+        "fresh_active_peer_expected.json",
+        "stale in-progress fresh-active-peer receipt changed; update the golden only after reviewing stand-off and contact semantics",
+    );
+}
+
+#[test]
+fn expired_reservation_and_inactive_agent_is_probably_stale() {
+    let receipt = receipt_json("expired_reservation_inactive_agent.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(row["id"].as_str(), Some("asupersync-stale1"));
+    assert_eq!(row["classification"].as_str(), Some("probably-stale"));
+    assert_eq!(row["evidence"]["reservation_expired"].as_bool(), Some(true));
+    assert_eq!(
+        row["proposed_action"]["command"].as_str(),
+        Some("br update asupersync-stale1 --status open --json")
+    );
+    assert_eq!(row["proposed_action"]["allowed_now"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["inactive_agents"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["agents"][0]["activity"].as_str(),
+        Some("inactive")
+    );
+}
+
+#[test]
+fn expired_reservation_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "expired_reservation_inactive_agent.json",
+        "expired_reservation_inactive_agent_expected.json",
+        "stale in-progress receipt changed; update the golden only after reviewing stale classification and proposed reopen semantics",
+    );
+}
+
+#[test]
+fn recent_commit_reference_recommends_verify_and_close() {
+    let receipt = receipt_json("recent_commit_reference.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("closed-by-recent-commit")
+    );
+    assert_eq!(
+        row["evidence"]["commit_hash"].as_str(),
+        Some("29d852cf8123456789")
+    );
+    assert!(
+        row["proposed_action"]["command"]
+            .as_str()
+            .expect("command string")
+            .contains("br close asupersync-aj7lx3.7 --reason 'Shipped in 29d852cf8123' --json")
+    );
+}
+
+#[test]
+fn recent_commit_reference_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "recent_commit_reference.json",
+        "recent_commit_reference_expected.json",
+        "stale in-progress recent-commit receipt changed; update the golden only after reviewing verify-and-close semantics",
+    );
+}
+
+#[test]
+fn active_reservation_with_weak_owner_freshness_blocks_reopen() {
+    let receipt = receipt_json("blocked_by_active_reservation.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("blocked-by-active-reservation")
+    );
+    assert_eq!(
+        row["evidence"]["reservation_holder"].as_str(),
+        Some("ReservationHolder")
+    );
+    assert_eq!(
+        row["evidence"]["reservation_expires_ts"].as_str(),
+        Some("2026-05-08T05:30:00Z")
+    );
+    assert_eq!(
+        row["proposed_action"]["kind"].as_str(),
+        Some("agent-mail-reply")
+    );
+    assert_eq!(
+        row["proposed_action"]["target"].as_str(),
+        Some("ReservationHolder")
+    );
+}
+
+#[test]
+fn active_reservation_blocker_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "blocked_by_active_reservation.json",
+        "blocked_by_active_reservation_expected.json",
+        "stale in-progress active-reservation receipt changed; update the golden only after reviewing stand-off and holder-message semantics",
+    );
+}
+
+#[test]
+fn dirty_tracker_rename_target_requires_human_escalation() {
+    let receipt = receipt_json("dirty_tracker_rename.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        receipt["tracker_state"]["status"].as_str(),
+        Some("dirty-tracker-and-code")
+    );
+    assert_eq!(
+        receipt["tracker_state"]["tracker_paths"][0].as_str(),
+        Some(".beads/issues.jsonl")
+    );
+    assert_eq!(
+        receipt["tracker_state"]["non_tracker_paths"][0].as_str(),
+        Some("docs/stale-state.md")
+    );
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("needs-human-escalation")
+    );
+    assert_eq!(
+        row["proposed_action"]["kind"].as_str(),
+        Some("blocker-bead-suggestion")
+    );
+}
+
+#[test]
+fn dirty_tracker_rename_output_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "dirty_tracker_rename.json",
+        "dirty_tracker_rename_expected.json",
+        "stale in-progress dirty-tracker rename receipt changed; update the golden only after reviewing porcelain rename tracker semantics",
+    );
+}
+
+#[test]
+fn dirty_tracker_only_state_requires_human_escalation() {
+    let receipt = receipt_json("dirty_tracker_only.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        receipt["tracker_state"]["status"].as_str(),
+        Some("dirty-tracker-only")
+    );
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("needs-human-escalation")
+    );
+    assert_eq!(
+        row["proposed_action"]["kind"].as_str(),
+        Some("blocker-bead-suggestion")
+    );
+}
+
+#[test]
+fn dirty_tracker_only_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "dirty_tracker_only.json",
+        "dirty_tracker_only_expected.json",
+        "stale in-progress dirty-tracker receipt changed; update the golden only after reviewing human-escalation semantics",
+    );
+}
+
+#[test]
+fn unavailable_agent_mail_is_explicitly_escalated() {
+    let receipt = receipt_json("unavailable_agent_mail.json");
+    let row = first_classification(&receipt);
+
+    assert_eq!(
+        receipt["subsystems"]["agent_mail"].as_str(),
+        Some("unavailable")
+    );
+    assert_eq!(
+        row["classification"].as_str(),
+        Some("needs-human-escalation")
+    );
+    assert!(
+        row["rationale"]
+            .as_str()
+            .expect("rationale string")
+            .contains("Agent Mail data is unavailable")
+    );
+    assert_eq!(
+        receipt["agent_roster"]["counts"]["missing_assignees"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        receipt["agent_roster"]["missing_assignees"][0].as_str(),
+        Some("UnknownAgent")
+    );
+}
+
+#[test]
+fn unavailable_agent_mail_matches_full_output_golden() {
+    assert_output_matches_full_golden(
+        "unavailable_agent_mail.json",
+        "unavailable_agent_mail_expected.json",
+        "stale in-progress unavailable-Agent-Mail receipt changed; update the golden only after reviewing human-escalation semantics",
+    );
+}
+
+#[test]
+fn receipt_safety_contract_forbids_mutation_execution_and_cargo() {
+    let receipt = receipt_json("expired_reservation_inactive_agent.json");
+
+    assert_eq!(
+        receipt["safety"]["mutating_commands_executed"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(receipt["safety"]["beads_mutated"].as_bool(), Some(false));
+    assert_eq!(receipt["safety"]["cargo_executed"].as_bool(), Some(false));
+    assert_eq!(
+        receipt["safety"]["branch_or_worktree_operations"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        receipt["safety"]["forbidden_command_tokens"]
+            .as_array()
+            .expect("forbidden tokens array")
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn receipt_has_required_top_level_shape() {
+    let receipt = receipt_json("fresh_active_peer.json");
+    for field in [
+        "schema_version",
+        "generated_at",
+        "current_date",
+        "agent",
+        "repo_path",
+        "thresholds",
+        "subsystems",
+        "agent_roster",
+        "tracker_state",
+        "classifications",
+        "summary",
+        "safety",
+    ] {
+        assert!(receipt.get(field).is_some(), "receipt missing {field}");
+    }
+}

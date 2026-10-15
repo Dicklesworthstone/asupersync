@@ -1,0 +1,633 @@
+{
+  "schema_version": "large-host-topology-corpus-v1",
+  "bead_id": "asupersync-ol11aa.1",
+  "created_date": "2026-06-06",
+  "description": "Deterministic representative topology corpus for large-host swarm pressure planning. This corpus is a contract input, not a live host probe or benchmark result.",
+  "source_of_truth": {
+    "artifact": "artifacts/large_host_topology_corpus_v1.json",
+    "helper": "scripts/large_host_topology_corpus.py",
+    "e2e_script": "scripts/run_large_host_topology_corpus_e2e.sh",
+    "contract_test": "tests/large_host_topology_corpus_contract.rs",
+    "operator_doc": "docs/large_host_topology_corpus.md",
+    "admission_atlas": "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+    "proof_lane_admission": "scripts/proof_lane_admission_decision.py",
+    "proof_lane_planner": "artifacts/swarm_proof_lane_planner_contract_v1.json"
+  },
+  "proof_boundary": {
+    "corpus_is_live_host_measurement": false,
+    "corpus_is_fresh_benchmark": false,
+    "proves_real_host_throughput": false,
+    "proves_rch_fleet_availability": false,
+    "runs_cargo": false,
+    "runs_rch": false,
+    "local_cargo_fallback_allowed": false,
+    "requires_rch_for_refresh_commands": true,
+    "operator_guidance_only": true,
+    "non_coverage": [
+      "fresh benchmark throughput",
+      "live NUMA discovery",
+      "RCH fleet capacity health",
+      "proof-lane correctness",
+      "scheduler fairness regression closure",
+      "dirty-tree ownership truth"
+    ]
+  },
+  "required_profile_fields": [
+    "profile_id",
+    "profile_family",
+    "title",
+    "topology",
+    "memory",
+    "cgroup",
+    "rch_slot_model",
+    "contention_domains",
+    "fallback_policy",
+    "operator_interpretation",
+    "proof_boundary",
+    "rch_refresh_command",
+    "source_refs"
+  ],
+  "required_log_fields": [
+    "bead_id",
+    "profile_id",
+    "profile_family",
+    "status",
+    "physical_cores",
+    "memory_gib",
+    "numa_nodes",
+    "rch_slots",
+    "fallback_action",
+    "artifact_path",
+    "first_failure"
+  ],
+  "required_profile_ids": [
+    "single-socket-64c-256g",
+    "dual-socket-64c-256g-numa",
+    "high-memory-96c-512g",
+    "cgroup-limited-32c-96g",
+    "memory-pressure-degraded-64c",
+    "remote-worker-queue-contention-64c-256g"
+  ],
+  "profile_catalog": [
+    {
+      "profile_id": "single-socket-64c-256g",
+      "profile_family": "single_socket_high_core",
+      "title": "Single-socket 64-core host with flat memory locality",
+      "topology": {
+        "physical_cores": 64,
+        "hardware_threads": 128,
+        "smt_threads_per_core": 2,
+        "socket_count": 1,
+        "numa_nodes": 1,
+        "cache_domains": [
+          {
+            "domain_id": "l3-0",
+            "shared_l3_mib": 256,
+            "core_range": "0-63",
+            "numa_node": 0
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          256
+        ],
+        "reserved_for_os_gib": 16,
+        "admission_memory_ceiling_gib": 192,
+        "memory_pressure_state": "healthy"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 64,
+        "memory_max_gib": 256,
+        "cpu_quota_cores": 64
+      },
+      "rch_slot_model": {
+        "recommended_slots": 4,
+        "max_parallel_heavy_lanes": 2,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "cargo-check"
+        ],
+        "avoid_lane_classes": [
+          "full-workspace-clippy-when-peer-dirty"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "l3-0",
+          "resource": "shared_l3",
+          "risk": "compile-and-test lanes contend for one cache domain",
+          "recommended_policy": "prefer one broad lane plus focused contract lanes"
+        },
+        {
+          "domain_id": "memory-0",
+          "resource": "memory_bandwidth",
+          "risk": "flat topology can hide memory bandwidth pressure",
+          "recommended_policy": "reserve 64 GiB headroom before admitting broad clippy"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "fall_back_to_scalar_capacity",
+        "safe_default_profile": "cgroup-limited-32c-96g",
+        "operator_action": "queue broad lanes until topology receipt is supplied",
+        "reason_codes": [
+          "topology-missing",
+          "scalar-capacity-only"
+        ]
+      },
+      "operator_interpretation": "Use as the optimistic flat-topology reference for large local hosts; do not treat it as proof of real throughput.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_single_socket CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract single_socket_profile_declares_flat_topology -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    },
+    {
+      "profile_id": "dual-socket-64c-256g-numa",
+      "profile_family": "dual_socket_numa",
+      "title": "Dual-socket 64-core host with two NUMA memory domains",
+      "topology": {
+        "physical_cores": 64,
+        "hardware_threads": 128,
+        "smt_threads_per_core": 2,
+        "socket_count": 2,
+        "numa_nodes": 2,
+        "cache_domains": [
+          {
+            "domain_id": "socket0-l3",
+            "shared_l3_mib": 128,
+            "core_range": "0-31",
+            "numa_node": 0
+          },
+          {
+            "domain_id": "socket1-l3",
+            "shared_l3_mib": 128,
+            "core_range": "32-63",
+            "numa_node": 1
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          128,
+          128
+        ],
+        "reserved_for_os_gib": 20,
+        "admission_memory_ceiling_gib": 176,
+        "memory_pressure_state": "healthy"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 64,
+        "memory_max_gib": 256,
+        "cpu_quota_cores": 64
+      },
+      "rch_slot_model": {
+        "recommended_slots": 4,
+        "max_parallel_heavy_lanes": 2,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "cargo-check",
+          "split-by-socket"
+        ],
+        "avoid_lane_classes": [
+          "two-broad-lanes-on-same-socket"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "socket0-l3",
+          "resource": "shared_l3",
+          "risk": "same-socket placement can make two admissible lanes fight for cache",
+          "recommended_policy": "split heavy lanes across sockets when topology is known"
+        },
+        {
+          "domain_id": "numa-link",
+          "resource": "remote_memory",
+          "risk": "cross-node allocations can invalidate scalar memory assumptions",
+          "recommended_policy": "prefer one broad lane per NUMA node with local memory headroom"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "queue_socket_sensitive_lanes",
+        "safe_default_profile": "cgroup-limited-32c-96g",
+        "operator_action": "admit only focused lanes until NUMA placement is declared",
+        "reason_codes": [
+          "topology-missing",
+          "numa-placement-unknown"
+        ]
+      },
+      "operator_interpretation": "Use when aggregate 64-core capacity must be treated as two placement domains rather than one flat pool.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_dual_socket CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract dual_socket_profile_declares_numa_domains -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    },
+    {
+      "profile_id": "high-memory-96c-512g",
+      "profile_family": "high_memory_large_host",
+      "title": "High-memory 96-core host for memory-heavy proof lanes",
+      "topology": {
+        "physical_cores": 96,
+        "hardware_threads": 192,
+        "smt_threads_per_core": 2,
+        "socket_count": 2,
+        "numa_nodes": 4,
+        "cache_domains": [
+          {
+            "domain_id": "socket0-die0-l3",
+            "shared_l3_mib": 128,
+            "core_range": "0-23",
+            "numa_node": 0
+          },
+          {
+            "domain_id": "socket0-die1-l3",
+            "shared_l3_mib": 128,
+            "core_range": "24-47",
+            "numa_node": 1
+          },
+          {
+            "domain_id": "socket1-die0-l3",
+            "shared_l3_mib": 128,
+            "core_range": "48-71",
+            "numa_node": 2
+          },
+          {
+            "domain_id": "socket1-die1-l3",
+            "shared_l3_mib": 128,
+            "core_range": "72-95",
+            "numa_node": 3
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 512,
+        "per_numa_node_gib": [
+          128,
+          128,
+          128,
+          128
+        ],
+        "reserved_for_os_gib": 32,
+        "admission_memory_ceiling_gib": 384,
+        "memory_pressure_state": "healthy"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 96,
+        "memory_max_gib": 512,
+        "cpu_quota_cores": 96
+      },
+      "rch_slot_model": {
+        "recommended_slots": 6,
+        "max_parallel_heavy_lanes": 3,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "cargo-check",
+          "memory-heavy-e2e"
+        ],
+        "avoid_lane_classes": [
+          "unbounded-fuzz",
+          "local-fallback-cargo"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "numa-0-3",
+          "resource": "memory_capacity",
+          "risk": "large memory hides per-node depletion",
+          "recommended_policy": "cap each heavy lane at one NUMA node's spare memory"
+        },
+        {
+          "domain_id": "worker-slot-pool",
+          "resource": "rch_slots",
+          "risk": "many warm slots can admit more lanes than the repo can validate safely",
+          "recommended_policy": "never let topology warmth override stale-proof or dirty-tree blockers"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "treat_as_cgroup_limited",
+        "safe_default_profile": "cgroup-limited-32c-96g",
+        "operator_action": "keep at most one broad lane active until per-node memory is known",
+        "reason_codes": [
+          "topology-missing",
+          "per-node-memory-unknown"
+        ]
+      },
+      "operator_interpretation": "Use for planning memory-heavy remote proof lanes, not as evidence that a live RCH worker has 512 GiB free.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_high_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract high_memory_profile_declares_large_memory_ceiling -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    },
+    {
+      "profile_id": "cgroup-limited-32c-96g",
+      "profile_family": "cgroup_limited",
+      "title": "Large host constrained to 32 effective cores and 96 GiB",
+      "topology": {
+        "physical_cores": 64,
+        "hardware_threads": 128,
+        "smt_threads_per_core": 2,
+        "socket_count": 1,
+        "numa_nodes": 1,
+        "cache_domains": [
+          {
+            "domain_id": "l3-0",
+            "shared_l3_mib": 256,
+            "core_range": "0-63",
+            "numa_node": 0
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          256
+        ],
+        "reserved_for_os_gib": 16,
+        "admission_memory_ceiling_gib": 72,
+        "memory_pressure_state": "cgroup-limited"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 32,
+        "memory_max_gib": 96,
+        "cpu_quota_cores": 32
+      },
+      "rch_slot_model": {
+        "recommended_slots": 2,
+        "max_parallel_heavy_lanes": 1,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "single-broad-check"
+        ],
+        "avoid_lane_classes": [
+          "parallel-broad-clippy",
+          "parallel-all-targets"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "cgroup-cpu",
+          "resource": "cpu_quota",
+          "risk": "physical host size overstates runnable core budget",
+          "recommended_policy": "admit by cpuset and quota, not physical core count"
+        },
+        {
+          "domain_id": "cgroup-memory",
+          "resource": "memory_max",
+          "risk": "worker OOM can occur below physical host memory",
+          "recommended_policy": "treat 96 GiB as the hard lane budget"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "use_cgroup_limited_defaults",
+        "safe_default_profile": "cgroup-limited-32c-96g",
+        "operator_action": "admit one broad lane or multiple focused lanes, never both broad lanes together",
+        "reason_codes": [
+          "topology-missing",
+          "cgroup-limit-assumed"
+        ]
+      },
+      "operator_interpretation": "Use as the conservative fallback when the physical machine is large but the effective container envelope is smaller.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_cgroup_limited CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract cgroup_limited_profile_declares_effective_limits -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    },
+    {
+      "profile_id": "memory-pressure-degraded-64c",
+      "profile_family": "memory_pressure_degraded",
+      "title": "64-core host under degraded memory-pressure admission",
+      "topology": {
+        "physical_cores": 64,
+        "hardware_threads": 128,
+        "smt_threads_per_core": 2,
+        "socket_count": 2,
+        "numa_nodes": 2,
+        "cache_domains": [
+          {
+            "domain_id": "socket0-l3",
+            "shared_l3_mib": 128,
+            "core_range": "0-31",
+            "numa_node": 0
+          },
+          {
+            "domain_id": "socket1-l3",
+            "shared_l3_mib": 128,
+            "core_range": "32-63",
+            "numa_node": 1
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          128,
+          128
+        ],
+        "reserved_for_os_gib": 96,
+        "admission_memory_ceiling_gib": 80,
+        "memory_pressure_state": "degraded"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 64,
+        "memory_max_gib": 160,
+        "cpu_quota_cores": 64
+      },
+      "rch_slot_model": {
+        "recommended_slots": 2,
+        "max_parallel_heavy_lanes": 1,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "short-e2e"
+        ],
+        "avoid_lane_classes": [
+          "full-workspace-clippy",
+          "memory-heavy-e2e"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "degraded-memory",
+          "resource": "memory_headroom",
+          "risk": "historical pressure means scalar memory totals are unsafe",
+          "recommended_policy": "queue broad lanes until fresh RCH envelope evidence exists"
+        },
+        {
+          "domain_id": "numa-imbalance",
+          "resource": "per_node_memory",
+          "risk": "one NUMA node can be depleted while aggregate memory looks healthy",
+          "recommended_policy": "prefer focused lanes and require explicit per-node headroom for broad lanes"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "fail_closed_for_broad_lanes",
+        "safe_default_profile": "memory-pressure-degraded-64c",
+        "operator_action": "allow only focused contract lanes until memory pressure clears",
+        "reason_codes": [
+          "memory-pressure",
+          "topology-missing",
+          "broad-lane-queued"
+        ]
+      },
+      "operator_interpretation": "Use when the host is large but memory pressure should brown out broad validation lanes.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_memory_degraded CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract degraded_profile_declares_safe_fallback -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    },
+    {
+      "profile_id": "remote-worker-queue-contention-64c-256g",
+      "profile_family": "remote_worker_queue_contention",
+      "title": "64-core remote worker profile with queue-slot contention",
+      "topology": {
+        "physical_cores": 64,
+        "hardware_threads": 128,
+        "smt_threads_per_core": 2,
+        "socket_count": 2,
+        "numa_nodes": 2,
+        "cache_domains": [
+          {
+            "domain_id": "socket0-l3",
+            "shared_l3_mib": 128,
+            "core_range": "0-31",
+            "numa_node": 0
+          },
+          {
+            "domain_id": "socket1-l3",
+            "shared_l3_mib": 128,
+            "core_range": "32-63",
+            "numa_node": 1
+          }
+        ]
+      },
+      "memory": {
+        "total_gib": 256,
+        "per_numa_node_gib": [
+          128,
+          128
+        ],
+        "reserved_for_os_gib": 24,
+        "admission_memory_ceiling_gib": 160,
+        "memory_pressure_state": "queue-contention"
+      },
+      "cgroup": {
+        "detected_from_live_host": false,
+        "cpuset_effective_cores": 64,
+        "memory_max_gib": 256,
+        "cpu_quota_cores": 64
+      },
+      "rch_slot_model": {
+        "recommended_slots": 3,
+        "max_parallel_heavy_lanes": 1,
+        "preferred_lane_classes": [
+          "focused-contract",
+          "cargo-check-after-warmup"
+        ],
+        "avoid_lane_classes": [
+          "parallel-remote-broad-lanes",
+          "stale-zero-test-refresh"
+        ]
+      },
+      "contention_domains": [
+        {
+          "domain_id": "rch-queue",
+          "resource": "remote_worker_slots",
+          "risk": "queue warmth can be mistaken for correctness evidence",
+          "recommended_policy": "require proof-lane freshness and nonzero test evidence before admission"
+        },
+        {
+          "domain_id": "remote-cache",
+          "resource": "worker_cache",
+          "risk": "warm cache can hide cold-start memory and compile pressure",
+          "recommended_policy": "log worker warmth as advisory only"
+        }
+      ],
+      "fallback_policy": {
+        "missing_topology_action": "prefer_remote_queue_backoff",
+        "safe_default_profile": "cgroup-limited-32c-96g",
+        "operator_action": "queue broad remote lanes when proof evidence is stale or zero-test",
+        "reason_codes": [
+          "remote-worker-contention",
+          "topology-missing",
+          "zero-test-evidence-not-proof"
+        ]
+      },
+      "operator_interpretation": "Use when RCH queue pressure and worker-slot scarcity matter more than aggregate host CPU and memory.",
+      "proof_boundary": {
+        "corpus_is_live_host_measurement": false,
+        "corpus_is_fresh_benchmark": false,
+        "proves_real_host_throughput": false,
+        "operator_guidance_only": true
+      },
+      "rch_refresh_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_topology_remote_queue CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test large_host_topology_corpus_contract remote_worker_contention_profile_declares_queue_policy -- --nocapture",
+      "source_refs": [
+        "artifacts/admission_aware_runtime_pressure_atlas_contract_v1.json",
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "scripts/proof_lane_admission_decision.py",
+        "scripts/large_host_topology_corpus.py",
+        "docs/large_host_topology_corpus.md",
+        "tests/large_host_topology_corpus_contract.rs"
+      ]
+    }
+  ]
+}

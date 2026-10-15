@@ -1,0 +1,5 @@
+Finished test profile [unoptimized + debuginfo] target(s) in 12.90s
+Running tests/web_csrf_validation_audit.rs
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+Remote command finished: exit=0
+local wrapper timed out while retrieving .rch-target artifacts after remote exit was already known

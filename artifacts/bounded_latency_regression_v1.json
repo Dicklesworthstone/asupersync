@@ -1,0 +1,160 @@
+{
+  "contract_version": "bounded-latency-regression-v1",
+  "bead_id": "asupersync-1508v.4.6",
+  "description": "AA-04.3 bounded-latency fairness, wakeup, and no-leak regression pack for kernel fast path validation.",
+  "runner_script": "scripts/run_bounded_latency_regression_smoke.sh",
+  "runner_bundle_schema_version": "bounded-latency-regression-smoke-bundle-v1",
+  "runner_report_schema_version": "bounded-latency-regression-smoke-run-report-v1",
+  "regression_dimensions": [
+    {
+      "dimension_id": "FAIRNESS-CANCEL-STORM",
+      "description": "Cancel-lane fairness under sustained cancel storms. Verifies no task starvation when cancel_streak is near limit.",
+      "invariants": [
+        "ready_queue_starvation_epochs == 0",
+        "cancel_lane_monopoly_epochs == 0",
+        "fairness_ratio >= 0.3"
+      ],
+      "workload_profile": "cancel-heavy",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "FAIRNESS-STEAL-PRESSURE",
+      "description": "Cross-worker steal fairness under asymmetric load. Verifies no single worker monopolizes steal targets.",
+      "invariants": [
+        "max_steal_imbalance_ratio <= 3.0",
+        "steal_starvation_workers == 0"
+      ],
+      "workload_profile": "steal-asymmetric",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "WAKEUP-RACE-CORRECTNESS",
+      "description": "No lost wakeups under concurrent wake/park races. Verifies task progress under aggressive parking.",
+      "invariants": [
+        "lost_wakeup_count == 0",
+        "task_completion_rate == 1.0"
+      ],
+      "workload_profile": "wake-park-race",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "WAKEUP-COALESCE-CORRECTNESS",
+      "description": "Wake coalescing does not suppress unique wakes. Verifies bloom filter false positives do not cause lost wakeups.",
+      "invariants": [
+        "unique_wakes_delivered == unique_wakes_expected",
+        "false_negative_wakes == 0"
+      ],
+      "workload_profile": "duplicate-wake-burst",
+      "fail_action": "disable_wake_coalescing"
+    },
+    {
+      "dimension_id": "OBLIGATION-NO-LEAK",
+      "description": "All obligations are settled during region close under fast-path. No obligation leaks across region boundaries.",
+      "invariants": [
+        "obligation_leak_count == 0",
+        "outstanding_obligations_at_close == 0"
+      ],
+      "workload_profile": "region-lifecycle",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "QUIESCENCE-SHUTDOWN",
+      "description": "Runtime quiesces cleanly under fast-path with all tasks drained and workers parked.",
+      "invariants": [
+        "tasks_remaining_at_shutdown == 0",
+        "workers_active_at_shutdown == 0",
+        "shutdown_timeout_exceeded == false"
+      ],
+      "workload_profile": "graceful-shutdown",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "TAIL-LATENCY-P99",
+      "description": "p99 task scheduling latency does not regress versus incumbent path.",
+      "invariants": [
+        "p99_delta_pct <= 5.0",
+        "p999_delta_pct <= 10.0"
+      ],
+      "workload_profile": "mixed-realistic",
+      "fail_action": "rollback_to_incumbent"
+    },
+    {
+      "dimension_id": "TAIL-LATENCY-CANCEL-LANE",
+      "description": "p99 cancel-lane latency bounded under epoch transitions.",
+      "invariants": [
+        "cancel_p99_us <= 500",
+        "cancel_p999_us <= 2000"
+      ],
+      "workload_profile": "cancel-epoch-transition",
+      "fail_action": "widen_cancel_streak"
+    }
+  ],
+  "tail_table_format": {
+    "description": "Tail latency comparison table format for before/after analysis.",
+    "columns": ["workload_id", "substrate", "p50_us", "p95_us", "p99_us", "p999_us", "verdict"],
+    "verdict_values": ["pass", "regressed", "improved"]
+  },
+  "fallback_surfaces": [
+    {
+      "surface_id": "shard-local-dispatch",
+      "fallback_flag": "shard_local_dispatch",
+      "rollback_action": "Disable shard-local batch buffer, revert to Mutex<IntrusiveStack>"
+    },
+    {
+      "surface_id": "wake-coalescing",
+      "fallback_flag": "wake_coalescing",
+      "rollback_action": "Disable bloom filter front-end, revert to direct Mutex<HashSet<TaskId>>"
+    },
+    {
+      "surface_id": "adaptive-steal",
+      "fallback_flag": "adaptive_steal",
+      "rollback_action": "Disable EMA-based lookahead, revert to fixed power-of-two-choices"
+    }
+  ],
+  "structured_log_fields_required": [
+    "dimension_id",
+    "workload_id",
+    "substrate",
+    "invariant_name",
+    "invariant_value",
+    "invariant_threshold",
+    "invariant_pass",
+    "p50_us",
+    "p95_us",
+    "p99_us",
+    "p999_us",
+    "fairness_ratio",
+    "steal_imbalance_ratio",
+    "lost_wakeup_count",
+    "obligation_leak_count",
+    "fallback_surface",
+    "rollback_triggered",
+    "verdict"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "BLR-SMOKE-FAIRNESS",
+      "description": "Validate fairness invariants under cancel and steal pressure",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa043 cargo test --test bounded_latency_regression_contract fairness -- --nocapture"
+    },
+    {
+      "scenario_id": "BLR-SMOKE-WAKEUP",
+      "description": "Validate wakeup correctness and coalescing safety",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa043 cargo test --test bounded_latency_regression_contract wakeup -- --nocapture"
+    },
+    {
+      "scenario_id": "BLR-SMOKE-LEAK",
+      "description": "Validate obligation no-leak and quiescence invariants",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa043 cargo test --test bounded_latency_regression_contract leak -- --nocapture"
+    },
+    {
+      "scenario_id": "BLR-SMOKE-TAIL",
+      "description": "Validate tail latency regression bounds",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa043 cargo test --test bounded_latency_regression_contract tail -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.10.7",
+    "asupersync-1508v.10.5"
+  ]
+}

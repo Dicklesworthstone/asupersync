@@ -1,0 +1,91 @@
+{
+  "contract_version": "semantic-lint-loop-checkpoint-rule-contract-v1",
+  "bead_id": "asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+  "rule_id": "loop-without-cx-checkpoint",
+  "source_of_truth": {
+    "inventory": "artifacts/semantic_lint_rule_inventory_v1.json",
+    "contract": "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+    "contract_test": "tests/semantic_lint_loop_checkpoint_contract.rs",
+    "runner": "scripts/semantic_lint.py",
+    "docs": "docs/semantic_lint_loop_checkpoint_rule.md",
+    "positive_fixture": "tests/fixtures/semantic_lint/loop_checkpoint/positive_uncheckpointed_loop.rs",
+    "negative_checkpoint_fixture": "tests/fixtures/semantic_lint/loop_checkpoint/negative_checkpointed_loop.rs",
+    "negative_bounded_fixture": "tests/fixtures/semantic_lint/loop_checkpoint/negative_bounded_loop.rs",
+    "valid_allow_fixture": "tests/fixtures/semantic_lint/loop_checkpoint/valid_allow.rs",
+    "invalid_allow_fixture": "tests/fixtures/semantic_lint/loop_checkpoint/invalid_allow.rs"
+  },
+  "implementation": {
+    "selected_engine": "hybrid-rustc-hir-ast-grep",
+    "runner_default_engine": "auto",
+    "result_schema": "semantic-lint-results-v1",
+    "candidate_scanner": true,
+    "requires_future_hir_confirmation": true,
+    "no_source_rewrites": true,
+    "no_runtime_behavior_change": true
+  },
+  "target_paths": [
+    "src/runtime/",
+    "src/lab/",
+    "src/transport/",
+    "src/database/",
+    "src/raptorq/"
+  ],
+  "candidate_policy": {
+    "reports": [
+      "loop blocks containing .await without an explicit checkpoint or cancellation token",
+      "while true blocks containing .await without an explicit checkpoint or cancellation token"
+    ],
+    "accepts": [
+      "loops containing cx.checkpoint()",
+      "loops containing cancellation polls",
+      "statically bounded for loops"
+    ],
+    "diagnostic_must_name": "missing checkpoint"
+  },
+  "allow_marker": {
+    "format": "asupersync-lint:allow loop-without-cx-checkpoint reason=<short reason> owner=<asupersync-bead-id>",
+    "locations": [
+      "same line as finding",
+      "immediately preceding line"
+    ],
+    "requires": [
+      "reason",
+      "owner"
+    ],
+    "owner_must_match": "^asupersync-[A-Za-z0-9_.-]+$",
+    "invalid_marker_does_not_suppress": true
+  },
+  "fixtures": [
+    {
+      "path": "tests/fixtures/semantic_lint/loop_checkpoint/positive_uncheckpointed_loop.rs",
+      "expected_verdict": "fail",
+      "expected_findings": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/loop_checkpoint/negative_checkpointed_loop.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/loop_checkpoint/negative_bounded_loop.rs",
+      "expected_verdict": "pass",
+      "expected_findings": 0
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/loop_checkpoint/valid_allow.rs",
+      "expected_verdict": "pass",
+      "expected_suppressed": 1
+    },
+    {
+      "path": "tests/fixtures/semantic_lint/loop_checkpoint/invalid_allow.rs",
+      "expected_verdict": "fail",
+      "expected_invalid_allow_markers": 1
+    }
+  ],
+  "no_claims": [
+    "does not close every rule required by asupersync-idea-wizard-fifth-wave-3gaiun.3.2",
+    "does not provide rustc-HIR type-aware confirmation",
+    "does not prove every live loop has a cancellation checkpoint",
+    "does not rewrite source code"
+  ]
+}

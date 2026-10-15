@@ -1,0 +1,37 @@
+{
+  "agent_mail": {
+    "available": true,
+    "messages": [
+      {
+        "body_md": "I am editing src/sync/rwlock.rs for a separate proof.",
+        "created_ts": "2026-05-08T05:02:00Z",
+        "from": "CoralGorge",
+        "subject": "rwlock edit",
+        "thread_id": "asupersync-rwlock"
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "BoldPlateau",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:56:00Z",
+        "path_pattern": "src/sync/rwlock.rs",
+        "reason": "asupersync-vddieh"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "issues": [],
+    "status": "ok"
+  },
+  "git": {
+    "entries": [
+      {
+        "path": "src/sync/rwlock.rs",
+        "status": " M"
+      }
+    ],
+    "status": "ok"
+  }
+}

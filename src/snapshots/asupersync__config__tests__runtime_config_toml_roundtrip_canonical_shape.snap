@@ -1,0 +1,62 @@
+---
+source: src/config.rs
+expression: "serde_json::json!({\n    \"input_toml\": fixture.trim(),\n    \"canonical_toml\": canonical_toml.trim_end(),\n    \"config\": parsed_summary,\n})"
+---
+{
+  "canonical_toml": "[encoding]\nrepair_overhead = 1.25\nmax_block_size = 4096\nsymbol_size = 512\nencoding_parallelism = 3\ndecoding_parallelism = 5\n\n[transport]\nmax_paths = 3\nhealth_check_interval_ms = 2500\ndead_path_backoff_initial_ms = 125\ndead_path_backoff_max_ms = 5000\ndead_path_backoff_multiplier = 1.75\nmax_symbols_in_flight = 64\npath_strategy = \"latency_weighted\"\nexperiment_gate = \"multipath_preview\"\ncoding_policy = \"raptorq_fec_preview\"\n\n[resources]\nmax_symbol_buffer_memory = 2097152\nmax_encoding_ops = 6\nmax_decoding_ops = 7\nsymbol_pool_size = 128\n\n[timeouts]\ndefault_timeout_ms = 5000\nencoding_timeout_ms = 6000\ndecoding_timeout_ms = 7000\npath_timeout_ms = 8000\nquorum_timeout_ms = 9000\n\n[observability]\nlog_level = \"warn\"\ntrace_all_symbols = false\nsample_rate = 0.25\nmax_spans = 33\nmax_log_entries = 44\ninclude_timestamps = false\nmetrics_enabled = true\n\n[security]\nauth_mode = \"permissive\"\nauth_key_seed = 12345\nreject_unauthenticated = false",
+  "config": {
+    "encoding": {
+      "decoding_parallelism": 5,
+      "encoding_parallelism": 3,
+      "max_block_size": 4096,
+      "repair_overhead": 1.25,
+      "symbol_size": 512
+    },
+    "observability": {
+      "include_timestamps": false,
+      "log_level": "warn",
+      "max_log_entries": 44,
+      "max_spans": 33,
+      "metrics_enabled": true,
+      "sample_rate": 0.25,
+      "trace_all_symbols": false
+    },
+    "resources": {
+      "max_decoding_ops": 7,
+      "max_encoding_ops": 6,
+      "max_symbol_buffer_memory": 2097152,
+      "symbol_pool_size": 128
+    },
+    "security": {
+      "auth_key_seed": 12345,
+      "auth_mode": "permissive",
+      "reject_unauthenticated": false
+    },
+    "timeouts_ms": {
+      "decoding": 7000,
+      "default": 5000,
+      "encoding": 6000,
+      "path": 8000,
+      "quorum": 9000
+    },
+    "transport": {
+      "aggregator_effective_policy": {
+        "coding_policy": "raptorq-fec-preview",
+        "experiment_gate": "multipath-preview",
+        "path_policy": "BestQuality { count: 1 }"
+      },
+      "coding_policy": "raptorq_fec_preview",
+      "dead_path_backoff": {
+        "initial_ms": 125,
+        "max_ms": 5000,
+        "multiplier": 1.75
+      },
+      "experiment_gate": "multipath_preview",
+      "health_check_interval_ms": 2500,
+      "max_paths": 3,
+      "max_symbols_in_flight": 64,
+      "path_strategy": "latency_weighted"
+    }
+  },
+  "input_toml": "[encoding]\nrepair_overhead = 1.25\nmax_block_size = 4096\nsymbol_size = 512\nencoding_parallelism = 3\ndecoding_parallelism = 5\n\n[transport]\nmax_paths = 3\nhealth_check_interval_ms = 2500\ndead_path_backoff_initial_ms = 125\ndead_path_backoff_max_ms = 5000\ndead_path_backoff_multiplier = 1.75\nmax_symbols_in_flight = 64\npath_strategy = \"latency_weighted\"\nexperiment_gate = \"multipath_preview\"\ncoding_policy = \"raptorq_fec_preview\"\n\n[resources]\nmax_symbol_buffer_memory = 2097152\nmax_encoding_ops = 6\nmax_decoding_ops = 7\nsymbol_pool_size = 128\n\n[timeouts]\ndefault_timeout_ms = 5000\nencoding_timeout_ms = 6000\ndecoding_timeout_ms = 7000\npath_timeout_ms = 8000\nquorum_timeout_ms = 9000\n\n[observability]\nlog_level = \"warn\"\ntrace_all_symbols = false\nsample_rate = 0.25\nmax_spans = 33\nmax_log_entries = 44\ninclude_timestamps = false\nmetrics_enabled = true\n\n[security]\nauth_mode = \"permissive\"\nauth_key_seed = 12345\nreject_unauthenticated = false"
+}

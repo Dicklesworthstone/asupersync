@@ -1,0 +1,261 @@
+---
+source: src/distributed/encoding.rs
+assertion_line: 1745
+expression: "serde_json::json!({\n    \"base\": scrub_encoded_state_envelope_for_snapshot_test(\"base\", &base),\n    \"extension\":\n    scrub_encoded_state_envelope_for_snapshot_test(\"extension\", &extension),\n})"
+---
+{
+  "base": {
+    "envelope": {
+      "encoded_at_nanos": 77000000000,
+      "original_size": 133,
+      "redundancy_factor": "1.333",
+      "repair_count": 1,
+      "source_count": 3
+    },
+    "layout_decision": {
+      "configured_max_source_blocks": 1,
+      "configured_min_repair_symbols": 1,
+      "effective_min_repair_symbols": 1,
+      "effective_source_blocks": 1,
+      "path_quality": null,
+      "policy_id": "static-block-layout-v1",
+      "reason_id": "path-quality-unknown",
+      "repair_multiplier_permille": 1000,
+      "requested_source_blocks": 1
+    },
+    "name": "base",
+    "params": {
+      "min_symbols_for_decode": 3,
+      "object_id": "ObjectId(00000000000000000000000000000010)",
+      "object_size": 133,
+      "source_blocks": 1,
+      "symbol_size": 48,
+      "symbols_per_block": 3
+    },
+    "roundtrip_snapshot": {
+      "budget": {
+        "cost_remaining": null,
+        "deadline_nanos": 1000000000,
+        "polls_remaining": 100
+      },
+      "cancel_reason": null,
+      "children": [],
+      "finalizer_count": 2,
+      "metadata": [],
+      "parent": null,
+      "region_id": {
+        "generation": 0,
+        "index": 1
+      },
+      "sequence": 1,
+      "state": "Open",
+      "tasks": [
+        {
+          "priority": 5,
+          "state": "Running",
+          "task_id": {
+            "generation": 0,
+            "index": 1
+          }
+        }
+      ],
+      "timestamp_nanos": 100000000000
+    },
+    "schema_version": "encoding-envelope-v2",
+    "symbols": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "53 4e 41 50 02 01 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "00 00 01 00 00 00 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "len": 48,
+        "preview_hex": "00 00 00 00 00 00 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 3,
+        "kind": "repair",
+        "len": 48,
+        "preview_hex": "53 4e a6 50 02 01 00 00",
+        "sbn": 0
+      }
+    ]
+  },
+  "extension": {
+    "envelope": {
+      "encoded_at_nanos": 88000000000,
+      "original_size": 210,
+      "redundancy_factor": "1.222",
+      "repair_count": 2,
+      "source_count": 9
+    },
+    "layout_decision": {
+      "configured_max_source_blocks": 2,
+      "configured_min_repair_symbols": 2,
+      "effective_min_repair_symbols": 2,
+      "effective_source_blocks": 2,
+      "path_quality": null,
+      "policy_id": "static-block-layout-v1",
+      "reason_id": "path-quality-unknown",
+      "repair_multiplier_permille": 1000,
+      "requested_source_blocks": 2
+    },
+    "name": "extension",
+    "params": {
+      "min_symbols_for_decode": 9,
+      "object_id": "ObjectId(00000000000000000000000000000020)",
+      "object_size": 210,
+      "source_blocks": 2,
+      "symbol_size": 24,
+      "symbols_per_block": 5
+    },
+    "roundtrip_snapshot": {
+      "budget": {
+        "cost_remaining": 34,
+        "deadline_nanos": 400000000000,
+        "polls_remaining": 12
+      },
+      "cancel_reason": "timeout: extension fields",
+      "children": [
+        {
+          "generation": 0,
+          "index": 8
+        },
+        {
+          "generation": 1,
+          "index": 9
+        }
+      ],
+      "finalizer_count": 5,
+      "metadata": [
+        222,
+        173,
+        190,
+        239,
+        16,
+        32
+      ],
+      "parent": {
+        "generation": 0,
+        "index": 2
+      },
+      "region_id": {
+        "generation": 1,
+        "index": 7
+      },
+      "sequence": 9,
+      "state": "Closing",
+      "tasks": [
+        {
+          "priority": 4,
+          "state": "Running",
+          "task_id": {
+            "generation": 0,
+            "index": 3
+          }
+        },
+        {
+          "priority": 8,
+          "state": "Cancelled",
+          "task_id": {
+            "generation": 2,
+            "index": 4
+          }
+        }
+      ],
+      "timestamp_nanos": 321000000000
+    },
+    "schema_version": "encoding-envelope-v2",
+    "symbols": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "53 4e 41 50 02 07 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 00 00 00 00 08 00",
+        "sbn": 0
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 02 00 00 00 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "04 00 00 00 02 00 00 00",
+        "sbn": 0
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 01 00 00 00 05 00",
+        "sbn": 0
+      },
+      {
+        "esi": 5,
+        "kind": "repair",
+        "len": 24,
+        "preview_hex": "3a 4e 97 50 b8 07 97 00",
+        "sbn": 0
+      },
+      {
+        "esi": 0,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "01 22 00 00 00 00 00 00",
+        "sbn": 1
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "78 74 65 6e 73 69 6f 6e",
+        "sbn": 1
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "06 00 00 00 de ad be ef",
+        "sbn": 1
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "len": 24,
+        "preview_hex": "00 00 00 00 00 00 00 00",
+        "sbn": 1
+      },
+      {
+        "esi": 4,
+        "kind": "repair",
+        "len": 24,
+        "preview_hex": "41 81 92 cd fd 9b ec 1f",
+        "sbn": 1
+      }
+    ]
+  }
+}

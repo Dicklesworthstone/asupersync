@@ -1,0 +1,4 @@
+  2026-05-10T07:44:58.642469Z  INFO rch::hook: Selected worker: vmi1152480 at ubuntu@109.205.181.92
+  2026-05-10T07:44:59.191997Z  INFO rch::hook: Starting remote compilation pipeline for asupersync (hash: f7d2b2e15a0b15f0)
+  2026-05-10T07:45:25.221759Z  INFO rch::hook: Executing command remotely: env cargo test --test dirty_tree_ownership_receipt_contract
+local wrapper terminated by signal TERM before remote command completion was observed

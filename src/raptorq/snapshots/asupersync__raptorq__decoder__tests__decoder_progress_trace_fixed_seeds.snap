@@ -1,0 +1,588 @@
+---
+source: src/raptorq/decoder.rs
+assertion_line: 6708
+expression: "serde_json::json!({\n    \"systematic_success\":\n    progress_trace_snapshot(\"systematic_success\", systematic_seed,\n    &systematic_result.proof,), \"mixed_peeling_elimination\":\n    progress_trace_snapshot(\"mixed_peeling_elimination\", mixed_seed,\n    &mixed_result.proof,), \"insufficient_symbols_failure\":\n    progress_trace_snapshot(\"insufficient_symbols_failure\", failure_seed,\n    &failure_proof,), \"strategy_transitions\":\n    progress_trace_snapshot(\"strategy_transitions\", transition_seed,\n    &transition_result.proof,),\n})"
+---
+{
+  "insufficient_symbols_failure": {
+    "config": {
+      "h": 10,
+      "k": 10,
+      "l": 27,
+      "s": 7,
+      "sbn": 0,
+      "symbol_size": 32
+    },
+    "elimination_trace": {
+      "inactivated": 0,
+      "inactive_cols": [],
+      "inactive_cols_truncated": false,
+      "pivot_events": [],
+      "pivot_events_truncated": false,
+      "pivots": 0,
+      "row_ops": 0,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Failure",
+      "reason": "InsufficientSymbols { received: 3, required: 27 }"
+    },
+    "peeling_trace": {
+      "solved": 0,
+      "solved_indices": [],
+      "truncated": false
+    },
+    "received_summary": {
+      "esis_length": 3,
+      "repair_count": 0,
+      "source_count": 3,
+      "total": 3,
+      "truncated": false
+    },
+    "scenario": "insufficient_symbols_failure",
+    "seed": 99999
+  },
+  "mixed_peeling_elimination": {
+    "config": {
+      "h": 10,
+      "k": 8,
+      "l": 27,
+      "s": 7,
+      "sbn": 0,
+      "symbol_size": 32
+    },
+    "elimination_trace": {
+      "inactivated": 27,
+      "inactive_cols": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26
+      ],
+      "inactive_cols_truncated": false,
+      "pivot_events": [
+        {
+          "col": 26,
+          "row": 16
+        },
+        {
+          "col": 24,
+          "row": 6
+        },
+        {
+          "col": 17,
+          "row": 0
+        },
+        {
+          "col": 18,
+          "row": 1
+        },
+        {
+          "col": 19,
+          "row": 2
+        },
+        {
+          "col": 25,
+          "row": 15
+        },
+        {
+          "col": 23,
+          "row": 5
+        },
+        {
+          "col": 20,
+          "row": 3
+        },
+        {
+          "col": 21,
+          "row": 4
+        },
+        {
+          "col": 22,
+          "row": 7
+        },
+        {
+          "col": 10,
+          "row": 8
+        },
+        {
+          "col": 0,
+          "row": 9
+        },
+        {
+          "col": 3,
+          "row": 10
+        },
+        {
+          "col": 11,
+          "row": 11
+        },
+        {
+          "col": 12,
+          "row": 13
+        },
+        {
+          "col": 14,
+          "row": 12
+        },
+        {
+          "col": 15,
+          "row": 14
+        },
+        {
+          "col": 16,
+          "row": 17
+        },
+        {
+          "col": 1,
+          "row": 18
+        },
+        {
+          "col": 6,
+          "row": 19
+        },
+        {
+          "col": 8,
+          "row": 20
+        },
+        {
+          "col": 4,
+          "row": 21
+        },
+        {
+          "col": 5,
+          "row": 22
+        },
+        {
+          "col": 13,
+          "row": 23
+        },
+        {
+          "col": 2,
+          "row": 24
+        },
+        {
+          "col": 9,
+          "row": 25
+        },
+        {
+          "col": 7,
+          "row": 26
+        }
+      ],
+      "pivot_events_truncated": false,
+      "pivots": 27,
+      "row_ops": 545,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Success",
+      "symbols_recovered": 8
+    },
+    "peeling_trace": {
+      "solved": 0,
+      "solved_indices": [],
+      "truncated": false
+    },
+    "received_summary": {
+      "esis_length": 28,
+      "repair_count": 20,
+      "source_count": 8,
+      "total": 28,
+      "truncated": false
+    },
+    "scenario": "mixed_peeling_elimination",
+    "seed": 54321
+  },
+  "strategy_transitions": {
+    "config": {
+      "h": 10,
+      "k": 12,
+      "l": 29,
+      "s": 7,
+      "sbn": 0,
+      "symbol_size": 64
+    },
+    "elimination_trace": {
+      "inactivated": 29,
+      "inactive_cols": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28
+      ],
+      "inactive_cols_truncated": false,
+      "pivot_events": [
+        {
+          "col": 28,
+          "row": 16
+        },
+        {
+          "col": 19,
+          "row": 0
+        },
+        {
+          "col": 25,
+          "row": 5
+        },
+        {
+          "col": 20,
+          "row": 1
+        },
+        {
+          "col": 21,
+          "row": 2
+        },
+        {
+          "col": 24,
+          "row": 4
+        },
+        {
+          "col": 27,
+          "row": 15
+        },
+        {
+          "col": 22,
+          "row": 3
+        },
+        {
+          "col": 26,
+          "row": 6
+        },
+        {
+          "col": 23,
+          "row": 7
+        },
+        {
+          "col": 12,
+          "row": 8
+        },
+        {
+          "col": 18,
+          "row": 9
+        },
+        {
+          "col": 15,
+          "row": 10
+        },
+        {
+          "col": 3,
+          "row": 11
+        },
+        {
+          "col": 13,
+          "row": 12
+        },
+        {
+          "col": 10,
+          "row": 13
+        },
+        {
+          "col": 16,
+          "row": 14
+        },
+        {
+          "col": 6,
+          "row": 17
+        },
+        {
+          "col": 8,
+          "row": 18
+        },
+        {
+          "col": 11,
+          "row": 19
+        },
+        {
+          "col": 14,
+          "row": 20
+        },
+        {
+          "col": 17,
+          "row": 21
+        },
+        {
+          "col": 0,
+          "row": 22
+        },
+        {
+          "col": 1,
+          "row": 23
+        },
+        {
+          "col": 4,
+          "row": 24
+        },
+        {
+          "col": 7,
+          "row": 25
+        },
+        {
+          "col": 2,
+          "row": 26
+        },
+        {
+          "col": 5,
+          "row": 27
+        },
+        {
+          "col": 9,
+          "row": 28
+        }
+      ],
+      "pivot_events_truncated": false,
+      "pivots": 29,
+      "row_ops": 924,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Success",
+      "symbols_recovered": 12
+    },
+    "peeling_trace": {
+      "solved": 0,
+      "solved_indices": [],
+      "truncated": false
+    },
+    "received_summary": {
+      "esis_length": 44,
+      "repair_count": 34,
+      "source_count": 10,
+      "total": 44,
+      "truncated": false
+    },
+    "scenario": "strategy_transitions",
+    "seed": 777
+  },
+  "systematic_success": {
+    "config": {
+      "h": 10,
+      "k": 6,
+      "l": 27,
+      "s": 7,
+      "sbn": 0,
+      "symbol_size": 16
+    },
+    "elimination_trace": {
+      "inactivated": 27,
+      "inactive_cols": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26
+      ],
+      "inactive_cols_truncated": false,
+      "pivot_events": [
+        {
+          "col": 24,
+          "row": 6
+        },
+        {
+          "col": 26,
+          "row": 16
+        },
+        {
+          "col": 23,
+          "row": 5
+        },
+        {
+          "col": 25,
+          "row": 15
+        },
+        {
+          "col": 17,
+          "row": 0
+        },
+        {
+          "col": 18,
+          "row": 1
+        },
+        {
+          "col": 19,
+          "row": 2
+        },
+        {
+          "col": 21,
+          "row": 3
+        },
+        {
+          "col": 22,
+          "row": 4
+        },
+        {
+          "col": 20,
+          "row": 7
+        },
+        {
+          "col": 10,
+          "row": 8
+        },
+        {
+          "col": 11,
+          "row": 9
+        },
+        {
+          "col": 14,
+          "row": 10
+        },
+        {
+          "col": 15,
+          "row": 11
+        },
+        {
+          "col": 0,
+          "row": 12
+        },
+        {
+          "col": 3,
+          "row": 13
+        },
+        {
+          "col": 12,
+          "row": 14
+        },
+        {
+          "col": 16,
+          "row": 17
+        },
+        {
+          "col": 1,
+          "row": 18
+        },
+        {
+          "col": 6,
+          "row": 19
+        },
+        {
+          "col": 13,
+          "row": 20
+        },
+        {
+          "col": 2,
+          "row": 21
+        },
+        {
+          "col": 4,
+          "row": 22
+        },
+        {
+          "col": 8,
+          "row": 23
+        },
+        {
+          "col": 5,
+          "row": 24
+        },
+        {
+          "col": 7,
+          "row": 25
+        },
+        {
+          "col": 9,
+          "row": 26
+        }
+      ],
+      "pivot_events_truncated": false,
+      "pivots": 27,
+      "row_ops": 493,
+      "strategy": "AllAtOnce",
+      "strategy_transitions": [],
+      "strategy_transitions_truncated": false
+    },
+    "outcome": {
+      "kind": "Success",
+      "symbols_recovered": 6
+    },
+    "peeling_trace": {
+      "solved": 0,
+      "solved_indices": [],
+      "truncated": false
+    },
+    "received_summary": {
+      "esis_length": 23,
+      "repair_count": 17,
+      "source_count": 6,
+      "total": 23,
+      "truncated": false
+    },
+    "scenario": "systematic_success",
+    "seed": 12345
+  }
+}

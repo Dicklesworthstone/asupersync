@@ -1,0 +1,416 @@
+{
+  "schema_version": "asupersync.atp.proof_reconciliation.v1",
+  "generated_for_bead": "asupersync-vk4kcf.15",
+  "created_date": "2026-05-24",
+  "generated_at_utc": "2026-05-24T22:40:00Z",
+  "purpose": "Inventory older closed ATP-N proof claims against the current implementation so stale or overbroad claims cannot satisfy ATP-NR13 release proof aggregation.",
+  "source_of_truth": {
+    "reconciliation_artifact": "artifacts/atp_proof_reconciliation_v1.json",
+    "documentation": "docs/atp_proof_reconciliation/README.md",
+    "contract_test": "tests/atp_proof_reconciliation_contract.rs",
+    "dashboard_contract": "artifacts/atp_completion_dashboard_contract_v1.json"
+  },
+  "policy": {
+    "history_policy": "Closed Beads are not deleted or rewritten; stale proof claims are made explicit and routed to live ATP-NR gates.",
+    "release_policy": "No historical ATP-N closure in this inventory directly satisfies ATP-NR13. ATP-NR13 must consume current ATP-NR gates and fresh artifacts.",
+    "stale_claim_release_policy": "Entries marked stale_overbroad, superseded_by_atp_nr, or blocked_frontier are release-blocking unless their replacement gates are green.",
+    "foundation_policy": "Entries marked accepted_foundation may remain valid foundational evidence but still require current ATP-NR release gates before signoff."
+  },
+  "release_proof_inputs": {
+    "atp_nr0_dashboard_gate": "ATP-NR14",
+    "atp_nr13_policy": "exclude_stale_or_superseded_historical_claims",
+    "required_dashboard_artifacts": [
+      "artifacts/atp_proof_reconciliation_v1.json",
+      "docs/atp_proof_reconciliation/README.md",
+      "tests/atp_proof_reconciliation_contract.rs"
+    ],
+    "blocked_release_reason": "Historical ATP-N proof closures contain broad claims that are not equivalent to the current ATP-NR release proof aggregate."
+  },
+  "required_closed_atp_n_claims": [
+    "asupersync-9tty78",
+    "asupersync-33lyim",
+    "asupersync-fkfntf",
+    "asupersync-m20jwv",
+    "asupersync-utdpso",
+    "asupersync-z6ehte",
+    "asupersync-xvaftm"
+  ],
+  "status_catalog": [
+    {
+      "status": "accepted_foundation",
+      "meaning": "The closed claim has live, focused artifacts that remain useful as foundation evidence, but it is not a complete release proof by itself."
+    },
+    {
+      "status": "superseded_by_atp_nr",
+      "meaning": "The older closure is too broad for release signoff and must be replaced by the named ATP-NR gate or gates."
+    },
+    {
+      "status": "stale_overbroad",
+      "meaning": "The older closure conflicts with live implementation or coverage reality and cannot be cited as current proof."
+    },
+    {
+      "status": "blocked_frontier",
+      "meaning": "The replacement proof is known but currently blocked by implementation, environment, or shared-main frontier work."
+    }
+  ],
+  "entries": [
+    {
+      "bead_id": "asupersync-9tty78",
+      "title": "ATP-N1: Define per-module unit/property/metamorphic test contract and coverage ledger",
+      "closed_at": "2026-05-22T00:47:29.724979383Z",
+      "close_reason": "Normalize invalid status (was 'completed'/'done')",
+      "claimed_guarantee": "Every ATP module has a per-module unit, property, and metamorphic test contract plus a coverage ledger that release gates can reference.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "7227ab974",
+      "current_status": "stale_overbroad",
+      "current_command_result": "Not rerun as a release proof. Live docs/atp_coverage_ledger.md reports TESTED 0, PARTIAL 0, PLANNED 33 and lists all critical path modules as PLANNED.",
+      "current_artifact_paths": [
+        "docs/atp_coverage_ledger.md",
+        "docs/atp_test_contract.md",
+        "tests/atp_test_plan.rs"
+      ],
+      "live_evidence": [
+        {
+          "path": "docs/atp_coverage_ledger.md",
+          "finding": "The compliance summary says TESTED 0 and PLANNED 33; critical path modules remain release blockers."
+        },
+        {
+          "path": "docs/atp_test_contract.md",
+          "finding": "The contract requires coverage, property, cancellation, leak, and performance gates that the ledger does not mark complete."
+        },
+        {
+          "path": "tests/atp_test_plan.rs",
+          "finding": "The test validates that ledger rows and required sections exist; it does not prove all module tests are implemented."
+        }
+      ],
+      "replacement_gates": [
+        "asupersync-vk4kcf.2",
+        "asupersync-vk4kcf.3",
+        "asupersync-vk4kcf.11"
+      ],
+      "release_gate_dependencies": [
+        "ATP-NR1",
+        "ATP-NR3",
+        "ATP-NR13"
+      ],
+      "release_proof_policy": "does_not_satisfy_atp_nr13",
+      "reconciliation_notes": [
+        "Keep N1 as documentation foundation only.",
+        "Use ATP-NR3 for current per-module coverage proof."
+      ]
+    },
+    {
+      "bead_id": "asupersync-33lyim",
+      "title": "ATP-N2: Build native QUIC protocol conformance, fuzz, and deterministic packet e2e harness",
+      "closed_at": "2026-05-20T18:23:25.072640944Z",
+      "close_reason": "ATP-N2 QUIC conformance/fuzz/e2e harness implemented",
+      "claimed_guarantee": "Native QUIC has conformance, fuzz, deterministic packet-lab, and local two-endpoint e2e proof evidence.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "435f74458",
+      "current_status": "superseded_by_atp_nr",
+      "current_command_result": "Not rerun as release proof. Live ATP-NR8 remains the current gate for native QUIC endpoint e2e without external QUIC crates.",
+      "current_artifact_paths": [
+        "tests/atp/quic/conformance.rs",
+        "tests/atp/quic/fuzz_harness.rs",
+        "tests/atp/quic/e2e_endpoints.rs",
+        "tests/atp_native_quic_endpoint_contract.rs",
+        "artifacts/atp_quic_dependency_audit_gate_contract_v1.json"
+      ],
+      "live_evidence": [
+        {
+          "path": "tests/atp/quic/conformance.rs",
+          "finding": "QUIC conformance harness surface exists."
+        },
+        {
+          "path": "tests/atp/quic/fuzz_harness.rs",
+          "finding": "Fuzz harness surface exists."
+        },
+        {
+          "path": "tests/atp_native_quic_endpoint_contract.rs",
+          "finding": "Current endpoint contract is the live ATP-NR8 proof surface, not the old closure text."
+        },
+        {
+          "path": "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+          "finding": "Dependency gate artifact supports no external QUIC stack policy."
+        }
+      ],
+      "replacement_gates": [
+        "asupersync-vk4kcf.6",
+        "asupersync-vk4kcf.11"
+      ],
+      "release_gate_dependencies": [
+        "ATP-NR8",
+        "ATP-NR13"
+      ],
+      "release_proof_policy": "does_not_satisfy_atp_nr13",
+      "reconciliation_notes": [
+        "The old N2 closure remains useful inventory, but ATP-NR8 is the current release proof gate.",
+        "Do not cite N2 alone for complete native QUIC endpoint proof."
+      ]
+    },
+    {
+      "bead_id": "asupersync-fkfntf",
+      "title": "ATP-N3: Build object graph, manifest, disk, journal, verifier, and crash-resume e2e proof suite",
+      "closed_at": "2026-05-20T18:23:37.372058693Z",
+      "close_reason": "ATP-N3 object graph, journal, verifier crash-resume e2e proof suite implemented",
+      "claimed_guarantee": "Object graph, manifest, disk, journal, verifier, and crash-resume e2e proof suite exists for receiver safety.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "2b6330a37",
+      "current_status": "superseded_by_atp_nr",
+      "current_command_result": "Not rerun as release proof. The current ledger still marks object, manifest, verifier, proof, journal, and writer modules PLANNED.",
+      "current_artifact_paths": [
+        "tests/atp_object_journal_e2e_proof_suite.rs",
+        "tests/atp/object/file_object_e2e.rs",
+        "tests/atp/journal/append_recovery_e2e.rs",
+        "docs/atp_coverage_ledger.md"
+      ],
+      "live_evidence": [
+        {
+          "path": "tests/atp_object_journal_e2e_proof_suite.rs",
+          "finding": "Object and journal e2e proof-suite surface exists."
+        },
+        {
+          "path": "tests/atp/object/file_object_e2e.rs",
+          "finding": "File-object e2e slice exists."
+        },
+        {
+          "path": "tests/atp/journal/append_recovery_e2e.rs",
+          "finding": "Journal append/recovery e2e slice exists."
+        },
+        {
+          "path": "docs/atp_coverage_ledger.md",
+          "finding": "Live module coverage status contradicts a full object/journal/verifier release-proof claim."
+        }
+      ],
+      "replacement_gates": [
+        "asupersync-vk4kcf.5",
+        "asupersync-vk4kcf.8",
+        "asupersync-vk4kcf.11"
+      ],
+      "release_gate_dependencies": [
+        "ATP-NR6",
+        "ATP-NR7",
+        "ATP-NR13"
+      ],
+      "release_proof_policy": "does_not_satisfy_atp_nr13",
+      "reconciliation_notes": [
+        "Treat N3 as partial object/journal foundation.",
+        "Use ATP-NR6 and ATP-NR7 for current object-transfer and crash/resume release evidence."
+      ]
+    },
+    {
+      "bead_id": "asupersync-m20jwv",
+      "title": "ATP-N5: Build CLI, atpd, SDK, and user-journey e2e scripts with structured log bundles",
+      "closed_at": "2026-05-20T18:16:55.534222935Z",
+      "close_reason": "Added ATP CLI user-journey contract module, structured JSONL bundle runner, and tests/cli validator; script covers CLI/atpd/SDK journeys, receive safety, path fallback, proof/replay artifact discovery.",
+      "claimed_guarantee": "CLI, atpd, SDK, and real user-journey e2e scripts exist with structured log bundles.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "b46bb1557",
+      "current_status": "superseded_by_atp_nr",
+      "current_command_result": "Not rerun as release proof. CLI/SDK/daemon journeys now route through ATP-NR5, ATP-NR10, and ATP-NR13.",
+      "current_artifact_paths": [
+        "tests/cli/atp_user_journey_contract.py",
+        "tests/atp_atpd_appspec.rs",
+        "tests/atp_perf_workflow_acceptance_contract.rs",
+        "docs/atp_log_schema.md"
+      ],
+      "live_evidence": [
+        {
+          "path": "tests/cli/atp_user_journey_contract.py",
+          "finding": "CLI user-journey validator exists."
+        },
+        {
+          "path": "tests/atp_atpd_appspec.rs",
+          "finding": "atpd app-spec contract surface exists."
+        },
+        {
+          "path": "tests/atp_perf_workflow_acceptance_contract.rs",
+          "finding": "Current workflow perf/usability acceptance contract exists."
+        },
+        {
+          "path": "docs/atp_log_schema.md",
+          "finding": "Structured log schema now comes from ATP-N6 rather than this older closure."
+        }
+      ],
+      "replacement_gates": [
+        "asupersync-vk4kcf.4",
+        "asupersync-vk4kcf.9",
+        "asupersync-vk4kcf.11"
+      ],
+      "release_gate_dependencies": [
+        "ATP-NR5",
+        "ATP-NR10",
+        "ATP-NR13"
+      ],
+      "release_proof_policy": "does_not_satisfy_atp_nr13",
+      "reconciliation_notes": [
+        "The old user-journey contract is a useful foundation.",
+        "It does not replace the current no-mock multi-process and CLI/SDK/daemon NR gates."
+      ]
+    },
+    {
+      "bead_id": "asupersync-utdpso",
+      "title": "ATP-N6: Define structured logging, trace redaction, failure bundle, and replay artifact contract for all ATP tests",
+      "closed_at": "2026-05-24T20:39:47.263224756Z",
+      "close_reason": "Implemented ATP-N6 structured log, failure-bundle, redaction, and replay-artifact schema contract.",
+      "claimed_guarantee": "ATP tests have a structured logging, trace redaction, failure-bundle, and replay-artifact schema contract.",
+      "claimed_proof_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/data/tmp/rch_target_p9 cargo test -p asupersync --test atp_e2e_proof_suite test_forensics_uses_logging_failure_bundle_replay_contract -- --nocapture",
+      "last_known_commit": "d3980fda6",
+      "current_status": "accepted_foundation",
+      "current_command_result": "Accepted as current foundation evidence. ATP-NR4 golden-log corpus also exercises the structured logging contract.",
+      "current_artifact_paths": [
+        "docs/atp_log_schema.md",
+        "src/atp/logging/schema.rs",
+        "src/atp/logging/failure_bundle.rs",
+        "src/atp/logging/redaction.rs",
+        "src/atp/logging/replay_artifacts.rs",
+        "tests/atp_e2e_proof_suite.rs",
+        "tests/atp_fixture_golden_log_corpus.rs"
+      ],
+      "live_evidence": [
+        {
+          "path": "docs/atp_log_schema.md",
+          "finding": "Canonical log schema documentation exists."
+        },
+        {
+          "path": "src/atp/logging/schema.rs",
+          "finding": "Structured log schema implementation exists."
+        },
+        {
+          "path": "src/atp/logging/failure_bundle.rs",
+          "finding": "Failure-bundle implementation exists."
+        },
+        {
+          "path": "tests/atp_fixture_golden_log_corpus.rs",
+          "finding": "Deterministic golden-log corpus validates the structured logging contract."
+        }
+      ],
+      "replacement_gates": [],
+      "release_gate_dependencies": [
+        "ATP-NR4",
+        "ATP-NR13"
+      ],
+      "release_proof_policy": "foundation_only",
+      "reconciliation_notes": [
+        "This is a legitimate completed foundation.",
+        "It still does not prove every ATP e2e, platform, and release aggregation lane."
+      ]
+    },
+    {
+      "bead_id": "asupersync-z6ehte",
+      "title": "ATP-N7: Build cross-platform CI and release proof lane matrix for ATP tests",
+      "closed_at": "2026-05-20T19:37:59.469213416Z",
+      "close_reason": "Cross-platform CI and proof lane matrix implemented and landed",
+      "claimed_guarantee": "Cross-platform CI and named release proof lanes cover ATP tests and release signoff.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "7227ab974",
+      "current_status": "superseded_by_atp_nr",
+      "current_command_result": "Not rerun as release proof. The canonical proof status snapshot is dated 2026-05-08 and the ATP-NR11 cross-platform gate remains the current platform capability proof.",
+      "current_artifact_paths": [
+        "docs/atp-dependency-gates.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/proof_status_snapshot_contract.rs"
+      ],
+      "live_evidence": [
+        {
+          "path": "docs/atp-dependency-gates.md",
+          "finding": "Dependency lanes are documented, but this is not a fresh cross-platform execution result."
+        },
+        {
+          "path": "artifacts/proof_lane_manifest_v1.json",
+          "finding": "Canonical lane manifest exists and names proof commands."
+        },
+        {
+          "path": "artifacts/proof_status_snapshot_v1.json",
+          "finding": "Snapshot exists but is dated 2026-05-08 and is stale under ATP-NR0 policy."
+        },
+        {
+          "path": "tests/proof_status_snapshot_contract.rs",
+          "finding": "Contract explicitly distinguishes green, scoped, frontier, and externally blocked proof rows."
+        }
+      ],
+      "replacement_gates": [
+        "asupersync-vk4kcf.10",
+        "asupersync-vk4kcf.11",
+        "asupersync-vk4kcf.15"
+      ],
+      "release_gate_dependencies": [
+        "ATP-NR11",
+        "ATP-NR13",
+        "ATP-NR14"
+      ],
+      "release_proof_policy": "does_not_satisfy_atp_nr13",
+      "reconciliation_notes": [
+        "The proof-lane manifest remains useful governance.",
+        "Fresh cross-platform capability evidence must come from ATP-NR11 and ATP-NR13."
+      ]
+    },
+    {
+      "bead_id": "asupersync-xvaftm",
+      "title": "ATP-N10: Enforce per-implementation Definition of Done for unit tests, e2e scripts, logs, and proof artifacts",
+      "closed_at": "2026-05-20T19:37:54.707565552Z",
+      "close_reason": "DoD enforcement infrastructure implemented and landed",
+      "claimed_guarantee": "ATP Definition of Done enforcement infrastructure rejects inadequate evidence such as compile-only, no-log, no-replay, or external-runtime-smuggled closures.",
+      "claimed_proof_command": "not recorded in close reason",
+      "last_known_commit": "7227ab974",
+      "current_status": "accepted_foundation",
+      "current_command_result": "Accepted as governance foundation only. ATP-NR0 and ATP-NR13 remain the live truth table and release aggregation gates.",
+      "current_artifact_paths": [
+        "ATP_DOD_CHECKLIST.md",
+        "scripts/validate_dod.sh",
+        "tests/atp/dod_validation.rs",
+        "artifacts/atp_completion_dashboard_contract_v1.json",
+        "tests/atp_completion_dashboard_contract.rs"
+      ],
+      "live_evidence": [
+        {
+          "path": "ATP_DOD_CHECKLIST.md",
+          "finding": "Manual DoD checklist exists."
+        },
+        {
+          "path": "scripts/validate_dod.sh",
+          "finding": "DoD validator script exists."
+        },
+        {
+          "path": "tests/atp/dod_validation.rs",
+          "finding": "Automated DoD validation test surface exists."
+        },
+        {
+          "path": "artifacts/atp_completion_dashboard_contract_v1.json",
+          "finding": "ATP-NR0 dashboard contract is now the live completion truth table."
+        }
+      ],
+      "replacement_gates": [],
+      "release_gate_dependencies": [
+        "ATP-NR0",
+        "ATP-NR13",
+        "ATP-NR14"
+      ],
+      "release_proof_policy": "foundation_only",
+      "reconciliation_notes": [
+        "This is legitimate governance infrastructure.",
+        "It is not a substitute for the current ATP-NR dashboard and release proof aggregation."
+      ]
+    }
+  ],
+  "reconciliation_summary": {
+    "older_claims_total": 7,
+    "accepted_foundations": 2,
+    "superseded_or_stale_claims": 5,
+    "historical_claims_that_directly_satisfy_atp_nr13": 0,
+    "claims_not_allowed_for_release": 7,
+    "release_blocking_followups": [
+      "asupersync-vk4kcf.2",
+      "asupersync-vk4kcf.3",
+      "asupersync-vk4kcf.4",
+      "asupersync-vk4kcf.5",
+      "asupersync-vk4kcf.6",
+      "asupersync-vk4kcf.8",
+      "asupersync-vk4kcf.9",
+      "asupersync-vk4kcf.10",
+      "asupersync-vk4kcf.11"
+    ]
+  }
+}

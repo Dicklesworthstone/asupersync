@@ -1,0 +1,865 @@
+//! Symbol collection and threshold tracking.
+//!
+//! `SymbolSet` collects symbols, deduplicates by `SymbolId`, tracks per-block
+//! progress, and reports when decode thresholds are reached.
+
+use crate::types::{Symbol, SymbolId, SymbolKind};
+use crate::util::DetHashMap;
+use parking_lot::RwLock;
+
+/// Estimated overhead per symbol for bookkeeping.
+const SYMBOL_OVERHEAD_BYTES: usize = 32;
+
+/// Configuration for threshold detection.
+#[derive(Debug, Clone, Copy)]
+pub struct ThresholdConfig {
+    /// Overhead factor (e.g., 1.02 means need K * 1.02 symbols).
+    pub overhead_factor: f64,
+    /// Minimum extra symbols beyond K.
+    pub min_overhead: usize,
+    /// Maximum symbols to accept per block (0 = unlimited).
+    pub max_per_block: usize,
+}
+
+impl ThresholdConfig {
+    /// Creates a new threshold configuration.
+    #[inline]
+    #[must_use]
+    pub const fn new(overhead_factor: f64, min_overhead: usize, max_per_block: usize) -> Self {
+        Self {
+            overhead_factor,
+            min_overhead,
+            max_per_block,
+        }
+    }
+}
+
+impl Default for ThresholdConfig {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            overhead_factor: 1.02,
+            min_overhead: 0,
+            max_per_block: 8192,
+        }
+    }
+}
+
+/// Progress tracking for a single source block.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockProgress {
+    /// Source block number.
+    pub sbn: u8,
+    /// Count of source symbols seen.
+    pub source_symbols: usize,
+    /// Count of repair symbols seen.
+    pub repair_symbols: usize,
+    /// Number of source symbols (K) if known.
+    pub k: Option<u16>,
+    /// Whether threshold has been reached.
+    pub threshold_reached: bool,
+}
+
+impl BlockProgress {
+    /// Returns the total number of symbols for this block.
+    #[inline]
+    #[must_use]
+    pub const fn total(&self) -> usize {
+        self.source_symbols + self.repair_symbols
+    }
+}
+
+/// Result of inserting a symbol.
+#[derive(Debug, Clone)]
+pub enum InsertResult {
+    /// Symbol inserted successfully.
+    Inserted {
+        /// Updated progress for this block.
+        block_progress: BlockProgress,
+        /// Whether threshold has been reached for this block.
+        threshold_reached: bool,
+    },
+    /// Symbol was already present.
+    Duplicate,
+    /// Symbol rejected due to memory limit.
+    MemoryLimitReached,
+    /// Symbol rejected due to per-block limit.
+    BlockLimitReached {
+        /// Block number that hit the limit.
+        sbn: u8,
+    },
+}
+
+/// A collection of symbols with threshold tracking.
+///
+/// br-asupersync-jg4yyx: backed by [`DetHashMap`] (project-fixed
+/// SipHash seed) instead of `std::collections::HashMap` (random
+/// per-process seed). Pre-fix, two `SymbolSet` instances built from
+/// the same input sequence iterated in different orders across
+/// replays / processes — defeating crashpack-hash determinism and
+/// any oracle that snapshots the symbol set as a golden artifact.
+/// Same fix-shape as the closed asupersync-q6vujm
+/// (`trace/distributed/collector.rs`) and asupersync-ks0t6j
+/// (`runtime/scheduler/three_lane.rs FairnessMonitor`).
+#[derive(Debug, Default)]
+pub struct SymbolSet {
+    symbols: DetHashMap<SymbolId, Symbol>,
+    block_counts: DetHashMap<u8, BlockProgress>,
+    total_count: usize,
+    total_bytes: usize,
+    memory_budget: Option<usize>,
+    memory_remaining: usize,
+    threshold_config: ThresholdConfig,
+}
+
+impl SymbolSet {
+    /// Creates a new SymbolSet with the default threshold configuration.
+    #[inline]
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_config(ThresholdConfig::default())
+    }
+
+    /// Creates a new SymbolSet with the specified configuration.
+    #[inline]
+    #[must_use]
+    pub fn with_config(config: ThresholdConfig) -> Self {
+        Self {
+            symbols: DetHashMap::default(),
+            block_counts: DetHashMap::default(),
+            total_count: 0,
+            total_bytes: 0,
+            memory_budget: None,
+            memory_remaining: 0,
+            threshold_config: config,
+        }
+    }
+
+    /// Creates a new SymbolSet with a memory budget.
+    #[inline]
+    #[must_use]
+    pub fn with_memory_budget(config: ThresholdConfig, budget_bytes: usize) -> Self {
+        let mut set = Self::with_config(config);
+        set.memory_budget = Some(budget_bytes);
+        set.memory_remaining = budget_bytes;
+        set
+    }
+
+    /// Inserts a symbol into the set.
+    pub fn insert(&mut self, symbol: Symbol) -> InsertResult {
+        let id = symbol.id();
+        if self.symbols.contains_key(&id) {
+            return InsertResult::Duplicate;
+        }
+
+        let size = Self::estimate_symbol_size(&symbol);
+        if !self.try_allocate(size) {
+            return InsertResult::MemoryLimitReached;
+        }
+
+        let sbn = id.sbn();
+        let config = self.threshold_config;
+
+        // Scope the mutable borrow of block_counts
+        let (limit_reached, progress_copy) = {
+            let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+                sbn,
+                source_symbols: 0,
+                repair_symbols: 0,
+                k: None,
+                threshold_reached: false,
+            });
+
+            if config.max_per_block != 0 && progress.total() >= config.max_per_block {
+                (true, *progress)
+            } else {
+                match symbol.kind() {
+                    SymbolKind::Source => progress.source_symbols += 1,
+                    SymbolKind::Repair => progress.repair_symbols += 1,
+                }
+
+                progress.threshold_reached = Self::calculate_threshold(progress, &config);
+                (false, *progress)
+            }
+        };
+
+        if limit_reached {
+            self.deallocate(size);
+            return InsertResult::BlockLimitReached { sbn };
+        }
+
+        self.symbols.insert(id, symbol);
+        self.total_count += 1;
+
+        InsertResult::Inserted {
+            block_progress: progress_copy,
+            threshold_reached: progress_copy.threshold_reached,
+        }
+    }
+
+    /// Inserts multiple symbols into the set.
+    pub fn insert_batch(&mut self, symbols: impl Iterator<Item = Symbol>) -> Vec<InsertResult> {
+        symbols.map(|symbol| self.insert(symbol)).collect()
+    }
+
+    /// Sets the source-symbol count (K) for a block.
+    ///
+    /// Returns true if the threshold is now reached for that block.
+    pub fn set_block_k(&mut self, sbn: u8, k: u16) -> bool {
+        let config = self.threshold_config;
+        let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+            sbn,
+            source_symbols: 0,
+            repair_symbols: 0,
+            k: None,
+            threshold_reached: false,
+        });
+        progress.k = Some(k);
+        progress.threshold_reached = Self::calculate_threshold(progress, &config);
+        progress.threshold_reached
+    }
+
+    /// Updates the maximum number of symbols accepted per block.
+    ///
+    /// This is used by decoders that can derive a safer cap only after object
+    /// parameters reveal the block geometry.
+    pub fn set_max_per_block(&mut self, max_per_block: usize) {
+        self.threshold_config.max_per_block = max_per_block;
+    }
+
+    /// The current per-block symbol-accept cap (`0` means unbounded).
+    #[must_use]
+    pub fn max_per_block(&self) -> usize {
+        self.threshold_config.max_per_block
+    }
+
+    /// Returns true if a symbol is present.
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, id: &SymbolId) -> bool {
+        self.symbols.contains_key(id)
+    }
+
+    /// Gets a symbol by ID.
+    #[inline]
+    #[must_use]
+    pub fn get(&self, id: &SymbolId) -> Option<&Symbol> {
+        self.symbols.get(id)
+    }
+
+    /// Removes a symbol by ID.
+    pub fn remove(&mut self, id: &SymbolId) -> Option<Symbol> {
+        let symbol = self.symbols.remove(id)?;
+        self.total_count = self.total_count.saturating_sub(1);
+        self.deallocate(Self::estimate_symbol_size(&symbol));
+
+        let sbn = id.sbn();
+        if let Some(progress) = self.block_counts.get_mut(&sbn) {
+            match symbol.kind() {
+                SymbolKind::Source => {
+                    progress.source_symbols = progress.source_symbols.saturating_sub(1);
+                }
+                SymbolKind::Repair => {
+                    progress.repair_symbols = progress.repair_symbols.saturating_sub(1);
+                }
+            }
+            progress.threshold_reached =
+                Self::calculate_threshold(progress, &self.threshold_config);
+            if progress.total() == 0 && progress.k.is_none() {
+                self.block_counts.remove(&sbn);
+            }
+        }
+
+        Some(symbol)
+    }
+
+    /// Returns an iterator over all symbols for a block.
+    pub fn symbols_for_block(&self, sbn: u8) -> impl Iterator<Item = &Symbol> {
+        self.symbols
+            .values()
+            .filter(move |symbol| symbol.sbn() == sbn)
+    }
+
+    /// Restores a previously accepted symbol without applying per-block intake
+    /// limits again.
+    ///
+    /// Deferred decode jobs temporarily move symbols out of the receive set so
+    /// the pipeline does not keep a second payload copy while a blocking solve
+    /// owns the job. If that solve is stale or fails, the same accepted symbols
+    /// must be put back exactly as retained input, not treated as fresh network
+    /// intake that can trip the cap.
+    pub(crate) fn restore_retained(&mut self, symbol: Symbol) -> bool {
+        let id = symbol.id();
+        if self.symbols.contains_key(&id) {
+            return false;
+        }
+
+        let size = Self::estimate_symbol_size(&symbol);
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        if self.memory_budget.is_some() {
+            self.memory_remaining = self.memory_remaining.saturating_sub(size);
+        }
+
+        let sbn = id.sbn();
+        let progress = self.block_counts.entry(sbn).or_insert(BlockProgress {
+            sbn,
+            source_symbols: 0,
+            repair_symbols: 0,
+            k: None,
+            threshold_reached: false,
+        });
+        match symbol.kind() {
+            SymbolKind::Source => progress.source_symbols += 1,
+            SymbolKind::Repair => progress.repair_symbols += 1,
+        }
+        progress.threshold_reached = Self::calculate_threshold(progress, &self.threshold_config);
+
+        self.symbols.insert(id, symbol);
+        self.total_count = self.total_count.saturating_add(1);
+        true
+    }
+
+    /// Moves all currently retained symbols for a block out of the set.
+    ///
+    /// The block's configured `K` is preserved so new arrivals while the decode
+    /// job is in flight still have correct threshold metadata.
+    pub(crate) fn take_block_symbols(&mut self, sbn: u8) -> Vec<Symbol> {
+        let ids: Vec<SymbolId> = self
+            .symbols
+            .iter()
+            .filter_map(|(id, symbol)| (symbol.sbn() == sbn).then_some(*id))
+            .collect();
+        let mut symbols = Vec::with_capacity(ids.len());
+        for id in ids {
+            if let Some(symbol) = self.remove(&id) {
+                symbols.push(symbol);
+            }
+        }
+        symbols
+    }
+
+    /// Returns block progress for a given block.
+    #[inline]
+    #[must_use]
+    pub fn block_progress(&self, sbn: u8) -> Option<&BlockProgress> {
+        self.block_counts.get(&sbn)
+    }
+
+    /// Returns true if the threshold is reached for a block.
+    #[inline]
+    #[must_use]
+    pub fn threshold_reached(&self, sbn: u8) -> bool {
+        self.block_counts
+            .get(&sbn)
+            .is_some_and(|progress| progress.threshold_reached)
+    }
+
+    /// Returns all blocks that have reached the threshold.
+    #[must_use]
+    pub fn ready_blocks(&self) -> Vec<u8> {
+        let mut ready: Vec<u8> = self
+            .block_counts
+            .iter()
+            .filter_map(|(sbn, progress)| {
+                if progress.threshold_reached {
+                    Some(*sbn)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        ready.sort_unstable();
+        ready
+    }
+
+    /// Returns the total number of symbols stored.
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.total_count
+    }
+
+    /// Returns true if no symbols are stored.
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.total_count == 0
+    }
+
+    /// Returns estimated memory usage in bytes.
+    #[inline]
+    #[must_use]
+    pub const fn memory_usage(&self) -> usize {
+        self.total_bytes
+    }
+
+    /// Clears all symbols.
+    pub fn clear(&mut self) {
+        self.symbols.clear();
+        self.block_counts.clear();
+        self.total_count = 0;
+        self.total_bytes = 0;
+        if let Some(budget) = self.memory_budget {
+            self.memory_remaining = budget;
+        }
+    }
+
+    /// Iterates over all symbols in the set.
+    pub fn iter(&self) -> impl Iterator<Item = (&SymbolId, &Symbol)> {
+        self.symbols.iter()
+    }
+
+    /// Drains all symbols from the set.
+    pub fn drain(&mut self) -> impl Iterator<Item = (SymbolId, Symbol)> {
+        self.block_counts.clear();
+        self.total_count = 0;
+        self.total_bytes = 0;
+        if let Some(budget) = self.memory_budget {
+            self.memory_remaining = budget;
+        }
+        std::mem::take(&mut self.symbols).into_iter()
+    }
+
+    /// Clears symbols for a specific block.
+    pub fn clear_block(&mut self, sbn: u8) {
+        let ids: Vec<SymbolId> = self
+            .symbols
+            .iter()
+            .filter_map(
+                |(id, symbol)| {
+                    if symbol.sbn() == sbn { Some(*id) } else { None }
+                },
+            )
+            .collect();
+
+        for id in ids {
+            let _ = self.remove(&id);
+        }
+
+        if let Some(progress) = self.block_counts.get_mut(&sbn) {
+            progress.source_symbols = 0;
+            progress.repair_symbols = 0;
+            progress.threshold_reached =
+                Self::calculate_threshold(progress, &self.threshold_config);
+            if progress.k.is_none() {
+                self.block_counts.remove(&sbn);
+            }
+        }
+    }
+
+    /// Clears selected repair symbols for a block, retaining systematic source
+    /// symbols, newer repair symbols, and the block's configured K.
+    pub fn clear_repair_symbols_for_block(&mut self, sbn: u8, ids: &[SymbolId]) -> usize {
+        let mut removed = 0usize;
+        for id in ids {
+            let Some(symbol) = self.symbols.get(id) else {
+                continue;
+            };
+            if symbol.sbn() != sbn || symbol.kind() != SymbolKind::Repair {
+                continue;
+            }
+            if self.remove(id).is_some() {
+                removed = removed.saturating_add(1);
+            }
+        }
+        removed
+    }
+
+    fn calculate_threshold(progress: &BlockProgress, config: &ThresholdConfig) -> bool {
+        progress.k.is_some_and(|k| {
+            if k == 0 {
+                return false;
+            }
+            let k_usize = k as usize;
+            if progress.source_symbols >= k_usize {
+                return true;
+            }
+            let total = progress.total();
+            let raw = (f64::from(k) * config.overhead_factor).ceil();
+            let minimum_threshold = k_usize.saturating_add(config.min_overhead);
+            if raw.is_nan() {
+                return total >= minimum_threshold;
+            }
+            if raw.is_sign_positive() && !raw.is_finite() {
+                return false;
+            }
+            if raw.is_sign_negative() {
+                return total >= minimum_threshold;
+            }
+            #[allow(clippy::cast_sign_loss)]
+            let factor_threshold = raw as usize;
+            // `overhead_factor` is already a total-symbol target; `min_overhead`
+            // is the minimum extra beyond K, so it acts as a floor instead.
+            let threshold = factor_threshold.max(minimum_threshold);
+            total >= threshold
+        })
+    }
+
+    fn estimate_symbol_size(symbol: &Symbol) -> usize {
+        std::mem::size_of::<SymbolId>() + symbol.data().len() + SYMBOL_OVERHEAD_BYTES
+    }
+
+    fn try_allocate(&mut self, size: usize) -> bool {
+        if self.memory_budget.is_some() {
+            if size <= self.memory_remaining {
+                self.memory_remaining -= size;
+            } else {
+                return false;
+            }
+        }
+        self.total_bytes = self.total_bytes.saturating_add(size);
+        true
+    }
+
+    fn deallocate(&mut self, size: usize) {
+        self.total_bytes = self.total_bytes.saturating_sub(size);
+        if let Some(budget) = self.memory_budget {
+            self.memory_remaining = self.memory_remaining.saturating_add(size).min(budget);
+        }
+    }
+}
+
+/// Thread-safe SymbolSet for concurrent insertion.
+#[derive(Debug, Default)]
+pub struct ConcurrentSymbolSet {
+    inner: RwLock<SymbolSet>,
+}
+
+impl ConcurrentSymbolSet {
+    /// Creates a new concurrent SymbolSet with the default config.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Inserts a symbol into the set.
+    pub fn insert(&self, symbol: Symbol) -> InsertResult {
+        self.inner.write().insert(symbol)
+    }
+
+    /// Sets the block K value.
+    pub fn set_block_k(&self, sbn: u8, k: u16) -> bool {
+        self.inner.write().set_block_k(sbn, k)
+    }
+
+    /// Returns true if a block has reached threshold.
+    #[must_use]
+    pub fn threshold_reached(&self, sbn: u8) -> bool {
+        self.inner.read().threshold_reached(sbn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::types::Symbol;
+
+    fn test_symbol(sbn: u8, esi: u32, data_len: usize) -> Symbol {
+        Symbol::new_source_for_test(1, sbn, esi, &vec![0u8; data_len])
+    }
+
+    fn test_repair_symbol(sbn: u8, esi: u32, data_len: usize) -> Symbol {
+        Symbol::new_repair_for_test(1, sbn, esi, &vec![0u8; data_len])
+    }
+
+    #[test]
+    fn insert_and_duplicate() {
+        let mut set = SymbolSet::new();
+        let symbol = test_symbol(0, 0, 4);
+        assert!(matches!(
+            set.insert(symbol.clone()),
+            InsertResult::Inserted { .. }
+        ));
+        assert!(matches!(set.insert(symbol), InsertResult::Duplicate));
+        assert_eq!(set.len(), 1);
+    }
+
+    #[test]
+    fn threshold_tracking() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.threshold_reached(0));
+
+        let _ = set.insert(test_symbol(0, 0, 4));
+        assert!(!set.threshold_reached(0));
+
+        set.set_block_k(0, 1);
+        assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn repair_symbols_increment_repair_progress() {
+        let mut set = SymbolSet::new();
+        let symbol = test_repair_symbol(0, 99, 4);
+
+        let InsertResult::Inserted { block_progress, .. } = set.insert(symbol) else {
+            panic!("repair symbol should insert");
+        };
+
+        assert_eq!(block_progress.source_symbols, 0);
+        assert_eq!(block_progress.repair_symbols, 1);
+    }
+
+    #[test]
+    fn block_limit_enforced() {
+        let config = ThresholdConfig::new(1.0, 0, 1);
+        let mut set = SymbolSet::with_config(config);
+        assert!(matches!(
+            set.insert(test_symbol(1, 0, 1)),
+            InsertResult::Inserted { .. }
+        ));
+        assert!(matches!(
+            set.insert(test_symbol(1, 1, 1)),
+            InsertResult::BlockLimitReached { sbn: 1 }
+        ));
+    }
+
+    #[test]
+    fn memory_budget_enforced() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_memory_budget(config, 8);
+        let large = test_symbol(0, 0, 128);
+        assert!(matches!(
+            set.insert(large),
+            InsertResult::MemoryLimitReached
+        ));
+    }
+
+    #[test]
+    fn clear_block_removes_only_block() {
+        let mut set = SymbolSet::new();
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(1, 0, 4));
+        assert_eq!(set.len(), 2);
+
+        set.clear_block(0);
+        assert_eq!(set.len(), 1);
+        assert!(set.symbols_for_block(0).next().is_none());
+        assert!(set.symbols_for_block(1).next().is_some());
+    }
+
+    /// Invariant: remove decrements counts and frees memory.
+    #[test]
+    fn remove_decrements_counts_and_memory() {
+        let mut set = SymbolSet::new();
+        let sym = test_symbol(0, 0, 16);
+        let id = sym.id();
+        let _ = set.insert(sym);
+        assert_eq!(set.len(), 1);
+        let mem_before = set.memory_usage();
+        assert!(mem_before > 0);
+
+        let removed = set.remove(&id);
+        assert!(removed.is_some());
+        assert_eq!(set.len(), 0);
+        assert!(set.is_empty());
+        assert_eq!(set.memory_usage(), 0);
+    }
+
+    /// Invariant: ConcurrentSymbolSet basic insert and threshold operations work.
+    #[test]
+    fn concurrent_symbol_set_insert_and_threshold() {
+        let css = ConcurrentSymbolSet::new();
+        let sym = test_symbol(0, 0, 4);
+        assert!(matches!(css.insert(sym), InsertResult::Inserted { .. }));
+        assert!(!css.threshold_reached(0));
+
+        css.set_block_k(0, 1);
+        assert!(css.threshold_reached(0));
+    }
+
+    /// Invariant: ready_blocks returns only blocks that have reached threshold.
+    #[test]
+    fn ready_blocks_returns_threshold_blocks() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(1, 0, 4));
+        set.set_block_k(0, 1); // block 0 ready
+        // block 1 not ready (no K set)
+
+        let ready = set.ready_blocks();
+        assert_eq!(ready.len(), 1);
+        assert!(ready.contains(&0));
+    }
+
+    #[test]
+    fn ready_blocks_are_sorted() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(2, 0, 4));
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(1, 0, 4));
+
+        assert!(set.set_block_k(2, 1));
+        assert!(set.set_block_k(0, 1));
+        assert!(set.set_block_k(1, 1));
+
+        assert_eq!(set.ready_blocks(), vec![0, 1, 2]);
+    }
+
+    /// Invariant: clear resets all symbol state.
+    #[test]
+    fn clear_resets_all_state() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_memory_budget(config, 4096);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(0, 1, 4));
+        set.set_block_k(0, 2);
+        assert_eq!(set.len(), 2);
+        assert!(set.memory_usage() > 0);
+
+        set.clear();
+        assert!(set.is_empty());
+        assert_eq!(set.len(), 0);
+        assert_eq!(set.memory_usage(), 0);
+        assert!(!set.threshold_reached(0));
+    }
+
+    /// Invariant: block_progress returns correct source/repair counts.
+    #[test]
+    fn block_progress_tracking() {
+        let mut set = SymbolSet::new();
+        assert!(set.block_progress(0).is_none());
+
+        let _ = set.insert(test_symbol(0, 0, 4)); // source (esi < K when K set)
+        let progress = set.block_progress(0).unwrap();
+        assert_eq!(
+            progress.total(),
+            progress.source_symbols + progress.repair_symbols
+        );
+        assert_eq!(progress.sbn, 0);
+    }
+
+    #[test]
+    fn iter_and_drain_symbols() {
+        let mut set = SymbolSet::new();
+        let _ = set.insert(test_symbol(0, 0, 4));
+        let _ = set.insert(test_symbol(0, 1, 4));
+
+        assert_eq!(set.iter().count(), 2);
+        assert_eq!(set.len(), 2);
+
+        let drained = set.drain().count();
+        assert_eq!(drained, 2);
+        assert!(set.is_empty());
+        assert_eq!(set.memory_usage(), 0);
+    }
+
+    #[test]
+    fn zero_k_never_reaches_threshold() {
+        let config = ThresholdConfig::new(1.0, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        assert!(!set.set_block_k(0, 0));
+        assert!(!set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_calculation_saturates_min_overhead() {
+        let config = ThresholdConfig::new(1.0, usize::MAX, 0);
+        let mut set = SymbolSet::with_config(config);
+        let _ = set.insert(test_symbol(0, 0, 4));
+        assert!(!set.set_block_k(0, 2));
+        assert!(!set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_reached_when_minimum_extra_dominates_without_double_counting() {
+        // Config: factor=1.05 → ceil(10*1.05)=11, min_overhead=3 → K+3=13
+        // threshold = max(11, 13) = 13
+        // Use fewer than K source symbols to avoid the source_symbols >= K
+        // short-circuit, then fill the rest with repair symbols.
+        let config = ThresholdConfig::new(1.05, 3, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        // Insert 5 source + 7 repair = 12 total (threshold = 13)
+        for esi in 0..5 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        for esi in 5..12 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
+        }
+        assert!(!set.threshold_reached(0));
+
+        // Insert 1 more repair symbol (total = 13, threshold = 13)
+        let _ = set.insert(test_repair_symbol(0, 12, 4));
+        assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_reached_when_factor_dominates_without_extra_increment() {
+        // Config: factor=1.5 → ceil(10*1.5)=15, min_overhead=1 → K+1=11
+        // threshold = max(15, 11) = 15
+        let config = ThresholdConfig::new(1.5, 1, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        // Insert 5 source + 9 repair = 14 total (threshold = 15)
+        for esi in 0..5 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        for esi in 5..14 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
+        }
+        assert!(!set.threshold_reached(0));
+
+        // Insert 1 more repair symbol (total = 15, threshold = 15)
+        let _ = set.insert(test_repair_symbol(0, 14, 4));
+        assert!(set.threshold_reached(0));
+    }
+
+    #[test]
+    fn threshold_does_not_reach_with_infinite_overhead_before_all_sources_arrive() {
+        // With infinite factor the threshold is never reached (line 375-376 returns false).
+        // Use only repair symbols beyond K to avoid source_symbols >= K short-circuit.
+        let config = ThresholdConfig::new(f64::INFINITY, 0, 0);
+        let mut set = SymbolSet::with_config(config);
+        assert!(!set.set_block_k(0, 10));
+
+        // Insert 9 source symbols (< K, so source check doesn't trigger)
+        for esi in 0..9 {
+            let _ = set.insert(test_symbol(0, esi, 4));
+        }
+        // Insert 56 repair symbols (total = 65, but infinite threshold)
+        for esi in 9..65 {
+            let _ = set.insert(test_repair_symbol(0, esi, 4));
+        }
+
+        assert!(!set.threshold_reached(0));
+    }
+
+    // =========================================================================
+    // Wave 56 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn threshold_config_debug_clone_copy() {
+        let cfg = ThresholdConfig::new(1.02, 0, 0);
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("ThresholdConfig"), "{dbg}");
+        let copied = cfg;
+        let cloned = cfg;
+        assert!((copied.overhead_factor - cloned.overhead_factor).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn insert_result_debug_clone() {
+        let mut set = SymbolSet::new();
+        let result = set.insert(test_symbol(0, 0, 4));
+        let dbg = format!("{result:?}");
+        assert!(dbg.contains("Insert"), "{dbg}");
+        let cloned = result;
+        let dbg2 = format!("{cloned:?}");
+        assert_eq!(dbg, dbg2);
+    }
+}

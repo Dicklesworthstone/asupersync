@@ -1,0 +1,3104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags:
+      - "v*"
+      - "release-*"
+  pull_request:
+    branches: [main]
+
+# One run per ref per event: a newer push replaces the *pending* run
+# (a superseded commit never earns a full matrix) but never cancels a run that
+# is already executing on `main`, so `main` always reaches a complete result.
+# Pull requests cancel their in-progress run outright. Without this, a push
+# cadence of a few minutes queued 80+ full runs (2026-09-02) and no run
+# finished for a day.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Check formatting
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for formatting checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_fmt" cargo fmt --all --check
+
+      - name: No-mock policy (allowlist + waiver expiry)
+        run: |
+          python3 scripts/check_no_mock_policy.py \
+            --policy .github/no_mock_policy.json
+
+      - name: No-mock policy snapshot (D5 input)
+        run: |
+          mkdir -p ci-summaries
+          python3 scripts/ci_summary_report.py no-mock-snapshot \
+            --policy .github/no_mock_policy.json \
+            --output ci-summaries/no_mock_policy_report.json
+
+      - name: Upload no-mock policy report (D5 input)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: no-mock-policy-report
+          path: ci-summaries/no_mock_policy_report.json
+          retention-days: 30
+
+      - name: CI matrix policy self-test
+        run: python3 scripts/check_ci_matrix_policy.py --self-test
+
+      - name: CI summary compose self-test
+        run: python3 scripts/ci_summary_report.py self-test
+
+      - name: CI matrix policy gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_ci_matrix_policy.py \
+            --policy .github/ci_matrix_policy.json \
+            --workflow .github/workflows/ci.yml
+
+      - name: Upload CI matrix policy report (D5 input)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-matrix-policy-report
+          path: |
+            artifacts/ci_matrix_policy_summary.json
+            artifacts/ci_matrix_policy_events.ndjson
+          retention-days: 30
+
+      - name: WASM dependency policy self-test
+        run: python3 scripts/check_wasm_dependency_policy.py --self-test
+
+      - name: WASM dependency policy gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_dependency_policy.py \
+            --policy .github/wasm_dependency_policy.json
+
+      - name: Upload WASM dependency audit report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-dependency-audit-report
+          path: |
+            artifacts/wasm_dependency_audit_summary.json
+            artifacts/wasm_dependency_audit_log.ndjson
+          retention-days: 30
+
+      - name: WASM ABI policy self-test
+        run: python3 scripts/check_wasm_abi_policy.py --self-test
+
+      - name: WASM ABI contract gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_abi_policy.py \
+            --policy .github/wasm_abi_policy.json
+
+      - name: Upload WASM ABI contract report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-abi-contract-report
+          path: |
+            artifacts/wasm_abi_contract_summary.json
+            artifacts/wasm_abi_contract_events.ndjson
+          retention-days: 30
+
+      - name: WASM optimization policy self-test
+        run: python3 scripts/check_wasm_optimization_policy.py --self-test
+
+      - name: WASM optimization pipeline contract
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_optimization_policy.py \
+            --policy .github/wasm_optimization_policy.json
+
+      - name: Upload WASM optimization pipeline summary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-optimization-pipeline-summary
+          path: artifacts/wasm_optimization_pipeline_summary.json
+          retention-days: 30
+
+      - name: WASM benchmark corpus self-test
+        run: python3 scripts/check_wasm_benchmark_corpus.py --self-test
+
+      - name: WASM benchmark corpus contract
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_wasm_benchmark_corpus.py \
+            --policy .github/wasm_benchmark_corpus.json
+
+      - name: Upload WASM benchmark corpus summary
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-benchmark-corpus-summary
+          path: artifacts/wasm_benchmark_corpus_summary.json
+          retention-days: 30
+
+      - name: Perf regression gate self-test
+        run: python3 scripts/check_perf_regression.py --self-test
+
+      - name: Build WASM size-budget artifact
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/wasm/release
+          target_dir=/tmp/rch-wasm-size-gate
+          "$RCH_BIN" exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR="$target_dir" cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod
+          cp "$target_dir/wasm32-unknown-unknown/release/asupersync.wasm" artifacts/wasm/release/asupersync.release.wasm
+          python3 - <<'PY'
+          import gzip
+          import json
+          import subprocess
+          from pathlib import Path
+
+          artifact = Path("artifacts/wasm/release/asupersync.release.wasm")
+          data = artifact.read_bytes()
+          try:
+              commit = subprocess.check_output(
+                  ["git", "rev-parse", "HEAD"],
+                  text=True,
+                  stderr=subprocess.DEVNULL,
+              ).strip()
+          except Exception:
+              commit = ""
+
+          summary = {
+              "schema_version": "wasm-budget-summary-v1",
+              "profile": "core-min",
+              "environment": "ci-check",
+              "commit": commit,
+              "entries": [
+                  {
+                      "metric_id": "M-PERF-01A",
+                      "metric": "wasm size (raw bytes)",
+                      "value": len(data),
+                      "unit": "bytes",
+                      "profile": "core-min",
+                      "artifact_path": str(artifact),
+                  },
+                  {
+                      "metric_id": "M-PERF-01B",
+                      "metric": "wasm size (gzip bytes)",
+                      "value": len(gzip.compress(data, compresslevel=9)),
+                      "unit": "bytes",
+                      "profile": "core-min",
+                      "artifact_path": str(artifact),
+                  },
+              ],
+              "commands": [
+                  "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-wasm-size-gate cargo build -p asupersync --target wasm32-unknown-unknown --release --no-default-features --features wasm-browser-prod",
+                  "gzip -9 -c artifacts/wasm/release/asupersync.release.wasm | wc -c",
+              ],
+              "artifact_paths": [
+                  str(artifact),
+              ],
+          }
+
+          Path("artifacts/wasm_budget_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Build packaged bootstrap perf summary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          WASM_PACKAGED_BOOTSTRAP_DRY_RUN=1 \
+          WASM_PERF_PROFILE=core-min \
+          bash scripts/test_wasm_packaged_bootstrap_e2e.sh
+
+      - name: Build packaged cancellation perf summary
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          WASM_PACKAGED_CANCELLATION_DRY_RUN=1 \
+          WASM_PERF_PROFILE=core-min \
+          bash scripts/test_wasm_packaged_cancellation_e2e.sh
+
+      - name: Perf regression gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_perf_regression.py \
+            --budgets .github/wasm_perf_budgets.json \
+            --profile core-min \
+            --measurements artifacts/wasm_budget_summary.json \
+            --measurements artifacts/wasm_packaged_bootstrap_perf_summary.json \
+            --measurements artifacts/wasm_packaged_cancellation_perf_summary.json \
+            --require-metric M-PERF-01A \
+            --require-metric M-PERF-01B \
+            --require-metric M-PERF-02A \
+            --require-metric M-PERF-02B \
+            --require-metric M-PERF-03A \
+            --require-metric M-PERF-03B
+
+      - name: Upload perf regression report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-perf-regression-report
+          path: |
+            artifacts/wasm_budget_summary.json
+            artifacts/wasm_packaged_bootstrap_perf_summary.json
+            artifacts/wasm_packaged_cancellation_perf_summary.json
+            artifacts/wasm_perf_regression_report.json
+            artifacts/wasm_perf_gate_events.ndjson
+          retention-days: 30
+
+      - name: Security release gate self-test
+        run: python3 scripts/check_security_release_gate.py --self-test
+
+      - name: Security release gate
+        run: |
+          mkdir -p artifacts
+          python3 scripts/check_security_release_gate.py \
+            --policy .github/security_release_policy.json
+
+      - name: Upload security release gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: security-release-gate-report
+          path: |
+            artifacts/security_release_gate_report.json
+            artifacts/security_release_gate_events.ndjson
+          retention-days: 30
+
+      # Track-G Performance Governance: RaptorQ regression gates
+      - name: RaptorQ performance gates self-test
+        run: |
+          bash scripts/run_raptorq_perf_gates.sh --self-test
+
+      - name: RaptorQ performance budget smoke test
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts baselines
+          # Run smoke benchmark and performance gates
+          bash scripts/run_raptorq_perf_gates.sh smoke
+
+      - name: RaptorQ performance budget validation
+        run: |
+          set -euo pipefail
+          # Validate performance budget schema and governance integration
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ performance validation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_raptorq_perf_invariants_schema" cargo test --test raptorq_perf_invariants g1_performance_budgets_schema_and_coverage -- --nocapture
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_raptorq_perf_invariants_gate" cargo test --test raptorq_perf_invariants g1_performance_gates_script_validation -- --nocapture
+
+      - name: Upload RaptorQ performance gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: raptorq-performance-gate-report
+          path: |
+            artifacts/raptorq_perf_gate_report.json
+            artifacts/raptorq_perf_gate_events.ndjson
+            artifacts/raptorq_current_bench_results.json
+          retention-days: 30
+
+      - name: Browser Edition onboarding command bundle smoke
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/onboarding
+          python3 scripts/run_browser_onboarding_checks.py \
+            --scenario all \
+            --dry-run \
+            --out-dir artifacts/onboarding
+
+      - name: Upload Browser Edition onboarding smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-browser-onboarding-smoke
+          path: |
+            artifacts/onboarding/*.ndjson
+            artifacts/onboarding/*.summary.json
+          retention-days: 30
+
+      - name: WASM QA smoke runner (dry-run bundle contract)
+        run: |
+          set -euo pipefail
+          bash scripts/run_wasm_qa_evidence_smoke.sh --all --dry-run
+
+      - name: Upload WASM QA smoke bundles
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-qa-smoke-bundles
+          path: target/e2e-results/wasm_qa_evidence_smoke/*/*/
+          retention-days: 30
+
+      - name: Upload WASM QA smoke suite summaries
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-qa-smoke-suite-summaries
+          path: target/e2e-results/wasm_qa_evidence_smoke/*/summary.json
+          retention-days: 30
+
+      - name: WASM browser vNext surface certification
+        run: |
+          set -euo pipefail
+          RCH_BIN="${HOME}/.local/bin/rch"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for WASM browser vNext surface certification" >&2
+            exit 1
+          fi
+          mkdir -p artifacts artifacts/onboarding_vnext
+          python3 scripts/run_browser_onboarding_checks.py \
+            --scenario worker \
+            --dry-run \
+            --out-dir artifacts/onboarding_vnext
+          : > artifacts/wasm_browser_vnext_surface_test.log
+
+          run_vnext_certification_test() {
+            local test_target="$1"
+            local target_dir="${TMPDIR:-/tmp}/rch_target_${test_target}"
+            "$RCH_BIN" exec -- env \
+              CARGO_INCREMENTAL=0 \
+              CARGO_PROFILE_TEST_DEBUG=0 \
+              RUSTFLAGS="-C debuginfo=0" \
+              CARGO_TARGET_DIR="$target_dir" \
+              cargo test -p asupersync --test "$test_target" -- --nocapture \
+              | tee -a artifacts/wasm_browser_vnext_surface_test.log
+          }
+
+          run_vnext_certification_test wasm_browser_feasibility_matrix
+          run_vnext_certification_test wasm_js_exports_coverage_contract
+          run_vnext_certification_test wasm_rust_browser_example_contract
+          run_vnext_certification_test wasm_pilot_observability_contract
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-browser-vnext-surface-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM browser vNext surface certification",
+              "summary_artifact": "artifacts/wasm_browser_vnext_surface_summary.json",
+              "log_artifact": "artifacts/wasm_browser_vnext_surface_test.log",
+              "worker_onboarding_artifacts": [
+                  "artifacts/onboarding_vnext/worker.ndjson",
+                  "artifacts/onboarding_vnext/worker.summary.json",
+              ],
+              "test_targets": [
+                  "wasm_browser_feasibility_matrix",
+                  "wasm_js_exports_coverage_contract",
+                  "wasm_rust_browser_example_contract",
+                  "wasm_pilot_observability_contract",
+              ],
+              "surface_matrix": [
+                  {
+                      "surface": "Dedicated worker direct runtime",
+                      "support_level": "direct_runtime_supported",
+                  },
+                  {
+                      "surface": "Durable storage + artifact persistence",
+                      "support_level": "direct_runtime_supported_with_explicit_browser_limits",
+                  },
+                  {
+                      "surface": "Rust-authored browser path",
+                      "support_level": "preview_only_repository_maintained",
+                  },
+                  {
+                      "surface": "WebTransport guarded lane",
+                      "support_level": "guarded_direct_runtime_support",
+                  },
+                  {
+                      "surface": "Worker offload / guarded parallel preview lane",
+                      "support_level": "guarded_preview_only",
+                  },
+              ],
+              "replay_command": "python3 scripts/run_browser_onboarding_checks.py --scenario worker --dry-run --out-dir artifacts/onboarding_vnext && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_browser_feasibility_matrix cargo test -p asupersync --test wasm_browser_feasibility_matrix -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_js_exports_coverage_contract cargo test -p asupersync --test wasm_js_exports_coverage_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_rust_browser_example_contract cargo test -p asupersync --test wasm_rust_browser_example_contract -- --nocapture && rch exec -- env CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_pilot_observability_contract cargo test -p asupersync --test wasm_pilot_observability_contract -- --nocapture",
+          }
+          Path("artifacts/wasm_browser_vnext_surface_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM browser vNext surface certification artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-browser-vnext-surface-certification
+          path: |
+            artifacts/wasm_browser_vnext_surface_summary.json
+            artifacts/wasm_browser_vnext_surface_test.log
+            artifacts/onboarding_vnext/*.ndjson
+            artifacts/onboarding_vnext/*.summary.json
+          retention-days: 30
+
+      - name: WASM bundler compatibility certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility" cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture | tee artifacts/wasm_bundler_compatibility_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-bundler-compatibility-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM bundler compatibility certification",
+              "test_target": "wasm_bundler_compatibility",
+              "matrix_doc": "docs/wasm_bundler_compatibility_matrix.md",
+              "log_artifact": "artifacts/wasm_bundler_compatibility_test.log",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_bundler_compatibility cargo test -p asupersync --test wasm_bundler_compatibility -- --nocapture",
+              "required_bundlers": ["Vite", "Webpack", "Turbopack", "esbuild"],
+              "required_browsers": ["Chrome", "Firefox", "Safari", "Edge"],
+          }
+          Path("artifacts/wasm_bundler_compatibility_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM bundler compatibility certification artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-bundler-compatibility-certification
+          path: |
+            artifacts/wasm_bundler_compatibility_summary.json
+            artifacts/wasm_bundler_compatibility_test.log
+          retention-days: 30
+
+      - name: WASM rollback and incident playbook certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook" cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture | tee artifacts/wasm_release_rollback_playbook_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-release-rollback-playbook-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM rollback and incident playbook certification",
+              "test_target": "wasm_release_rollback_incident_playbook",
+              "playbook_doc": "docs/wasm_release_rollback_incident_playbook.md",
+              "release_strategy_doc": "docs/wasm_release_channel_strategy.md",
+              "publish_workflow": ".github/workflows/publish.yml",
+              "log_artifact": "artifacts/wasm_release_rollback_playbook_test.log",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_release_rollback_incident_playbook cargo test -p asupersync --test wasm_release_rollback_incident_playbook -- --nocapture",
+              "required_release_artifacts": [
+                  "artifacts/security_release_gate_report.json",
+                  "artifacts/wasm_dependency_audit_summary.json",
+                  "artifacts/wasm_optimization_pipeline_summary.json",
+                  "artifacts/npm/publish_outcome.json",
+                  "artifacts/npm/rollback_outcome.json"
+              ]
+          }
+          Path("artifacts/wasm_release_rollback_playbook_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM rollback playbook certification artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-release-rollback-playbook-certification
+          path: |
+            artifacts/wasm_release_rollback_playbook_summary.json
+            artifacts/wasm_release_rollback_playbook_test.log
+          retention-days: 30
+
+      - name: WASM GA readiness review board certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist" cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture | tee artifacts/wasm_ga_readiness_review_board_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-ga-readiness-review-board-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM GA readiness review board certification",
+              "test_target": "wasm_ga_readiness_review_board_checklist",
+              "checklist_doc": "docs/wasm_ga_readiness_review_board_checklist.md",
+              "decision_packet_artifact": "artifacts/wasm_ga_readiness_decision_packet.json",
+              "log_artifact": "artifacts/wasm_ga_readiness_review_board_test.log",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_ga_readiness_review_board_checklist cargo test -p asupersync --test wasm_ga_readiness_review_board_checklist -- --nocapture",
+              "blocker_beads": [
+                  "asupersync-umelq.17.2",
+                  "asupersync-umelq.15.5",
+                  "asupersync-umelq.14.5",
+                  "asupersync-umelq.13.5",
+                  "asupersync-umelq.16.5",
+                  "asupersync-umelq.12.5",
+                  "asupersync-umelq.18.10"
+              ],
+              "fail_closed_rule": "NO_GO on missing evidence, blocker failure, quorum failure, or unresolved critical risk"
+          }
+          Path("artifacts/wasm_ga_readiness_review_board_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM GA readiness review board certification artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-ga-readiness-review-board-certification
+          path: |
+            artifacts/wasm_ga_readiness_review_board_summary.json
+            artifacts/wasm_ga_readiness_review_board_test.log
+          retention-days: 30
+
+      - name: WASM launch rollout and support stabilization certification
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization" cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture | tee artifacts/wasm_launch_rollout_support_stabilization_test.log
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          summary = {
+              "schema_version": "wasm-launch-rollout-support-stabilization-certification-v1",
+              "workflow": ".github/workflows/ci.yml",
+              "step_name": "WASM launch rollout and support stabilization certification",
+              "test_target": "wasm_launch_rollout_support_stabilization",
+              "contract_doc": "docs/wasm_launch_rollout_support_stabilization.md",
+              "log_artifact": "artifacts/wasm_launch_rollout_support_stabilization_test.log",
+              "summary_artifact": "artifacts/wasm_launch_rollout_support_stabilization_summary.json",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wasm_launch_rollout_support_stabilization cargo test -p asupersync --test wasm_launch_rollout_support_stabilization -- --nocapture",
+              "upstream_contracts": [
+                  "asupersync-umelq.17.4",
+                  "asupersync-umelq.15.5",
+                  "asupersync-umelq.17.3",
+                  "asupersync-umelq.16.5"
+              ],
+              "stabilization_exit_requirements": [
+                  "30-day severe-incident-free window",
+                  "replay-backed closure for severe incidents",
+                  "support SLA >= 99%"
+              ]
+          }
+          Path("artifacts/wasm_launch_rollout_support_stabilization_summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload WASM launch rollout/support stabilization certification artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wasm-launch-rollout-support-stabilization-certification
+          path: |
+            artifacts/wasm_launch_rollout_support_stabilization_summary.json
+            artifacts/wasm_launch_rollout_support_stabilization_test.log
+          retention-days: 30
+
+  # The --all-features clippy/check pair lives in its own job on purpose
+  # (br-asupersync-c6ppu4). It used to be the last two steps of `check`, behind
+  # ~50 cheap policy/WASM/perf gates. GitHub Actions stops a job at the first
+  # failing step, so any one of those unrelated gates silently turned the repo's
+  # only comprehensive compile gate into a no-op that still looked present when
+  # you grepped the workflow. That is how two removed-API call sites
+  # (benches/spork_baseline.rs, benches/fabric_bench.rs) bit-rotted for ~3 months
+  # behind a red no-mock policy step. A cheap gate must never be able to disable
+  # an expensive one; keep these steps in a job with no policy steps ahead of them.
+  lint-build:
+    name: Lint and compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Clippy lints
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Clippy lints" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_clippy" cargo clippy --all-targets --all-features --keep-going -- -D warnings
+
+      - name: Check compilation
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Check compilation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_check" cargo check --all-targets --all-features --keep-going
+
+  dependency-supply-chain:
+    name: Dependency supply-chain audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache Cargo scanner builds and advisory database
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/bin/cargo-audit
+            ~/.cargo/bin/cargo-deny
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-dependency-scanners-${{ hashFiles('artifacts/dependency_supply_chain_policy_v1.json') }}
+
+      - name: Install pinned Cargo scanners
+        run: scripts/ci/audit_dependencies.sh install-tools
+
+      - name: Exercise fail-closed dependency policy fixtures
+        env:
+          DEPENDENCY_AUDIT_OUTPUT_DIR: artifacts/dependency-supply-chain
+          ASUPERSYNC_ADVISORY_DB_ROOT: artifacts/dependency-supply-chain/advisory-dbs
+        run: scripts/ci/audit_dependencies.sh self-test
+
+      - name: Run root and excluded-fuzz dependency policy
+        env:
+          DEPENDENCY_AUDIT_OUTPUT_DIR: artifacts/dependency-supply-chain
+          ASUPERSYNC_ADVISORY_DB_ROOT: artifacts/dependency-supply-chain/advisory-dbs
+        run: scripts/ci/audit_dependencies.sh run
+
+      - name: Upload dependency supply-chain receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dependency-supply-chain-receipts
+          path: artifacts/dependency-supply-chain
+          retention-days: 30
+
+  differential-fast:
+    name: Differential Fast Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-differential-fast-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Differential fast CI gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/lab-differential-fast
+
+          bash scripts/run_lab_live_differential.sh \
+            --profile smoke \
+            --seed 91 \
+            --out-dir artifacts/lab-differential-fast \
+            | tee artifacts/lab-differential-fast/smoke.stdout.log
+
+          bash scripts/run_lab_live_differential.sh \
+            --profile calibration \
+            --scenario calibration.channel.commit_visibility_mismatch \
+            --seed 20260323 \
+            --out-dir artifacts/lab-differential-fast \
+            | tee artifacts/lab-differential-fast/calibration.stdout.log
+
+      - name: Summarize differential fast gate
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo "## Lab Differential Fast Gate"
+            echo
+            for profile in smoke calibration; do
+              profile_dir="artifacts/lab-differential-fast/${profile}"
+              artifact_index="${profile_dir}/artifact_index.json"
+              operator_summary="${profile_dir}/operator_summary.txt"
+              echo "### ${profile}"
+              if [[ -f "${artifact_index}" ]]; then
+                scenario_ids="$(jq -r '[(.scenarios // [])[] | .scenario_id] | join(", ")' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                exit_semantics="$(jq -r '.exit_semantics // "<missing>"' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                aggregate_event_log="$(jq -r '.aggregate_event_log_path // "<missing>"' "${artifact_index}" 2>/dev/null || echo "<unavailable>")"
+                if [[ -z "${scenario_ids}" ]]; then
+                  scenario_ids="<none>"
+                fi
+                echo "- artifact_index: \`${artifact_index}\`"
+                echo "- scenario_ids: \`${scenario_ids}\`"
+                echo "- exit_semantics: \`${exit_semantics}\`"
+                echo "- aggregate_event_log: \`${aggregate_event_log}\`"
+              else
+                echo "- artifact_index missing: \`${artifact_index}\`"
+              fi
+              if [[ -f "${operator_summary}" ]]; then
+                echo
+                echo '```text'
+                cat "${operator_summary}"
+                echo '```'
+              fi
+              echo
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload differential fast gate artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lab-live-differential-fast-artifacts
+          path: artifacts/lab-differential-fast/
+          retention-days: 14
+
+  lean-smoke:
+    name: Lean Smoke Gate (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lean-smoke-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Resolve Lean smoke artifact contract
+        id: lean_smoke_contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          if [[ ! -f "$profile_file" ]]; then
+            echo "::error::Missing $profile_file"
+            exit 1
+          fi
+
+          profile_json="$(jq -c '.profiles[] | select(.name == "smoke")' "$profile_file")"
+          if [[ -z "$profile_json" || "$profile_json" == "null" ]]; then
+            echo "::error::Missing smoke profile in $profile_file"
+            exit 1
+          fi
+
+          artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
+          artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
+          retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
+          routing_policy="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.routing_policy // empty' "$profile_file")"
+          ttfr_target_minutes="$(jq -r '.profiles[] | select(.name == "smoke") | .triage.ttfr_target_minutes // empty' "$profile_file")"
+          misroute_policy_id="$(jq -r '.artifact_contract.misroute_tracking.policy_id // empty' "$profile_file")"
+          misroute_feedback_log_path="$(jq -r '.artifact_contract.misroute_tracking.feedback_log_path // empty' "$profile_file")"
+          misroute_review_window_days="$(jq -r '.artifact_contract.misroute_tracking.review_window_days // empty' "$profile_file")"
+          governance_policy_id="$(jq -r '.governance_policy.policy_id // empty' "$profile_file")"
+          governance_decision_log_path="$(jq -r '.governance_policy.decision_log_path // empty' "$profile_file")"
+          governance_weekly_review_json="$(jq -c '.governance_policy.reviews[] | select(.review_id == "weekly-proof-health")' "$profile_file")"
+          governance_decision_required_fields_json="$(jq -c '.governance_policy.decision_record_template.required_fields // []' "$profile_file")"
+          failure_payload_default="lean-smoke/failure_payload.json"
+          failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
+          if [[ -z "$failure_payload_path" ]]; then
+            failure_payload_path="$failure_payload_default"
+          fi
+
+          if [[ -z "$artifact_name" || -z "$artifact_dir" || -z "$failure_payload_path" ]]; then
+            echo "::error::Smoke artifact contract is missing name/directory/failure_payload"
+            exit 1
+          fi
+          if [[ ! "$retention_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::Smoke retention_days must be numeric, got: $retention_days"
+            exit 1
+          fi
+          if [[ ! "$ttfr_target_minutes" =~ ^[0-9]+$ ]]; then
+            echo "::error::Smoke ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
+            exit 1
+          fi
+          if [[ ! "$misroute_review_window_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::misroute review_window_days must be numeric, got: $misroute_review_window_days"
+            exit 1
+          fi
+          if [[ -z "$routing_policy" ]]; then
+            echo "::error::Smoke triage.routing_policy must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$misroute_policy_id" || -z "$misroute_feedback_log_path" ]]; then
+            echo "::error::artifact_contract.misroute_tracking policy_id/feedback_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_policy_id" || -z "$governance_decision_log_path" ]]; then
+            echo "::error::governance_policy policy_id/decision_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_weekly_review_json" || "$governance_weekly_review_json" == "null" ]]; then
+            echo "::error::Missing governance weekly-proof-health review contract"
+            exit 1
+          fi
+          governance_required_field_count="$(jq -r 'length' <<<"$governance_decision_required_fields_json")"
+          if [[ ! "$governance_required_field_count" =~ ^[0-9]+$ || "$governance_required_field_count" -eq 0 ]]; then
+            echo "::error::governance decision_record_template.required_fields must be a non-empty array"
+            exit 1
+          fi
+
+          {
+            printf 'profile_file=%s\n' "$profile_file"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_dir=%s\n' "$artifact_dir"
+            printf 'retention_days=%s\n' "$retention_days"
+            printf 'routing_policy=%s\n' "$routing_policy"
+            printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'misroute_policy_id=%s\n' "$misroute_policy_id"
+            printf 'misroute_feedback_log_path=%s\n' "$misroute_feedback_log_path"
+            printf 'misroute_review_window_days=%s\n' "$misroute_review_window_days"
+            printf 'governance_policy_id=%s\n' "$governance_policy_id"
+            printf 'governance_decision_log_path=%s\n' "$governance_decision_log_path"
+            printf 'governance_weekly_review_json=%s\n' "$governance_weekly_review_json"
+            printf 'governance_decision_required_fields_json=%s\n' "$governance_decision_required_fields_json"
+            printf 'failure_payload=%s\n' "$failure_payload_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Lean smoke profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_smoke_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_smoke_contract.outputs.profile_file }}"
+          mkdir -p "$artifact_dir"
+
+          mapfile -t smoke_commands < <(jq -r '.profiles[] | select(.name == "smoke") | .commands[]' "$profile_file")
+          if [[ "${#smoke_commands[@]}" -eq 0 ]]; then
+            echo "::error::Smoke profile has no commands"
+            exit 1
+          fi
+
+          printf '%s\n' "${smoke_commands[@]}" > "$artifact_dir/commands.txt"
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Lean smoke profile Cargo commands" >&2
+            exit 1
+          fi
+
+          run_rch_cargo() {
+            local target_suffix="$1"
+            shift
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_lean_smoke_${target_suffix}" cargo "$@"
+          }
+
+          run_lean_profile_command() {
+            local cmd="$1"
+            case "$cmd" in
+              "cargo fmt --check")
+                run_rch_cargo fmt fmt --check
+                ;;
+              "cargo check --all-targets")
+                run_rch_cargo check check --all-targets
+                ;;
+              "cargo clippy --all-targets -- -D warnings")
+                run_rch_cargo clippy clippy --all-targets -- -D warnings
+                ;;
+              "cargo test")
+                run_rch_cargo test test
+                ;;
+              "cargo test --test lean_preservation_constructor_total")
+                run_rch_cargo lean_preservation_constructor_total test --test lean_preservation_constructor_total
+                ;;
+              "cargo test --test lean_theorem_rule_traceability")
+                run_rch_cargo lean_theorem_rule_traceability test --test lean_theorem_rule_traceability
+                ;;
+              "cargo test --test lean_theorem_surface_inventory")
+                run_rch_cargo lean_theorem_surface_inventory test --test lean_theorem_surface_inventory
+                ;;
+              "cargo test --test lean_gap_risk_sequencing_plan")
+                run_rch_cargo lean_gap_risk_sequencing_plan test --test lean_gap_risk_sequencing_plan
+                ;;
+              "cargo test --test lean_invariant_status_inventory")
+                run_rch_cargo lean_invariant_status_inventory test --test lean_invariant_status_inventory
+                ;;
+              "cargo test --test lean_baseline_report")
+                run_rch_cargo lean_baseline_report test --test lean_baseline_report
+                ;;
+              "cargo test --test runtime_state_refinement_map")
+                run_rch_cargo runtime_state_refinement_map test --test runtime_state_refinement_map
+                ;;
+              "cargo test --test refinement_conformance")
+                run_rch_cargo refinement_conformance test --test refinement_conformance
+                ;;
+              "ubs --only=rust --diff .")
+                ubs --only=rust --diff .
+                ;;
+              *)
+                echo "::error::Unsupported Lean profile command: $cmd"
+                return 2
+                ;;
+            esac
+          }
+
+          for cmd in "${smoke_commands[@]}"; do
+            echo ">>> $cmd"
+            if ! run_lean_profile_command "$cmd"; then
+              printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
+              exit 1
+            fi
+          done
+
+      - name: Emit frontier failure payload
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_smoke_contract.outputs.artifact_dir }}"
+          routing_policy="${{ steps.lean_smoke_contract.outputs.routing_policy }}"
+          ttfr_target_minutes="${{ steps.lean_smoke_contract.outputs.ttfr_target_minutes }}"
+          misroute_policy_id="${{ steps.lean_smoke_contract.outputs.misroute_policy_id }}"
+          misroute_feedback_log_path="${{ steps.lean_smoke_contract.outputs.misroute_feedback_log_path }}"
+          misroute_review_window_days="${{ steps.lean_smoke_contract.outputs.misroute_review_window_days }}"
+          governance_policy_id="${{ steps.lean_smoke_contract.outputs.governance_policy_id }}"
+          governance_decision_log_path="${{ steps.lean_smoke_contract.outputs.governance_decision_log_path }}"
+          governance_weekly_review_json="${{ steps.lean_smoke_contract.outputs.governance_weekly_review_json }}"
+          governance_decision_required_fields_json="${{ steps.lean_smoke_contract.outputs.governance_decision_required_fields_json }}"
+          failure_payload_path="${{ steps.lean_smoke_contract.outputs.failure_payload }}"
+          mkdir -p "$artifact_dir"
+
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
+          frontier_file="formal/lean/coverage/lean_frontier_buckets_v1.json"
+          issues_file=".beads/issues.jsonl"
+
+          if [[ -f "$frontier_file" ]]; then
+            jq \
+              --arg failed_command "$failed_cmd" \
+              --arg routing_policy "$routing_policy" \
+              --arg failure_payload_path "$failure_payload_path" \
+              --arg misroute_policy_id "$misroute_policy_id" \
+              --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+              --argjson misroute_review_window_days "$misroute_review_window_days" \
+              --arg governance_policy_id "$governance_policy_id" \
+              --arg governance_decision_log_path "$governance_decision_log_path" \
+              --arg governance_weekly_review_json "$governance_weekly_review_json" \
+              --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
+              --argjson ttfr_target_minutes "$ttfr_target_minutes" \
+              --slurpfile issues "$issues_file" '
+              def owners_for_bead($id):
+                [ $issues[] | select((.id == $id) or (.external_ref == $id))
+                  | (.assignee // .owner // .created_by // "unassigned")
+                ];
+              def owner_for_bead($id):
+                (owners_for_bead($id) | last) // "unassigned";
+              def routed_owners_for_bucket($bead_ids):
+                ($bead_ids // [])
+                | map(owner_for_bead(.))
+                | map(select(. != "unassigned"))
+                | unique
+                | sort;
+              def owner_candidates_for_bucket($bead_ids):
+                ($bead_ids // [])
+                | map({
+                    bead_id: .,
+                    owner: owner_for_bead(.)
+                  });
+              {
+              profile: "smoke",
+              routing_policy: $routing_policy,
+              ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_weekly_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson),
+                bead_update_commands: [
+                  "br update <bead-id> --status in_progress --notes \"governance review outcome\"",
+                  "br update <bead-id> --status blocked --notes \"new blocker identified in governance review\""
+                ],
+                dependency_update_commands: [
+                  "br dep add <blocked-bead-id> <blocking-bead-id>",
+                  "br dep remove <blocked-bead-id> <resolved-bead-id>"
+                ]
+              },
+              failed_command: $failed_command,
+              first_action_checklist: [
+                ("Open " + $failure_payload_path + " and identify bucket_id + primary_owner"),
+                "Run the failed command locally in the same commit to confirm repro",
+                "Route to primary_owner and linked_bead_ids with artifact path + repro command",
+                "If owner is unassigned, claim the top linked bead and post triage note",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
+              ],
+              source_frontier: .source_log,
+              diagnostics_total: .diagnostics_total,
+              errors_total: .errors_total,
+              warnings_total: .warnings_total,
+              buckets: [
+                .buckets[] | . as $bucket | {
+                  bucket_id,
+                  failure_mode,
+                  error_code,
+                  count,
+                  linked_gap_ids,
+                  linked_bead_ids,
+                  owner_candidates: owner_candidates_for_bucket($bucket.linked_bead_ids),
+                  routed_owners: routed_owners_for_bucket($bucket.linked_bead_ids),
+                  primary_owner: (
+                    (routed_owners_for_bucket($bucket.linked_bead_ids) | first)
+                    // "unassigned"
+                  ),
+                  first_action_checklist: [
+                    "Inspect linked_bead_ids and notify primary_owner",
+                    "Attach failed_command and frontier bucket in the owner handoff",
+                    "Escalate to failure_triage_bead if no response before ttfr_target_minutes"
+                  ]
+                }
+              ]
+            }' "$frontier_file" > "$failure_payload_path"
+          else
+            jq -n \
+              --arg failed_command "$failed_cmd" \
+              --arg routing_policy "$routing_policy" \
+              --arg misroute_policy_id "$misroute_policy_id" \
+              --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+              --argjson misroute_review_window_days "$misroute_review_window_days" \
+              --arg governance_policy_id "$governance_policy_id" \
+              --arg governance_decision_log_path "$governance_decision_log_path" \
+              --arg governance_weekly_review_json "$governance_weekly_review_json" \
+              --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
+              --argjson ttfr_target_minutes "$ttfr_target_minutes" \
+              '{
+              profile: "smoke",
+              routing_policy: $routing_policy,
+              ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_weekly_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson)
+              },
+              failed_command: $failed_command,
+              first_action_checklist: [
+                "Run failed command locally to verify repro",
+                "Generate formal/lean/coverage/lean_frontier_buckets_v1.json",
+                "Route manually to owning bead(s) based on failure mode",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
+              ],
+              error: "missing formal/lean/coverage/lean_frontier_buckets_v1.json"
+            }' > "$failure_payload_path"
+          fi
+
+          {
+            echo "## Lean Smoke Failure Payload"
+            echo
+            echo "- Failed command: \`$failed_cmd\`"
+            echo "- Payload artifact: \`$failure_payload_path\`"
+            if [[ -f "$frontier_file" ]]; then
+              echo
+              echo "| Bucket | Count | Gap IDs | Bead IDs |"
+              echo "|---|---:|---|---|"
+              jq -r '.buckets[] | "| `\(.bucket_id)` | \(.count) | \((.linked_gap_ids // []) | join(", ")) | \((.linked_bead_ids // []) | join(", ")) |"' "$frontier_file"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Lean smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.lean_smoke_contract.outputs.artifact_name }}
+          path: ${{ steps.lean_smoke_contract.outputs.artifact_dir }}/
+          retention-days: ${{ fromJSON(steps.lean_smoke_contract.outputs.retention_days) }}
+
+  lean-full:
+    name: Lean Full Gate (Main/Release)
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-lean-full-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Resolve Lean full artifact contract
+        id: lean_full_contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          profile_file="formal/lean/coverage/ci_verification_profiles.json"
+          if [[ ! -f "$profile_file" ]]; then
+            echo "::error::Missing $profile_file"
+            exit 1
+          fi
+
+          profile_json="$(jq -c '.profiles[] | select(.name == "full")' "$profile_file")"
+          if [[ -z "$profile_json" || "$profile_json" == "null" ]]; then
+            echo "::error::Missing full profile in $profile_file"
+            exit 1
+          fi
+
+          manifest_schema_version="$(jq -r '.artifact_contract.manifest_schema_version // empty' "$profile_file")"
+          manifest_schema_path="$(jq -r '.artifact_contract.manifest_schema_path // empty' "$profile_file")"
+          frontier_snapshot_path="$(jq -r '.artifact_contract.frontier_snapshot_path // empty' "$profile_file")"
+          artifact_name="$(jq -r '.artifact_bundle.name // empty' <<<"$profile_json")"
+          artifact_dir="$(jq -r '.artifact_bundle.directory // empty' <<<"$profile_json")"
+          retention_days="$(jq -r '.artifact_bundle.retention_days // empty' <<<"$profile_json")"
+          routing_policy="$(jq -r '.triage.routing_policy // empty' <<<"$profile_json")"
+          ttfr_target_minutes="$(jq -r '.triage.ttfr_target_minutes // empty' <<<"$profile_json")"
+          misroute_policy_id="$(jq -r '.artifact_contract.misroute_tracking.policy_id // empty' "$profile_file")"
+          misroute_feedback_log_path="$(jq -r '.artifact_contract.misroute_tracking.feedback_log_path // empty' "$profile_file")"
+          misroute_review_window_days="$(jq -r '.artifact_contract.misroute_tracking.review_window_days // empty' "$profile_file")"
+          governance_policy_id="$(jq -r '.governance_policy.policy_id // empty' "$profile_file")"
+          governance_decision_log_path="$(jq -r '.governance_policy.decision_log_path // empty' "$profile_file")"
+          governance_phase_exit_review_json="$(jq -c '.governance_policy.reviews[] | select(.review_id == "phase-exit-signoff")' "$profile_file")"
+          governance_decision_required_fields_json="$(jq -c '.governance_policy.decision_record_template.required_fields // []' "$profile_file")"
+          repro_bundle_manifest="$(jq -r '.artifact_bundle.repro_bundle_manifest // empty' <<<"$profile_json")"
+          repro_script="$(jq -r '.artifact_bundle.repro_script // empty' <<<"$profile_json")"
+          failure_payload_default="lean-full/failure_payload.json"
+          failure_payload_path="$(jq -r '.artifact_bundle.failure_payload // empty' <<<"$profile_json")"
+          if [[ -z "$failure_payload_path" ]]; then
+            failure_payload_path="$failure_payload_default"
+          fi
+
+          if [[ -z "$manifest_schema_version" || -z "$manifest_schema_path" || -z "$frontier_snapshot_path" || -z "$artifact_name" || -z "$artifact_dir" ]]; then
+            echo "::error::Full artifact contract is missing manifest schema version/path/frontier snapshot/name/directory"
+            exit 1
+          fi
+          if [[ ! -f "$manifest_schema_path" ]]; then
+            echo "::error::manifest schema path does not exist: $manifest_schema_path"
+            exit 1
+          fi
+          if [[ -z "$repro_bundle_manifest" || -z "$repro_script" || -z "$failure_payload_path" ]]; then
+            echo "::error::Full artifact contract is missing repro/failure payload paths"
+            exit 1
+          fi
+          if [[ ! "$retention_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::Full retention_days must be numeric, got: $retention_days"
+            exit 1
+          fi
+          if [[ ! "$ttfr_target_minutes" =~ ^[0-9]+$ ]]; then
+            echo "::error::Full ttfr_target_minutes must be numeric, got: $ttfr_target_minutes"
+            exit 1
+          fi
+          if [[ ! "$misroute_review_window_days" =~ ^[0-9]+$ ]]; then
+            echo "::error::misroute review_window_days must be numeric, got: $misroute_review_window_days"
+            exit 1
+          fi
+          if [[ -z "$routing_policy" ]]; then
+            echo "::error::Full triage.routing_policy must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$misroute_policy_id" || -z "$misroute_feedback_log_path" ]]; then
+            echo "::error::artifact_contract.misroute_tracking policy_id/feedback_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_policy_id" || -z "$governance_decision_log_path" ]]; then
+            echo "::error::governance_policy policy_id/decision_log_path must be non-empty"
+            exit 1
+          fi
+          if [[ -z "$governance_phase_exit_review_json" || "$governance_phase_exit_review_json" == "null" ]]; then
+            echo "::error::Missing governance phase-exit-signoff review contract"
+            exit 1
+          fi
+          governance_required_field_count="$(jq -r 'length' <<<"$governance_decision_required_fields_json")"
+          if [[ ! "$governance_required_field_count" =~ ^[0-9]+$ || "$governance_required_field_count" -eq 0 ]]; then
+            echo "::error::governance decision_record_template.required_fields must be a non-empty array"
+            exit 1
+          fi
+
+          {
+            printf 'profile_file=%s\n' "$profile_file"
+            printf 'manifest_schema_version=%s\n' "$manifest_schema_version"
+            printf 'manifest_schema_path=%s\n' "$manifest_schema_path"
+            printf 'frontier_snapshot_path=%s\n' "$frontier_snapshot_path"
+            printf 'artifact_name=%s\n' "$artifact_name"
+            printf 'artifact_dir=%s\n' "$artifact_dir"
+            printf 'retention_days=%s\n' "$retention_days"
+            printf 'routing_policy=%s\n' "$routing_policy"
+            printf 'ttfr_target_minutes=%s\n' "$ttfr_target_minutes"
+            printf 'misroute_policy_id=%s\n' "$misroute_policy_id"
+            printf 'misroute_feedback_log_path=%s\n' "$misroute_feedback_log_path"
+            printf 'misroute_review_window_days=%s\n' "$misroute_review_window_days"
+            printf 'governance_policy_id=%s\n' "$governance_policy_id"
+            printf 'governance_decision_log_path=%s\n' "$governance_decision_log_path"
+            printf 'governance_phase_exit_review_json=%s\n' "$governance_phase_exit_review_json"
+            printf 'governance_decision_required_fields_json=%s\n' "$governance_decision_required_fields_json"
+            printf 'repro_bundle_manifest=%s\n' "$repro_bundle_manifest"
+            printf 'repro_script=%s\n' "$repro_script"
+            printf 'failure_payload=%s\n' "$failure_payload_path"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run Lean full profile commands
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          mkdir -p "$artifact_dir"
+
+          mapfile -t full_commands < <(jq -r '.profiles[] | select(.name == "full") | .commands[]' "$profile_file")
+          if [[ "${#full_commands[@]}" -eq 0 ]]; then
+            echo "::error::Full profile has no commands"
+            exit 1
+          fi
+
+          printf '%s\n' "${full_commands[@]}" > "$artifact_dir/commands.txt"
+
+          run_status="success"
+          : > "$artifact_dir/run.log"
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Lean full profile Cargo commands" >&2
+            exit 1
+          fi
+
+          run_rch_cargo() {
+            local target_suffix="$1"
+            shift
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_lean_full_${target_suffix}" cargo "$@"
+          }
+
+          run_lean_profile_command() {
+            local cmd="$1"
+            case "$cmd" in
+              "cargo fmt --check")
+                run_rch_cargo fmt fmt --check
+                ;;
+              "cargo check --all-targets")
+                run_rch_cargo check check --all-targets
+                ;;
+              "cargo clippy --all-targets -- -D warnings")
+                run_rch_cargo clippy clippy --all-targets -- -D warnings
+                ;;
+              "cargo test")
+                run_rch_cargo test test
+                ;;
+              "cargo test --test lean_preservation_constructor_total")
+                run_rch_cargo lean_preservation_constructor_total test --test lean_preservation_constructor_total
+                ;;
+              "cargo test --test lean_theorem_rule_traceability")
+                run_rch_cargo lean_theorem_rule_traceability test --test lean_theorem_rule_traceability
+                ;;
+              "cargo test --test lean_theorem_surface_inventory")
+                run_rch_cargo lean_theorem_surface_inventory test --test lean_theorem_surface_inventory
+                ;;
+              "cargo test --test lean_gap_risk_sequencing_plan")
+                run_rch_cargo lean_gap_risk_sequencing_plan test --test lean_gap_risk_sequencing_plan
+                ;;
+              "cargo test --test lean_invariant_status_inventory")
+                run_rch_cargo lean_invariant_status_inventory test --test lean_invariant_status_inventory
+                ;;
+              "cargo test --test lean_baseline_report")
+                run_rch_cargo lean_baseline_report test --test lean_baseline_report
+                ;;
+              "cargo test --test runtime_state_refinement_map")
+                run_rch_cargo runtime_state_refinement_map test --test runtime_state_refinement_map
+                ;;
+              "cargo test --test refinement_conformance")
+                run_rch_cargo refinement_conformance test --test refinement_conformance
+                ;;
+              "ubs --only=rust --diff .")
+                ubs --only=rust --diff .
+                ;;
+              *)
+                echo "::error::Unsupported Lean profile command: $cmd"
+                return 2
+                ;;
+            esac
+          }
+
+          for cmd in "${full_commands[@]}"; do
+            echo ">>> $cmd" | tee -a "$artifact_dir/run.log"
+            if ! run_lean_profile_command "$cmd" >> "$artifact_dir/run.log" 2>&1; then
+              printf '%s\n' "$cmd" > "$artifact_dir/failed_command.txt"
+              run_status="failure"
+              break
+            fi
+          done
+
+          printf '%s\n' "$run_status" > "$artifact_dir/status.txt"
+          if [[ "$run_status" != "success" ]]; then
+            exit 1
+          fi
+
+      - name: Build Lean full repro bundle manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          manifest_schema_version="${{ steps.lean_full_contract.outputs.manifest_schema_version }}"
+          manifest_schema_path="${{ steps.lean_full_contract.outputs.manifest_schema_path }}"
+          frontier_snapshot_path="${{ steps.lean_full_contract.outputs.frontier_snapshot_path }}"
+          repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
+          repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
+          mkdir -p "$artifact_dir"
+
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
+          run_status="$(cat "$artifact_dir/status.txt" 2>/dev/null || echo "unknown")"
+          rustc_version="$(rustc -V)"
+          cargo_version="$(cargo -V)"
+          rustup_toolchain="${RUSTUP_TOOLCHAIN:-unknown}"
+          cargo_lock_sha256="$(sha256sum Cargo.lock | awk '{print $1}')"
+
+          mapfile -t full_artifacts < <(jq -r '.profiles[] | select(.name == "full") | .output_artifacts[]' "$profile_file")
+          : > "$artifact_dir/artifacts.jsonl"
+          for artifact in "${full_artifacts[@]}"; do
+            if [[ -f "$artifact" ]]; then
+              sha256="$(sha256sum "$artifact" | awk '{print $1}')"
+              size_bytes="$(wc -c < "$artifact" | tr -d ' ')"
+              jq -cn \
+                --arg path "$artifact" \
+                --arg sha256 "$sha256" \
+                --argjson size_bytes "$size_bytes" \
+                '{path: $path, exists: true, sha256: $sha256, size_bytes: $size_bytes}' \
+                >> "$artifact_dir/artifacts.jsonl"
+            else
+              jq -cn \
+                --arg path "$artifact" \
+                '{path: $path, exists: false, sha256: null, size_bytes: null}' \
+                >> "$artifact_dir/artifacts.jsonl"
+            fi
+          done
+
+          jq -s '.' "$artifact_dir/artifacts.jsonl" > "$artifact_dir/artifacts.json"
+
+          if [[ -f "$frontier_snapshot_path" ]]; then
+            frontier_sha256="$(sha256sum "$frontier_snapshot_path" | awk '{print $1}')"
+            frontier_size_bytes="$(wc -c < "$frontier_snapshot_path" | tr -d ' ')"
+            jq -n \
+              --arg path "$frontier_snapshot_path" \
+              --arg sha256 "$frontier_sha256" \
+              --argjson size_bytes "$frontier_size_bytes" \
+              --arg schema_version "$(jq -r '.schema_version // empty' "$frontier_snapshot_path")" \
+              --arg source_log "$(jq -r '.source_log // empty' "$frontier_snapshot_path")" \
+              --arg generated_by "$(jq -r '.generated_by // empty' "$frontier_snapshot_path")" \
+              --argjson diagnostics_total "$(jq '.diagnostics_total // 0' "$frontier_snapshot_path")" \
+              --argjson errors_total "$(jq '.errors_total // 0' "$frontier_snapshot_path")" \
+              --argjson warnings_total "$(jq '.warnings_total // 0' "$frontier_snapshot_path")" \
+              '{
+                path: $path,
+                exists: true,
+                sha256: $sha256,
+                size_bytes: $size_bytes,
+                schema_version: (if $schema_version == "" then null else $schema_version end),
+                source_log: (if $source_log == "" then null else $source_log end),
+                generated_by: (if $generated_by == "" then null else $generated_by end),
+                diagnostics_total: $diagnostics_total,
+                errors_total: $errors_total,
+                warnings_total: $warnings_total
+              }' > "$artifact_dir/frontier_snapshot.json"
+          else
+            jq -n \
+              --arg path "$frontier_snapshot_path" \
+              '{
+                path: $path,
+                exists: false,
+                sha256: null,
+                size_bytes: null,
+                schema_version: null,
+                source_log: null,
+                generated_by: null,
+                diagnostics_total: null,
+                errors_total: null,
+                warnings_total: null
+              }' > "$artifact_dir/frontier_snapshot.json"
+          fi
+
+          {
+            echo "#!/usr/bin/env bash"
+            echo "set -euo pipefail"
+            while IFS= read -r cmd; do
+              [[ -n \"$cmd\" ]] || continue
+              printf '%s\n' \"$cmd\"
+            done < "$artifact_dir/commands.txt"
+          } > "$repro_script"
+          chmod +x "$repro_script"
+
+          jq -n \
+            --arg schema_version "$manifest_schema_version" \
+            --arg generated_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg profile "full" \
+            --arg status "$run_status" \
+            --arg failed_command "$failed_cmd" \
+            --arg profile_source "$profile_file" \
+            --arg manifest_schema_path "$manifest_schema_path" \
+            --arg repro_script "$repro_script" \
+            --arg commands_file "$artifact_dir/commands.txt" \
+            --arg workflow_name "${GITHUB_WORKFLOW}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg run_attempt "${GITHUB_RUN_ATTEMPT}" \
+            --arg event_name "${GITHUB_EVENT_NAME}" \
+            --arg git_ref "${GITHUB_REF}" \
+            --arg git_commit "${GITHUB_SHA}" \
+            --arg rustc_version "$rustc_version" \
+            --arg cargo_version "$cargo_version" \
+            --arg rustup_toolchain "$rustup_toolchain" \
+            --arg cargo_lock_sha256 "$cargo_lock_sha256" \
+            --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
+            --arg comparison_keys_json "$(jq -c '.profiles[] | select(.name == "full") | .comparison_keys' "$profile_file")" \
+            --argjson expected_runtime_seconds "$(jq '.profiles[] | select(.name == "full") | .expected_runtime_seconds' "$profile_file")" \
+            --argjson commands "$(jq -Rsc 'split(\"\\n\")[:-1]' "$artifact_dir/commands.txt")" \
+            --argjson artifacts "$(cat "$artifact_dir/artifacts.json")" \
+            --argjson frontier_snapshot "$(cat "$artifact_dir/frontier_snapshot.json")" \
+            --argjson manifest_required_fields "$(jq '.artifact_contract.manifest_required_fields' "$profile_file")" \
+            '{
+              schema_version: $schema_version,
+              generated_at_utc: $generated_at_utc,
+              profile: $profile,
+              status: $status,
+              failed_command: (if $failed_command == "unknown" then null else $failed_command end),
+              profile_source: $profile_source,
+              manifest_schema_path: $manifest_schema_path,
+              repro_script: $repro_script,
+              ci_context: {
+                workflow: $workflow_name,
+                run_id: $run_id,
+                run_attempt: $run_attempt,
+                event_name: $event_name,
+                git_ref: $git_ref,
+                git_commit: $git_commit
+              },
+              ownership: ($ownership_json | fromjson),
+              comparison_keys: ($comparison_keys_json | fromjson),
+              expected_runtime_seconds: $expected_runtime_seconds,
+              toolchain: {
+                rustc: $rustc_version,
+                cargo: $cargo_version,
+                rustup_toolchain: $rustup_toolchain
+              },
+              inputs: {
+                profile_file: $profile_source,
+                commands_file: $commands_file,
+                cargo_lock_sha256: $cargo_lock_sha256
+              },
+              manifest_required_fields: $manifest_required_fields,
+              commands: $commands,
+              frontier_snapshot: $frontier_snapshot,
+              artifacts: $artifacts
+            }' > "$repro_bundle_manifest"
+
+          mapfile -t missing_required_fields < <(jq -r '(.manifest_required_fields - (keys_unsorted))[]?' "$repro_bundle_manifest")
+          if [[ "${#missing_required_fields[@]}" -ne 0 ]]; then
+            echo "::error::Repro manifest missing required fields from artifact_contract.manifest_required_fields"
+            printf 'Missing fields:\n'
+            printf '  - %s\n' "${missing_required_fields[@]}"
+            exit 1
+          fi
+          emitted_schema_path="$(jq -r '.manifest_schema_path // empty' "$repro_bundle_manifest")"
+          if [[ "$emitted_schema_path" != "$manifest_schema_path" ]]; then
+            echo "::error::Repro manifest emitted manifest_schema_path=$emitted_schema_path but contract requires $manifest_schema_path"
+            exit 1
+          fi
+
+      - name: Emit full failure payload
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact_dir="${{ steps.lean_full_contract.outputs.artifact_dir }}"
+          profile_file="${{ steps.lean_full_contract.outputs.profile_file }}"
+          routing_policy="${{ steps.lean_full_contract.outputs.routing_policy }}"
+          ttfr_target_minutes="${{ steps.lean_full_contract.outputs.ttfr_target_minutes }}"
+          misroute_policy_id="${{ steps.lean_full_contract.outputs.misroute_policy_id }}"
+          misroute_feedback_log_path="${{ steps.lean_full_contract.outputs.misroute_feedback_log_path }}"
+          misroute_review_window_days="${{ steps.lean_full_contract.outputs.misroute_review_window_days }}"
+          governance_policy_id="${{ steps.lean_full_contract.outputs.governance_policy_id }}"
+          governance_decision_log_path="${{ steps.lean_full_contract.outputs.governance_decision_log_path }}"
+          governance_phase_exit_review_json="${{ steps.lean_full_contract.outputs.governance_phase_exit_review_json }}"
+          governance_decision_required_fields_json="${{ steps.lean_full_contract.outputs.governance_decision_required_fields_json }}"
+          repro_bundle_manifest="${{ steps.lean_full_contract.outputs.repro_bundle_manifest }}"
+          repro_script="${{ steps.lean_full_contract.outputs.repro_script }}"
+          failure_payload_path="${{ steps.lean_full_contract.outputs.failure_payload }}"
+          mkdir -p "$artifact_dir"
+
+          failed_cmd="$(cat "$artifact_dir/failed_command.txt" 2>/dev/null || echo "unknown")"
+
+          jq -n \
+            --arg profile "full" \
+            --arg failed_command "$failed_cmd" \
+            --arg repro_bundle_manifest "$repro_bundle_manifest" \
+            --arg repro_script "$repro_script" \
+            --arg routing_policy "$routing_policy" \
+            --arg misroute_policy_id "$misroute_policy_id" \
+            --arg misroute_feedback_log_path "$misroute_feedback_log_path" \
+            --argjson misroute_review_window_days "$misroute_review_window_days" \
+            --arg governance_policy_id "$governance_policy_id" \
+            --arg governance_decision_log_path "$governance_decision_log_path" \
+            --arg governance_phase_exit_review_json "$governance_phase_exit_review_json" \
+            --arg governance_decision_required_fields_json "$governance_decision_required_fields_json" \
+            --arg ownership_json "$(jq -c '.profiles[] | select(.name == "full") | .ownership' "$profile_file")" \
+            --argjson ttfr_target_minutes "$ttfr_target_minutes" \
+            '{
+              profile: $profile,
+              routing_policy: $routing_policy,
+              ttfr_target_minutes: $ttfr_target_minutes,
+              misroute_tracking: {
+                policy_id: $misroute_policy_id,
+                feedback_log_path: $misroute_feedback_log_path,
+                review_window_days: $misroute_review_window_days
+              },
+              governance: {
+                policy_id: $governance_policy_id,
+                decision_log_path: $governance_decision_log_path,
+                review: ($governance_phase_exit_review_json | fromjson),
+                decision_record_required_fields: ($governance_decision_required_fields_json | fromjson),
+                bead_update_commands: [
+                  "br update <bead-id> --status in_progress --notes \"governance review outcome\"",
+                  "br update <bead-id> --status blocked --notes \"new blocker identified in governance review\"",
+                  "br close <bead-id> --reason \"phase-exit completed\""
+                ],
+                dependency_update_commands: [
+                  "br dep add <blocked-bead-id> <blocking-bead-id>",
+                  "br dep remove <blocked-bead-id> <resolved-bead-id>"
+                ]
+              },
+              failed_command: $failed_command,
+              repro_bundle_manifest: $repro_bundle_manifest,
+              repro_script: $repro_script,
+              ownership: ($ownership_json | fromjson),
+              first_action_checklist: [
+                "Download lean-full-artifacts and open lean-full/repro_bundle_manifest.json",
+                "Run lean-full/repro_commands.sh on the same commit to reproduce deterministically",
+                "Route to ownership.primary_bead and failure_triage_bead with manifest + failed command",
+                "Escalate to ownership.escalation_bead if TTFR exceeds ttfr_target_minutes",
+                ("Record misroutes in " + $misroute_feedback_log_path + " for policy review"),
+                ("Append governance decision record to " + $governance_decision_log_path + " and apply bead/dependency updates")
+              ]
+            }' > "$failure_payload_path"
+
+          {
+            echo "## Lean Full Failure Payload"
+            echo
+            echo "- Failed command: \`$failed_cmd\`"
+            echo "- Repro bundle: \`$repro_bundle_manifest\`"
+            echo "- Repro script: \`$repro_script\`"
+            echo "- Failure payload: \`$failure_payload_path\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Lean full artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.lean_full_contract.outputs.artifact_name }}
+          path: ${{ steps.lean_full_contract.outputs.artifact_dir }}/
+          retention-days: ${{ fromJSON(steps.lean_full_contract.outputs.retention_days) }}
+
+  # Real Lean build (br-asupersync-gap-lean-tla-receipts-48ukyp). The Lean
+  # smoke/full gates above run cargo-side structural tests only; nothing in CI
+  # ever ran `lake build` on formal/lean, so the "189 theorems, 0 sorry"
+  # claim had no hash-bound receipt. This job installs the pinned toolchain
+  # from formal/lean/lean-toolchain, builds the library, fails on any error,
+  # and uploads the build log plus a receipt naming the commit and source
+  # hashes.
+  lean-build:
+    name: Lean build (lake build formal/lean)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Cache elan toolchains
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean/lean-toolchain') }}
+
+      - name: Install elan and the pinned Lean toolchain
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$HOME/.elan/bin/elan" ]]; then
+            curl -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+            sh /tmp/elan-init.sh -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+          "$HOME/.elan/bin/elan" toolchain install "$(cat formal/lean/lean-toolchain)"
+
+      - name: lake build
+        working-directory: formal/lean
+        run: |
+          set -euo pipefail
+          mkdir -p ../../lean-build
+          lean --version | tee ../../lean-build/lean-version.txt
+          lake build 2>&1 | tee ../../lean-build/lake-build.log
+          {
+            echo "schema=lean.build.receipt.v1"
+            echo "git_commit=${GITHUB_SHA}"
+            echo "toolchain=$(cat lean-toolchain)"
+            echo "lean_version=$(lean --version)"
+            echo "theorems=$(grep -cE '^theorem|^lemma' Asupersync.lean)"
+            echo "sorry_count=$(grep -c 'sorry' Asupersync.lean || true)"
+            sha256sum Asupersync.lean lakefile.lean lean-toolchain
+          } | tee ../../lean-build/receipt.txt
+          if grep -qE '^error:|error: ' ../../lean-build/lake-build.log; then
+            echo "::error::lake build reported errors" >&2
+            exit 1
+          fi
+          test "$(grep -c 'sorry' Asupersync.lean || true)" -eq 0
+
+      - name: Upload Lean build receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lean-build-receipt
+          path: lean-build/
+          retention-days: 90
+
+  # TLA+ export model-checked with TLC (same bead). `LabRunReport::export_tla`
+  # had no callers and no exported trace had ever been checked. The test
+  # exports a lab trace, runs TLC on it, and fails closed under CI=true when
+  # the jar is missing, so this job cannot silently skip.
+  tla-tlc:
+    name: TLA+ export checked by TLC
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TLA2TOOLS_VERSION: v1.7.4
+      TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/tla-tlc
+          key: ${{ runner.os }}-cargo-tla-tlc-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install Java and TLC
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends default-jre-headless
+          curl -sSL -o /tmp/tla2tools.jar \
+            "https://github.com/tlaplus/tlaplus/releases/download/${TLA2TOOLS_VERSION}/tla2tools.jar"
+          echo "${TLA2TOOLS_SHA256}  /tmp/tla2tools.jar" | sha256sum -c -
+          java -version
+
+      - name: Export a lab trace and model-check it with TLC
+        env:
+          CI: "true"
+          ASUPERSYNC_TLA2TOOLS_JAR: /tmp/tla2tools.jar
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/tla-tlc
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+            cargo test -p asupersync --test lab_tla_export_tlc_e2e -- --nocapture
+
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Run unit tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run unit tests" >&2
+            exit 1
+          fi
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
+            # rustc on nightly-2026-07-05 aborted twice here with
+            # STATUS_ILLEGAL_INSTRUCTION (on x86_64 Windows that is the `ud2`
+            # a rustc abort compiles to), while the identical check finishes
+            # on real Windows hardware (2026-09-02, 51 min, exit 0; see
+            # br-asupersync-gap-nonlinux-reactor-ci-gxv3dy). `.cargo/config.toml`
+            # enables the parallel frontend (`-Z threads=4`) for every build;
+            # run the frontend single-threaded on this 7 GB runner instead.
+            export RUSTFLAGS="-Z threads=1"
+          fi
+          max_parallel_threads="${ASUPERSYNC_CI_LIB_TEST_THREADS:-}"
+          if [[ -z "$max_parallel_threads" ]]; then
+            if command -v nproc >/dev/null 2>&1; then
+              max_parallel_threads="$(nproc)"
+            elif [[ "${{ runner.os }}" == "macOS" ]]; then
+              max_parallel_threads="$(sysctl -n hw.logicalcpu)"
+            else
+              max_parallel_threads="${NUMBER_OF_PROCESSORS:-2}"
+            fi
+          fi
+          if ! [[ "$max_parallel_threads" =~ ^[1-9][0-9]*$ ]]; then
+            echo "ASUPERSYNC_CI_LIB_TEST_THREADS must be a positive integer, got: $max_parallel_threads" >&2
+            exit 64
+          fi
+
+          mkdir -p ci-summaries/lib-unit
+          summary_path="ci-summaries/lib-unit/summary-${{ runner.os }}.json"
+          run_lib_unit_attempt() {
+            local attempt="$1"
+            local log_path="ci-summaries/lib-unit/attempt-${attempt}-${{ runner.os }}.log"
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_unit" \
+              cargo test --lib "${feature_args[@]}" -- --test-threads "$max_parallel_threads" \
+              2>&1 | tee "$log_path"
+          }
+
+          if run_lib_unit_attempt 1; then
+            printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":1,"verdict":"pass","bead_id":"asupersync-n6sk5s"}\n' \
+              "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+            exit 0
+          fi
+
+          echo "::warning::lib-unit first attempt failed under max parallelism; retrying once for flake classification"
+          if run_lib_unit_attempt 2; then
+            printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":2,"verdict":"flaky_retry_pass","bead_id":"asupersync-n6sk5s"}\n' \
+              "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+            echo "::warning::lib-unit retry passed; classify this run as flaky and inspect ci-summaries/lib-unit artifacts"
+            exit 0
+          fi
+
+          printf '{"schema_version":"lib-unit-flake-gate-v1","runner_os":"%s","max_parallel_threads":%s,"attempts":2,"verdict":"fail","bead_id":"asupersync-n6sk5s"}\n' \
+            "${{ runner.os }}" "$max_parallel_threads" > "$summary_path"
+          exit 1
+
+      - name: Upload lib-unit flake artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: lib-unit-flake-artifacts-${{ runner.os }}
+          path: ci-summaries/lib-unit/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Run integration tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run integration tests" >&2
+            exit 1
+          fi
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_integration" cargo test --test '*' "${feature_args[@]}"
+
+      - name: Run doc tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Run doc tests" >&2
+            exit 1
+          fi
+          # Every feature except the legacy audit harnesses (uncommitted
+          # goldens; see scripts/ci/release_test_features.sh). On Windows the
+          # `ci-cross-platform` members minus those harnesses.
+          feature_args=(--features "$(scripts/ci/release_test_features.sh)")
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            feature_args=(--features "$(scripts/ci/release_test_features.sh windows)")
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_doctest" cargo test --doc "${feature_args[@]}"
+
+  # Real-server suites (br-asupersync-gap-real-server-ci-aoovsx). Every suite
+  # below skips cleanly without its REAL_* toggle, so until this job existed no
+  # workflow ever exercised the PostgreSQL/MySQL/Redis/NATS/Kafka clients
+  # against a real server. Servers run as plain docker containers on the runner
+  # (GitHub `services:` cannot pass command-line flags such as `-js`), cargo
+  # runs on the runner next to them via the CI rch fallback, and
+  # scripts/ci/run_real_server_suite.sh fails closed on skips and zero-test runs.
+  real-servers:
+    name: Real-server suites (PostgreSQL, MySQL, Redis, NATS, Kafka)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      REAL_SERVERS_TARGET_DIR: ${{ github.workspace }}/target/real-servers
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/real-servers
+          key: ${{ runner.os }}-cargo-real-servers-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-real-servers-${{ env.RUST_TOOLCHAIN }}-
+
+      - name: Start real servers
+        run: |
+          set -euo pipefail
+          docker run -d --name asup-pg -e POSTGRES_PASSWORD=postgres \
+            -p 127.0.0.1:5432:5432 postgres:16
+          docker run -d --name asup-mysql -e MYSQL_ROOT_PASSWORD=password -e MYSQL_ROOT_HOST=% \
+            -p 127.0.0.1:3306:3306 mysql:8.0
+          docker run -d --name asup-redis -p 127.0.0.1:6379:6379 redis:7
+          docker run -d --name asup-nats -p 127.0.0.1:4222:4222 -p 127.0.0.1:8222:8222 \
+            nats:2.10 -js -m 8222
+          docker run -d --name asup-redpanda -p 127.0.0.1:9092:9092 \
+            docker.redpanda.com/redpandadata/redpanda:v24.2.7 \
+            redpanda start --mode dev-container --smp 1 --memory 1G --overprovisioned \
+            --kafka-addr PLAINTEXT://0.0.0.0:9092 --advertise-kafka-addr PLAINTEXT://127.0.0.1:9092
+
+          wait_for() {
+            local label="$1"; shift
+            for i in $(seq 1 90); do
+              if "$@" >/dev/null 2>&1; then echo "$label ready after ${i}s"; return 0; fi
+              sleep 1
+            done
+            echo "::error::$label not ready after 90s" >&2
+            docker ps -a
+            return 1
+          }
+          wait_for postgres docker exec asup-pg pg_isready -U postgres
+          wait_for mysql docker exec asup-mysql mysqladmin ping -uroot -ppassword --silent
+          wait_for redis docker exec asup-redis redis-cli ping
+          wait_for nats curl -fsS http://127.0.0.1:8222/healthz
+          wait_for redpanda docker exec asup-redpanda rpk cluster info
+
+      - name: Warm the MySQL caching_sha2_password cache
+        # The client implements caching_sha2_password fast auth only (no RSA
+        # public-key exchange and no full auth over TLS). A fresh server demands
+        # full auth on the first login of an account, so log in once over TLS
+        # from inside the container as root@'%' (the account a TCP connection
+        # from the runner maps to; the image runs with skip-name-resolve) so the
+        # server caches the credential and the runner's plaintext login can use
+        # fast auth. A client that cannot do this against a cold server is a
+        # documented limitation, not something this job hides: the suite still
+        # performs the real handshake, auth, and query round-trips.
+        run: |
+          set -euo pipefail
+          docker exec asup-mysql mysql --protocol=TCP -h127.0.0.1 --ssl-mode=REQUIRED \
+            -uroot -ppassword -e 'SELECT 1' >/dev/null
+
+      - name: PostgreSQL real-server suite
+        env:
+          REAL_POSTGRES_TESTS: "true"
+          POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh postgres_real_server --features postgres,mysql
+
+      - name: Negative control - wrong PostgreSQL password must fail
+        # Proves the suite really authenticates against the server; a suite
+        # that passes here is skipping or not connecting, and the lane is void.
+        env:
+          REAL_POSTGRES_TESTS: "true"
+          POSTGRES_URL: postgres://postgres:not-the-password@localhost:5432/postgres
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: |
+          set -euo pipefail
+          if scripts/ci/run_real_server_suite.sh postgres_real_server --features postgres,mysql; then
+            echo "::error::PostgreSQL suite passed with a wrong password; it is not talking to the server" >&2
+            exit 1
+          fi
+          echo "negative control: suite failed with the wrong password, as required"
+
+      - name: MySQL real-server suite
+        env:
+          REAL_MYSQL_TESTS: "true"
+          MYSQL_URL: mysql://root:password@localhost:3306/mysql
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh mysql_real_server --features postgres,mysql
+
+      - name: Redis E2E suite
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh e2e_redis --features postgres,mysql
+
+      - name: NATS real-server suite
+        env:
+          REAL_NATS_TESTS: "true"
+          NATS_URL: nats://127.0.0.1:4222
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh nats_real_server --features postgres,mysql
+
+      - name: JetStream real-server suite
+        env:
+          REAL_NATS_TESTS: "true"
+          NATS_URL: nats://127.0.0.1:4222
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh jetstream_real_server --features postgres,mysql
+
+      - name: Kafka real-broker suite (Redpanda)
+        # Adds the `kafka` feature (rdkafka builds librdkafka from source), so
+        # it runs last to keep the earlier suites' compile shared.
+        env:
+          REAL_KAFKA_TESTS: "true"
+          # 127.0.0.1 on purpose: the broker advertises 127.0.0.1 and the port
+          # is published on 127.0.0.1 only, so a host where `localhost`
+          # resolves to ::1 first cannot strand the consumer's follow-up
+          # connections (observed 2026-09-02: producer sends succeeded, every
+          # consumer poll failed with BrokerTransportFailure).
+          KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:9092
+          CARGO_TARGET_DIR: ${{ env.REAL_SERVERS_TARGET_DIR }}
+        run: scripts/ci/run_real_server_suite.sh kafka_real_broker --features postgres,mysql,kafka
+
+      - name: Server logs on failure
+        if: failure()
+        run: |
+          for c in asup-pg asup-mysql asup-redis asup-nats asup-redpanda; do
+            echo "::group::$c"; docker logs --tail 80 "$c" 2>&1 || true; echo "::endgroup::"
+          done
+
+  coverage:
+    name: Coverage (llvm-cov)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-llvm-cov-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install llvm-tools-preview
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run coverage
+        env:
+          COVERAGE_MIN_LINE_PCT: 5
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for coverage" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_coverage" \
+            COVERAGE_MIN_LINE_PCT="$COVERAGE_MIN_LINE_PCT" \
+            TEST_FEATURES="$(scripts/ci/release_test_features.sh)" \
+            bash -lc "
+              set -euo pipefail
+              rustup component add llvm-tools-preview
+              mkdir -p coverage
+              cargo llvm-cov --lib --features \"\$TEST_FEATURES\" \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+                --fail-under-lines \"\$COVERAGE_MIN_LINE_PCT\" \
+                --lcov --output-path coverage/lcov.info
+              cargo llvm-cov --lib --features \"\$TEST_FEATURES\" \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+                --text --output-path coverage/coverage.txt --no-run
+              cargo llvm-cov report --json --output-path coverage/llvm_cov.json \
+                --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/'
+            "
+
+      - name: Coverage ratchet gate (D1)
+        run: |
+          python3 scripts/check_coverage_ratchet.py \
+            --policy .github/coverage_policy.json \
+            --coverage-json coverage/llvm_cov.json \
+            --invariant-map formal/lean/coverage/invariant_theorem_test_link_map.json \
+            --output coverage/coverage_ratchet_report.json
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: llvm-cov-report
+          path: coverage/
+          retention-days: 30
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@b9fd7d16f6d7d1b5d2bec1a2887e65ceed900238 # v4.6.0
+        with:
+          files: coverage/lcov.info
+          fail_ci_if_error: false
+
+  conformance:
+    name: Conformance Tests
+    runs-on: ubuntu-latest
+    env:
+      RCH_BIN: ${{ github.workspace }}/scripts/rch_ci_fallback.sh
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-conformance-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run conformance tests
+        working-directory: conformance
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_conformance" cargo test -- --nocapture
+        continue-on-error: true
+
+      - name: Generate conformance report
+        run: |
+          set -euo pipefail
+          mkdir -p conformance-reports
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for conformance report generation" >&2
+            exit 1
+          fi
+          cd conformance
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_conformance_report" cargo test -- --format json 2>&1 | tee ../conformance-reports/results.json || true
+
+      - name: Upload conformance report
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: conformance-report
+          path: conformance-reports/
+          retention-days: 30
+
+  property-tests:
+    name: Property Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proptest-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run property tests with limited cases
+        env:
+          PROPTEST_CASES: 256
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for property tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_property_tests" cargo test --test algebraic_laws --test property_region_ops --all-features -- --nocapture
+
+  benchmarks:
+    name: Benchmark Baseline
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run benchmarks
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for benchmarks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_benchmarks" cargo bench --all-features -- --noplot
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-results
+          path: target/criterion/
+          retention-days: 30
+
+  regression-gates:
+    name: RaptorQ Regression Gates (G2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-regression-gates-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run G2 CI regression gates
+        run: |
+          mkdir -p artifacts
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for G2 CI regression gates" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_regression_gates" cargo test --test ci_regression_gates -- --nocapture 2> artifacts/ci_regression_gate_report.ndjson
+          echo "G2 regression gate exit: $?"
+
+      - name: Upload G2 regression gate report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: regression-gate-report
+          path: artifacts/ci_regression_gate_report.ndjson
+          retention-days: 30
+
+  phase6-e2e:
+    name: Phase 6 E2E Suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-phase6-e2e-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: GEO – Geodesic normalization E2E
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for geodesic normalization E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_e2e_geodesic_normalization" cargo test --test e2e_geodesic_normalization --all-features -- --nocapture
+
+      - name: HOMO – Topology-guided exploration E2E
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for topology-guided exploration E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_topology_benchmark" cargo test --test topology_benchmark --all-features -- --nocapture
+
+      - name: LYAP – Governor vs baseline E2E
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for governor vs baseline E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_e2e_governor_vs_baseline" cargo test --test e2e_governor_vs_baseline --all-features -- --nocapture
+
+      - name: RAPTORQ – Encode/decode conformance E2E
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ conformance E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_raptorq_conformance" cargo test --test raptorq_conformance --all-features -- --nocapture
+
+      - name: RAPTORQ – G2 correctness/comparator CI gate
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-artifacts/raptorq-g2
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for RaptorQ G2 correctness/comparator CI gate" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_raptorq_g2" cargo test --test ci_regression_gates --all-features -- --nocapture 2>&1 \
+            | tee phase6-artifacts/raptorq-g2/ci_regression_gates.log
+          grep -E '^\{"schema_version":"raptorq-g2-ci-regression-gate-v1"' \
+            phase6-artifacts/raptorq-g2/ci_regression_gates.log > phase6-artifacts/raptorq-g2/g2_events.ndjson || true
+          grep -E '^\{"schema_version":"raptorq-g8-anytime-regression-v1"' \
+            phase6-artifacts/raptorq-g2/ci_regression_gates.log > phase6-artifacts/raptorq-g2/g8_events.ndjson || true
+          python3 - <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          log_path = Path("phase6-artifacts/raptorq-g2/ci_regression_gates.log")
+          text = log_path.read_text(encoding="utf-8", errors="replace")
+
+          levers = ["E4", "E5", "C5", "C6", "F5", "F6", "F7", "F8"]
+          lever_counts = {
+              lever: len(re.findall(rf'"lever":"{lever}"', text))
+              for lever in levers
+          }
+          missing_levers = [lever for lever, count in lever_counts.items() if count == 0]
+          comparator_count = text.count('"type":"comparator"')
+
+          fpr_match = re.search(
+              r"G2 aggregate FPR:\s*(\d+)/(\d+)\s*=\s*([0-9]*\.?[0-9]+)",
+              text,
+          )
+          false_positive_rate = None
+          checks = 0
+          false_positives = 0
+          if fpr_match:
+              false_positives = int(fpr_match.group(1))
+              checks = int(fpr_match.group(2))
+              false_positive_rate = float(fpr_match.group(3))
+
+          summary = {
+              "schema_version": "raptorq-g2-ci-gate-summary-v1",
+              "suite_id": "RQ-G2-CI-GATE",
+              "scenario_id": "RQ-G2-CORRECTNESS-COMPARATOR",
+              "status": "pass",
+              "lever_counts": lever_counts,
+              "missing_levers": missing_levers,
+              "comparator_events": comparator_count,
+              "false_positive_rate": false_positive_rate,
+              "false_positive_checks": checks,
+              "false_positives": false_positives,
+              "fpr_threshold": 0.10,
+              "artifact_path": "phase6-artifacts/raptorq-g2/ci_regression_gates.log",
+              "repro_command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_raptorq_g2 cargo test --test ci_regression_gates --all-features -- --nocapture",
+          }
+
+          errors = []
+          if missing_levers:
+              errors.append(f"missing lever coverage: {', '.join(missing_levers)}")
+          if comparator_count <= 0:
+              errors.append("missing comparator events in G2 output")
+          if false_positive_rate is None:
+              errors.append("missing aggregate false-positive-rate line in output")
+          elif false_positive_rate > 0.10:
+              errors.append(
+                  f"false-positive-rate {false_positive_rate:.4f} exceeds threshold 0.10"
+              )
+
+          if errors:
+              summary["status"] = "fail"
+              summary["errors"] = errors
+
+          Path("phase6-artifacts/raptorq-g2/summary.json").write_text(
+              json.dumps(summary, indent=2) + "\n",
+              encoding="utf-8",
+          )
+
+          if errors:
+              for err in errors:
+                  print(f"::error::{err}")
+              sys.exit(1)
+          PY
+
+      - name: RAPTORQ – Deterministic full E2E profile gate (G2)
+        run: |
+          set -euo pipefail
+          NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile full
+          latest_dir="$(ls -1dt target/e2e-results/raptorq/full_* | head -n1)"
+          mkdir -p phase6-artifacts/raptorq-full
+          cp "$latest_dir/summary.json" phase6-artifacts/raptorq-full/summary.json
+          cp "$latest_dir/scenarios.ndjson" phase6-artifacts/raptorq-full/scenarios.ndjson
+
+      - name: RAPTORQ – Forensic logging contract gate (D3)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for forensic profile execution" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env NO_PREFLIGHT=1 bash ./scripts/run_raptorq_e2e.sh --profile forensics --scenario RQ-E2E-FAILURE-INSUFFICIENT
+          latest_dir="$(ls -1dt target/e2e-results/raptorq/forensics_* | head -n1)"
+          mkdir -p phase6-artifacts/raptorq-forensics
+          cp "$latest_dir/summary.json" phase6-artifacts/raptorq-forensics/summary.json
+          cp "$latest_dir/scenarios.ndjson" phase6-artifacts/raptorq-forensics/scenarios.ndjson
+
+      - name: RAPTORQ – Perf smoke regression gate (G2)
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-artifacts/raptorq-perf
+          set +e
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for perf e2e execution" | tee phase6-artifacts/raptorq-perf/run.log
+            exit 1
+          fi
+          "$RCH_BIN" exec -- ./scripts/run_perf_e2e.sh \
+            --bench raptorq_benchmark \
+            --bench phase0_baseline \
+            --seed 424242 \
+            --compare baselines/baseline_latest.json \
+            --metric median_ns \
+            --max-regression-pct 10 \
+            --timeout 1200 2>&1 | tee phase6-artifacts/raptorq-perf/run.log
+          perf_rc=${PIPESTATUS[0]}
+          set -e
+
+          latest_perf_dir="$(ls -1dt target/perf-results/perf_* | head -n1)"
+          if [[ -n "$latest_perf_dir" && -d "$latest_perf_dir" ]]; then
+            cp "$latest_perf_dir/report.json" phase6-artifacts/raptorq-perf/report.json || true
+            cp "$latest_perf_dir/artifacts/baseline_current.json" phase6-artifacts/raptorq-perf/baseline_current.json || true
+            cp "$latest_perf_dir/artifacts/compare.log" phase6-artifacts/raptorq-perf/compare.log || true
+            cp "$latest_perf_dir/artifacts/compare.txt" phase6-artifacts/raptorq-perf/compare.txt || true
+            cp "$latest_perf_dir/artifacts/gate_events.ndjson" phase6-artifacts/raptorq-perf/gate_events.ndjson || true
+          fi
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          report_path = Path("phase6-artifacts/raptorq-perf/report.json")
+          summary_path = Path("phase6-artifacts/raptorq-perf/summary.json")
+          summary = {
+              "schema_version": "raptorq-g2-perf-smoke-summary-v1",
+              "suite_id": "RQ-G2-PERF-SMOKE",
+              "scenario_id": "RQ-G2-PERF-SMOKE-424242",
+              "status": "unknown",
+              "artifact_path": str(report_path),
+              "repro_command": "./scripts/run_perf_e2e.sh --bench raptorq_benchmark --bench phase0_baseline --seed 424242 --compare baselines/baseline_latest.json --metric median_ns --max-regression-pct 10 --timeout 1200",
+          }
+          if report_path.exists():
+              report = json.loads(report_path.read_text(encoding="utf-8"))
+              bench_failures = [
+                  b["name"] for b in report.get("benchmarks", []) if b.get("exit_code", 1) != 0
+              ]
+              compare_exit = int(report.get("baseline", {}).get("compare_exit", 1))
+              summary["bench_failures"] = bench_failures
+              summary["compare_exit"] = compare_exit
+              summary["status"] = "pass" if not bench_failures and compare_exit == 0 else "fail"
+          summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+          PY
+
+          if [[ "$perf_rc" -ne 0 ]]; then
+            echo "::error::RAPTORQ perf smoke regression gate failed (exit ${perf_rc})"
+            exit "$perf_rc"
+          fi
+
+      - name: E2E scenario-matrix completeness gate (D4)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for run_all_e2e matrix verification" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- bash ./scripts/run_all_e2e.sh --verify-matrix
+          latest_dir="$(ls -1dt target/e2e-results/orchestrator_* | head -n1)"
+          mkdir -p phase6-artifacts/e2e-scenario-matrix
+          cp "$latest_dir/scenario_matrix_validation.json" phase6-artifacts/e2e-scenario-matrix/scenario_matrix_validation.json
+          cp "$latest_dir/artifact_lifecycle_policy.json" phase6-artifacts/e2e-scenario-matrix/artifact_lifecycle_policy.json
+
+          lifecycle_file="phase6-artifacts/e2e-scenario-matrix/artifact_lifecycle_policy.json"
+          privacy_policy_file=".github/security_release_policy.json"
+          ci_allowed_modes="$(jq -c '.trace_telemetry_privacy.opt_in_levels.ci_allowed_modes' "$privacy_policy_file")"
+          required_redacted_fields="$(jq -c '.trace_telemetry_privacy.sensitive_field_policy.required_redacted_fields' "$privacy_policy_file")"
+          allowed_path_fragments="$(jq -c '.trace_telemetry_privacy.storage_scope.allowed_path_fragments' "$privacy_policy_file")"
+          ci_retention_max="$(jq -r '.trace_telemetry_privacy.retention_days.ci_max' "$privacy_policy_file")"
+          replay_required="$(jq -r '.trace_telemetry_privacy.retrieval_contract.replay_command_required' "$privacy_policy_file")"
+
+          if [[ ! "$ci_retention_max" =~ ^[0-9]+$ ]]; then
+            echo "::error::trace_telemetry_privacy.retention_days.ci_max must be numeric"
+            exit 1
+          fi
+
+          jq -e \
+            --argjson ci_allowed_modes "$ci_allowed_modes" \
+            --argjson required_redacted_fields "$required_redacted_fields" \
+            --argjson allowed_path_fragments "$allowed_path_fragments" \
+            --argjson ci_retention_max "$ci_retention_max" \
+            --argjson replay_required "$replay_required" \
+            '
+            . as $doc
+            | ($doc.schema_version == "e2e-artifact-lifecycle-policy-v1")
+            and ($doc.environment_class == "ci")
+            and ($doc.retention_days | type == "number" and . >= 1 and . <= $ci_retention_max)
+            and ($doc.redaction_policy.mode as $mode | any($ci_allowed_modes[]; . == $mode))
+            and (all($required_redacted_fields[]; ($doc.redaction_policy.redacted_fields | index(.) != null)))
+            and (all($doc.storage_roots[]; . as $root | any($allowed_path_fragments[]; $root | contains(.))))
+            and ($doc.retrieval_contract.replay_command_required == $replay_required)
+            and ($doc.suites | type == "array" and length > 0)
+            and (all($doc.suites[]; .artifact_route_configured == true and .replay_route_configured == true))
+            ' "$lifecycle_file" >/dev/null
+          echo "Trace telemetry privacy policy gate passed for $lifecycle_file"
+
+      - name: PLAN – Certified rewrite pipeline E2E
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for certified rewrite pipeline E2E" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_golden_outputs" cargo test --test golden_outputs --all-features -- --nocapture
+
+      - name: Generate E2E report artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p phase6-artifacts
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for E2E report artifact generation" >&2
+            exit 1
+          fi
+          echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > phase6-artifacts/metadata.json
+          for suite in e2e_geodesic_normalization topology_benchmark e2e_governor_vs_baseline raptorq_conformance golden_outputs; do
+            "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_report_${suite}" cargo test --test "$suite" --all-features -- --format json 2>&1 \
+              | tee "phase6-artifacts/${suite}.json" || true
+          done
+
+      - name: Upload Phase 6 E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: phase6-e2e-artifacts
+          path: phase6-artifacts/
+          retention-days: 30
+
+  ci-summary-d5:
+    name: CI Summary Reports (D5)
+    needs: [check, coverage, phase6-e2e]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Download no-mock policy report (D5 input)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: no-mock-policy-report
+          path: ci-summary-inputs/no-mock
+
+      - name: Download CI matrix policy report (D5 input)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-matrix-policy-report
+          path: ci-summary-inputs/ci-matrix
+
+      - name: Download coverage report (D5 input)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: llvm-cov-report
+          path: ci-summary-inputs/coverage
+
+      - name: Download Phase 6 E2E artifacts (D5 input)
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: phase6-e2e-artifacts
+          path: ci-summary-inputs/phase6
+
+      - name: Compose CI summary reports (D5)
+        run: |
+          mkdir -p ci-summary
+          python3 scripts/ci_summary_report.py compose \
+            --coverage-report ci-summary-inputs/coverage/coverage_ratchet_report.json \
+            --no-mock-report ci-summary-inputs/no-mock/no_mock_policy_report.json \
+            --ci-matrix-report ci-summary-inputs/ci-matrix/ci_matrix_policy_summary.json \
+            --e2e-matrix-report ci-summary-inputs/phase6/e2e-scenario-matrix/scenario_matrix_validation.json \
+            --forensics-report ci-summary-inputs/phase6/raptorq-forensics/summary.json \
+            --output-json ci-summary/ci_summary_report.json \
+            --output-markdown ci-summary/ci_summary_report.md \
+            --fail-on-nonpass
+
+      - name: Upload CI summary reports (D5)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-summary-report
+          path: ci-summary/
+          retention-days: 30
+
+  proof-checks:
+    name: Formal Proof Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-proofs-${{ hashFiles('**/Cargo.lock') }}
+
+      # Run the escaped-defect contract before broader proof suites. If a
+      # later lane fails fast, that must not hide whether native parked-task
+      # cancellation still preserves the downstream-visible join result.
+      - name: Native parked-task cancellation contract
+        run: |
+          set -euo pipefail
+          set +e
+          output=$(env \
+            CARGO_INCREMENTAL=0 \
+            CARGO_PROFILE_TEST_DEBUG=0 \
+            RUSTFLAGS='-D warnings -C debuginfo=0' \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/target_ci_native_parked_task_cancellation" \
+            cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [[ $status -ne 0 ]]; then
+            exit "$status"
+          fi
+          if ! grep -Eq \
+            'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' \
+            <<<"$output"; then
+            echo "native parked-task cancellation proof must run a nonzero, completely unfiltered test matrix" >&2
+            exit 87
+          fi
+          for required_test in \
+            run_test_preserves_typed_cancellation_from_a_parked_spawn \
+            abort_repolls_a_mutex_parked_operation_to_graceful_cancellation \
+            abort_repolls_an_explicit_cx_websocket_close_write_to_typed_cancellation \
+            abort_repolls_a_capacity_parked_send_to_graceful_cancellation \
+            abort_repolls_a_semaphore_parked_acquire_to_graceful_cancellation \
+            local_spawn_abort_preserves_mutex_cancellation_and_waiter_cleanup \
+            cross_thread_abort_on_multi_worker_runtime_preserves_mutex_cancellation_and_waiter_cleanup \
+            cross_thread_cx_cancel_wakes_a_timer_parked_native_task \
+            abort_and_join_complete_promptly_for_a_timer_parked_native_child \
+            abort_before_first_poll_keeps_task_level_cancellation_attribution \
+            local_abort_before_first_poll_keeps_task_level_cancellation_attribution \
+            cancellation_published_at_the_end_of_pending_repolls_user_code \
+            acknowledged_cancellation_can_finish_async_cleanup_before_join_completes \
+            ordinary_spawn_keeps_cancellation_dominant_for_cancellation_blind_late_values \
+            read_only_cancellation_observation_does_not_reclassify_a_late_value \
+            spawn_blocking_discards_a_late_value_after_wrapper_cancellation \
+            spawn_blocking_in_discards_a_late_value_after_wrapper_cancellation \
+            legacy_state_task_panic_after_abort_remains_panicked \
+            legacy_state_ready_future_drop_panic_is_published_as_join_error \
+            legacy_state_task_keeps_cancellation_dominant_result_attribution \
+            terminal_publication_boundary_preserves_panics_as_join_errors \
+            panic_during_cancel_cleanup_outranks_task_cancellation \
+            mailbox_and_scope_spawn_paths_classify_before_terminal_publication \
+            sibling_terminal_handle_publishers_are_cx_independent \
+            task_handle_abort_publishes_via_same_stable_envelope_as_cancel \
+            task_handle_abort_strengthens_existing_cancel_reason \
+            task_handle_abort_defers_panic_isolated_wakers_to_runtime_publication \
+            task_handle_abort_default_reason_is_user_kind_not_force_kill \
+            cx_cancel_with_publishes_via_same_stable_envelope_as_abort \
+            cx_cancel_fast_uses_same_publish_mechanism_minimal_attribution \
+            no_unsafe_thread_termination_in_abort_or_cancel_paths \
+            abort_path_uses_weak_handle_to_avoid_keeping_task_alive \
+            cancel_handlers_run_on_both_abort_and_cancel_via_same_checkpoint_path \
+            abort_does_not_have_separate_force_kill_method \
+            abort_with_reason_does_not_call_drop_guard_bypass_machinery \
+            cross_reference_to_prior_audits \
+            checked_zero_quota_refuses_before_publication_on_native_current_thread \
+            checked_zero_quota_refuses_before_publication_on_native_sharded_workers \
+            checked_owned_permit_cancellation_and_same_poll_reuse_on_native_current_thread \
+            checked_owned_permit_cancellation_and_same_poll_reuse_on_native_sharded_workers \
+            checked_other_primitives_refuse_cancel_and_reuse_on_native_current_thread \
+            checked_other_primitives_refuse_cancel_and_reuse_on_native_sharded_workers
+          do
+            if ! grep -Fq "test ${required_test} ... ok" <<<"$output"; then
+              echo "native parked-task cancellation proof did not pass required sentinel ${required_test}" >&2
+              exit 88
+            fi
+          done
+
+      - name: Certificate verification tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for certificate verification tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_certificate" cargo test --lib plan::certificate --all-features -- --nocapture
+
+      - name: Obligation formal checks (dialectica, graded, marking, guarded)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for obligation formal checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_obligation" cargo test --lib obligation --all-features -- --nocapture
+
+      - name: Lab oracle invariant checks
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for lab oracle invariant checks" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_lab_oracle" cargo test --lib lab::oracle --all-features -- --nocapture
+
+      - name: Cancellation protocol formalization tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for cancellation protocol formalization tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_cancel" cargo test --lib types::cancel --all-features -- --nocapture
+
+      - name: Combinator algebraic law tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for combinator algebraic law tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_combinator_laws" cargo test --lib combinator::laws --all-features -- --nocapture
+
+      - name: Trace fingerprint fixed-seed determinism gate
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for trace fingerprint determinism gate" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_trace_fingerprint_seed_gate" cargo test --test dpor_exploration trace_fingerprint_fixed_seed_gate_is_stable -- --nocapture
+
+      - name: DPOR exploration tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for DPOR exploration tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_dpor_exploration" cargo test --test dpor_exploration --all-features -- --nocapture
+        continue-on-error: true
+
+      - name: TLA+ export smoke test
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for TLA+ export smoke test" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_tla_export" cargo test --lib trace::tla_export --all-features -- --nocapture
+
+      - name: Trace canonicalization tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for trace canonicalization tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_trace_canonicalize" cargo test --lib trace::canonicalize --all-features -- --nocapture
+
+      - name: Lease semantics and liveness tests (bd-yj06g)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for lease semantics and liveness tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_lease_semantics" cargo test --test lease_semantics -- --nocapture
+
+      - name: Close quiescence regression tests (bd-sbi6e)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for close quiescence regression tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_close_quiescence" cargo test --test close_quiescence_regression -- --nocapture
+
+      - name: Refinement conformance tests (bd-3g13z)
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for refinement conformance tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_refinement_conformance" cargo test --test refinement_conformance -- --nocapture
+
+      - name: Proof artifact manifest validation
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for proof artifact manifest validation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_manifest" cargo test --test proof_artifact_manifest -- --nocapture
+
+      - name: TLA+ bounded model check (bd-11g3i)
+        run: bash scripts/run_model_check.sh --ci
+        continue-on-error: true
+
+      - name: Generate proof artifacts report
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p proof-artifacts
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for proof artifact generation" >&2
+            exit 1
+          fi
+          echo '{"ci_run": "${{ github.run_id }}", "commit": "${{ github.sha }}"}' > proof-artifacts/metadata.json
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_certificate" cargo test --lib plan::certificate --all-features -- --format json 2>&1 | tee proof-artifacts/certificate-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_obligation" cargo test --lib obligation --all-features -- --format json 2>&1 | tee proof-artifacts/obligation-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_oracle" cargo test --lib lab::oracle --all-features -- --format json 2>&1 | tee proof-artifacts/oracle-tests.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_lease" cargo test --test lease_semantics -- --format json 2>&1 | tee proof-artifacts/lease-semantics.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_close_quiescence" cargo test --test close_quiescence_regression -- --format json 2>&1 | tee proof-artifacts/close-quiescence.json || true
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_proof_artifact_refinement" cargo test --test refinement_conformance -- --format json 2>&1 | tee proof-artifacts/refinement-conformance.json || true
+          # Copy TLA+ results if available
+          cp formal/tla/output/result.json proof-artifacts/tla-model-check.json 2>/dev/null || true
+
+      - name: Upload proof artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: proof-artifacts
+          path: proof-artifacts/
+          retention-days: 90
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Build documentation
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for Build documentation" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_rustdoc" cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  quic-h3-unit:
+    name: QUIC/H3 Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-quic-h3-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run quic_core unit tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for quic_core unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_core" cargo test -p asupersync quic_core --all-features -- --nocapture
+
+      - name: Run quic_native unit tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for quic_native unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_native" cargo test -p asupersync quic_native --all-features -- --nocapture
+
+      - name: Run h3_native unit tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for h3_native unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_h3_native" cargo test -p asupersync h3_native --all-features -- --nocapture
+
+      - name: Run forensic_log unit tests
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for forensic_log unit tests" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_forensic_log" cargo test -p asupersync forensic_log --all-features -- --nocapture
+
+  quic-h3-e2e:
+    name: QUIC/H3 E2E Suite
+    runs-on: ubuntu-latest
+    needs: [quic-h3-unit]
+    strategy:
+      fail-fast: false
+      matrix:
+        test_crate:
+          - quic_h3_e2e
+          - quic_h3_e2e_loss
+          - quic_h3_e2e_h3
+          - quic_h3_e2e_cancel
+          - quic_h3_e2e_violations
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-quic-h3-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run ${{ matrix.test_crate }}
+        run: |
+          set -euo pipefail
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for ${{ matrix.test_crate }}" >&2
+            exit 1
+          fi
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_${{ matrix.test_crate }}" cargo test --test ${{ matrix.test_crate }} --all-features -- --nocapture
+
+      - name: Persist forensic artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quic-h3-forensic-${{ matrix.test_crate }}
+          path: |
+            artifacts/quic_h3_*
+            target/quic_h3_forensic/
+          retention-days: 30
+
+  quic-h3-no-mock:
+    name: QUIC/H3 No-Mock Gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Verify no mock/fake/stub in QUIC/H3 modules
+        run: |
+          python3 scripts/check_no_mock_policy.py \
+            --policy .github/no_mock_policy.json
+
+      - name: Verify replay catalog integrity
+        run: |
+          python3 scripts/quic_h3_triage.py --self-test
+
+  quic-h3-coverage:
+    name: QUIC/H3 Coverage Ratchet
+    runs-on: ubuntu-latest
+    needs: [quic-h3-unit, quic-h3-e2e]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cb33e69fad06166ca28a42b2575e4dadabf62ee8 # v2.85.8
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Run QUIC/H3 coverage
+        run: |
+          RCH_BIN="${RCH_BIN:-$HOME/.local/bin/rch}"
+          if [[ ! -x "$RCH_BIN" ]]; then
+            echo "rch is required for QUIC/H3 coverage" >&2
+            exit 1
+          fi
+          mkdir -p ci-summaries
+          "$RCH_BIN" exec -- env \
+            CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_ci_quic_h3_coverage" \
+            bash -lc "
+              set -euo pipefail
+              rustup component add llvm-tools-preview
+              cargo llvm-cov test -p asupersync --all-features --summary-only
+            " 2>&1 | tee ci-summaries/quic_h3_coverage.txt
+
+      - name: Check coverage ratchet (90% floor)
+        run: |
+          mkdir -p ci-summaries
+          python3 -c "
+          import json, sys
+          policy = json.load(open('.github/coverage_policy.json'))
+          qh3 = [s for s in policy['subsystems'] if s['id'] == 'quic_h3_native']
+          if qh3:
+              print(f'QUIC/H3 coverage floor: {qh3[0][\"min_line_pct\"]}%')
+          else:
+              print('WARNING: quic_h3_native subsystem not found in coverage policy')
+              sys.exit(1)
+          "
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quic-h3-coverage-report
+          path: ci-summaries/
+          retention-days: 30

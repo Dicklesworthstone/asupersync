@@ -1,0 +1,1 @@
+CONNECT {"verbose":true,"pedantic":false,"lang":"rust","version":"2.10.0","protocol":1,"name":"seed-client","user":"demo","pass":"secret"}\r\n

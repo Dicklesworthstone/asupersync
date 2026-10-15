@@ -1,0 +1,59 @@
+---
+source: src/http/h1/types.rs
+expression: request_response_builder_snapshot(&request, &response)
+---
+{
+  "request": {
+    "body_utf8": "{\"customer_id\":\"cust_123\",\"items\":[{\"qty\":2,\"sku\":\"A-1\"},{\"qty\":1,\"sku\":\"B-4\"}]}",
+    "headers": [
+      [
+        "Date",
+        "[TIMESTAMP]"
+      ],
+      [
+        "X-Request-Id",
+        "[ID]"
+      ],
+      [
+        "Content-Type",
+        "application/json"
+      ]
+    ],
+    "method": "POST",
+    "peer_addr": "[PEER_ADDR]",
+    "trailers": [
+      [
+        "X-Trace-Id",
+        "[ID]"
+      ]
+    ],
+    "uri": "/api/orders?page=2&cursor=after%3A2026-04-20T07%3A59%3A14Z",
+    "version": "HTTP/1.0"
+  },
+  "response": {
+    "body_utf8": "{\"accepted\":true,\"batch\":\"batch-17\"}",
+    "headers": [
+      [
+        "Date",
+        "[TIMESTAMP]"
+      ],
+      [
+        "X-Request-Id",
+        "[ID]"
+      ],
+      [
+        "Location",
+        "/api/orders/accepted/42"
+      ]
+    ],
+    "reason": "Accepted",
+    "status": 202,
+    "trailers": [
+      [
+        "X-Trace-Id",
+        "[ID]"
+      ]
+    ],
+    "version": "HTTP/1.1"
+  }
+}

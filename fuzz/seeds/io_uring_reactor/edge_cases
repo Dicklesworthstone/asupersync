@@ -1,0 +1,26 @@
+{
+  "config": {
+    "register_count": 20,
+    "invalid_fd_probability": 30,
+    "duplicate_token_probability": 50,
+    "modify_operations": 15,
+    "poll_iterations": 20,
+    "timeout_mode": "Zero",
+    "wake_probability": 80,
+    "interest_flags": 31,
+    "close_fd_probability": 40,
+    "timeout_millis": 1,
+    "chaos_seed": 67890
+  },
+  "operations": [
+    { "op_type": "Register", "token": 0, "interest": 31 },
+    { "op_type": "Register", "token": 0, "interest": 15 },
+    { "op_type": "CloseFd", "token": 0, "interest": 0 },
+    { "op_type": "Modify", "token": 0, "interest": 1 },
+    { "op_type": "Register", "token": 255, "interest": 16 },
+    { "op_type": "Wake", "token": 0, "interest": 0 },
+    { "op_type": "Wake", "token": 0, "interest": 0 },
+    { "op_type": "Poll", "token": 0, "interest": 0 },
+    { "op_type": "Deregister", "token": 999, "interest": 0 }
+  ]
+}

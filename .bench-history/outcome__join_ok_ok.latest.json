@@ -1,0 +1,12 @@
+{
+  "cv_pct": 7.127556404925716,
+  "generated_at": "2026-06-01T23:31:56Z",
+  "git_sha": "0c9bdcef378b0c36a2d4d4a610e927c344dd8c36",
+  "mean_ns": 13.043519831236111,
+  "median_ns": 13.43956741688513,
+  "name": "outcome/join_ok_ok",
+  "p95_ns": 14.144073988598523,
+  "p99_ns": 14.547955200094217,
+  "profile": "release-perf",
+  "std_dev_ns": 0.9296842331590254
+}

@@ -1,0 +1,253 @@
+---
+source: tests/trace_canonicalizer_golden.rs
+assertion_line: 507
+expression: golden
+---
+{
+  "scenario": "large_parallel_burst",
+  "input_metadata": {
+    "event_count": 17,
+    "event_kinds": [
+      "region_created",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn",
+      "spawn"
+    ],
+    "unique_tasks": 16,
+    "unique_regions": 17,
+    "description": "Boundary case: large burst of independent events - stress test parallelism detection"
+  },
+  "canonical_output": {
+    "depth": 1,
+    "len": 17,
+    "layers": [
+      [
+        {
+          "seq": 2,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 8589934592,
+            "secondary": 8589934592,
+            "tertiary": 0
+          },
+          "data_summary": "T2/R2"
+        },
+        {
+          "seq": 3,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 12884901888,
+            "secondary": 12884901888,
+            "tertiary": 0
+          },
+          "data_summary": "T3/R3"
+        },
+        {
+          "seq": 4,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 17179869184,
+            "secondary": 17179869184,
+            "tertiary": 0
+          },
+          "data_summary": "T4/R4"
+        },
+        {
+          "seq": 5,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 21474836480,
+            "secondary": 21474836480,
+            "tertiary": 0
+          },
+          "data_summary": "T5/R5"
+        },
+        {
+          "seq": 6,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 25769803776,
+            "secondary": 25769803776,
+            "tertiary": 0
+          },
+          "data_summary": "T6/R6"
+        },
+        {
+          "seq": 7,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 30064771072,
+            "secondary": 30064771072,
+            "tertiary": 0
+          },
+          "data_summary": "T7/R7"
+        },
+        {
+          "seq": 8,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 34359738368,
+            "secondary": 34359738368,
+            "tertiary": 0
+          },
+          "data_summary": "T8/R8"
+        },
+        {
+          "seq": 9,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 38654705664,
+            "secondary": 38654705664,
+            "tertiary": 0
+          },
+          "data_summary": "T9/R9"
+        },
+        {
+          "seq": 10,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 42949672960,
+            "secondary": 42949672960,
+            "tertiary": 0
+          },
+          "data_summary": "T10/R10"
+        },
+        {
+          "seq": 11,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 47244640256,
+            "secondary": 47244640256,
+            "tertiary": 0
+          },
+          "data_summary": "T11/R11"
+        },
+        {
+          "seq": 12,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 51539607552,
+            "secondary": 51539607552,
+            "tertiary": 0
+          },
+          "data_summary": "T12/R12"
+        },
+        {
+          "seq": 13,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 55834574848,
+            "secondary": 55834574848,
+            "tertiary": 0
+          },
+          "data_summary": "T13/R13"
+        },
+        {
+          "seq": 14,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 60129542144,
+            "secondary": 60129542144,
+            "tertiary": 0
+          },
+          "data_summary": "T14/R14"
+        },
+        {
+          "seq": 15,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 64424509440,
+            "secondary": 64424509440,
+            "tertiary": 0
+          },
+          "data_summary": "T15/R15"
+        },
+        {
+          "seq": 16,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 68719476736,
+            "secondary": 68719476736,
+            "tertiary": 0
+          },
+          "data_summary": "T16/R16"
+        },
+        {
+          "seq": 17,
+          "time_ns": 1,
+          "kind": "spawn",
+          "sort_key": {
+            "kind": 0,
+            "primary": 73014444032,
+            "secondary": 73014444032,
+            "tertiary": 0
+          },
+          "data_summary": "T17/R17"
+        },
+        {
+          "seq": 1,
+          "time_ns": 0,
+          "kind": "region_created",
+          "sort_key": {
+            "kind": 10,
+            "primary": 4294967296,
+            "secondary": 0,
+            "tertiary": 0
+          },
+          "data_summary": "R1/Pnone"
+        }
+      ]
+    ],
+    "independence_stats": {
+      "layer_count": 1,
+      "events_per_layer": [
+        17
+      ],
+      "max_parallelism": 17,
+      "independent_pairs": 136
+    }
+  }
+}

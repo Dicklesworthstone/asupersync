@@ -1,0 +1,23 @@
+{
+  "schema_version": "semantic-golden-fixture-v1",
+  "fixture_id": "golden-fuzz-baseline",
+  "rule_ids": ["inv.determinism.replayable"],
+  "description": "Expected fuzz campaign results for stable seed 0xADC00003",
+  "seed": 2915041283,
+  "seed_hex": "0xADC00003",
+  "iterations": 50,
+  "expected": {
+    "schema_version": 1,
+    "determinism": "all iterations must produce identical certificate hashes when replayed with same seed",
+    "corpus_format": "FuzzRegressionCorpus with schema_version=1",
+    "serde_roundtrip": "JSON serialize then deserialize must produce identical corpus"
+  },
+  "invariants": [
+    "FuzzRegressionCorpus serde round-trip is lossless",
+    "corpus.base_seed == 0xADC00003",
+    "corpus.iterations == 50",
+    "corpus.schema_version == 1",
+    "Two runs with same seed produce identical corpus JSON",
+    "Cases within corpus are sorted by (replay_seed, seed)"
+  ]
+}

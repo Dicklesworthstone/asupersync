@@ -1,0 +1,446 @@
+{
+  "schema_version": "proof-lane-admission-input-schema-v1",
+  "input_schema_version": "proof-lane-admission-input-v1",
+  "bead_id": "asupersync-l5m170.5.1",
+  "capability_id": "large_core_proof_lane_admission_input",
+  "artifact_path": "artifacts/proof_lane_admission_input_schema_v1.json",
+  "contract_test": "tests/proof_lane_admission_input_schema_contract.rs",
+  "generated_at_utc": "2026-05-29T01:24:00Z",
+  "support_class": "artifact-contract-backed",
+  "scope_boundary": {
+    "defines_schema_only": true,
+    "decision_engine_bead": "asupersync-l5m170.5.2",
+    "integrated_receipt_bead": "asupersync-l5m170.5.3",
+    "non_coverage": [
+      "does not start rch jobs",
+      "does not decide final admission",
+      "does not override dirty-tree or Agent Mail reservations",
+      "does not claim cache warmth is proof success"
+    ]
+  },
+  "side_effect_policy": {
+    "mode": "report_only_schema",
+    "beads_mutation_allowed": false,
+    "agent_mail_mutation_allowed": false,
+    "filesystem_cleanup_allowed": false,
+    "cargo_execution_allowed": false,
+    "rch_execution_allowed": false,
+    "cache_mutation_allowed": false,
+    "notes": "This artifact only defines deterministic input shape and fixture coverage for later admission logic."
+  },
+  "required_input_sections": [
+    "host_profile",
+    "resource_pressure",
+    "disk_headroom",
+    "rch_workers",
+    "active_project_exclusion",
+    "cargo_target_isolation",
+    "agent_mail_reservations",
+    "dirty_tree",
+    "proof_lane"
+  ],
+  "input_schema": {
+    "sections": {
+      "host_profile": {
+        "description": "Local machine capacity observed before scheduling proof lanes.",
+        "required_fields": [
+          {
+            "name": "cpu_cores",
+            "type": "u16",
+            "minimum": 1,
+            "reason": "Admission must know physical scheduling width."
+          },
+          {
+            "name": "memory_bytes",
+            "type": "u64",
+            "minimum": 536870912,
+            "reason": "Admission must know RAM headroom relative to proof peak memory."
+          },
+          {
+            "name": "numa_nodes",
+            "type": "u16",
+            "minimum": 1,
+            "reason": "Large-core hosts need a stable locality signal."
+          },
+          {
+            "name": "profile_class",
+            "type": "enum",
+            "allowed_values": [
+              "single_agent",
+              "large_core_swarm",
+              "oversubscribed_ci",
+              "unknown"
+            ],
+            "reason": "Operators need a coarse resource-governance posture."
+          }
+        ]
+      },
+      "resource_pressure": {
+        "description": "Fresh CPU, memory, and I/O pressure telemetry.",
+        "required_fields": [
+          {
+            "name": "telemetry_sampled_at_utc",
+            "type": "utc_timestamp",
+            "reason": "Stale pressure telemetry must fail closed."
+          },
+          {
+            "name": "telemetry_age_seconds",
+            "type": "u64",
+            "maximum": 900,
+            "reason": "Admission is only meaningful for fresh pressure data."
+          },
+          {
+            "name": "cpu_busy_bps",
+            "type": "u16",
+            "maximum": 10000,
+            "reason": "CPU saturation determines queue or split recommendations."
+          },
+          {
+            "name": "memory_available_bytes",
+            "type": "u64",
+            "reason": "Proof lanes must leave explicit RAM headroom."
+          },
+          {
+            "name": "io_some_avg10_bps",
+            "type": "u16",
+            "maximum": 10000,
+            "reason": "I/O pressure determines whether heavy Cargo lanes should wait."
+          }
+        ]
+      },
+      "disk_headroom": {
+        "description": "Local disk and target-dir parent capacity.",
+        "required_fields": [
+          {
+            "name": "root_free_bytes",
+            "type": "u64",
+            "reason": "Root pressure can make logs and artifacts unsafe."
+          },
+          {
+            "name": "tmp_free_bytes",
+            "type": "u64",
+            "reason": "rch target dirs often live below tmp."
+          },
+          {
+            "name": "target_parent_free_bytes",
+            "type": "u64",
+            "reason": "Admission must protect isolated CARGO_TARGET_DIR storage."
+          },
+          {
+            "name": "pressure_class",
+            "type": "enum",
+            "allowed_values": [
+              "healthy",
+              "watch",
+              "low",
+              "critical"
+            ],
+            "reason": "Operator receipts need a compact disk-pressure class."
+          }
+        ]
+      },
+      "rch_workers": {
+        "description": "Remote worker availability and cache-warm telemetry.",
+        "required_fields": [
+          {
+            "name": "remote_required",
+            "type": "bool",
+            "reason": "Proof evidence must distinguish remote execution from local fallback."
+          },
+          {
+            "name": "telemetry_sampled_at_utc",
+            "type": "utc_timestamp",
+            "reason": "Worker state goes stale quickly under swarm load."
+          },
+          {
+            "name": "telemetry_age_seconds",
+            "type": "u64",
+            "maximum": 900,
+            "reason": "Old worker telemetry must queue or fail closed."
+          },
+          {
+            "name": "workers",
+            "type": "array",
+            "reason": "Admission needs per-worker queue, pressure, and warmth rows."
+          }
+        ],
+        "worker_required_fields": [
+          "worker_id",
+          "queue_state",
+          "available_cores",
+          "available_memory_bytes",
+          "active_project_excluded",
+          "cache_warmth"
+        ]
+      },
+      "active_project_exclusion": {
+        "description": "Same-project exclusion state for remote workers.",
+        "required_fields": [
+          {
+            "name": "local_project_active",
+            "type": "bool",
+            "reason": "Local active project state determines whether local fallback is contaminating."
+          },
+          {
+            "name": "same_project_workers_excluded",
+            "type": "array",
+            "reason": "Receipts must name excluded workers without using them."
+          },
+          {
+            "name": "remote_worker_required",
+            "type": "bool",
+            "reason": "Remote-required lanes must not silently fall back."
+          }
+        ]
+      },
+      "cargo_target_isolation": {
+        "description": "Per-agent, per-bead, per-lane Cargo target-dir isolation.",
+        "required_fields": [
+          {
+            "name": "target_dir_template",
+            "type": "string",
+            "reason": "Suggested commands must preserve isolated CARGO_TARGET_DIRs."
+          },
+          {
+            "name": "agent_scoped",
+            "type": "bool",
+            "reason": "Agents must not share target dirs while editing shared main."
+          },
+          {
+            "name": "bead_scoped",
+            "type": "bool",
+            "reason": "A proof lane's cache should not be mistaken for another bead's evidence."
+          },
+          {
+            "name": "lane_scoped",
+            "type": "bool",
+            "reason": "Narrow and broad lanes need independent cache/evidence surfaces."
+          },
+          {
+            "name": "forbid_shared_target_dir",
+            "type": "bool",
+            "reason": "Shared target dirs contaminate proof evidence under parallel swarms."
+          }
+        ]
+      },
+      "agent_mail_reservations": {
+        "description": "Active reservation pressure from Agent Mail.",
+        "required_fields": [
+          {
+            "name": "telemetry_age_seconds",
+            "type": "u64",
+            "maximum": 900,
+            "reason": "Reservation state must be fresh enough to guard edits."
+          },
+          {
+            "name": "tracker_reserved",
+            "type": "bool",
+            "reason": "Tracker reservations control whether br mutations are safe."
+          },
+          {
+            "name": "active_peer_source_reservations",
+            "type": "array",
+            "reason": "Peer-owned source files can block proof execution."
+          },
+          {
+            "name": "active_self_reservations",
+            "type": "array",
+            "reason": "Self-owned source files can allow path-limited source work."
+          }
+        ]
+      },
+      "dirty_tree": {
+        "description": "Dirty-tree ownership classification before proof execution.",
+        "required_fields": [
+          {
+            "name": "classification",
+            "type": "enum",
+            "allowed_values": [
+              "clean",
+              "clean-or-self-only",
+              "tracker-only",
+              "peer-owned-source",
+              "unreserved-source",
+              "owner-conflict"
+            ],
+            "reason": "Proof evidence must not include unowned or peer-owned source dirt."
+          },
+          {
+            "name": "dirty_paths",
+            "type": "array",
+            "reason": "Receipts must name exact dirty paths."
+          },
+          {
+            "name": "peer_owned_paths",
+            "type": "array",
+            "reason": "Peer-owned dirty paths force wait or handoff."
+          },
+          {
+            "name": "unreserved_source_paths",
+            "type": "array",
+            "reason": "Unreserved source dirt cannot be silently validated."
+          }
+        ]
+      },
+      "proof_lane": {
+        "description": "The proof lane being considered for admission.",
+        "required_fields": [
+          {
+            "name": "lane_id",
+            "type": "string",
+            "reason": "Receipts must identify the exact proof lane."
+          },
+          {
+            "name": "workspace_package",
+            "type": "string",
+            "reason": "Cargo proof commands are package-scoped."
+          },
+          {
+            "name": "lane_family",
+            "type": "string",
+            "reason": "Cache warmth and cost estimates are family-scoped."
+          },
+          {
+            "name": "estimated_cost",
+            "type": "object",
+            "reason": "Admission cannot reason about CPU, RAM, I/O, or lane weight without cost."
+          },
+          {
+            "name": "command_template",
+            "type": "string",
+            "reason": "Operator receipts must include the exact next command shape."
+          }
+        ],
+        "estimated_cost_required_fields": [
+          "cpu_core_seconds",
+          "memory_bytes_peak",
+          "io_bytes",
+          "proof_weight"
+        ]
+      }
+    }
+  },
+  "cross_section_invariants": [
+    {
+      "invariant_id": "fresh-telemetry",
+      "description": "resource_pressure, rch_workers, and agent_mail_reservations telemetry_age_seconds must be present and no greater than 900."
+    },
+    {
+      "invariant_id": "remote-required-no-local-fallback",
+      "description": "remote_required proof lanes must either name an admissible remote worker or fail closed before validation."
+    },
+    {
+      "invariant_id": "target-dir-isolation",
+      "description": "target_dir_template must include agent, bead, and lane variables and every command_template must include CARGO_TARGET_DIR."
+    },
+    {
+      "invariant_id": "dirty-tree-preflight",
+      "description": "peer_owned_paths or unreserved_source_paths make the input incomplete for proof execution."
+    },
+    {
+      "invariant_id": "cost-before-admission",
+      "description": "proof_lane.estimated_cost must include CPU, memory, I/O, and proof_weight before a scheduler can split or queue lanes."
+    }
+  ],
+  "operator_receipt_logging": {
+    "required_fields": [
+      "receipt_id",
+      "profile_id",
+      "input_status",
+      "reason_codes",
+      "dirty_tree.classification",
+      "dirty_tree.dirty_paths",
+      "reservation_holders",
+      "resource_pressure_summary",
+      "worker_summary",
+      "cargo_target_dir_template",
+      "suggested_next_command",
+      "non_coverage"
+    ],
+    "detail_level": "operator-debug",
+    "redaction_policy": "worker ids may be stable handles; paths stay project-relative; secrets are forbidden"
+  },
+  "64_core_256gb_smoke_profile": {
+    "fixture_path": "tests/fixtures/proof_lane_admission_input_schema/64c_256g_smoke_profile.json",
+    "expected_projection": {
+      "profile_id": "64c-256g-clean-admit-smoke",
+      "cpu_cores": 64,
+      "memory_bytes": 274877906944,
+      "profile_class": "large_core_swarm",
+      "input_status": "complete",
+      "admission_precondition": "schema-ready",
+      "target_dir_isolated": true,
+      "remote_required": true,
+      "peer_dirty_paths": 0,
+      "unreserved_source_paths": 0
+    }
+  },
+  "fixture_coverage": [
+    {
+      "case_id": "complete_64c_256g",
+      "description": "Complete 64-core / 256 GiB host profile with fresh telemetry, clean dirty-tree state, isolated target dir, and an admissible remote worker.",
+      "fixture_path": "tests/fixtures/proof_lane_admission_input_schema/64c_256g_smoke_profile.json",
+      "expected_input_status": "complete",
+      "expected_admission_precondition": "schema-ready",
+      "reason_codes": [
+        "host-large-core",
+        "worker-admissible",
+        "target-dir-isolated"
+      ],
+      "fail_closed": false
+    },
+    {
+      "case_id": "missing_telemetry",
+      "description": "Required rch worker telemetry timestamp is absent or stale.",
+      "input_mutation": "remove rch_workers.telemetry_sampled_at_utc and set telemetry_age_seconds above 900",
+      "expected_input_status": "incomplete",
+      "expected_admission_precondition": "wait-for-telemetry",
+      "reason_codes": [
+        "missing-rch-telemetry",
+        "stale-telemetry"
+      ],
+      "fail_closed": true
+    },
+    {
+      "case_id": "dirty_tree_peer_reserved",
+      "description": "Dirty source path is owned by another active Agent Mail reservation.",
+      "input_mutation": "set dirty_tree.classification to peer-owned-source and add a matching active_peer_source_reservations row",
+      "expected_input_status": "incomplete",
+      "expected_admission_precondition": "wait-for-dirty-tree-handoff",
+      "reason_codes": [
+        "peer-owned-dirty-path",
+        "reservation-handoff-required"
+      ],
+      "fail_closed": true
+    },
+    {
+      "case_id": "worker_saturation",
+      "description": "All remote workers are saturated or excluded by active-project policy.",
+      "input_mutation": "set every rch_workers.workers[*].queue_state to saturated or active_project_excluded to true",
+      "expected_input_status": "complete",
+      "expected_admission_precondition": "queue-for-worker",
+      "reason_codes": [
+        "remote-worker-saturated"
+      ],
+      "fail_closed": true
+    },
+    {
+      "case_id": "low_disk_headroom",
+      "description": "CARGO_TARGET_DIR parent does not have enough free bytes for the lane's estimated I/O footprint.",
+      "input_mutation": "set disk_headroom.pressure_class to low and target_parent_free_bytes below proof_lane.estimated_cost.io_bytes",
+      "expected_input_status": "complete",
+      "expected_admission_precondition": "wait-for-disk-headroom",
+      "reason_codes": [
+        "low-target-dir-disk-headroom"
+      ],
+      "fail_closed": true
+    }
+  ],
+  "validation": {
+    "json_probe": "python3 -m json.tool artifacts/proof_lane_admission_input_schema_v1.json >/dev/null",
+    "fixture_probe": "python3 -m json.tool tests/fixtures/proof_lane_admission_input_schema/64c_256g_smoke_profile.json >/dev/null",
+    "format_check": "rustup run nightly rustfmt --edition 2024 --check tests/proof_lane_admission_input_schema_contract.rs",
+    "remote_required_contract_test": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_admission_input_schema cargo test -p asupersync --test proof_lane_admission_input_schema_contract -- --nocapture",
+    "dirty_tree_caveat": "Do not cite remote proof success while peer-owned dirty source or untracked proof files are present in the shared working tree."
+  }
+}

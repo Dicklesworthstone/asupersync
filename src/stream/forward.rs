@@ -1,0 +1,510 @@
+//! Helpers for forwarding streams to channels.
+
+use crate::channel::mpsc;
+use crate::channel::mpsc::SendError;
+use crate::cx::Cx;
+use crate::runtime::yield_now;
+use crate::stream::{Stream, StreamExt};
+
+/// Cooperative budget for successful sends in a single executor turn.
+///
+/// Without this cap, forwarding from an always-ready stream into a receiver
+/// with spare capacity can monopolize a poll until the input is fully drained.
+const FORWARD_SEND_BUDGET: usize = 1024;
+
+/// Sink wrapper for mpsc sender.
+pub struct SinkStream<T> {
+    sender: mpsc::Sender<T>,
+}
+
+impl<T> SinkStream<T> {
+    /// Create a new SinkStream.
+    #[inline]
+    #[must_use]
+    pub fn new(sender: mpsc::Sender<T>) -> Self {
+        Self { sender }
+    }
+
+    /// Send item through the channel.
+    #[inline]
+    pub async fn send(&self, cx: &Cx, item: T) -> Result<(), SendError<T>> {
+        self.sender.send(cx, item).await
+    }
+
+    /// Send all items from stream.
+    #[inline]
+    pub async fn send_all<S>(&self, cx: &Cx, stream: S) -> Result<(), SendError<S::Item>>
+    where
+        S: Stream<Item = T> + Unpin,
+    {
+        forward(cx, stream, self.sender.clone()).await
+    }
+
+    /// Forwards using caller-owned retry state and checked two-phase sends.
+    ///
+    /// `pending` holds at most one item extracted from `stream` but not yet
+    /// committed to the channel. Dropping this borrowing future, cooperative
+    /// cancellation, disconnection, or obligation-admission refusal leaves that
+    /// item in `pending`. Retry with the same stream and slot; a new sink may be
+    /// used after disconnection. A supplied pending item is sent before another
+    /// source item is requested. Values need not be cloned.
+    ///
+    /// The wait wakes on cancellation even while the source is idle. Channel
+    /// capacity is reserved before taking the pending value, and commit is
+    /// synchronous: there is no await holding an extracted value only in this
+    /// disposable future. At most one item is read ahead, and always-ready
+    /// pipelines yield cooperatively. No background task is spawned.
+    ///
+    /// Success means EOF was observed and every extracted item was accepted by
+    /// the channel, not that a consumer processed it. Do not retry after success
+    /// unless the source supports polling after EOF. Dropping `stream` or the
+    /// pending slot can still discard their contents. Source side effects while
+    /// returning Pending and panicking user code are outside the retry guarantee.
+    ///
+    /// ```no_run
+    /// # async fn example(cx: &asupersync::Cx) {
+    /// use asupersync::{channel::mpsc, stream::{into_sink, iter}};
+    /// let (sender, _receiver) = mpsc::channel(8);
+    /// let sink = into_sink(sender);
+    /// let mut source = iter([1, 2, 3]);
+    /// let mut pending = None;
+    /// let result = sink.send_all_recoverable(cx, &mut source, &mut pending).await;
+    /// // On error, retain BOTH source and pending for recovery.
+    /// assert!(result.is_ok());
+    /// assert!(pending.is_none());
+    /// # }
+    /// ```
+    pub async fn send_all_recoverable<S>(
+        &self,
+        cx: &Cx,
+        stream: &mut S,
+        pending: &mut Option<T>,
+    ) -> Result<(), mpsc::CheckedSendError<()>>
+    where
+        S: Stream<Item = T> + Unpin + ?Sized,
+    {
+        let mut sent_since_yield = 0usize;
+        loop {
+            if pending.is_none() {
+                match crate::stream::Next::new(stream).with_cx(cx).await {
+                    Ok(Some(item)) => *pending = Some(item),
+                    Ok(None) => return Ok(()),
+                    Err(_) => {
+                        return Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(())));
+                    }
+                }
+            }
+
+            let permit = self.sender.reserve_checked(cx).await?;
+            if cx.checkpoint().is_err() {
+                // RAII aborts the permit; the staged value has not moved.
+                return Err(mpsc::CheckedSendError::Channel(SendError::Cancelled(())));
+            }
+            let item = pending
+                .take()
+                .expect("source or caller supplied a pending item");
+            let (result, notification) = permit.try_send_deferred_wake(item);
+            if let Err(error) = result {
+                // Receiver closure may race the reservation. Restore ownership
+                // before notifying arbitrary user code, not merely before return:
+                // a panicking settlement notifier must not destroy an unsent item.
+                let error = match error {
+                    SendError::Disconnected(value) => {
+                        *pending = Some(value);
+                        SendError::Disconnected(())
+                    }
+                    SendError::Cancelled(value) => {
+                        *pending = Some(value);
+                        SendError::Cancelled(())
+                    }
+                    SendError::Full(value) => {
+                        *pending = Some(value);
+                        SendError::Full(())
+                    }
+                };
+                notification.wake();
+                return Err(mpsc::CheckedSendError::Channel(error));
+            }
+            // Publication and quota settlement are synchronous. Notify only
+            // after the channel owns the value (or the slot above recovered it).
+            notification.wake();
+
+            sent_since_yield += 1;
+            if sent_since_yield >= FORWARD_SEND_BUDGET {
+                sent_since_yield = 0;
+                yield_now().await;
+            }
+        }
+    }
+}
+
+/// Convert a stream into a channel sender.
+#[inline]
+#[must_use]
+pub fn into_sink<T>(sender: mpsc::Sender<T>) -> SinkStream<T> {
+    SinkStream::new(sender)
+}
+
+/// Forward stream to channel.
+///
+/// For idle-source cancellation and recovery after dropping a pending
+/// forwarding future, use [`SinkStream::send_all_recoverable`] instead.
+///
+/// # Cancel semantics
+///
+/// On a successful `stream.next().await`, this function checks `cx` BEFORE
+/// the `sender.send`. If `cx` has been cancelled, the in-flight item is
+/// returned to the caller via `Err(SendError::Cancelled(item))` — the
+/// stream will NOT see this item again on a subsequent call to
+/// `stream.next()`. Callers that must not lose items on cancellation are
+/// responsible for handling `SendError::Cancelled` and either re-feeding
+/// the value into a fresh `forward` invocation or persisting it to a
+/// recovery queue. Dropping the returned error variant silently drops
+/// the value. (Pass-3 / cancel-correctness invariant — re-stated here
+/// after the /multi-pass-bug-hunting re-audit, batch-363 SOUND.)
+#[inline]
+pub async fn forward<S, T>(
+    cx: &Cx,
+    mut stream: S,
+    sender: mpsc::Sender<T>,
+) -> Result<(), SendError<T>>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    let mut sent_since_yield = 0usize;
+    while let Some(item) = stream.next().await {
+        if cx.checkpoint().is_err() {
+            return Err(SendError::Cancelled(item));
+        }
+        sender.send(cx, item).await?;
+
+        sent_since_yield += 1;
+        if sent_since_yield >= FORWARD_SEND_BUDGET {
+            sent_since_yield = 0;
+            yield_now().await;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "forward_recover_tests.rs"]
+mod recover_tests;
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use crate::stream::iter;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Waker};
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct TrackWaker(Arc<AtomicBool>);
+
+    use std::task::Wake;
+    impl Wake for TrackWaker {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    fn poll_forward_to_ready(input: Vec<i32>, sender: mpsc::Sender<i32>) {
+        let cx: Cx = Cx::for_testing();
+        let stream = iter(input);
+        let mut future = std::pin::pin!(forward(&cx, stream, sender));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            completed,
+            "forward completes with spare channel capacity",
+            true,
+            completed
+        );
+    }
+
+    fn poll_sink_send_all_to_ready(input: Vec<i32>, sink: &SinkStream<i32>) {
+        let cx: Cx = Cx::for_testing();
+        let stream = iter(input);
+        let mut future = std::pin::pin!(sink.send_all(&cx, stream));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(
+            completed,
+            "sink send_all completes with spare channel capacity",
+            true,
+            completed
+        );
+    }
+
+    fn drain_receiver(receiver: &mut mpsc::Receiver<i32>) -> Vec<i32> {
+        let mut items = Vec::new();
+        while let Ok(item) = receiver.try_recv() {
+            items.push(item);
+        }
+        items
+    }
+
+    fn forward_collect(input: Vec<i32>) -> Vec<i32> {
+        let (tx, mut rx) = mpsc::channel::<i32>(input.len().saturating_add(1));
+        poll_forward_to_ready(input, tx);
+        drain_receiver(&mut rx)
+    }
+
+    /// Invariant: `into_sink` wraps an mpsc::Sender in a SinkStream.
+    #[test]
+    fn into_sink_creates_sink_stream() {
+        init_test("into_sink_creates_sink_stream");
+        let (tx, _rx) = mpsc::channel::<i32>(4);
+        let _sink = into_sink(tx);
+        // Construction succeeded — SinkStream wraps the sender.
+        crate::test_complete!("into_sink_creates_sink_stream");
+    }
+
+    /// Invariant: `forward` delivers all stream items to the channel.
+    #[test]
+    fn forward_sends_all_items() {
+        init_test("forward_sends_all_items");
+        let cx: Cx = Cx::for_testing();
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        let stream = iter(vec![10, 20, 30]);
+
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        // iter() yields synchronously, channel has capacity — should complete in one poll.
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(completed, "forward completes", true, completed);
+
+        // All items should be in the channel.
+        let v1 = rx.try_recv();
+        let ok1 = matches!(v1, Ok(10));
+        crate::assert_with_log!(ok1, "received 10", true, ok1);
+        let v2 = rx.try_recv();
+        let ok2 = matches!(v2, Ok(20));
+        crate::assert_with_log!(ok2, "received 20", true, ok2);
+        let v3 = rx.try_recv();
+        let ok3 = matches!(v3, Ok(30));
+        crate::assert_with_log!(ok3, "received 30", true, ok3);
+
+        crate::test_complete!("forward_sends_all_items");
+    }
+
+    #[test]
+    fn mr_forward_partitioned_inputs_match_unsplit_fifo_order() {
+        init_test("mr_forward_partitioned_inputs_match_unsplit_fifo_order");
+        let combined = vec![1, 2, 3, 4, 5, 6];
+        let baseline = forward_collect(combined);
+
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        poll_forward_to_ready(vec![1, 2], tx.clone());
+        poll_forward_to_ready(vec![3, 4, 5, 6], tx);
+        let partitioned = drain_receiver(&mut rx);
+
+        crate::assert_with_log!(
+            partitioned == baseline,
+            "partitioned forwarding matches combined forwarding",
+            baseline,
+            partitioned
+        );
+        crate::test_complete!("mr_forward_partitioned_inputs_match_unsplit_fifo_order");
+    }
+
+    #[test]
+    fn mr_forward_sink_send_all_matches_direct_forward() {
+        init_test("mr_forward_sink_send_all_matches_direct_forward");
+        let input = vec![9, 8, 7, 6];
+        let baseline = forward_collect(input.clone());
+
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        let sink = into_sink(tx);
+        poll_sink_send_all_to_ready(input, &sink);
+        let through_sink = drain_receiver(&mut rx);
+
+        crate::assert_with_log!(
+            through_sink == baseline,
+            "SinkStream::send_all matches direct forward",
+            baseline,
+            through_sink
+        );
+        crate::test_complete!("mr_forward_sink_send_all_matches_direct_forward");
+    }
+
+    /// Invariant: forwarding an empty stream completes immediately with Ok.
+    #[test]
+    fn forward_empty_stream_ok() {
+        init_test("forward_empty_stream_ok");
+        let cx: Cx = Cx::for_testing();
+        let (tx, _rx) = mpsc::channel::<i32>(4);
+        let stream = iter(Vec::<i32>::new());
+
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let completed = matches!(poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(completed, "empty forward completes", true, completed);
+
+        crate::test_complete!("forward_empty_stream_ok");
+    }
+
+    #[test]
+    fn forward_yields_after_budget_on_always_ready_stream() {
+        init_test("forward_yields_after_budget_on_always_ready_stream");
+        let cx: Cx = Cx::for_testing();
+        let item_count = FORWARD_SEND_BUDGET + 1;
+        let (tx, mut rx) = mpsc::channel::<usize>(item_count + 1);
+        let stream = iter(0..item_count);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+
+        let first_poll = future.as_mut().poll(&mut task_cx);
+        let first_pending = matches!(first_poll, std::task::Poll::Pending);
+        crate::assert_with_log!(first_pending, "first poll pending", true, first_pending);
+        let woke_after_budget = woke.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            woke_after_budget,
+            "self wake scheduled",
+            true,
+            woke_after_budget
+        );
+
+        let second_poll = future.as_mut().poll(&mut task_cx);
+        let second_ready = matches!(second_poll, std::task::Poll::Ready(Ok(())));
+        crate::assert_with_log!(second_ready, "second poll ready", true, second_ready);
+
+        let mut received = Vec::with_capacity(item_count);
+        while let Ok(item) = rx.try_recv() {
+            received.push(item);
+        }
+        let expected: Vec<_> = (0..item_count).collect();
+        crate::assert_with_log!(
+            received == expected,
+            "all forwarded items",
+            expected,
+            received
+        );
+
+        crate::test_complete!("forward_yields_after_budget_on_always_ready_stream");
+    }
+
+    #[test]
+    fn forward_cancelled_before_first_send_returns_unsent_item() {
+        init_test("forward_cancelled_before_first_send_returns_unsent_item");
+        let cx: Cx = Cx::for_testing();
+        let (tx, mut rx) = mpsc::channel::<i32>(8);
+        let stream = iter(vec![10, 20, 30]);
+
+        cx.set_cancel_requested(true);
+
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+
+        let poll = future.as_mut().poll(&mut task_cx);
+        let cancelled = matches!(poll, std::task::Poll::Ready(Err(SendError::Cancelled(10))));
+        crate::assert_with_log!(
+            cancelled,
+            "cancellation returns first unsent item",
+            true,
+            cancelled
+        );
+
+        let receiver_empty = rx.try_recv().is_err();
+        crate::assert_with_log!(
+            receiver_empty,
+            "no items forwarded after pre-send cancellation",
+            true,
+            receiver_empty
+        );
+
+        crate::test_complete!("forward_cancelled_before_first_send_returns_unsent_item");
+    }
+
+    #[test]
+    fn forward_full_path_reports_cancelled_not_disconnected() {
+        init_test("forward_full_path_reports_cancelled_not_disconnected");
+        let cx: Cx = Cx::for_testing();
+        let (tx, mut rx) = mpsc::channel::<i32>(1);
+        let stream = iter(vec![1, 2]);
+
+        let woke = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TrackWaker(Arc::clone(&woke))));
+        let mut task_cx = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(forward(&cx, stream, tx));
+
+        let first_poll = future.as_mut().poll(&mut task_cx);
+        let first_pending = matches!(first_poll, std::task::Poll::Pending);
+        crate::assert_with_log!(
+            first_pending,
+            "first poll blocks on full channel",
+            true,
+            first_pending
+        );
+
+        let first_item = rx.try_recv();
+        let first_forwarded = matches!(first_item, Ok(1));
+        crate::assert_with_log!(
+            first_forwarded,
+            "first item forwarded",
+            true,
+            first_forwarded
+        );
+
+        cx.set_cancel_requested(true);
+
+        let second_poll = future.as_mut().poll(&mut task_cx);
+        let cancelled = matches!(
+            second_poll,
+            std::task::Poll::Ready(Err(SendError::Cancelled(2)))
+        );
+        crate::assert_with_log!(
+            cancelled,
+            "full-path cancellation preserves cancelled error kind",
+            true,
+            cancelled
+        );
+
+        let no_extra_item = rx.try_recv().is_err();
+        crate::assert_with_log!(
+            no_extra_item,
+            "second item not forwarded after cancellation",
+            true,
+            no_extra_item
+        );
+
+        crate::test_complete!("forward_full_path_reports_cancelled_not_disconnected");
+    }
+}

@@ -1,0 +1,10 @@
+---
+source: src/cancel/symbol_cancel.rs
+expression: hex_output
+---
+Token: test_token_max_values
+Token ID: 0xffffffffffffffff
+Object ID: 0xdeadbeefcafebabe:0x1337133713371337
+Cancelled: true
+Wire bytes: [ff, ff, ff, ff, ff, ff, ff, ff, de, ad, be, ef, ca, fe, ba, be, 13, 37, 13, 37, 13, 37, 13, 37, 01]
+Hex: ffffffffffffffffdeadbeefcafebabe133713371337133701

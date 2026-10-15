@@ -1,0 +1,29 @@
+[
+  {
+    "foundation": "1",
+    "component": 1,
+    "protocol": "udp",
+    "priority": 2113667326,
+    "address": "192.168.1.100:54400",
+    "candidate_type": "Host",
+    "related_address": null
+  },
+  {
+    "foundation": "2",
+    "component": 1,
+    "protocol": "udp",
+    "priority": 1686052606,
+    "address": "203.0.113.45:54401",
+    "candidate_type": "ServerReflexive",
+    "related_address": "192.168.1.100:54400"
+  },
+  {
+    "foundation": "3",
+    "component": 1,
+    "protocol": "udp",
+    "priority": 16777215,
+    "address": "203.0.113.80:49200",
+    "candidate_type": "Relay",
+    "related_address": "203.0.113.45:54401"
+  }
+]

@@ -1,0 +1,190 @@
+# ATP vs rsync — real-internet benchmark harness (br-asupersync-iiz6jk)
+
+Measures `atp` against a **maximally tuned** rsync transferring real payloads
+between real fleet machines over the open internet (Hetzner → Contabo), with
+bit-for-bit SHA-256 verification of every single transfer.
+
+## Methodology (gauntlet rules)
+
+- **Honest baseline first**: every number is reported, including losses. No
+  cherry-picking. Network conditions (RTT, optional iperf3 throughput ceiling)
+  are recorded alongside results.
+- **Toughest-possible rsync**: random payloads are incompressible and the
+  destination is always empty, so rsync is configured to skip everything that
+  would slow it down:
+  - `-aW --inplace` — archive mode, **whole-file** (delta algorithm off — it
+    can only lose on fresh random data), in-place writes (no tmp-copy rename).
+  - **No `-z`** — compression strictly hurts on `/dev/urandom` payloads.
+  - ssh transport tuned: `-T -x -o Compression=no -c aes128-gcm@openssh.com`
+    (fastest AEAD cipher commonly available; no TTY, no X11).
+  - **`rsyncd` daemon mode** is also measured: plaintext TCP, no ssh crypto at
+    all. `atp-quic` is the QUIC/TLS ATP row, `atp-rq` is the authenticated
+    RaptorQ/UDP ATP row, `atp-tcp` is the plaintext legacy ATP control row,
+    `rsyncd` is the plaintext rsync ceiling, and rsync-over-ssh is the
+    authenticated/encrypted rsync row. This is stated in the report rather than
+    hidden.
+- **3 measured runs + 1 warmup** per (tool × payload). Each cell writes to a
+  unique receiver directory under `/root/atp-bench/recv/<run-id>/...`; the
+  harness retains artifacts instead of deleting prior runs.
+- **Verification**: a SHA-256 manifest is generated at payload creation; after
+  EVERY transfer the receiver runs `sha256sum -c` over the manifest. A failed
+  verification fails the run (recorded, not discarded).
+- **RQ symbol authentication**: `atp-rq` uses a 32-byte symbol-auth key. The
+  harness generates one with `atp rq-keygen` per run. To supply an operator key,
+  pass `--atp-rq-auth-key-stdin` and pipe exactly one 64-hex-character line into
+  the harness. Each local and remote ATP process receives the key through its
+  own stdin; in new runs, the key is absent from process arguments,
+  environments, SSH command strings, `/usr/bin/time` command records, and
+  result artifacts. `atp-quic` instead authenticates every symbol datagram
+  through QUIC's TLS 1.3 AEAD and neither needs nor accepts the RQ stdin key.
+  The legacy `ATP_RQ_AUTH_KEY_HEX` and `RQ_AUTH_KEY_HEX` environment inputs are
+  rejected.
+
+  Before each secret-bearing fleet SSH session, the harness checks the exact
+  effective host, options, and remote command with a public stdin canary.
+  Ordinary aliases, ProxyJump, and bastions remain supported. Effective paths
+  that target fd 0, as well as tokenized (`%...`) identity/certificate paths
+  whose final expansion cannot be proven safe, fail closed.
+
+  Artifacts retained from older harness versions can still contain raw
+  key-designated values because `/usr/bin/time` recorded the former argv. Audit
+  matrix-cell `send.time` / `recv.time`, fleet receiver `recv_time.txt`, and the
+  sender `time.txt` beneath each retained `atp_bench_one.*` temp directory.
+  Treat those values as expired and compromised, never reuse them, and audit
+  both local and fleet retention before sharing old results. This harness
+  neither rewrites nor deletes existing artifacts. Its Bash
+  overwrite-and-unset cleanup is best effort; it is not a claim of
+  cryptographic heap zeroization.
+- **Crypto-symmetric reporting**: `report.py` only headlines apples-to-apples
+  speedup pairs: `atp-quic`/`atp-rq` against rsync-over-ssh, and the plaintext
+  `atp-tcp` control against `rsyncd`.
+
+## Metrics captured
+
+| Metric | Source | Side |
+|--------|--------|------|
+| Wall clock | `/usr/bin/time -v` | sender + receiver (atp `--once`) |
+| Peak RSS | `/usr/bin/time -v` MaxRSS | sender + receiver |
+| Avg RSS / %CPU | `sampler.sh` (0.5s `ps` samples) | sender + receiver |
+| CPU cycles / instructions | `perf stat` when available, else omitted | sender |
+| Per-core utilization | `mpstat -P ALL 1` during run | sender |
+| Responsiveness guard | 1-min loadavg sampled; run fails if > configured cap × cores | both |
+| Throughput | payload bytes / wall | derived |
+| feedback_rounds | ATP sender JSON | ATP rows |
+
+## Files
+
+- `gen_payloads.sh` — run on the **sender**: builds `/root/atp-bench/payloads`
+  (512KB/1MB/10MB/100MB/1GB urandom files + heterogeneous nested tree) and
+  SHA-256 manifests. Idempotent; if an existing payload does not match its
+  manifest, the script fails closed rather than overwriting it.
+- `collect_metrics.sh` — background process sampler (`ps`/loadavg → JSONL).
+- `run_one.sh` — runs one sender command under `/usr/bin/time -v` (+ `perf
+  stat` if present), emits a JSON result line, and retains its temp directory
+  path in the `tmp_dir` field.
+- `run_bench.sh` — orchestrator (run from the dev box): deploys binaries +
+  scripts, iterates payload × tool × run, collects sender+receiver metrics,
+  verifies hashes, writes `results.jsonl`.
+- `report.py` — aggregates `results.jsonl` → markdown comparison report.
+
+## ATP RQ/QUIC knobs
+
+`atp-quic` and `atp-rq` are included by default. The TCP row remains useful as a
+plaintext regression/control comparison while RQ/QUIC work continues.
+
+```bash
+--atp-rq-streams 8
+--atp-rq-symbol-size 1024
+--atp-rq-repair-overhead 1.15
+--atp-rq-tail-drain-ms 2
+--atp-rq-auth-key-stdin              # optional; read one 64-hex line before setup
+--atp-quic-server-name <name-or-ip> # optional; default is receiver host/IP
+--atp-quic-handshake-timeout-ms 30000
+```
+
+Those non-secret values are recorded in `conditions.json` for every run.
+`atp-quic` reuses the RQ symbol size, repair overhead, and tail-drain tuning, but
+its authentication boundary is TLS rather than the separate RQ symbol key.
+Sweep the tuning values when working on throughput: larger symbols reduce coding
+overhead, more streams can help fill the RQ path, and repair overhead trades
+network bytes for fewer decode round trips. Tail drain is the receiver-side
+quiet window after each fountain round marker; increasing it can prevent false
+`NeedMore` rounds on high-RTT paths where control traffic beats queued symbols
+to user space.
+
+When `atp-quic` is requested, `run_bench.sh` generates a short-lived self-signed
+certificate/key on the receiver under `<base>/runs/<run-id>/quic_tls/`, copies
+the certificate to the sender as the CA trust root, and passes `--server-cert`,
+`--server-key`, `--ca`, and `--server-name` explicitly. The key is never copied
+off the receiver.
+
+`run_bench.sh` also accepts `--run-id <A-Za-z0-9._->` and
+`--base <remote-dir>`. Supplying a run id makes reruns easy to correlate across
+sender, receiver, and local artifacts. Use `--base` when the sender is not
+`root`; the directory must be writable on both machines. Cleanup is
+intentionally manual: inspect or archive `<base>/recv/<run-id>` and
+`<base>/runs/<run-id>` on the receiver before removing anything.
+
+## Resource Guard
+
+Every benchmark row records a `resource_guard` object with schema
+`atp-bench-resource-guard-v1`. The guard evaluates sampled load and optional
+RSS caps as a pass/fail artifact, so the G3 responsiveness claim is not inferred
+from prose in `report.md`.
+
+```bash
+--max-load-per-core 1.5     # default; applies to sender and receiver load1
+--max-sender-rss-mb 0       # 0 disables the sender RSS cap
+--max-receiver-rss-mb 0     # 0 disables the receiver RSS cap
+```
+
+The load cap is enforced before each series and after each measured run. RSS
+caps are opt-in because valid ceilings depend on payload/profile size; when set,
+the row fails closed if `/usr/bin/time -v` or sampler evidence crosses the cap.
+
+## Usage
+
+```bash
+# from the repo root on the dev box
+scripts/atp_bench/run_bench.sh \
+  --sender hz1 --sender-key ~/.ssh/contabo_vps_ed25519 \
+  --receiver vmi1156319 --receiver-key ~/.ssh/contabo_vps_ed25519 \
+  --base /home/ubuntu/atp-bench \
+  --atp-binary target/release/atp \
+  --payloads 512k,1m,10m,100m,1g,tree \
+  --tools atp-quic,atp-rq,atp-tcp,rsync-ssh,rsyncd \
+  --atp-rq-streams 8 \
+  --atp-rq-symbol-size 1024 \
+  --atp-rq-repair-overhead 1.15 \
+  --atp-rq-tail-drain-ms 2 \
+  --run-id atp-rq-open-internet-$(date -u +%Y%m%dT%H%M%SZ) \
+  --runs 3 \
+  --out artifacts/atp_bench/$(date +%Y-%m-%d)
+
+python3 scripts/atp_bench/report.py artifacts/atp_bench/<date>/results.jsonl \
+  > artifacts/atp_bench/<date>/report.md
+```
+
+For the netns matrix harness high-BDP UDP fan-out sweep, keep rsync as the
+single-stream baseline and sweep ATP-RQ streams explicitly:
+
+```bash
+scripts/atp_bench/matrix_bench.sh \
+  --workloads 50M,500M \
+  --regimes good,bad \
+  --tiers auth \
+  --streams 1,2,4,8 \
+  --reps 3
+
+python3 scripts/atp_bench/score_matrix.py \
+  artifacts/atp_bench_matrix/<run-id>/results.jsonl \
+  --out-md artifacts/atp_bench_matrix/<run-id>/scorecard.md
+```
+
+ATP-RQ result rows carry `atp_rq_streams`/`stream_count`, and the scorecard
+groups medians and admitted ATP-vs-rsync ratios by stream count. Non-RQ rows,
+including tuned rsync, stay single-baseline rows for apples-to-apples scoring.
+
+Fleet etiquette: prefer `hz1` as sender (hz2 is the highest-priority rch build
+worker); the responsiveness guard aborts a run series if either machine's
+loadavg exceeds 1.5× its core count.

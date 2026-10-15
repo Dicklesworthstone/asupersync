@@ -1,0 +1,1492 @@
+# Testing Guide
+
+This document defines the test logging standards, categories, and execution
+patterns for the Asupersync codebase. The goal is deterministic, explainable
+failures with high-signal traces and minimal manual digging.
+
+## Quick Commands
+
+Run these from the repository root on the pinned toolchain. Require remote
+execution for the entire shell session; an unavailable worker or local fallback
+is a failed attempt. For changes covered by the native cancellation boundary
+below, run that unfiltered target before broader checks.
+
+```bash
+export RCH_REQUIRE_REMOTE=1
+
+# Build hygiene check (compilation only)
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_check cargo check --lib -p asupersync --features test-internals
+
+# Library unit tests; this does not select tests/*.rs integration targets
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_lib cargo test --lib --features test-internals
+
+# Stream logs
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_lib_nocapture cargo test --lib --features test-internals -- --nocapture
+
+# Run a specific test file
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_http_verification cargo test --test http_verification --features test-internals
+
+# Run the complete cancellation integration target
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_cancellation cargo test --test cancellation_conformance --features test-internals
+
+# Phase 2 differential policy contract checks
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
+```
+
+Cargo's positional test argument is a substring filter on test names;
+`--test cancellation_conformance` selects the integration executable. Require
+nonzero executed tests and inspect failed, ignored and filtered counts. A
+successful command with zero selected tests proves no behavior.
+
+## Mandatory Native Parked-Task Cancellation Boundary
+
+Deterministic LabRuntime, cancellation models, E2E scenarios, structural
+scans, and broad aggregate test counts cannot prove the native boundary between
+a parked future, scheduler cancellation wakeup, a spawn wrapper, and
+`TaskHandle` terminal-result publication. Changes to `Cx`, `TaskHandle`,
+scheduler cancellation wakeup, spawn wrappers, or cancel-aware primitives must
+run this release-blocking contract in addition to narrower unit/Lab tests:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_native_parked_task_cancellation" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+```
+
+The maintained `scripts/run_proof_checks.sh` suite executes this lane as its
+first proof check, before its broader Rust and integration proofs, and
+`tests/proof_lane_manifest_contract.rs` fails if that wiring or the runner's
+remote-only policy disappears. This order is intentional: a later unrelated
+fail-fast must not prevent the cancellation contract from running.
+If this native prerequisite or the following published cancellation compatibility
+canary fails, the runner stops before launching broader builds and writes a
+non-passing manifest containing only the checks attempted. Fix the prerequisite
+and rerun the complete suite; unattempted checks provide no evidence. Passing
+both prerequisites retains the full existing proof-check schedule.
+
+The GitHub workflow also runs this target directly on its native Linux runner.
+That is supplementary platform regression coverage, not remote RCH proof. The
+canonical release wrapper rejects both RCH local fallback and the repository's
+`rch_ci_fallback.sh` compatibility banner.
+
+The native cases must prove they are actually parked before abort. They must
+then assert the exact distinction between a domain-level cancellation value
+returned by a cancel-aware operation and task-level `JoinError::Cancelled`, as
+well as waiter unlinking. The
+matrix must cover current-thread and owner-local scheduling plus cross-thread
+abort delivery on a multi-worker runtime,
+abort-before-first-poll delivery, cancellation arriving after the user future
+returned `Pending` but before wrapper classification, and panic classification
+through the same terminal-publication boundary. It must additionally prove that a
+task which has acknowledged cancellation can cross another `Pending` while
+finishing asynchronous protocol cleanup. Ordinary `Cx::spawn*` preserves a
+typed result returned after cancellation acknowledgement, but retains v0.4.3
+task-level cancellation for cancellation-blind late values and cancellation
+before the first user poll. Cancellation-dominant combinators, blocking
+wrappers, and low-level state tasks retain their separately asserted result
+policies. Do not invent a generic hard-stop or truncate acknowledged cleanup to
+make the lane pass.
+
+The lane is not green if it is red, unrun, skipped, filtered, reports zero
+tests, or omits any named escaped-defect sentinel required by the proof runner.
+A green build, Lab/model result, structural source assertion, or any number of
+unrelated passing tests cannot replace it. When the lane is added for an
+escaped defect, preserve evidence that the regression test failed on the old
+implementation and passed on the repair.
+
+The runtime `TaskHandle` channel is capability-restricted: spawn adapters get a
+private terminal-result sender that can only be consumed by the authoritative
+Cx-independent publisher. The lane's source census must fail if a producer
+reintroduces a raw result sender, bypasses completion classification, or adds a
+new `TaskHandle` constructor without an explicit policy and behavioral case.
+
+### Published v0.4.4 downstream cancellation compatibility
+
+The native current-tree lane above is paired with an external consumer that
+depends on the exact crates.io release `asupersync = "=0.4.4"` under a distinct
+dependency alias. Run it through the canonical remote-only command:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_downstream_consumer_v044_cancel_compat" CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer
+```
+
+The executable first launches a planted copy of FrankenGraphDB's stale
+`Err(JoinError::Cancelled)` expectation and requires that copy to fail for the
+intended policy mismatch. It then proves the migrated public sequence: an
+ordinary child is genuinely parked on a mutex, observes cancellation, crosses
+an asynchronous cleanup boundary, unlinks its waiter, and joins as `Ok(())`.
+An adjacent cancellation-blind child must still join with outer
+`JoinError::Cancelled`, so the two policies cannot silently alias. A valid run
+emits `V044_CANCEL_COMPAT_NEGATIVE_RED`,
+`V044_CANCEL_COMPAT_POSITIVE_GREEN`, and `V044_CANCEL_COMPAT_CASES=3` before
+remote exit 0. Missing signals, local fallback, or zero/filtered/skipped output
+is a hard failure.
+
+This lane proves only the exact published v0.4.4 cancellation boundary. It is
+not current-HEAD runtime evidence, broad FrankenGraphDB coverage, performance
+evidence, or release-readiness by itself.
+
+## Shared Validation Contract (asupersync-ay6qvw)
+
+This section is the canonical validation contract for the stub-resolution closeout
+track. Z0 freezes the shared schema and execution policy here; Z0a, Z0b, Z1,
+Z2, and every terminal bead in Tracks B-I must consume this section instead of
+inventing runner-specific conventions.
+
+The authoritative stub inventory and end-state selection lives in
+`docs/stub_disposition_matrix.md`. This section defines how those track-level
+end-states must be validated and recorded.
+
+If an older duplicate bead is reopened or superseded, the successor inherits
+the same validation obligations below; do not fork the contract just because
+the bead ID changed during plan cleanup.
+
+### Required Validation Classes
+
+Every terminal bead in Tracks B-I must explicitly contribute one or more of
+the following evidence classes:
+
+- `unit`: inline/module tests proving the local invariant of the changed surface
+- `integration`: real-component or cross-module coverage of the changed boundary
+- `e2e`: deterministic script or maintained scenario proving the user-visible or
+  cross-component workflow
+- `scan`: structural/policy evidence (placeholder scans, waivers, cfg/build
+  matrix checks, docs-truthfulness scans)
+- `audit`: synchronized docs, matrix rows, audit index entries, and handoff notes
+
+If a class is not applicable, the bead notes or closeout doc must say `N/A`
+and explain why. Silence is not an allowed contract.
+
+### Required Structured Fields
+
+New Track-Z validation artifacts must use the exact field names below unless a
+pre-existing schema already owns that surface. Legacy runners may keep older
+schemas, but any new summary or NDJSON record added for stub-resolution work
+must preserve these names and meanings.
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `schema_version` | yes | Stable schema discriminator for the artifact or log row |
+| `bead_id` | yes | Owning bead, for example `asupersync-v2ofj7.8.6` |
+| `track_id` | yes | Owning track lane, for example `B` through `I` or `Z` |
+| `scenario_id` | yes | Stable scenario or check id |
+| `validation_surface` | yes | One of `unit`, `integration`, `e2e`, `scan`, `audit` |
+| `profile_family` | yes | Profile or feature family under test |
+| `feature_flags` | yes | Explicit feature set or build mode being validated |
+| `seed_or_fixture_id` | yes | Deterministic seed or stable fixture identifier |
+| `config_snapshot_ref` | yes | Pointer to the config, workload, or policy snapshot used |
+| `command` | yes | Exact command that executed the validation step |
+| `expected_outcome` | yes | Contract expectation for the step |
+| `observed_outcome` | yes | Actual result, using stable language like `passed`, `failed`, `unsupported`, `skipped` |
+| `exit_code` | yes | Process exit status for the validation step |
+| `artifact_path` | yes | Canonical path to the primary summary artifact for this step |
+| `replay_pointer` | no | Replay trace, repro command, or equivalent deterministic failure pointer |
+| `rch_routed` | yes | `true` when the cargo-heavy step actually ran through `rch` |
+| `execution_backend` | yes | One of `rch`, `local`, `rch_local_fallback`, `dry_run` |
+| `cargo_target_dir` | conditional | Required for any cargo-backed scripted run; identifies the isolated target dir |
+| `evidence_owner` | yes | Bead or closeout lane responsible for keeping the evidence green |
+
+Additional fields may be added, but they must be additive and must not rename
+or weaken the required fields above.
+
+### Artifact Roots And Ownership
+
+Do not invent new top-level artifact roots when an existing canonical root
+already fits the surface.
+
+| Surface | Canonical owner | Canonical root | Required artifacts |
+| --- | --- | --- | --- |
+| Unit or integration test harness | Rust test harness | `$ASUPERSYNC_TEST_ARTIFACTS_DIR/<test_id>/<seed>/` | `repro_manifest.json`, `events.ndjson` or equivalent event log, `summary.json`, optional `environment.json` |
+| Deterministic E2E suite | Runner script under `scripts/` | `target/e2e-results/<suite>/<run_id>/` | `summary.json`, scenario log (`scenarios.ndjson` or suite-specific equivalent), optional `validation_stages.ndjson`, step logs |
+| Scan or policy ratchet | Checker script or policy gate | `artifacts/` or `target/e2e-results/<suite>/` when the scan is suite-owned | One summary JSON plus one machine-readable event log, with the summary pointing at both |
+| Audit or doc closeout | In-repo docs and audit records | `docs/`, `TESTING.md`, `audit_index.jsonl` when applicable | Updated contract docs, disposition references, and residual-scope notes |
+
+Naming rules:
+- Use stable filenames where the repo already has a convention: `summary.json`,
+  `scenarios.ndjson`, `validation_stages.ndjson`, `repro_manifest.json`.
+- Summary artifacts own the cross-links. If a runner emits multiple logs, the
+  summary must point to the primary scenario log, stage log, and replay pointer.
+- Scan and policy gates should prefer `artifacts/<contract>_summary.json` and
+  `artifacts/<contract>_events.ndjson` unless they are already part of an
+  existing suite root.
+
+The canonical stub-resolution runner (`scripts/verify_stub_resolution.sh`)
+additionally owns two stable suite-root discovery manifests under
+`target/e2e-results/stub-resolution/`:
+
+- `latest.json`: pointer to the newest attempted stub-resolution run
+- `latest_success.json`: pointer to the newest passing stub-resolution run
+
+Both manifests must remain machine-readable and must point at the per-run
+`summary.json`, `validation_stages.ndjson`, `scenarios.ndjson`, and scan summary
+so Z2/Z3 closeout can consume the current evidence bundle mechanically instead
+of scraping bead comments.
+
+### RCH Execution Policy
+
+All cargo-heavy validation for Track-Z work must follow this policy:
+
+- Canonical form:
+
+  ```bash
+  rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-<lane-id> cargo <...>
+  ```
+
+- Interactive one-shot commands must use the canonical
+  `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=... cargo ...` form.
+  Bare `rch exec -- cargo ...` commands are not compliant because they reuse
+  the ambient target directory.
+- Scripted or multi-stage validation must expose `RCH_BIN` and route cargo via
+  `"$RCH_BIN" exec -- ...` when `rch` is available.
+- Scripted Cargo runs must set an isolated `CARGO_TARGET_DIR` per
+  suite/run/stage/attempt. Accepted patterns are
+  `${PROJECT_ROOT}/.rch_target_<suite>/<run_id>/<stage>` or
+  `${TMPDIR:-/tmp}/rch-<suite>-<run_id>-<stage>`.
+- Repeated commands in the same validation lane should reuse the same isolated
+  target dir to preserve remote cache locality.
+- Set `RCH_REQUIRE_REMOTE=1` before invoking these commands. Local fallback is
+  forbidden for this project. Preserve any unexpected fallback log as a failed
+  attempt with `execution_backend="rch_local_fallback"`; that label records a
+  violation and does not authorize continuing locally.
+- Dry-run or contract-only paths that intentionally skip cargo must record
+  `execution_backend="dry_run"` and explain why no remote execution occurred.
+- Summary artifacts for cargo-backed runs must record both `rch_routed` and
+  `cargo_target_dir`.
+
+### RCH Behavior and Workarounds (observed 2026-09-22..24, asupersync-bi2462.82.5)
+
+These are RCH behaviors, not asupersync bugs; they are reported to the RCH
+maintainer. Until they change:
+
+- **One pooled target per worker.** Distinct `CARGO_TARGET_DIR` values map to a
+  single pooled target on each worker, so concurrent asupersync lanes on one
+  worker serialize on Cargo's lock ("Blocking waiting for file lock on build
+  directory") while holding their slots. Send concurrent lanes to different
+  workers with `RCH_WORKER`. Cancel your own blocked job; never a peer's.
+- **Each clean-overlay job restages the source**, so every lane rebuilds from
+  scratch (17-50 min for asupersync test targets on a loaded worker). Put
+  several `--test` targets in one cargo invocation instead of one lane each.
+- **RCH-I006 "lacks the required runtime" for clippy or rustfmt** means the
+  worker's rustup inventory probe hit a cache lock, so installed components look
+  missing. `rch workers capabilities --json` shows it under `probe_warnings`.
+  `--refresh` clears it only briefly. Steer with `RCH_WORKER` to workers whose
+  inventory lists the component. `RCH_WORKER` is merged with
+  `.rch/config.toml`'s `preferred_workers`.
+- **Admission:** size `-j` to the free slots (the RCH-I003 message says what
+  fits) and set `RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=3000`, because the
+  default wait ends in RCH-I001 `queue_timeout`. `cargo fmt --check` is sized at
+  4 cores and takes no `-j`, so it is not admitted while no worker has 4 free
+  slots.
+- **Timeouts:** the default `RCH_BUILD_TIMEOUT_SEC=5400` is too short for a
+  loaded `cargo check --all-targets` at `-j 2` (RCH-E104). Use 10800 for
+  all-targets lanes. After an E104 whose remote process group could not be
+  verified dead, RCH quarantines the worker.
+- **False results:** a local client exit (for example 143) after `Remote
+  command finished: exit=0` and artifact retrieval is a client-side false red,
+  and the remote exit is authoritative. RCH-E412/E504 exit 0 with nothing run.
+  Always grep for `Finished`, `test result:` and the named tests.
+
+### Evidence Matrix For Terminal Tracks
+
+The rows below are the minimum evidence ownership contract for the current
+canonical terminal beads referenced by the disposition matrix.
+
+| Bead | Surface | Required evidence |
+| --- | --- | --- |
+| `asupersync-v2ofj7.2.2` | Surviving WASM boundary exports, errors, and types | boundary `unit` tests on export/error/type helpers, targeted consumer/build `integration` checks, deterministic consumer workflow `e2e`, and `audit` updates making the surviving owner and duplicate role explicit |
+| `asupersync-v2ofj7.2.3` | Canonical WASM packaging, build, and consumer story | build-matrix `scan`, maintained consumer `e2e`, packaging artifact summary, and `audit` updates naming the canonical JS/WASM owner |
+| `asupersync-v2ofj7.3.2` | Macro fallback docs and reexports after contract freeze | macro export or compile-fail `unit` coverage, proc/no-proc build-matrix `scan`, and `audit` updates for docs, examples, and reexports |
+| `asupersync-v2ofj7.4.1` | TLS pinning contract truthfulness | known-answer and malformed-input `unit` tests, focused `integration`, feature-gate `scan`, and `audit` security/doc updates |
+| `asupersync-v2ofj7.4.2` | Real `AuthenticationTag` cryptographic contract | known-answer plus misuse/error `unit` tests, security-path `integration`, deterministic security-path `e2e` where user-visible, and `audit` security/doc updates |
+| `asupersync-v2ofj7.4.3` | Browser entropy contract truthfulness | boundary `unit` or compile coverage, browser-profile `scan`, consumer-facing `audit` updates, and `e2e` only if host behavior changed |
+| `asupersync-v2ofj7.5.2` | Kafka producer and consumer paths aligned to the chosen contract | focused producer/consumer `unit` coverage, transport or harness-lane `integration`, deterministic brokerless-or-real-broker `e2e` per the chosen contract, and `audit` updates clarifying supported vs harness-only behavior |
+| `asupersync-v2ofj7.5.3` | Kafka validation and stale waiver retirement | contract or policy `scan`, focused `integration` or `e2e` proving the chosen fallback or production truth, and waiver/doc `audit` updates |
+| `asupersync-v2ofj7.6.2` | Remote spawn, result, cancel, and close lifecycle | lifecycle state-machine `unit` tests, remote-boundary `integration`, deterministic remote-path `e2e` or scripted scenario, and `audit` updates for protocol truthfulness |
+| `asupersync-v2ofj7.6.3` | Remote deterministic harness and failure-injection validation | harness `unit` coverage, deterministic fault-injection `e2e`, replay or debug `scan`, and `audit` updates for protocol and harness contracts |
+| `asupersync-v2ofj7.7.2` | Transport-backed session-type send, recv, and close semantics | typestate/runtime `unit` coverage, transport-backed `integration`, deterministic session workflow `e2e`, and `audit` updates for the chosen bridge |
+| `asupersync-v2ofj7.7.6` | Typed session integration coverage and contract docs | maintained `integration` and `e2e` suite coverage, unsupported-surface `scan` where needed, and session-contract `audit` updates |
+| `asupersync-v2ofj7.8.6` | Legacy `UringReactor` shim resolution | cfg-aware `unit` and compile coverage, build verification `integration` where relevant, stale-shim `scan`, and reactor support/doc `audit` updates |
+| `asupersync-v2ofj7.8.7` | `IoUringReactor` cfg-off unsupported semantics | cfg/build `scan`, unsupported-path `unit` tests, and platform-matrix `audit` updates |
+| `asupersync-v2ofj7.8.8` | Stale duplicate reactor files, docs, and waivers cleanup | stale-surface `scan`, docs/module-path `audit`, and regression `integration` checks required to prove no public truth drift |
+| `asupersync-v2ofj7.9.1` | Example and test-harness `SplitReader::poll_read` cleanup | harness `unit` coverage, example or integration proof, and `audit` updates for example truthfulness |
+| `asupersync-v2ofj7.9.2` | Panic-based conformance dummy runtime replacement | replacement `unit` coverage, real-component `integration`, and `audit` updates retiring dummy-runtime claims |
+| `asupersync-v2ofj7.9.3` | Honest end-state for `asupersync_v4_api_skeleton.rs` | structural `scan`, doc/API `audit`, and supporting `integration` or compile coverage if the public surface changes |
+
+### Z-Track Deliverable Split
+
+Downstream Z-track beads own distinct validation layers:
+
+- Z0a owns structural probes and invariant tests that continuously check the
+  disposition matrix.
+- Z0b owns the heavy `rch`-backed runner and the feature/profile matrix.
+- Z1 owns the scan ratchet, allowlists, and waiver policy.
+- Z2 owns the closeout evidence bundle, audit/doc sync, and final replayable
+  proof packet.
+
+## Phase 2 Differential Policy Docs
+
+When widening the lab-vs-live program beyond the semantic core, use these docs
+as the operator-facing entrypoint before claiming timer or virtualized
+transport parity:
+
+- `docs/lab_live_differential_scope_matrix.md`: admitted surfaces, rollout
+  order, and external-surface eligibility gates
+- `docs/lab_live_time_normalization_policy.md`: scenario-clock rules,
+  scheduler-noise classes, and when timing remains provenance-only
+- `docs/lab_live_virtualized_surface_matrix.md`: Phase 2 timer and
+  virtual-transport coverage rows, required logs, invalid-experiment signals,
+  and promotion floors
+
+If you touch those docs or the executable policy around them, validate the
+contract surface with:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_time_policy_contract cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
+rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_virtualized_surface_contract cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
+```
+
+## Test Categories and Locations
+
+- Unit tests: colocated under `src/` modules
+- Integration tests: `tests/*.rs`
+- E2E tests: `tests/e2e/**` (protocol stacks, cancel-correctness, tracing)
+- Conformance suite: `conformance/` crate (runtime-agnostic suite)
+- Fuzz tests: `fuzz/` (cargo-fuzz targets + corpora)
+- Property tests: see `property-tests.yml` CI workflow and `tests/*.rs` files
+
+## Artifact Bundle Layout + Samples (bd-1t58q)
+
+When `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set, failed tests emit a deterministic
+artifact bundle under a sanitized test name directory. The harness also writes
+a per-test JSON summary into the root artifact directory.
+
+Failure artifacts (from `TestHarness::finish`):
+- `event_log.txt`: human-readable event log summary
+- `failed_assertions.json`: serialized list of failed assertions
+- `repro_manifest.json`: deterministic repro manifest (see schema below)
+
+Environment metadata (optional, from `TestEnvironment::write_metadata_artifact`):
+- `environment.json`: OS/arch/seed/ports/services snapshot
+
+Summary (always written when artifacts are enabled):
+- `<test_name>_summary.json`: per-test summary and event stats
+
+Example bundle layout:
+
+```text
+$ASUPERSYNC_TEST_ARTIFACTS_DIR/
+  cancellation_conformance/
+    event_log.txt
+    failed_assertions.json
+    repro_manifest.json
+    environment.json
+  cancellation_conformance_summary.json
+```
+
+### Trace Artifact Lifecycle Policy (asupersync-umelq.12.4)
+
+Trace/replay artifacts follow one explicit lifecycle contract for local and CI workflows.
+
+- Storage roots:
+  - Unit/integration failure bundles: `$ASUPERSYNC_TEST_ARTIFACTS_DIR`
+  - E2E suite bundles: `target/e2e-results/<suite>/`
+  - E2E orchestrator metadata: `target/e2e-results/orchestrator_<timestamp>/`
+- Retention defaults:
+  - Local: `ARTIFACT_RETENTION_DAYS_LOCAL=14`
+  - CI: `ARTIFACT_RETENTION_DAYS_CI=30`
+- Redaction mode:
+  - `ARTIFACT_REDACTION_MODE=metadata_only` (default)
+  - Allowed values: `metadata_only`, `none`, `strict`
+- Privacy policy source of truth:
+  - `.github/security_release_policy.json` -> `trace_telemetry_privacy`
+  - schema id: `trace-telemetry-privacy-v1`
+- Retrieval contract:
+  - Per-suite rerun command: `bash ./scripts/run_all_e2e.sh --suite <suite>`
+  - Matrix verification command: `bash ./scripts/run_all_e2e.sh --verify-matrix`
+  - Replay verification pointer: `target/e2e-results/orchestrator_<timestamp>/replay_verification.json`
+  - WASM cross-framework fault mode:
+    - `WASM_FAULT_MATRIX_MODE=reduced` (default gate profile)
+    - `WASM_FAULT_MATRIX_MODE=full` (expanded network-fault matrix)
+
+CI privacy constraints (release blocking):
+- CI redaction modes are restricted to `metadata_only` or `strict`
+- `none` is local-only and treated as policy violation in CI
+- CI retention is capped at 30 days
+- Required redacted fields must include `suite_log`
+- Artifact roots must stay inside approved path fragments (`/target/e2e-results/`, `/target/phase6-e2e`, `/target/test-results/`, `/test_logs`)
+
+`scripts/run_all_e2e.sh` now emits
+`artifact_lifecycle_policy.json` in the orchestrator report directory.
+The file is deterministic and includes:
+- environment class (`local` or `ci`)
+- retention policy values
+- redaction policy
+- per-suite artifact roots + replay commands
+
+E2E log quality gate (asupersync-umelq.18.8):
+- `scripts/run_all_e2e.sh` computes a per-suite `log_quality_score` (0-100)
+  from schema validity, replayability, artifact completeness, and log presence.
+- `LOG_QUALITY_MIN_SCORE` (default `80`) is enforced as a contract gate.
+- Each manifest row (`artifact_manifest.ndjson` / `.json`) includes:
+  `log_quality_score`, `log_quality_threshold`, and `log_quality_gate_ok`.
+- `replay_verification.json` reports `log_quality_violations` and
+  `log_quality_violating_suites`.
+
+E2E summary schema extension policy:
+- `e2e-suite-summary-v3` required fields are contract-stable and validated by
+  `validate_suite_summary_contract` in `scripts/run_all_e2e.sh`.
+- Additive optional fields are allowed without schema bumps.
+- Any change to required fields (rename/remove/type change/semantics change)
+  requires a schema version bump plus validator/test updates in the same change.
+
+### Dependency-Sovereignty E2E Contract
+
+The dependency program's maintained suite is:
+
+```bash
+bash scripts/run_all_e2e.sh --suite dependency-sovereignty
+```
+
+Its runner, `scripts/run_dependency_sovereignty_e2e.sh`, emits
+`summary.json`, `events.ndjson`, `scenarios.ndjson`,
+`validation_stages.ndjson`, `artifact_manifest.ndjson`, `environment.json`,
+`repro_manifest.json`, and per-step stdout/stderr under
+`target/e2e-results/dependency-sovereignty/<run_id>/`. The suite root also
+keeps `latest.json` and `latest_success.json` discovery pointers.
+
+The default smoke profile is contract-only and executes no Cargo. Opt-in
+Cargo-backed scenarios require `RCH_REQUIRE_REMOTE=1`, use isolated
+`CARGO_TARGET_DIR` values, and fail closed on missing RCH or any local fallback
+marker. `BLOCKED_RCH`, `UNSUPPORTED_PLATFORM`, timeout, signal, redaction,
+artifact, replay, and cleanup failures are non-green.
+
+List and select scenarios with:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh --list
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario verification-matrix-contract \
+  --run-id ver-a2-review-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario failure-injection-contract \
+  --run-id ver-a4-failure-matrix-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract \
+  --run-id ver-a5-feature-platform-consumer-001
+
+bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --dry-run \
+  --run-id ver-a6-dry-run-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --run-id ver-a6-aggregate-signoff-001
+```
+
+`--dry-run` emits the complete inventory and replay bundle without executing a
+scenario. `--timeout` defaults to 900 seconds for direct runs and remains
+overrideable by the orchestrator environment. `--fail-fast` retains explicit
+`NOT_RUN_FAIL_FAST` rows for skipped work; the default continue-for-diagnostics
+mode preserves all attempted results. See
+`docs/dependency_verification_matrix.md` for the field contract, outcome
+taxonomy, and no-claim boundary. VER A4 replacement owners should also read
+`docs/dependency_failure_injection_matrix.md`; it defines the deterministic
+phase matrix, structured receipt, cleanup oracles, negative fixtures, exact
+replay requirements, and the boundary between contract proof and real no-mock
+replacement evidence.
+VER A5 profile or platform owners should read
+`docs/dependency_feature_platform_consumer_matrix.md`; it defines the complete
+sparse feature projection, host-versus-target coordinates, public-consumer and
+service-version rows, negative fixtures, and fail-closed no-claim states.
+VER A6 release-gate owners should read
+`docs/dependency_verification_final_signoff.md`; it defines the deterministic
+capability-to-evidence join, row-local E2E N/A rule, forensic artifact fields,
+14 negative fixtures, and `PASS_SCOPED_KEEP_DEFER` no-claim boundary.
+
+CI evidence:
+- `.github/workflows/ci.yml` check job runs `scripts/check_ci_matrix_policy.py`
+  against `.github/ci_matrix_policy.json` and uploads
+  `artifacts/ci_matrix_policy_summary.json` +
+  `artifacts/ci_matrix_policy_events.ndjson` as `ci-matrix-policy-report`.
+- `.github/workflows/ci.yml` D4 gate validates `artifact_lifecycle_policy.json`
+  against `.github/security_release_policy.json.trace_telemetry_privacy`
+  and fails on retention, mode, redaction-field, or storage-scope violations.
+- `.github/workflows/ci.yml` D5 summary step emits `ci-summary/ci_summary_report.json`
+  with deterministic `ci_matrix` + `reproduction` sections:
+  - lane identity/status for required CI lanes
+  - failing lane IDs and replay command pointers
+  - CI context (`run_id`, `run_attempt`, `sha`, `ref`, `workflow`)
+  - replay commands and artifact pointers for failed matrix/forensics rows
+  - status labels: `none_required`, `action_required`, `insufficient_data`
+
+### Incident Forensics Drill Contract (asupersync-umelq.12.5)
+
+Deterministic incident drill surfaces for browser replay triage:
+
+- Suite runner:
+  `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
+- Direct drill runner:
+  `TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh`
+- Contract-only fallback:
+  `INCIDENT_FORENSICS_DRY_RUN=1 TEST_SEED=4242 bash ./scripts/test_wasm_incident_forensics_e2e.sh`
+- Playbook contract check:
+  `python3 ./scripts/check_incident_forensics_playbook.py`
+
+Expected deterministic artifact root:
+- `target/e2e-results/wasm_incident_forensics`
+
+Expected per-run artifacts:
+- `summary.json` (`e2e-suite-summary-v3`)
+- `incident_summary.json` (`incident-forensics-drill-summary-v1`)
+- `incident_events.ndjson` (`incident-forensics-event-v1`)
+- `repro_bundle.json` (`incident-forensics-repro-bundle-v1`)
+- replay payloads (`replay_run1.json`, `replay_run2.json`) and failure probe diagnostics (`expected_failure.log`)
+
+### WASM Flake Governance Gate (asupersync-umelq.18.5)
+
+Browser verification release quality now includes an explicit flake-governance
+contract.
+
+Policy source of truth:
+- `.github/wasm_flake_governance_policy.json`
+
+Gate checker:
+- `python3 ./scripts/check_wasm_flake_governance.py --policy .github/wasm_flake_governance_policy.json`
+
+Core governance workflow:
+- `scripts/run_semantic_flake_detector.sh --iterations 5 --json`
+- `bash scripts/check_semantic_signal_quality.sh --report target/semantic-verification/verification_report.json --dashboard target/semantic-verification/flake/latest/variance_dashboard.json --output target/semantic-verification/signal-quality/signal_quality_report.json`
+- `bash ./scripts/run_all_e2e.sh --suite wasm-incident-forensics`
+- `python3 ./scripts/check_incident_forensics_playbook.py`
+
+Required quarantine manifest:
+- `artifacts/wasm_flake_quarantine_manifest.json` (`schema_version=wasm-flake-quarantine-v1`)
+
+Release-blocking conditions:
+- critical test failures in deterministic replay suites,
+- unresolved high/critical flakes in quarantine manifest,
+- missing forensics replay linkage (`replay_command` + `trace_pointer`),
+- flake-rate/false-positive threshold breaches from policy.
+
+Example structured log entry (start/end markers include the same context):
+
+```text
+INFO test_start test_id="cancellation_conformance" seed=0xDEADBEEF subsystem="cancellation" invariant="losers_drained"
+```
+
+Repro manifest schema (canonical v1 contract):
+- `schema_version` (u32, currently `1`)
+- `scenario_id` (string, required)
+- `invariant_ids` (string array, required, sorted + deduplicated)
+- `seed` (u64 root seed, required)
+- `trace_fingerprint` (string, required)
+- `replay_command` (string, required)
+- `failure_class` (string, required)
+- `artifact_paths` (string array, required, sorted + deduplicated)
+- `passed` (bool)
+- Optional extended fields: `entropy_seed`, `config_hash`, `input_digest`, `oracle_violations`, `subsystem`, `invariant`, `trace_file`, `input_file`, `env_snapshot`, `phases_executed`, `failure_reason`
+
+CI/C5 contract note:
+- Canonical contract id: `repro-manifest.v1`
+- Required-field list is exported in Rust as `REPRO_MANIFEST_REQUIRED_FIELDS`
+- Validation entrypoint: `ReproManifest::validate_contract_v1()`
+
+Sample `repro_manifest.json`:
+
+```json
+{
+  "schema_version": 1,
+  "scenario_id": "cancellation_conformance",
+  "invariant_ids": ["losers_drained", "no_obligation_leaks"],
+  "seed": 57005,
+  "trace_fingerprint": "trace_fp_v1",
+  "replay_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env ASUPERSYNC_SEED=0xDEAD CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_repro_manifest cargo test --test cancellation_conformance --features test-internals -- --nocapture",
+  "failure_class": "assertion_failure",
+  "artifact_paths": [
+    "target/test-artifacts/cancellation_conformance/event_log.txt",
+    "target/test-artifacts/cancellation_conformance/repro_manifest.json"
+  ],
+  "entropy_seed": 48879,
+  "config_hash": "cfg_hash_v1",
+  "input_digest": "input_digest_v1",
+  "oracle_violations": ["losers_drained", "no_obligation_leaks"],
+  "passed": false,
+  "subsystem": "cancellation",
+  "invariant": "losers_drained",
+  "trace_file": "traces/run.jsonl",
+  "input_file": "inputs/failing.json",
+  "env_snapshot": [["ASUPERSYNC_LAB", "1"], ["RUST_LOG", "info"]],
+  "phases_executed": ["setup", "execute", "verify"],
+  "failure_reason": "losers_drained: expected=true, actual=false"
+}
+```
+
+## Coverage Completeness Plan (bd-2c7u)
+
+This section defines what "complete" means for testing coverage and logging.
+It is a plan and checklist for the epic, not the final audit matrix.
+
+Completeness means:
+- Every subsystem lists explicit invariants and has at least one unit test per invariant.
+- Every cross-subsystem interaction has an integration test that exercises real components.
+- Every major protocol stack has at least one E2E test with deterministic logs and traces.
+- Every test run is deterministic under lab runtime or documented as intentionally wall-clock.
+- No mocks or fakes are used where lab runtime, deterministic drivers, or real components exist.
+
+Matrix fields for the audit task (bd-2alu):
+- Subsystem and ownership (module path).
+- Invariants (named, testable claims).
+- Unit tests (file + test name).
+- Integration tests (file + test name).
+- E2E tests (file + test name).
+- Logging and trace expectations (required markers, seeds, trace artifacts).
+- Gaps and priority (what is missing, impact, suggested bead).
+
+Subsystems in scope:
+- Runtime and scheduler (lanes, fairness, stealing, quiescence).
+- Cancellation and obligations (request, drain, finalize, leak-free).
+- Channels and sync primitives.
+- IO/reactor/time drivers.
+- Net/http/h2/websocket transport.
+- RaptorQ codec and pipelines.
+- Distributed and remote execution.
+- Trace/record/replay and DPOR.
+- Security and capability boundaries.
+
+Invariants to map (non-exhaustive baseline):
+- Region close implies quiescence.
+- No task leaks.
+- No obligation leaks.
+- Losers drained after races.
+- Cancellation protocol is request -> drain -> finalize.
+- Deterministic lab runtime with seed-stable traces.
+- Bounded cleanup with explicit budgets.
+
+## Program Closeout Gate + Maintenance Cadence (asupersync-2bqzt.4.6)
+
+This gate defines when the `[TEST-COVERAGE]` program can be considered closed
+and how we keep it from regressing.
+
+### Closeout Gate (all required)
+
+1. Track-D gates are landed and enforced in CI:
+   - D1 coverage ratchet gate
+   - D2 no-new-mock/fake gate + waiver expiry enforcement
+   - D3 forensic logging contract gate
+   - D4 E2E scenario-matrix completeness gate
+2. C7 artifacts are emitted and verified for failure repro:
+   - deterministic manifest/index present
+   - replay commands validated and executable
+3. `TESTING.md` matrix + gap list are synchronized with current code/tests.
+4. No unresolved waivers with expired dates in policy files.
+5. CI evidence bundle is attached for sign-off and contains:
+   - coverage ratchet report
+   - no-mock policy report
+   - forensic logging contract artifacts
+   - E2E scenario matrix validation artifact
+   - C7 replay verification artifact
+
+### Required Sign-Off Record
+
+Before closing the program epic, add a sign-off note containing:
+
+- commit SHA(s) for all D1/D2/D3/D4/C7 deliverables
+- exact CI run URL + artifact paths
+- residual risk list with owners and due dates
+- explicit next maintenance review date
+
+### Maintenance Cadence
+
+- Weekly (owner: test-infra on-call):
+  - run deterministic gate checklist locally or in CI dry-run mode
+  - verify waiver registry for upcoming expirations within 14 days
+- Bi-weekly:
+  - refresh subsystem matrix deltas (new modules/tests, removed tests)
+  - review false-positive/false-negative rates for no-mock and forensic checks
+- Monthly:
+  - ratchet coverage floors upward where two consecutive weeks pass cleanly
+  - re-run E2E scenario matrix audit and C7 replay verifier across all required profiles
+
+### Deterministic Command Checklist
+
+Run the following for a maintenance pass:
+
+```bash
+python3 scripts/check_no_mock_policy.py --policy .github/no_mock_policy.json
+scripts/run_all_e2e.sh --verify-matrix
+NO_PREFLIGHT=1 ./scripts/run_raptorq_e2e.sh --profile forensics --bundle
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_coverage cargo llvm-cov --lib --all-features \
+  --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+  --text --output-path coverage/coverage.txt
+```
+
+RaptorQ one-command validation notes:
+- `./scripts/run_raptorq_e2e.sh --profile <fast|full|forensics> --bundle` is the canonical wrapper for staged unit + perf-smoke + deterministic E2E runs.
+- The wrapper auto-uses `rch` when available for cargo-heavy stages and emits `summary.json`, `scenarios.ndjson`, and `validation_stages.ndjson`.
+- For slow workers, raise `VALIDATION_TIMEOUT` (bundle stages) and/or `E2E_TIMEOUT` (scenario runs) before re-running.
+
+If any command fails, open/refresh a bead under `[TEST-COVERAGE][Track-D]`,
+link the failing artifact, and do not mark maintenance pass as complete.
+
+## SEM-10.4 Guardrail Mismatch Fixtures
+
+Use the deterministic mismatch-fixture harness to validate that anti-drift
+guardrails fail with actionable diagnostics across projection surfaces.
+
+Fixture catalog:
+- `tests/fixtures/semantic_guardrail_mismatch/fixtures.json`
+- schema: `semantic-guardrail-mismatch-fixtures-v1`
+- required surfaces: `docs`, `runtime`, `lean`, `tla`, `e2e`
+
+Harness:
+- `scripts/test_semantic_guardrail_mismatch_fixtures.sh`
+- summary schema: `semantic-guardrail-mismatch-report-v1`
+- artifacts: `target/semantic-guardrail-fixtures/<run-id>/`
+
+Commands:
+
+```bash
+# Fast deterministic pass (non-heavy cases only)
+bash scripts/test_semantic_guardrail_mismatch_fixtures.sh --light
+
+# Full matrix (includes runner-backed heavy cases; uses rch when available)
+bash scripts/test_semantic_guardrail_mismatch_fixtures.sh
+```
+
+Expected behavior:
+- Every fixture must fail with `expected_exit != 0`.
+- Every fixture must emit required diagnostic substrings from the catalog.
+- Harness exits non-zero if any fixture misses exit/diagnostic expectations.
+
+False-positive / noise profile:
+- Exit-code checks are exact and deterministic (no fuzzy thresholds).
+- Diagnostic checks use fixed substring assertions per fixture id.
+- Heavy runner cases are isolated from light checks so local fast loops stay
+  stable and low-noise.
+- Artifact logs are per-fixture (`logs/<fixture_id>.log`) for direct replay.
+
+## Coverage Audit Matrix (bd-2alu)
+
+This historical audit matrix maps subsystems and invariants to candidate tests.
+Its names and gap annotations are discovery leads, not a current execution or
+coverage report. Verify each target against the selected source and profile.
+The maintained native workflows below provide executable entry points for the
+channel, supervision and HTTP/2 work added since this inventory.
+
+| Subsystem | Invariants (examples) | Unit tests (src/) | Integration tests (tests/) | E2E tests (tests/e2e/) | Logging/trace expectations | Gaps / notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Runtime + scheduler | Lane priority, fairness, no orphan tasks, region close = quiescence | `src/runtime/scheduler/three_lane.rs::test_cancel_priority_over_ready`, `src/runtime/scheduler/three_lane.rs::test_stealing_only_from_ready_lane`, `src/runtime/scheduler/mod.rs::test_worker_shutdown` | `tests/scheduler_lane_fairness.rs::test_ready_not_starved_by_cancel_flood`, `tests/scheduler_backoff.rs::test_scheduler_shutdown_with_backoff`, `tests/scheduler_regression.rs::regression_throughput_10k_schedule_pop`, `tests/phase0_verification.rs::e2e_nested_region_quiescence_oracles` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | Scoped logging from `run_test` / `run_test_with_cx`, plus `test_phase!` in scheduler and runtime tests | Unit gap task tracked in `bd-2tlx` |
+| Cancellation + obligations | Request -> drain -> finalize, no obligation leaks, losers drained | `src/cancel/symbol_cancel.rs::test_token_cancel_once`, `src/cancel/symbol_cancel.rs::test_token_child_inherits_cancellation`, `src/obligation/leak_check.rs::clean_reserve_commit`, `src/obligation/graded.rs::obligation_commit_clean` | `tests/cancellation_conformance.rs::cancel_request_on_running_task`, `tests/cancellation_conformance.rs::cancel_finalize_phase_entered`, `tests/cancel_attribution.rs::cancel_reason_basic_construction`, `tests/io_cancellation.rs::io_cancel_001_cancel_during_read` | `tests/e2e/combinator/cancel_correctness/obligation_cleanup.rs::test_loser_permit_resolved` | Cancellation tests should emit phase markers for checkpoints and drain | Unit gap task tracked in `bd-38kk` |
+| Channels + sync primitives | No permit/ack leaks, bounded drain, correct wakeups | `src/channel/mpsc.rs::basic_send_recv`, `src/channel/mpsc.rs::fifo_ordering_single_sender`, `src/sync/semaphore.rs::new_semaphore_has_correct_permits` | `tests/channel_conformance.rs::run_conformance_tests`, `tests/sync_conformance.rs::sync_001_mutex_basic_lock_unlock`, `tests/stream_e2e.rs::test_basic_stream_iteration` | `tests/e2e_messaging.rs::e2e_mpsc_queue_delivery` | Trace markers around reserve/commit and drain | Unit gap task tracked in `bd-139b` |
+| IO + reactor + time | Readiness registration, cancellation behavior, deadline/timeout correctness | `src/time/sleep.rs::new_creates_sleep_with_deadline`, `src/time/sleep.rs::after_computes_deadline`, `src/runtime/reactor/registration.rs::drop_deregisters` | `tests/io_cancellation.rs::io_cancel_001_cancel_during_read`, `tests/io_uring_reactor.rs::reactor_creates_successfully`, `tests/time_e2e.rs::test_sleep_new_creates_with_deadline` | `tests/e2e_fs.rs::e2e_file_create_write_read_roundtrip` | Must log timer wheel steps and cancellation injection points | Unit gap task tracked in `bd-rpsc` |
+| Net + HTTP + H2 + WebSocket + gRPC | Protocol correctness, error coverage, security hardening | `src/http/h1/codec.rs::decode_simple_get`, `src/net/websocket/handshake.rs::test_compute_accept_key` | `tests/http_verification.rs::body_full_lifecycle`, `tests/h2_security.rs::hpack_integer_overflow_rejected`, `tests/grpc_verification.rs::grpc_verify_001_code_i32_roundtrip`, `tests/net_tcp.rs::net_tcp_001_basic_connect_accept` | `tests/e2e_websocket.rs::ws_url_parse_basic_ws`, `tests/e2e_web.rs::e2e_route_resolution_and_method_dispatch` | Expect per-protocol `test_phase!` markers and deterministic traces | Unit gap task tracked in `bd-2hvn` |
+| RaptorQ codec + pipelines | Encode/decode correctness, matrix constraints, determinism and perf bounds | `src/raptorq/decoder.rs::decode_all_source_symbols`, `src/raptorq/systematic.rs::params_small`, `src/encoding.rs::test_encode_small_data` | `tests/raptorq_conformance.rs::roundtrip_no_loss`, `tests/codec_e2e.rs::e2e_codec_001_lines_multi_decode` | `tests/raptorq_conformance.rs::roundtrip_no_loss` | Deterministic seeds and block params logged for encode/decode | Unit gap task tracked in `bd-lefk` |
+| Distributed + remote | Idempotency, leases, sagas, region consistency | `src/remote.rs::node_id_basics`, `src/record/distributed_region.rs::initializing_predicates` | `tests/e2e_distributed.rs::e2e_full_encode_distribute_recover_pipeline`, `tests/service_verification.rs::svc_verify_001_service_poll_ready_call` | `tests/e2e_distributed.rs::e2e_full_encode_distribute_recover_pipeline` | Trace should include remote task ids and lease lifecycle | Some stubs remain (Kafka, QUIC); verify coverage for real transports |
+| Trace + record + replay + DPOR | Trace integrity, determinism, DPOR coverage | `src/trace/file.rs::write_and_read_roundtrip`, `src/trace/replay.rs::metadata_creation`, `src/record/region.rs::region_state_predicates` | `tests/replay_debugging.rs::trace_file_roundtrip_matches_recorded_events`, `tests/dpor_exploration.rs::independence_on_synthetic_trace`, `tests/e2e_geodesic_normalization.rs::e2e_normalization_deterministic_report` | `tests/e2e_geodesic_normalization.rs::e2e_normalization_deterministic_report`, `tests/golden_outputs.rs::golden_outcome_severity_lattice` | Require stable seed + trace file artifacts | Good coverage; ensure trace file verification in CI |
+| Security + capabilities | Capability boundaries, auth modes, tag validation | `src/security/authenticated.rs::test_new_verified`, `src/security/key.rs::test_from_seed_deterministic` | `tests/security_invariants.rs::invariant_max_concurrent_streams_bounded`, `tests/security.rs::security_sign_marks_verified_and_tag_nonzero`, `tests/h2_security.rs::hpack_integer_overflow_rejected` | `tests/e2e_web.rs::e2e_route_resolution_and_method_dispatch` | Log security decisions and auth mode | Expand security matrix in `docs/security_threat_model.md` if gaps found |
+| Lab runtime + testing infra | Deterministic scheduling, replay, oracles | `src/lab/runtime.rs::empty_runtime_is_quiescent`, `src/lab/oracle/*` unit tests | `tests/lab_determinism.rs::test_lab_deterministic_scheduling_same_seed`, `tests/property_region_ops.rs::property_invariant_coverage`, `tests/algebraic_laws.rs::algebraic_law_coverage` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | Determinism oracles must log seed and schedule | Some tests still use mocks for pool/transport (see gap list) |
+| Config + CLI + observability | Config validation, CLI tooling, metrics | `src/config.rs::default_config_valid`, `src/observability/metrics.rs::test_counter_increment` | `tests/builder_verification.rs::builder_verify_001_default_build`, `tests/otel_metrics.rs::test_provider_receives_task_events`, `tests/tracing_integration.rs::trace_with_fields_emits_structured_entry` | `tests/e2e_console.rs::console_plain_text_never_mode_no_ansi` | CLI outputs should be deterministic | gRPC CLI paths still have stubbed behavior |
+
+### Historical Quantitative Summary (2026-04-28 partial refresh; 2026-02-03 baseline)
+
+These old source-text tallies are retained for audit history. They are not
+current selected-test counts, passing-test counts or coverage measurements.
+Do not use their totals or qualitative ratings to close a present-day gap.
+
+The Cancellation and Obligations rows were re-counted against current `src/` on 2026-04-28
+(`grep -c '#\[test\]' src/cancel/*.rs` and `src/obligation/leak_check.rs`); the rest of the
+table remains on the 2026-02-03 baseline and is therefore directionally stale, especially in
+the high-churn modules (Net, HTTP, Trace).
+
+| Subsystem | Unit tests (src/) | Integration tests (tests/) | Files w/ inline tests | Key gap |
+| --- | --- | --- | --- | --- |
+| Runtime + scheduler | 486 | ~65 (6 files) | 35 | Lane fairness invariant coverage |
+| Cancellation (cancel/) | 185 | ~51 (5 files) | 4 | Spread across 4 files (progress_certificate, symbol_cancel, protocol_state_machines, protocol_validator_test_suite); fairness/ordering invariants still need explicit coverage |
+| Obligations | 210 | covered by cancel/conformance | 10 | Leak oracle (`obligation/leak_check.rs`) now has 42 unit tests; remaining gap is multi-region leak attribution |
+| Channels | 66 | ~41 (4 files) | 4 | Cancel-safety explicit tests |
+| Sync primitives | 79 | ~25 (3 files) | 7 | Barrier has only 2 tests |
+| IO + reactor + time | 76 | ~78 (6 files) | 12 | io_uring paths hard to test in CI |
+| Net (TCP/UDP/QUIC/WS) | 213 | ~157 (10 files) | 25 | QUIC still has stubbed paths |
+| HTTP + H2 + gRPC | 409 | ~222 (7 files) | 17 | H3 error coverage minimal |
+| RaptorQ | 153 | ~48 (3 files) | 9 | Decode failure mode gaps |
+| Distributed | 189 | ~47 (3 files) | 8 | Kafka/NATS stubbed |
+| Trace + record + replay | 418 | ~36 (4 files) | 32 | DPOR exploration incomplete |
+| Security | 26 | ~68 (5 files) | 5 | Low unit test count |
+| Lab + testing infra | 350 | ~64 (4 files) | 30 | Good coverage |
+| Combinators | 433 | ~11 (1 file) | 15 | Good unit coverage |
+| **Totals** | **~3290+** | **~1297** | **384** | |
+
+### Coverage Measurement + CI Gating (bd-28bx)
+
+**Tooling choice:** `cargo llvm-cov` (LLVM source-based coverage). We standardize on this tool for
+local runs and CI, using a shared ignore regex to exclude tests/benches/examples/fuzz/conformance.
+
+**Remote all-feature library coverage attempt:**
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_coverage_all_features cargo llvm-cov --lib --all-features \
+  --ignore-filename-regex '(^|/)(tests|benches|examples|fuzz|conformance)/' \
+  --text --output-path coverage/coverage.txt
+```
+
+**CI gating (current floor):**
+- The `coverage` job in `.github/workflows/ci.yml` sets
+  `COVERAGE_MIN_LINE_PCT=5` and selects `--lib --features "$TEST_FEATURES"` using
+  `scripts/ci/release_test_features.sh`. That helper excludes the two legacy
+  harness features; it does not select `--all-features`. The broader command
+  above can therefore fail on surfaces outside that CI profile.
+- The same job subsequently runs `scripts/check_coverage_ratchet.py` against
+  `.github/coverage_policy.json`. Inspect the actual workflow artifacts before
+  claiming either gate passed; the configured floor is not a measured result.
+- No-mock policy is enforced separately in CI via an allowlisted `rg` scan.
+
+**Minimum coverage thresholds per invariant (v1):**
+
+| Invariant | Unit tests | Integration tests | E2E tests |
+| --- | --- | --- | --- |
+| Region close implies quiescence | ≥1 | ≥1 | ≥1 |
+| No task leaks | ≥1 | ≥1 | ≥1 |
+| No obligation leaks | ≥1 | ≥1 | ≥1 |
+| Losers drained after races | ≥1 | ≥1 | ≥1 |
+| Cancellation protocol (request → drain → finalize) | ≥1 | ≥1 | ≥1 |
+| Deterministic lab runtime (seed-stable) | ≥1 | ≥1 | ≥1 |
+| Bounded cleanup (budgeted) | ≥1 | ≥1 | ≥1 |
+
+**Minimum line-coverage floors per subsystem (initial targets, to ratchet):**
+
+| Subsystem | Floor (line %) |
+| --- | --- |
+| Runtime + scheduler | 20 |
+| Cancellation + obligations | 20 |
+| Channels + sync primitives | 15 |
+| IO + reactor + time | 15 |
+| Net + HTTP + H2 + WebSocket + gRPC | 10 |
+| RaptorQ codec + pipelines | 15 |
+| Distributed + remote | 10 |
+| Trace + record + replay + DPOR | 15 |
+| Security + capabilities | 10 |
+| Lab runtime + testing infra | 20 |
+| Config + CLI + observability | 10 |
+
+### Oracle Coverage (src/lab/oracle/)
+
+These oracles check the listed invariants during lab execution. The counts
+below belong to the historical inventory, not a fresh test run; they do not
+establish native scheduler or operating-system behavior.
+
+| Oracle | Invariant | Unit tests | Used in integration tests |
+| --- | --- | --- | --- |
+| `quiescence.rs` | Region close = quiescence | 10 | `phase0_verification`, `region_lifecycle_conformance`, `cancellation_conformance` |
+| `obligation_leak.rs` | No obligation leaks | 3 | `cancellation_conformance`, `e2e/combinator/cancel_correctness/*` |
+| `loser_drain.rs` | Losers drained after races | 10 | `cancellation_conformance`, `repro_race_leak` |
+| `task_leak.rs` | No task leaks | 10 | `phase0_verification`, `meta/coverage_meta` |
+| `ambient_authority.rs` | No ambient authority | 16 | `security_invariants` |
+| `cancellation_protocol.rs` | Request -> drain -> finalize | 13 | `cancellation_conformance`, `cancel_attribution` |
+| `deadline_monotone.rs` | Deadline monotonicity | 18 | `phase0_verification` |
+| `finalizer.rs` | Finalizers run on close | 8 | `region_lifecycle_conformance` |
+| `region_tree.rs` | Valid region tree structure | 23 | `property_region_ops`, `region_lifecycle_conformance` |
+| `actor.rs` | Actor supervision invariants | 14 | `e2e_actor`, `e2e/actor/lab/oracle` |
+| `determinism.rs` | Seed-stable scheduling | 9 | `lab_determinism`, `meta/determinism_meta` |
+
+### Mock/Fake Usage Inventory
+
+Files using mocks or fakes (candidates for `bd-1z5u` remediation):
+
+**Source (17 files):** `src/transport/mock.rs` (deterministic transport simulator; legacy module name), `src/runtime/reactor/lab.rs` (lab reactor — acceptable), `src/lab/runtime.rs` (lab runtime — acceptable), `src/runtime/builder.rs`, `src/runtime/state.rs`, `src/cx/cap.rs`, `src/test_utils.rs`, and others where "mock" refers to lab-based deterministic substitutes rather than external mock libraries.
+
+**Tests (8 files):** `tests/pool_tests.rs`, `tests/e2e_database.rs`, `tests/lab_determinism.rs`, `tests/property_region_ops.rs`, `tests/e2e/combinator/cancel_correctness/obligation_cleanup.rs`, `tests/e2e/console/diagnostics/explain_task.rs`, `tests/e2e/console/diagnostics/explain_region.rs`, `tests/common/mod.rs`.
+
+**Assessment:** Most "mock" usage is lab-based deterministic substitutes (acceptable). The transport simulator in `src/transport/mock.rs` is now explicitly deterministic and policy‑compliant; remaining occurrences should be reviewed for naming clarity only.
+
+### Property Tests
+
+The historical inventory named `tests/algebraic_laws.rs`,
+`tests/property_region_ops.rs`, `tests/security/property_tests.rs`,
+`src/combinator/laws.rs`, `src/trace/geodesic.rs`, and `tests/common/mod.rs`.
+This is not the current complete set. Discover current uses with
+`rg -l 'proptest' src tests`, then inspect the actual properties and selected
+test results before deciding whether an invariant lacks coverage.
+
+### Gap List (prioritized)
+
+This is the historical prioritization associated with the `bd-*` graph below.
+Its numeric and stub claims are not current findings. Preserve the invariant
+goals, but check live implementation and tracker status before creating a
+duplicate task or treating an old count as evidence of a gap. Current
+follow-through belongs to `asupersync-bi2462`, including cancellation/channel
+work `.28`–`.31`, supervision `.34`–`.35`, independent H2 `.36`, and native
+QUIC `.76`.
+
+1. `bd-38kk` **Cancellation unit gaps (CRITICAL):** Only 15 unit tests in `src/cancel/` (1 file). The obligation leak oracle has only 3 unit tests. Add direct unit tests for request/drain/finalize sequencing and loser drain invariants.
+2. `bd-2tlx` **Scheduler unit gaps:** Fairness and lane ordering should have explicit invariant tests. The 486 tests are spread across reactor/config; scheduler-specific invariant tests (lane priority ordering, work-stealing correctness) need dedicated coverage.
+3. `bd-139b` **Channels + sync unit gaps:** Barrier has only 2 tests. Add explicit tests that verify no obligation leaks and cancellation-drain semantics for all sync primitives.
+4. `bd-rpsc` **IO/reactor/time unit gaps:** Add deterministic tests for cancellation + deadline interactions across drivers. io_uring tests need CI-compatible stubbing.
+5. `bd-2hvn` **Net/HTTP/H2/WebSocket unit gaps:** H3 error module has 1 test. QUIC has stubbed paths. Bolster edge-case unit tests (protocol errors, shutdown paths).
+6. `bd-lefk` **RaptorQ unit/perf gaps:** Expand invariant tests around decode failure modes and perf regressions.
+7. `bd-1z5u` **No-mock policy violations:** resolved in tests (`tests/pool_tests.rs`, `tests/e2e_database.rs`) and transport simulator (`src/transport/mock.rs` now deterministic; legacy module name).
+8. `bd-3q6f` **Distributed/trace/remote gaps:** Kafka/NATS/QUIC integrations are stubbed. Decide scope for Phase 0.
+9. **Property test expansion:** Only 6 files use proptest. Extend to obligation invariants, channel semantics, and budget arithmetic.
+10. **Security unit expansion:** Only 26 unit tests across 5 files for security/capability module.
+
+Dependency graph for implementation tasks:
+
+```mermaid
+graph TD
+  A[bd-2c7u Coverage & E2E Logging Completeness Plan]
+  B[bd-2alu Coverage audit + matrix]
+  C[bd-38kk Unit gaps: cancellation + obligations]
+  D[bd-2tlx Unit gaps: scheduler + lane fairness]
+  E[bd-139b Unit gaps: channels + sync]
+  F[bd-rpsc Unit gaps: IO/reactor + time]
+  G[bd-2hvn Unit gaps: net/http/h2/websocket]
+  H[bd-lefk Unit gaps: RaptorQ encode/decode + perf]
+  I[bd-1z5u No-mock policy + deterministic harness]
+  J[bd-12vq E2E harness + logging standardization]
+  K[bd-3q6f Unit gaps: distributed/trace/remote]
+  L[bd-28bx Coverage measurement + CI gating]
+
+  A --> B
+  B --> C
+  B --> D
+  B --> E
+  B --> F
+  B --> G
+  B --> H
+  B --> I
+  B --> J
+  B --> K
+  B --> L
+```
+
+## No-Mock Policy + Deterministic Harness Guidance (bd-1z5u)
+
+**Policy (non-negotiable):**
+- Do not use external mock frameworks or runtime fakes for core behavior.
+- Do not use ambient randomness or wall-clock time in tests.
+- Do not print to stdout/stderr from core code; use structured tracing via `Cx::trace` or test logging helpers.
+- Any exception to the no-mock rule must be explicitly documented in the test file header with rationale and a plan to remove.
+
+**Allowed deterministic doubles (preferred):**
+- Lab runtime (`LabRuntime`) with deterministic scheduling and virtual time.
+- Deterministic entropy via `Cx` or `DetEntropy`/`DetRng`.
+- Deterministic IO/time drivers provided by the runtime (lab reactor, virtual timer wheel).
+- In-memory real components (actual parsers/encoders/decoders) with deterministic seeds.
+
+**Cx construction + capability scoping (example):**
+```rust
+use asupersync::cx::{Cx, PureCaps};
+use asupersync::cx::wrappers::narrow;
+use asupersync::test_utils::run_test_with_cx;
+
+run_test_with_cx(|cx| async move {
+    // Scope capabilities explicitly
+    let full = std::sync::Arc::new(cx);
+    let pure: std::sync::Arc<Cx<PureCaps>> = narrow(&full);
+    pure.checkpoint().expect("no cancel");
+});
+```
+
+**Trace capture + replay (example):**
+```rust
+use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::types::Budget;
+
+let mut runtime = LabRuntime::new(LabConfig::new(42).trace_capacity(4096));
+let region = runtime.state.create_root_region(Budget::INFINITE);
+let (task_id, _handle) = runtime
+    .state
+    .create_task(region, Budget::INFINITE, async { 42 })
+    .expect("create task");
+runtime.scheduler.lock().unwrap().schedule(task_id, 0);
+runtime.run_until_quiescent();
+
+let trace = runtime.finish_replay_trace().expect("replay trace");
+// Replay should be deterministic with same seed + trace
+```
+
+**Logging schema (required fields):**
+- `seed` (u64), `scenario` (string), `params` (structured), `trace_fingerprint` (string or hash)
+- `cancel_reason` (if applicable), `obligation_counts` (per phase), `oracle_violations` (if any)
+- Stable ordering: emit fields in a fixed order and avoid non-deterministic timestamps
+
+**Cancellation + obligations checklist (apply to every relevant test):**
+- Explicitly log cancel phase transitions (request → drain → finalize).
+- Assert losers are drained after races and obligations are resolved (commit/abort).
+- Assert region close implies quiescence (no live children, finalizers done).
+- Assert no obligation leaks using oracles or direct counts.
+
+**E2E script guidance:**
+- Use deterministic seeds and log them at start and end of each scenario.
+- Run with `--nocapture` and emit structured logs only.
+- Avoid wall-clock time; use virtual time via `Cx`.
+- Log trace artifacts and replay commands in failure output.
+
+## Logging Standards
+
+### Scoped initialization (required)
+
+`run_test`, `run_test_with_cx`, and `lab_with_config` manage logging for their
+complete execution scope, including runtime construction and future polling.
+Do not call `init_test_logging` before these helpers. They preserve an existing
+scoped or process-global tracing dispatcher unchanged. If no dispatcher exists,
+they install a thread-scoped subscriber for the duration of the helper:
+
+- a wholly valid `RUST_LOG` is honored;
+- unset `RUST_LOG` uses `warn,asupersync=debug`;
+- empty, non-Unicode, or malformed `RUST_LOG` fails closed to that same safe
+  default and emits one bounded, redacted warning each time that fallback
+  policy is applied, with the stable reason `empty`, `non_unicode`, or `parse`;
+  the raw value is never logged;
+- the prior dispatcher is restored during normal return and panic unwinding;
+- no process-global tracing subscriber or `log` logger is installed.
+
+```rust
+use asupersync::test_utils::run_test;
+
+#[test]
+fn my_async_test() {
+    run_test(|| async {
+        tracing::debug!("polled inside the scoped subscriber");
+    });
+}
+```
+
+Synchronous tests that need tracing can use the explicit scoped API:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, with_test_logging};
+
+#[test]
+fn my_sync_test() {
+    let config = TestLogConfig::try_new("warn,my_crate=debug")
+        .expect("static filter must be valid");
+    with_test_logging(&config, || {
+        tracing::debug!(target: "my_crate", "captured in this scope");
+    });
+}
+```
+
+Empty input is invalid, not shorthand for disabled logging. The typed error is
+available without exposing the raw filter:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, TestLogConfigError};
+
+assert!(matches!(
+    TestLogConfig::try_new("  "),
+    Err(TestLogConfigError::Empty)
+));
+```
+
+All-target TRACE is available only as a deliberate local choice:
+
+```rust
+use asupersync::test_utils::{TestLogConfig, with_test_logging};
+
+with_test_logging(&TestLogConfig::trace(), || {
+    // Narrow diagnostic scope; TRACE can be extremely high volume.
+});
+```
+
+Use the named OFF scope when a test must suppress tracing without changing
+process globals. Drive async work inside the closure: returning a future would
+restore the prior dispatcher before that future is polled. A nested explicit
+policy temporarily re-enables logging and restores OFF afterward.
+
+```rust
+use asupersync::test_utils::{
+    TestLogConfig, run_test, with_test_logging, with_test_logging_disabled,
+};
+
+let outer = TestLogConfig::try_new("my_crate=debug").unwrap();
+with_test_logging(&outer, || {
+    tracing::debug!(target: "my_crate", "outer-before");
+    with_test_logging_disabled(|| {
+        tracing::debug!(target: "my_crate", "suppressed");
+        with_test_logging(&TestLogConfig::trace(), || {
+            run_test(|| async {
+                tracing::trace!(target: "my_crate", "explicitly enabled");
+            });
+        });
+        tracing::debug!(target: "my_crate", "suppressed-again");
+    });
+    tracing::debug!(target: "my_crate", "outer-after");
+});
+```
+
+The outer sink sees its before/after records but no records from the OFF
+scope. The explicitly enabled inner scope owns its own writer. Policies are
+thread-local and are not inherited by new OS threads; when a worker must share
+a policy, clone the current `tracing::Dispatch` and enter it in that worker with
+`tracing::dispatcher::with_default`.
+
+Do not use `Dispatch::new(NoSubscriber::default())` to express OFF intent.
+`NoSubscriber` is also tracing's ambient-absence sentinel, so runtime helpers
+deliberately interpret it as absence and install the deterministic safe
+default. `with_test_logging_disabled` provides the unambiguous authority.
+
+`log` records from third-party dependencies are not bridged into tracing by
+default. `install_global_test_log_bridge()` is an explicit, irreversible
+process-wide opt-in and must be isolated in a fresh test process. Likewise,
+`install_global_test_subscriber()` is only for legacy harnesses that cannot
+accept a closure. The transitional `init_test_logging*` functions use this
+global path with a safe filter and no implicit `LogTracer`; new tests must use
+the scoped APIs.
+
+```rust
+use asupersync::test_utils::{
+    TestLogConfig, install_global_test_log_bridge, with_test_logging,
+};
+
+// Run this opt-in in a fresh process: the bridge is process-global and first-wins.
+install_global_test_log_bridge().expect("fresh process accepts LogTracer");
+with_test_logging(&TestLogConfig::trace(), || {
+    tracing_log::log::trace!(target: "dependency", "bridged explicitly");
+});
+```
+
+### Phase Markers
+
+Use `test_phase!` for major phases and `test_section!` for smaller steps:
+
+```rust
+asupersync::test_phase!("setup");
+// ...
+asupersync::test_section!("spawn tasks");
+// ...
+```
+
+### Assertion Logging
+
+Use `assert_with_log!` to capture expected vs actual values:
+
+```rust
+asupersync::assert_with_log!(
+    value == 42,
+    "value should be the answer",
+    42,
+    value
+);
+```
+
+### Completion Marker
+
+Log a clean success at the end of each test:
+
+```rust
+asupersync::test_complete!("my_test");
+```
+
+## Required Log Points
+
+Every test should log:
+
+1. Test start (enter a scoped runtime/logging helper and emit a `test_phase!` marker)
+2. Each major phase or step (`test_phase!`, `test_section!`)
+3. Values before key assertions (`assert_with_log!`)
+4. Final outcome (`test_complete!`)
+
+## Log Level Guidelines
+
+- TRACE: Internal details (tight loops, state diffs)
+- DEBUG: Setup, intermediate values, assertions
+- INFO: Phase transitions, test outcomes
+- WARN: Unexpected but recoverable conditions
+- ERROR: Test infrastructure failures
+
+## Test Organization
+
+- Shared helpers live in `src/test_utils.rs`
+- Use the lab runtime (`LabRuntime`) for deterministic concurrency tests
+
+## Conformance Suite
+
+The conformance suite lives in the `conformance/` crate and is designed to be
+runtime-agnostic. To run it:
+
+```bash
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_conformance cargo test -p asupersync-conformance
+```
+
+The `asupersync` crate also exposes conformance tooling in the CLI when the
+`cli` feature is enabled (see `src/bin/asupersync.rs`).
+
+`conformance/Cargo.toml` enables the runtime's `test-internals` dependency
+feature itself. This satellite suite is distinct from the independent
+`h2spec` process against the native listener; use the maintained invocation in
+[`conformance/http2_h2spec.md`](conformance/http2_h2spec.md) for that proof.
+
+## E2E Tests
+
+E2E tests are organized under `tests/e2e/` and cover protocol-level behavior
+with structured logging. Use `-- --nocapture` for logs and prefer deterministic
+lab runtime variants where available.
+
+### Native supervision and channel admission
+
+The maintained obligation runner has separate `--managed-supervision`,
+`--checked-admission`, and `--responsiveness` modes. Each starts with the
+unfiltered native cancellation audit and then runs the selected feature's
+unit and public boundary stages. For a committed candidate on `main`:
+
+```bash
+candidate_base=$(git rev-parse HEAD)
+RCH_REQUIRE_REMOTE=1 bash scripts/test_obligation_cleanup_e2e.sh \
+  --managed-supervision --base "$candidate_base" --no-overlay
+```
+
+`--no-overlay` excludes uncommitted edits. For owned changes, use the exact
+reserved-path recipe in [`docs/channel_supervision_e2e.md`](docs/channel_supervision_e2e.md).
+The [supervision guide](docs/signal_graceful_shutdown_supervision_tree_e2e.md)
+describes actual native SIGTERM delivery, parked cleanup, finalizer ordering,
+negative controls and the explicit limits of that evidence. Retain the
+runner's selected source, stage logs and terminal summary; discovering this
+command or seeing it compile is not an executed supervision result.
+
+### E2E Environment Orchestration (bd-76y5)
+
+Hermetic E2E tests use `TestEnvironment` from `asupersync::test_logging` to
+manage services, ports, and metadata deterministically.
+
+**Core types** (all in `asupersync::test_logging`, re-exported via `tests/common`):
+
+| Type | Purpose |
+|------|---------|
+| `TestEnvironment` | Ties together `TestContext` + ports + services + cleanup |
+| `PortAllocator` | OS-assigned ephemeral ports with labels; prevents conflicts |
+| `FixtureService` trait | `start()` / `stop()` / `is_healthy()` for any service |
+| `DockerFixtureService` | SHA-256-pinned Docker lifecycle, health checks, redacted logs |
+| `PinnedProcessIdentity` | Absolute binary path + SHA-256 + exact version probe |
+| `ProcessFixtureService` | Isolated process, bounded readiness, crash/log/orphan handling |
+| `TempDirFixture` | Per-test temp directory (auto-cleaned on drop) |
+| `InProcessService<S>` | Closure-backed in-process service (echo servers, etc.) |
+| `NoOpFixtureService` | For testing the orchestration itself |
+| `wait_until_healthy()` | Polls `is_healthy()` with exponential backoff |
+| `EnvironmentMetadata` | Structured OS/arch/port/service snapshot for artifacts |
+
+**Typical pattern:**
+
+```rust
+use asupersync::test_logging::*;
+
+let ctx = TestContext::new("my_e2e", 0xDEAD_BEEF);
+let mut env = TestEnvironment::new(ctx);
+
+// Allocate isolated ports
+let http_port = env.allocate_port("http")?;
+let ws_port = env.allocate_port("websocket")?;
+
+// Register services
+env.register_service(Box::new(
+    DockerFixtureService::new(
+        "redis",
+        "redis@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+        .with_port_map(env.port_for("redis").unwrap(), 6379)
+        .with_health_cmd(vec!["redis-cli", "ping"]),
+));
+env.register_service(Box::new(TempDirFixture::new("workdir")));
+
+// Start all and wait for readiness
+env.start_all_services()?;
+for (name, _) in env.health_check() {
+    // Or use wait_until_healthy per-service before start_all
+}
+
+// Emit metadata to logs + artifact dir
+env.emit_metadata();
+env.write_metadata_artifact();
+
+// ... test body ...
+
+// Teardown is automatic on drop (or call env.teardown() explicitly)
+```
+
+**Key invariants:**
+- Ports are held by `TcpListener` until explicitly released, preventing reuse.
+- Held ports are released immediately before managed service startup.
+- Partial startup rolls back in reverse order.
+- Services are stopped in reverse registration order.
+- Cleanup callbacks (`on_teardown`) run in reverse order.
+- Teardown is idempotent; failed stops remain retryable and visible through
+  `teardown_errors()` and `orphaned_services()`.
+- `EnvironmentMetadata` excludes nondeterministic fields (no wall-clock timestamps).
+
+The dependency program's pinned service-family catalog, explicit
+`BLOCKED_EXTERNAL`/`UNSUPPORTED` receipts, and no-claim boundary are documented
+in [`docs/dependency_real_service_fixtures.md`](docs/dependency_real_service_fixtures.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario real-service-fixture-contract
+```
+
+The dependency program's sparse-feature, target/platform, maintained public
+consumer, external downstream portfolio, and service-version coordinates are
+defined in
+[`docs/dependency_feature_platform_consumer_matrix.md`](docs/dependency_feature_platform_consumer_matrix.md).
+Its focused canonical scenario is:
+
+```bash
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario feature-platform-consumer-contract
+```
+
+The aggregate capability-to-evidence projection and final fail-closed audit are
+defined in
+[`docs/dependency_verification_final_signoff.md`](docs/dependency_verification_final_signoff.md).
+Its canonical dry-run and focused scenario are:
+
+```bash
+bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract \
+  --dry-run \
+  --run-id ver-a6-dry-run-001
+
+RCH_REQUIRE_REMOTE=1 bash scripts/run_dependency_sovereignty_e2e.sh \
+  --scenario aggregate-signoff-contract
+```
+
+### NDJSON Event Schema (bd-1t58q)
+
+Structured NDJSON (newline-delimited JSON) logging enables CI log parsing,
+failure triage, and cross-test aggregation. Each test event is one JSON line.
+
+**Enable:** Set `ASUPERSYNC_TEST_NDJSON=1` to stream events to stderr, or use
+`NdjsonLogger::enabled()` programmatically.
+
+**Schema v1 fields:**
+
+| Field        | Type       | Description                                |
+|-------------|-----------|---------------------------------------------|
+| `v`         | `u32`     | Schema version (currently 1)                |
+| `ts_us`     | `u64`     | Microseconds since test start               |
+| `level`     | `string`  | ERROR, WARN, INFO, DEBUG, or TRACE          |
+| `category`  | `string`  | reactor, io, waker, task, timer, region, obligation, custom |
+| `event`     | `string`  | Specific type (TaskSpawn, IoRead, etc.)     |
+| `test_id`   | `string?` | Test identifier from TestContext            |
+| `seed`      | `u64?`    | Root seed for deterministic replay          |
+| `subsystem` | `string?` | Subsystem tag                               |
+| `invariant` | `string?` | Invariant under verification                |
+| `thread_id` | `u64`     | OS thread ID                                |
+| `message`   | `string`  | Human-readable description                  |
+| `data`      | `object`  | Event-specific key-value pairs              |
+
+**Trace file naming conventions:**
+
+```
+{subsystem}_{scenario}_{seed:016x}.trace   — binary replay trace
+{subsystem}_{scenario}_{seed:016x}.ndjson  — structured event log
+```
+
+**Artifact bundle layout** (under `$ASUPERSYNC_TEST_ARTIFACTS_DIR/{test_id}/{seed:016x}/`):
+
+```
+manifest.json        — ReproManifest with seed, phases, env snapshot
+events.ndjson        — Structured event log (NDJSON schema v1)
+summary.json         — TestSummary from harness
+environment.json     — EnvironmentMetadata snapshot
+*.trace              — Binary trace files (if recording enabled)
+failed_assertions.json — Assertion details (on failure)
+```
+
+**Usage:**
+
+```rust
+use asupersync::test_ndjson::{NdjsonLogger, write_artifact_bundle};
+use asupersync::test_logging::{TestLogLevel, TestEvent, TestContext, ReproManifest};
+
+let ctx = TestContext::new("my_test", 0xDEAD_BEEF).with_subsystem("scheduler");
+let logger = NdjsonLogger::enabled(TestLogLevel::Info, Some(ctx.clone()));
+
+logger.log(TestEvent::TaskSpawn { task_id: 1, name: Some("worker".into()) });
+
+// On completion, write artifact bundle
+let manifest = ReproManifest::from_context(&ctx, true).with_env_snapshot();
+write_artifact_bundle(&manifest, Some(&logger), None).unwrap();
+```
+
+The module lives in `src/test_ndjson.rs` and re-exports are available via
+`asupersync::test_ndjson`.
+
+## Fuzzing
+
+Fuzzing targets live under `fuzz/` and are documented in `fuzz/README.md`.
+Example:
+
+```bash
+cd fuzz
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_fuzz cargo fuzz run fuzz_http2_frame -- -max_total_time=60
+```
+
+This requires `cargo-fuzz` and the repository's pinned nightly toolchain on
+the selected remote worker. RCH refusal or missing tools do not authorize a
+local retry. Preserve the worker's `fuzz/artifacts/` and `fuzz/corpus/` outputs;
+do not assume an RCH command automatically retrieved them.
+
+## Phase 6 End-to-End Suites
+
+Phase 6 E2E suites validate cross-module integration, determinism, and artifact
+stability for the five major subsystems. They are intentionally separate from
+unit tests: units validate local invariants, E2E validates the full pipeline.
+
+### Single command (remote Cargo stages)
+
+```bash
+# Via runner script (produces summary + per-suite logs in target/phase6-e2e/):
+RCH_REQUIRE_REMOTE=1 ./scripts/run_phase6_e2e.sh
+
+# Or via cargo directly:
+rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_testing_e2e cargo test --test e2e_geodesic_normalization \
+           --test topology_benchmark \
+           --test e2e_governor_vs_baseline \
+           --test raptorq_conformance \
+           --test golden_outputs \
+           --features test-internals -- --nocapture
+
+# Run a single suite:
+RCH_REQUIRE_REMOTE=1 ./scripts/run_phase6_e2e.sh --suite geo
+```
+
+### Suite breakdown
+
+| Suite | Test file | Subsystem | Key checks |
+|-------|-----------|-----------|------------|
+| GEO | `e2e_geodesic_normalization.rs` | Trace normalization | Deterministic reports, switch cost reduction, golden checksum |
+| HOMO | `topology_benchmark.rs` | Topology-guided exploration | Coverage reports, detection rates, topology vs baseline |
+| LYAP | `e2e_governor_vs_baseline.rs` | Lyapunov governance | V(Σ) convergence, cancel/drain latency, deterministic fingerprints |
+| RAPTORQ | `raptorq_conformance.rs` | RaptorQ FEC codec | Roundtrip correctness, proof artifacts, erasure patterns |
+| PLAN | `golden_outputs.rs` | Certified rewrite engine | Certificate verification, lab equivalence, golden hashes |
+
+### What these tests catch
+
+- **Non-deterministic outputs**: Same seed must produce byte-identical reports.
+- **Golden checksum mismatches**: Behavioral changes are caught by pinned hashes.
+- **Invariant violations**: Oracle checks, linear extension validity, certificate verification.
+- **Regressions**: Cost metrics (switch count, latency, coverage) must not degrade.
+
+## CI Expectations
+
+CI should run at minimum:
+
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_fmt cargo fmt -- --check`
+- `rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_clippy cargo clippy --all-targets -- -D warnings`
+- `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_ci_tests cargo test --lib --features test-internals`
+
+`test-internals` is deliberately not part of the default production feature
+set. Any test lane that needs private helpers such as `Cx::new()` must pass
+`--features test-internals` explicitly.
+
+CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml`,
+property tests via `.github/workflows/property-tests.yml`, and
+Phase 6 E2E suites via the `phase6-e2e` job in `.github/workflows/ci.yml`.
+
+## Debugging Tips
+
+- Use `rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_debug_tests cargo test --lib --features test-internals -- --nocapture` to stream logs.
+- Prefer `test_lab_with_tracing()` when you need larger trace buffers.
+- When a test fails, scan for the last `test_phase!` and `assert_with_log!`
+  markers to pinpoint the failure point.

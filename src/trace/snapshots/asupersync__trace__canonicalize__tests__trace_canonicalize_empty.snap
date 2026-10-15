@@ -1,0 +1,9 @@
+---
+source: src/trace/canonicalize.rs
+expression: canonical_trace_snapshot(&[])
+---
+{
+  "depth": 0,
+  "len": 0,
+  "layers": []
+}

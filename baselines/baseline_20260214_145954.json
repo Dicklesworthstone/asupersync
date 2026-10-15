@@ -1,0 +1,1589 @@
+{
+  "generated_at": "2026-02-14T20:59:53Z",
+  "benchmarks": [
+    {
+      "name": "arena/get_hit",
+      "mean_ns": 0.6437352770026942,
+      "median_ns": 0.6407821129609081,
+      "p95_ns": 0.6658356355891648,
+      "p99_ns": 0.6900397873986499,
+      "std_dev_ns": 0.012154496278090449
+    },
+    {
+      "name": "arena/insert",
+      "mean_ns": 10.273137083010472,
+      "median_ns": 11.081915151089005,
+      "p95_ns": 11.93479396047779,
+      "p99_ns": 12.302243813995817,
+      "std_dev_ns": 2.726083304653597
+    },
+    {
+      "name": "arena/insert_remove_cycle",
+      "mean_ns": 2.8787881201402272,
+      "median_ns": 2.8787048159913153,
+      "p95_ns": 2.91363299776063,
+      "p99_ns": 2.9252898683992687,
+      "std_dev_ns": 0.020032400072897947
+    },
+    {
+      "name": "arena/iterate_1000",
+      "mean_ns": 489.2666101478957,
+      "median_ns": 489.09957626499795,
+      "p95_ns": 495.5567569238378,
+      "p99_ns": 499.0919213649852,
+      "std_dev_ns": 3.670526255412717
+    },
+    {
+      "name": "budget/combine",
+      "mean_ns": 4.754139340779925,
+      "median_ns": 4.751970821026177,
+      "p95_ns": 4.771689281644184,
+      "p99_ns": 4.781549003916845,
+      "std_dev_ns": 0.011126101422473134
+    },
+    {
+      "name": "budget/create_infinite",
+      "mean_ns": 3.86085058753635,
+      "median_ns": 3.8589967327834738,
+      "p95_ns": 3.9153801109500663,
+      "p99_ns": 3.9529133197318913,
+      "std_dev_ns": 0.036309154243299044
+    },
+    {
+      "name": "budget/create_with_deadline",
+      "mean_ns": 4.140050991545426,
+      "median_ns": 4.1331465975637105,
+      "p95_ns": 4.193654380814893,
+      "p99_ns": 4.247578911941037,
+      "std_dev_ns": 0.03437919296214692
+    },
+    {
+      "name": "cancel_dispatch/inject_pop_global/10",
+      "mean_ns": 297.1953178598208,
+      "median_ns": 296.8398111563431,
+      "p95_ns": 300.78371190200613,
+      "p99_ns": 306.66816411238824,
+      "std_dev_ns": 2.7713321399026665
+    },
+    {
+      "name": "cancel_dispatch/inject_pop_global/100",
+      "mean_ns": 2226.199274760531,
+      "median_ns": 2225.298695009781,
+      "p95_ns": 2246.173882197657,
+      "p99_ns": 2277.188802957808,
+      "std_dev_ns": 14.198264303961416
+    },
+    {
+      "name": "cancel_dispatch/inject_pop_global/1000",
+      "mean_ns": 21697.689996299185,
+      "median_ns": 21696.505032287358,
+      "p95_ns": 21912.147824675325,
+      "p99_ns": 22217.312668621704,
+      "std_dev_ns": 176.61606907244652
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler/10",
+      "mean_ns": 33859.28971611721,
+      "median_ns": 37031.86129623065,
+      "p95_ns": 39780.21532051282,
+      "p99_ns": 55340.74882404328,
+      "std_dev_ns": 22866.509712348525
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler/100",
+      "mean_ns": 63933.26573137844,
+      "median_ns": 70474.2197385621,
+      "p95_ns": 75465.67923158791,
+      "p99_ns": 76027.68844797192,
+      "std_dev_ns": 13253.616936235789
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler/1000",
+      "mean_ns": 391769.2839530352,
+      "median_ns": 389925.18131094263,
+      "p95_ns": 415235.19120051636,
+      "p99_ns": 453224.0593108938,
+      "std_dev_ns": 21008.92483885982
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler_governor/10",
+      "mean_ns": 31652.66660342633,
+      "median_ns": 38239.257533421,
+      "p95_ns": 38932.84801689274,
+      "p99_ns": 39568.12809077515,
+      "std_dev_ns": 10262.766513890077
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler_governor/100",
+      "mean_ns": 65183.42518466078,
+      "median_ns": 72456.11226579521,
+      "p95_ns": 77026.27920447901,
+      "p99_ns": 77484.38584256812,
+      "std_dev_ns": 12743.273952036216
+    },
+    {
+      "name": "cancel_dispatch/inject_via_scheduler_governor/1000",
+      "mean_ns": 388101.2208911132,
+      "median_ns": 385078.5821488294,
+      "p95_ns": 417759.7481047272,
+      "p99_ns": 433261.7771770125,
+      "std_dev_ns": 20734.76383036185
+    },
+    {
+      "name": "cancel_ready_mixed/pop_all/100",
+      "mean_ns": 3212.2493911623706,
+      "median_ns": 3127.3848269495975,
+      "p95_ns": 3686.694327524317,
+      "p99_ns": 4064.8179127352964,
+      "std_dev_ns": 216.50567030467064
+    },
+    {
+      "name": "cancel_ready_mixed/pop_all/1000",
+      "mean_ns": 47106.06347397465,
+      "median_ns": 47088.470029970034,
+      "p95_ns": 47722.49507783883,
+      "p99_ns": 48324.24938461539,
+      "std_dev_ns": 442.1053362015421
+    },
+    {
+      "name": "cancel_ready_mixed/pop_all/400",
+      "mean_ns": 16246.8410188815,
+      "median_ns": 15875.71719358083,
+      "p95_ns": 16775.77198807221,
+      "p99_ns": 27686.725986965972,
+      "std_dev_ns": 2300.754497178106
+    },
+    {
+      "name": "cancel_reason/create_timeout",
+      "mean_ns": 12.167658494352194,
+      "median_ns": 12.165368340801454,
+      "p95_ns": 12.27210193922284,
+      "p99_ns": 12.317675562378467,
+      "std_dev_ns": 0.07012771512136479
+    },
+    {
+      "name": "cancel_reason/create_user",
+      "mean_ns": 12.24878217421068,
+      "median_ns": 12.269733229791315,
+      "p95_ns": 12.417308182103406,
+      "p99_ns": 12.699893015569279,
+      "std_dev_ns": 0.13646430741850998
+    },
+    {
+      "name": "cancel_reason/strengthen_different",
+      "mean_ns": 11.208812413162827,
+      "median_ns": 11.20774907295085,
+      "p95_ns": 11.367976474562852,
+      "p99_ns": 11.396584093343945,
+      "std_dev_ns": 0.10008697293955228
+    },
+    {
+      "name": "cancel_reason/strengthen_same",
+      "mean_ns": 6.887856100949023,
+      "median_ns": 6.889536372135295,
+      "p95_ns": 7.163414109847166,
+      "p99_ns": 7.20998135590273,
+      "std_dev_ns": 0.16742966256068553
+    },
+    {
+      "name": "combinator/effective_deadline_no_existing",
+      "mean_ns": 0.6410908573609455,
+      "median_ns": 0.640222064514717,
+      "p95_ns": 0.6487850044944296,
+      "p99_ns": 0.6525886372022739,
+      "std_dev_ns": 0.006233820748408138
+    },
+    {
+      "name": "combinator/effective_deadline_with_existing",
+      "mean_ns": 0.6391265127552227,
+      "median_ns": 0.6396141494266192,
+      "p95_ns": 0.64648738873048,
+      "p99_ns": 0.650699549946592,
+      "std_dev_ns": 0.004701639747758295
+    },
+    {
+      "name": "combinator/join2_outcomes_ok",
+      "mean_ns": 31.35910785461545,
+      "median_ns": 31.373935478972673,
+      "p95_ns": 31.65978290189946,
+      "p99_ns": 31.75602873067203,
+      "std_dev_ns": 0.20216611298163656
+    },
+    {
+      "name": "combinator/race2_outcomes_first_wins",
+      "mean_ns": 45.364856695790294,
+      "median_ns": 45.39112156561497,
+      "p95_ns": 45.8319752113399,
+      "p99_ns": 45.95037951044039,
+      "std_dev_ns": 0.2905179256550279
+    },
+    {
+      "name": "combinator/race2_outcomes_second_wins",
+      "mean_ns": 44.740605804372535,
+      "median_ns": 44.76161035251596,
+      "p95_ns": 45.24010856431834,
+      "p99_ns": 45.94216043395886,
+      "std_dev_ns": 0.3802104376733257
+    },
+    {
+      "name": "combinator/timeout_config_new",
+      "mean_ns": 3.242118357269526,
+      "median_ns": 3.240878876056323,
+      "p95_ns": 3.2722063486328596,
+      "p99_ns": 3.313993851116788,
+      "std_dev_ns": 0.0250150049799627
+    },
+    {
+      "name": "combinator/timeout_config_resolve",
+      "mean_ns": 0.641247634397292,
+      "median_ns": 0.6419005980644874,
+      "p95_ns": 0.6488245555617974,
+      "p99_ns": 0.6521498145659028,
+      "std_dev_ns": 0.005162994677366247
+    },
+    {
+      "name": "convergence_analysis/analyze/10",
+      "mean_ns": 104.6907266789899,
+      "median_ns": 87.35297495284468,
+      "p95_ns": 177.2721715030819,
+      "p99_ns": 179.64112956935122,
+      "std_dev_ns": 46.88049942015681
+    },
+    {
+      "name": "convergence_analysis/analyze/100",
+      "mean_ns": 678.3466335485278,
+      "median_ns": 765.4400857843137,
+      "p95_ns": 993.8471870046878,
+      "p99_ns": 1000.6218632077846,
+      "std_dev_ns": 288.67502882531966
+    },
+    {
+      "name": "convergence_analysis/analyze/1000",
+      "mean_ns": 6692.251027587169,
+      "median_ns": 7153.75292022792,
+      "p95_ns": 11922.353039537427,
+      "p99_ns": 12486.115103652808,
+      "std_dev_ns": 3620.309783720339
+    },
+    {
+      "name": "gaussian_elimination/solve_basic/16",
+      "mean_ns": 33662.42797266229,
+      "median_ns": 33640.06383838384,
+      "p95_ns": 34100.36297252747,
+      "p99_ns": 34604.017640832295,
+      "std_dev_ns": 389.2005359315309
+    },
+    {
+      "name": "gaussian_elimination/solve_basic/32",
+      "mean_ns": 134935.3996931491,
+      "median_ns": 134732.6886214115,
+      "p95_ns": 136687.03452586208,
+      "p99_ns": 137523.4590625,
+      "std_dev_ns": 1005.061354311828
+    },
+    {
+      "name": "gaussian_elimination/solve_basic/64",
+      "mean_ns": 556709.9839114479,
+      "median_ns": 555960.8379599479,
+      "p95_ns": 563066.8543589743,
+      "p99_ns": 568812.1281538462,
+      "std_dev_ns": 3848.484529356319
+    },
+    {
+      "name": "gaussian_elimination/solve_basic/8",
+      "mean_ns": 4607.50873705166,
+      "median_ns": 4292.033459372169,
+      "p95_ns": 6563.264343317972,
+      "p99_ns": 6665.945889400922,
+      "std_dev_ns": 733.3133563509493
+    },
+    {
+      "name": "gaussian_elimination/solve_markowitz/16",
+      "mean_ns": 34340.55466695993,
+      "median_ns": 34308.58770586959,
+      "p95_ns": 34852.149999999994,
+      "p99_ns": 35121.44793103449,
+      "std_dev_ns": 323.97907151043773
+    },
+    {
+      "name": "gaussian_elimination/solve_markowitz/32",
+      "mean_ns": 142444.36443223932,
+      "median_ns": 142467.4116419295,
+      "p95_ns": 144212.41352878464,
+      "p99_ns": 144444.0530105634,
+      "std_dev_ns": 1162.573460491851
+    },
+    {
+      "name": "gaussian_elimination/solve_markowitz/64",
+      "mean_ns": 607413.3098658322,
+      "median_ns": 606508.433982684,
+      "p95_ns": 610781.317051282,
+      "p99_ns": 624064.6627325581,
+      "std_dev_ns": 3039.892002255031
+    },
+    {
+      "name": "gaussian_elimination/solve_markowitz/8",
+      "mean_ns": 9173.077090911745,
+      "median_ns": 9180.898155712903,
+      "p95_ns": 9262.879554799698,
+      "p99_ns": 9300.239543142043,
+      "std_dev_ns": 64.76964464587003
+    },
+    {
+      "name": "gf256_primitives/add_slice/1024",
+      "mean_ns": 18.80653225911411,
+      "median_ns": 18.37105924247286,
+      "p95_ns": 21.79993654310215,
+      "p99_ns": 22.794078379900313,
+      "std_dev_ns": 1.3883787263021417
+    },
+    {
+      "name": "gf256_primitives/add_slice/16384",
+      "mean_ns": 267.08588835990076,
+      "median_ns": 261.5315699055126,
+      "p95_ns": 297.88717027719895,
+      "p99_ns": 352.40133413918966,
+      "std_dev_ns": 18.738578717043943
+    },
+    {
+      "name": "gf256_primitives/add_slice/256",
+      "mean_ns": 5.681383907961744,
+      "median_ns": 5.568786090732312,
+      "p95_ns": 6.341021886915459,
+      "p99_ns": 7.182695975931831,
+      "std_dev_ns": 0.37519741707290627
+    },
+    {
+      "name": "gf256_primitives/add_slice/4096",
+      "mean_ns": 68.15548399473136,
+      "median_ns": 66.48181566949256,
+      "p95_ns": 76.28640668478201,
+      "p99_ns": 79.65974312961119,
+      "std_dev_ns": 4.550179473783345
+    },
+    {
+      "name": "gf256_primitives/add_slice/64",
+      "mean_ns": 2.6654916376700157,
+      "median_ns": 2.6428195621964257,
+      "p95_ns": 2.847728318276795,
+      "p99_ns": 2.9906540564080943,
+      "std_dev_ns": 0.1098816035875505
+    },
+    {
+      "name": "gf256_primitives/addmul_slice/1024",
+      "mean_ns": 190.08175166124315,
+      "median_ns": 185.75259851988898,
+      "p95_ns": 235.80220504903667,
+      "p99_ns": 263.8426934189192,
+      "std_dev_ns": 19.65996855405438
+    },
+    {
+      "name": "gf256_primitives/addmul_slice/16384",
+      "mean_ns": 3220.520265283691,
+      "median_ns": 3032.424450434262,
+      "p95_ns": 4351.743953258071,
+      "p99_ns": 4893.627416507938,
+      "std_dev_ns": 527.9781053983309
+    },
+    {
+      "name": "gf256_primitives/addmul_slice/256",
+      "mean_ns": 53.70783434005407,
+      "median_ns": 51.923666203161595,
+      "p95_ns": 68.71224867214646,
+      "p99_ns": 71.68848135326262,
+      "std_dev_ns": 6.66229903636453
+    },
+    {
+      "name": "gf256_primitives/addmul_slice/4096",
+      "mean_ns": 708.7114700281111,
+      "median_ns": 698.3702880847599,
+      "p95_ns": 797.9004453166517,
+      "p99_ns": 852.0741014608733,
+      "std_dev_ns": 41.946067667861094
+    },
+    {
+      "name": "gf256_primitives/addmul_slice/64",
+      "mean_ns": 17.346179624114757,
+      "median_ns": 16.641687793067867,
+      "p95_ns": 21.16061658203112,
+      "p99_ns": 22.97744555369098,
+      "std_dev_ns": 2.0870308563062374
+    },
+    {
+      "name": "gf256_primitives/mul_slice/1024",
+      "mean_ns": 201.62383723350663,
+      "median_ns": 193.68858397355712,
+      "p95_ns": 269.4251938022704,
+      "p99_ns": 293.6933381537816,
+      "std_dev_ns": 30.795676117273164
+    },
+    {
+      "name": "gf256_primitives/mul_slice/16384",
+      "mean_ns": 3512.034019641116,
+      "median_ns": 3232.5835992242246,
+      "p95_ns": 4602.036376376376,
+      "p99_ns": 4739.123119369369,
+      "std_dev_ns": 675.1865593311692
+    },
+    {
+      "name": "gf256_primitives/mul_slice/256",
+      "mean_ns": 50.795235169299914,
+      "median_ns": 47.384703427096,
+      "p95_ns": 69.90383714994346,
+      "p99_ns": 82.67583973893672,
+      "std_dev_ns": 9.225452508141936
+    },
+    {
+      "name": "gf256_primitives/mul_slice/4096",
+      "mean_ns": 745.6335892624899,
+      "median_ns": 720.7443870192308,
+      "p95_ns": 892.3581197768281,
+      "p99_ns": 1088.193402138201,
+      "std_dev_ns": 86.88748950587592
+    },
+    {
+      "name": "gf256_primitives/mul_slice/64",
+      "mean_ns": 12.872794421726653,
+      "median_ns": 12.304077024670967,
+      "p95_ns": 16.528451548406437,
+      "p99_ns": 19.94671039888922,
+      "std_dev_ns": 1.778444975166725
+    },
+    {
+      "name": "governor_overhead/compute_record",
+      "mean_ns": 14.292366871195673,
+      "median_ns": 14.147397741033746,
+      "p95_ns": 14.604539279250659,
+      "p99_ns": 17.649933415939405,
+      "std_dev_ns": 0.7378617008469223
+    },
+    {
+      "name": "governor_overhead/potential_loop_100_steps",
+      "mean_ns": 1540.1513151463253,
+      "median_ns": 1540.0091456632351,
+      "p95_ns": 1560.7149982006813,
+      "p99_ns": 1691.2748545250686,
+      "std_dev_ns": 47.26057502926125
+    },
+    {
+      "name": "governor_overhead/suggest_default",
+      "mean_ns": 5.268041876099906,
+      "median_ns": 5.2151200001057685,
+      "p95_ns": 5.494783842211651,
+      "p99_ns": 6.38854698514258,
+      "std_dev_ns": 0.26068708990323786
+    },
+    {
+      "name": "governor_overhead/suggest_obligation_focused",
+      "mean_ns": 5.221639827824929,
+      "median_ns": 5.183356960337324,
+      "p95_ns": 5.369038382230767,
+      "p99_ns": 5.74624968270448,
+      "std_dev_ns": 0.1550996507495948
+    },
+    {
+      "name": "governor_suggest/deadline_dominated",
+      "mean_ns": 5.2240789653035264,
+      "median_ns": 5.204656599797072,
+      "p95_ns": 5.3471783791177545,
+      "p99_ns": 5.43242229117074,
+      "std_dev_ns": 0.07418182138735477
+    },
+    {
+      "name": "governor_suggest/obligation_dominated",
+      "mean_ns": 5.215156510150689,
+      "median_ns": 5.224436115819369,
+      "p95_ns": 5.3157246308608075,
+      "p99_ns": 5.445408302469806,
+      "std_dev_ns": 0.0739230205469344
+    },
+    {
+      "name": "governor_suggest/quiescent",
+      "mean_ns": 4.785373642018717,
+      "median_ns": 4.784402227481195,
+      "p95_ns": 4.827346827548782,
+      "p99_ns": 4.830486857965532,
+      "std_dev_ns": 0.026579141242876445
+    },
+    {
+      "name": "governor_suggest/region_drain",
+      "mean_ns": 5.208267184994655,
+      "median_ns": 5.170692107784811,
+      "p95_ns": 5.321860428790515,
+      "p99_ns": 5.885600491413744,
+      "std_dev_ns": 0.13368695693214108
+    },
+    {
+      "name": "lab_runtime/create",
+      "mean_ns": 26123.97461432834,
+      "median_ns": 26124.40190620783,
+      "p95_ns": 26398.21669575725,
+      "p99_ns": 26754.15724958949,
+      "std_dev_ns": 173.23626018265233
+    },
+    {
+      "name": "lab_runtime/now",
+      "mean_ns": 0.6417120993597094,
+      "median_ns": 0.6416719842366715,
+      "p95_ns": 0.6469202363340816,
+      "p99_ns": 0.6644172875959334,
+      "std_dev_ns": 0.0073344250970713825
+    },
+    {
+      "name": "lab_runtime/steps",
+      "mean_ns": 0.6400377125269905,
+      "median_ns": 0.6400693673848901,
+      "p95_ns": 0.6451261608055235,
+      "p99_ns": 0.6472624231998345,
+      "std_dev_ns": 0.00327579223403369
+    },
+    {
+      "name": "lab_runtime/with_seed",
+      "mean_ns": 26390.56463405382,
+      "median_ns": 26329.239562818337,
+      "p95_ns": 26783.76395898422,
+      "p99_ns": 26887.32910526316,
+      "std_dev_ns": 248.32508105349834
+    },
+    {
+      "name": "linalg_operations/row_scale_add/1024",
+      "mean_ns": 180.92621773058679,
+      "median_ns": 175.5865325156775,
+      "p95_ns": 210.6142040496092,
+      "p99_ns": 226.94797263270465,
+      "std_dev_ns": 17.39820984262373
+    },
+    {
+      "name": "linalg_operations/row_scale_add/256",
+      "mean_ns": 47.448704317518924,
+      "median_ns": 45.951189803086486,
+      "p95_ns": 55.4231150643066,
+      "p99_ns": 67.98170450598654,
+      "std_dev_ns": 5.002409907808352
+    },
+    {
+      "name": "linalg_operations/row_scale_add/4096",
+      "mean_ns": 792.682833379044,
+      "median_ns": 717.4231450946249,
+      "p95_ns": 1246.2831576967355,
+      "p99_ns": 1272.5720376723002,
+      "std_dev_ns": 176.8533338959548
+    },
+    {
+      "name": "linalg_operations/row_xor/1024",
+      "mean_ns": 18.84647969056316,
+      "median_ns": 18.82632979186721,
+      "p95_ns": 21.283774320143948,
+      "p99_ns": 21.62826013185446,
+      "std_dev_ns": 1.201004137714301
+    },
+    {
+      "name": "linalg_operations/row_xor/256",
+      "mean_ns": 5.429447080544556,
+      "median_ns": 5.3711158276921935,
+      "p95_ns": 6.006208224123894,
+      "p99_ns": 6.122439158916055,
+      "std_dev_ns": 0.26134023926945865
+    },
+    {
+      "name": "linalg_operations/row_xor/4096",
+      "mean_ns": 71.58537467978192,
+      "median_ns": 70.13381536627617,
+      "p95_ns": 82.9575879451532,
+      "p99_ns": 89.4785988288964,
+      "std_dev_ns": 6.569845049807471
+    },
+    {
+      "name": "outcome/join_ok_cancelled",
+      "mean_ns": 48.03623381861505,
+      "median_ns": 46.58747856999733,
+      "p95_ns": 54.978274746716586,
+      "p99_ns": 61.477714542251945,
+      "std_dev_ns": 4.053602610751665
+    },
+    {
+      "name": "outcome/join_ok_ok",
+      "mean_ns": 37.938641930954816,
+      "median_ns": 36.99342562183355,
+      "p95_ns": 44.860302306212326,
+      "p99_ns": 49.76095629304906,
+      "std_dev_ns": 3.86138143295903
+    },
+    {
+      "name": "outcome/severity_cancelled",
+      "mean_ns": 1.057313819299666,
+      "median_ns": 1.032156957358382,
+      "p95_ns": 1.2290771662146256,
+      "p99_ns": 1.3879209872332294,
+      "std_dev_ns": 0.15976533894623887
+    },
+    {
+      "name": "outcome/severity_ok",
+      "mean_ns": 1.067179601026555,
+      "median_ns": 1.0482918157290837,
+      "p95_ns": 1.2765886583301291,
+      "p99_ns": 1.755613422853851,
+      "std_dev_ns": 0.18855501751988601
+    },
+    {
+      "name": "potential_compute/deadline_focused",
+      "mean_ns": 14.129434646660066,
+      "median_ns": 14.06879330730026,
+      "p95_ns": 14.251025175881956,
+      "p99_ns": 14.696604882638116,
+      "std_dev_ns": 0.5021541689647617
+    },
+    {
+      "name": "potential_compute/default_weights",
+      "mean_ns": 14.3700237214639,
+      "median_ns": 14.247165489594106,
+      "p95_ns": 14.939107656754516,
+      "p99_ns": 16.991831127813057,
+      "std_dev_ns": 0.531599715006503
+    },
+    {
+      "name": "potential_compute/obligation_focused",
+      "mean_ns": 14.123406746732275,
+      "median_ns": 14.069947661128843,
+      "p95_ns": 14.21725690705387,
+      "p99_ns": 15.56894930219134,
+      "std_dev_ns": 0.37728612253442295
+    },
+    {
+      "name": "potential_compute/uniform_weights",
+      "mean_ns": 14.170751475760044,
+      "median_ns": 14.108658158138299,
+      "p95_ns": 14.332197477659033,
+      "p99_ns": 15.852576936416265,
+      "std_dev_ns": 0.4447396643562291
+    },
+    {
+      "name": "raptorq_e2e/decode_repair_only/k=16_sym=1024",
+      "mean_ns": 12253.995088385194,
+      "median_ns": 12202.96663350367,
+      "p95_ns": 12475.948956839164,
+      "p99_ns": 12552.160771604948,
+      "std_dev_ns": 208.81364982819744
+    },
+    {
+      "name": "raptorq_e2e/decode_repair_only/k=32_sym=1024",
+      "mean_ns": 77806.94897489544,
+      "median_ns": 76791.45179610307,
+      "p95_ns": 81979.40842490841,
+      "p99_ns": 83997.90358597286,
+      "std_dev_ns": 2283.4187392700514
+    },
+    {
+      "name": "raptorq_e2e/decode_repair_only/k=4_sym=256",
+      "mean_ns": 4632.878997318318,
+      "median_ns": 4624.360324947589,
+      "p95_ns": 4820.535795139239,
+      "p99_ns": 4886.873305256065,
+      "std_dev_ns": 98.95304226495811
+    },
+    {
+      "name": "raptorq_e2e/decode_repair_only/k=8_sym=256",
+      "mean_ns": 7235.166343359515,
+      "median_ns": 7218.850024509804,
+      "p95_ns": 7427.0212622549025,
+      "p99_ns": 7502.902665441177,
+      "std_dev_ns": 109.2548828005459
+    },
+    {
+      "name": "raptorq_e2e/decode_source_only/k=16_sym=1024",
+      "mean_ns": 8148.697040872859,
+      "median_ns": 8131.312093059165,
+      "p95_ns": 8225.203090846993,
+      "p99_ns": 8981.75634611305,
+      "std_dev_ns": 145.79566664431073
+    },
+    {
+      "name": "raptorq_e2e/decode_source_only/k=32_sym=1024",
+      "mean_ns": 18523.515311591786,
+      "median_ns": 18542.03420479303,
+      "p95_ns": 18995.6062100894,
+      "p99_ns": 19299.25797449464,
+      "std_dev_ns": 351.12382250868995
+    },
+    {
+      "name": "raptorq_e2e/decode_source_only/k=4_sym=256",
+      "mean_ns": 2908.9908740282485,
+      "median_ns": 2911.0391466493265,
+      "p95_ns": 3006.4260567017504,
+      "p99_ns": 3029.828791112957,
+      "std_dev_ns": 64.04112800394165
+    },
+    {
+      "name": "raptorq_e2e/decode_source_only/k=8_sym=256",
+      "mean_ns": 3823.9859284420672,
+      "median_ns": 3833.9865212746245,
+      "p95_ns": 3895.2189745937285,
+      "p99_ns": 3918.905232988516,
+      "std_dev_ns": 48.28945213939605
+    },
+    {
+      "name": "raptorq_e2e/encode/k=16_sym=1024",
+      "mean_ns": 56811.62751241152,
+      "median_ns": 56734.427997076025,
+      "p95_ns": 57508.51168831169,
+      "p99_ns": 58653.518145833346,
+      "std_dev_ns": 517.8619906127233
+    },
+    {
+      "name": "raptorq_e2e/encode/k=32_sym=1024",
+      "mean_ns": 123586.59356780969,
+      "median_ns": 123455.73866959065,
+      "p95_ns": 125662.90342487374,
+      "p99_ns": 126521.67620852125,
+      "std_dev_ns": 970.6718960144402
+    },
+    {
+      "name": "raptorq_e2e/encode/k=4_sym=256",
+      "mean_ns": 9194.044521105667,
+      "median_ns": 9175.0488256047,
+      "p95_ns": 9327.205413105414,
+      "p99_ns": 9383.373163580247,
+      "std_dev_ns": 76.5977081947839
+    },
+    {
+      "name": "raptorq_e2e/encode/k=8_sym=256",
+      "mean_ns": 14220.93130199181,
+      "median_ns": 14216.146406371407,
+      "p95_ns": 14613.043811554078,
+      "p99_ns": 14711.786394731205,
+      "std_dev_ns": 215.06084181362493
+    },
+    {
+      "name": "raptorq_pipeline/send_receive/1048576",
+      "mean_ns": 2887413049.98,
+      "median_ns": 2874537895.0,
+      "p95_ns": 2943345668.5,
+      "p99_ns": 3140046911.3600006,
+      "std_dev_ns": 54763346.97733516
+    },
+    {
+      "name": "raptorq_pipeline/send_receive/262144",
+      "mean_ns": 93514736.94,
+      "median_ns": 89714505.5,
+      "p95_ns": 104728208.25,
+      "p99_ns": 104900739.24,
+      "std_dev_ns": 6757166.507350579
+    },
+    {
+      "name": "raptorq_pipeline/send_receive/65536",
+      "mean_ns": 5405611.492,
+      "median_ns": 5424520.65,
+      "p95_ns": 5496143.625,
+      "p99_ns": 5523174.874,
+      "std_dev_ns": 109849.18031423829
+    },
+    {
+      "name": "runtime_state/cancel_request_region",
+      "mean_ns": 323.76458418254145,
+      "median_ns": 297.8008760107817,
+      "p95_ns": 396.31202427027904,
+      "p99_ns": 401.2753068974119,
+      "std_dev_ns": 43.92244468860042
+    },
+    {
+      "name": "runtime_state/create",
+      "mean_ns": 6216.332361583773,
+      "median_ns": 6278.387755478765,
+      "p95_ns": 6573.633151005944,
+      "p99_ns": 6928.154201972297,
+      "std_dev_ns": 262.82985803170743
+    },
+    {
+      "name": "runtime_state/create_root_region",
+      "mean_ns": 291.93511774295064,
+      "median_ns": 340.5217163952358,
+      "p95_ns": 369.68995844076267,
+      "p99_ns": 375.4871909479297,
+      "std_dev_ns": 107.85382512468627
+    },
+    {
+      "name": "runtime_state/is_quiescent_empty",
+      "mean_ns": 3.892592013435321,
+      "median_ns": 3.8911779803510864,
+      "p95_ns": 3.9438521904259756,
+      "p99_ns": 3.9654320531728797,
+      "std_dev_ns": 0.039862070172205936
+    },
+    {
+      "name": "runtime_state/live_task_count_empty",
+      "mean_ns": 0.6400112865814549,
+      "median_ns": 0.6398912054715664,
+      "p95_ns": 0.6447559207370583,
+      "p99_ns": 0.6536806893383745,
+      "std_dev_ns": 0.004293017828944028
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_only_dispatch/100",
+      "mean_ns": 325795.04376747174,
+      "median_ns": 31233.78555268261,
+      "p95_ns": 40353.74623846593,
+      "p99_ns": 339186.97100015247,
+      "std_dev_ns": 2981138.1321157636
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_only_dispatch/1000",
+      "mean_ns": 451610.83918509417,
+      "median_ns": 75416.64423076923,
+      "p95_ns": 112960.20755772006,
+      "p99_ns": 481828.7796501876,
+      "std_dev_ns": 3669363.028339707
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_only_dispatch/10000",
+      "mean_ns": 660106.1369999999,
+      "median_ns": 624058.45,
+      "p95_ns": 651553.0099999999,
+      "p99_ns": 723839.0310000161,
+      "std_dev_ns": 324488.40331936616
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_ready_mixed/16",
+      "mean_ns": 239044.72985433092,
+      "median_ns": 43448.19333333333,
+      "p95_ns": 76236.30609104403,
+      "p99_ns": 275681.93890332273,
+      "std_dev_ns": 1898809.3096166607
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_ready_mixed/2",
+      "mean_ns": 195223.90917607147,
+      "median_ns": 47674.54748964803,
+      "p95_ns": 57541.35186813187,
+      "p99_ns": 212858.89446674453,
+      "std_dev_ns": 1523637.6533427176
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_ready_mixed/4",
+      "mean_ns": 193549.41158452738,
+      "median_ns": 45581.35146133925,
+      "p95_ns": 60265.48210809647,
+      "p99_ns": 217507.657261981,
+      "std_dev_ns": 1492789.890067831
+    },
+    {
+      "name": "scheduler_cancel_preemption/cancel_ready_mixed/8",
+      "mean_ns": 195430.73496297773,
+      "median_ns": 49510.00655284044,
+      "p95_ns": 58971.04366221666,
+      "p99_ns": 214378.2474529078,
+      "std_dev_ns": 1518309.5778629626
+    },
+    {
+      "name": "scheduler_cancel_preemption/ready_stall_depth/2",
+      "mean_ns": 202281.6441063459,
+      "median_ns": 34366.57631416203,
+      "p95_ns": 38805.469456521736,
+      "p99_ns": 226583.06706968643,
+      "std_dev_ns": 1749376.3904535673
+    },
+    {
+      "name": "scheduler_cancel_preemption/ready_stall_depth/4",
+      "mean_ns": 193917.0585403643,
+      "median_ns": 35150.00849056603,
+      "p95_ns": 42946.56948953824,
+      "p99_ns": 238184.9372784351,
+      "std_dev_ns": 1657791.119392756
+    },
+    {
+      "name": "scheduler_cancel_preemption/ready_stall_depth/8",
+      "mean_ns": 186670.2333184851,
+      "median_ns": 34510.60139318886,
+      "p95_ns": 38321.08328513163,
+      "p99_ns": 197959.6312500815,
+      "std_dev_ns": 1593960.7759807075
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/10",
+      "mean_ns": 144.02398338840018,
+      "median_ns": 143.54479644495413,
+      "p95_ns": 149.94855534199078,
+      "p99_ns": 155.3054841825771,
+      "std_dev_ns": 3.870104269142057
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/100",
+      "mean_ns": 1237.2614211387558,
+      "median_ns": 1228.1533006016718,
+      "p95_ns": 1319.6014309472441,
+      "p99_ns": 1352.052899013425,
+      "std_dev_ns": 50.531189284062286
+    },
+    {
+      "name": "scheduler_global_queue/push_batch/1000",
+      "mean_ns": 12822.97212300913,
+      "median_ns": 12723.57372080089,
+      "p95_ns": 13830.735497311827,
+      "p99_ns": 13948.789526479217,
+      "std_dev_ns": 510.14906892631404
+    },
+    {
+      "name": "scheduler_global_queue/push_pop_single",
+      "mean_ns": 47.27787679703572,
+      "median_ns": 46.67531585960904,
+      "p95_ns": 51.86020470744684,
+      "p99_ns": 52.727231100119624,
+      "std_dev_ns": 1.8827971097626075
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/10",
+      "mean_ns": 298.0203403160928,
+      "median_ns": 296.1853756993388,
+      "p95_ns": 313.51455432535573,
+      "p99_ns": 320.7389830189448,
+      "std_dev_ns": 7.597735797041994
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/100",
+      "mean_ns": 2451.2292952478997,
+      "median_ns": 2397.9921065598214,
+      "p95_ns": 2752.951100436923,
+      "p99_ns": 2778.567341094307,
+      "std_dev_ns": 136.08320298802124
+    },
+    {
+      "name": "scheduler_global_queue/push_then_pop/1000",
+      "mean_ns": 25169.227709643605,
+      "median_ns": 25039.714497335102,
+      "p95_ns": 26530.928347578345,
+      "p99_ns": 27316.578695993936,
+      "std_dev_ns": 791.598541068133
+    },
+    {
+      "name": "scheduler_intrusive_ring/interleaved_push_pop",
+      "mean_ns": 6891.50811421743,
+      "median_ns": 6775.217893217893,
+      "p95_ns": 7634.827874338512,
+      "p99_ns": 7847.439623581449,
+      "std_dev_ns": 333.8413425551914
+    },
+    {
+      "name": "scheduler_intrusive_ring/push_pop_single",
+      "mean_ns": 71.8438793802355,
+      "median_ns": 67.2671875088651,
+      "p95_ns": 90.9058505351682,
+      "p99_ns": 92.88122628009096,
+      "std_dev_ns": 9.34371898652184
+    },
+    {
+      "name": "scheduler_intrusive_ring/push_then_pop/10",
+      "mean_ns": 447.7572749573261,
+      "median_ns": 442.45132057416265,
+      "p95_ns": 482.8035148136106,
+      "p99_ns": 520.6124743083005,
+      "std_dev_ns": 19.67948383926019
+    },
+    {
+      "name": "scheduler_intrusive_ring/push_then_pop/100",
+      "mean_ns": 3809.4875471608952,
+      "median_ns": 3771.994107622888,
+      "p95_ns": 4050.160240900484,
+      "p99_ns": 4101.420203886152,
+      "std_dev_ns": 103.9746380321944
+    },
+    {
+      "name": "scheduler_intrusive_ring/push_then_pop/1000",
+      "mean_ns": 41430.75757944768,
+      "median_ns": 38079.74114774115,
+      "p95_ns": 54509.298361328845,
+      "p99_ns": 57407.20289115647,
+      "std_dev_ns": 6055.995582188278
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_pop_single",
+      "mean_ns": 74.74445783130085,
+      "median_ns": 71.40018797841716,
+      "p95_ns": 94.87746493138198,
+      "p99_ns": 96.26941899340382,
+      "std_dev_ns": 9.611479637798432
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_pop/10",
+      "mean_ns": 627.0164851301511,
+      "median_ns": 526.3831472620947,
+      "p95_ns": 1050.9480402352835,
+      "p99_ns": 1153.924431776304,
+      "std_dev_ns": 213.0301476580164
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_pop/100",
+      "mean_ns": 3922.550385937743,
+      "median_ns": 3799.703557744937,
+      "p95_ns": 4204.885780141844,
+      "p99_ns": 6035.94244761905,
+      "std_dev_ns": 406.79503647484677
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_pop/1000",
+      "mean_ns": 43706.28982175584,
+      "median_ns": 38721.10869809203,
+      "p95_ns": 62125.79902356902,
+      "p99_ns": 68966.83403855421,
+      "std_dev_ns": 8917.94437962119
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_steal_batch/16",
+      "mean_ns": 720.2625030424315,
+      "median_ns": 715.7819334594436,
+      "p95_ns": 797.0981941719351,
+      "p99_ns": 807.3246490236382,
+      "std_dev_ns": 42.14987594999478
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_steal_batch/256",
+      "mean_ns": 9946.951131463115,
+      "median_ns": 9536.755,
+      "p95_ns": 11996.769991807116,
+      "p99_ns": 12410.796199999999,
+      "std_dev_ns": 858.6755445888872
+    },
+    {
+      "name": "scheduler_intrusive_stack/push_then_steal_batch/64",
+      "mean_ns": 2619.515395292495,
+      "median_ns": 2566.9020887012775,
+      "p95_ns": 2935.824287725225,
+      "p99_ns": 3035.5025756756777,
+      "std_dev_ns": 155.43918674668956
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/binaryheap_uniform_priority/10",
+      "mean_ns": 276.6025156415011,
+      "median_ns": 275.20309391967737,
+      "p95_ns": 281.5422930645249,
+      "p99_ns": 312.9588944175066,
+      "std_dev_ns": 6.7851378405447695
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/binaryheap_uniform_priority/100",
+      "mean_ns": 2852.419101651254,
+      "median_ns": 2829.810213741902,
+      "p95_ns": 2943.2779098343162,
+      "p99_ns": 3167.4435298252283,
+      "std_dev_ns": 72.81718416112483
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/binaryheap_uniform_priority/1000",
+      "mean_ns": 37533.13993439514,
+      "median_ns": 37211.78445273284,
+      "p95_ns": 39141.68703703704,
+      "p99_ns": 40811.213587336744,
+      "std_dev_ns": 919.6987119085047
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/intrusive_ring/10",
+      "mean_ns": 443.85427919211446,
+      "median_ns": 431.7559114665822,
+      "p95_ns": 524.8208111742771,
+      "p99_ns": 580.988248014748,
+      "std_dev_ns": 38.48903069811756
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/intrusive_ring/100",
+      "mean_ns": 3709.108359669161,
+      "median_ns": 3654.3354341736695,
+      "p95_ns": 4012.4130559006207,
+      "p99_ns": 4166.9849366767985,
+      "std_dev_ns": 138.29929387033422
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/intrusive_ring/1000",
+      "mean_ns": 41704.7819817948,
+      "median_ns": 36921.98192640692,
+      "p95_ns": 64482.41883252817,
+      "p99_ns": 68568.46640276223,
+      "std_dev_ns": 8859.244448524578
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/priority_scheduler/10",
+      "mean_ns": 629.9666067052462,
+      "median_ns": 632.4676199868508,
+      "p95_ns": 650.269043956044,
+      "p99_ns": 658.1957120663653,
+      "std_dev_ns": 15.876565058750636
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/priority_scheduler/100",
+      "mean_ns": 5486.617436236208,
+      "median_ns": 5410.1597583399,
+      "p95_ns": 5834.542149362478,
+      "p99_ns": 5891.658629707604,
+      "std_dev_ns": 162.51820042198747
+    },
+    {
+      "name": "scheduler_intrusive_vs_binaryheap/priority_scheduler/1000",
+      "mean_ns": 70463.7484983668,
+      "median_ns": 70361.86814574315,
+      "p95_ns": 70980.91607638888,
+      "p99_ns": 72945.33501700682,
+      "std_dev_ns": 514.5910973860545
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/intrusive_ring/100",
+      "mean_ns": 3752.8296800576145,
+      "median_ns": 3695.9413134484566,
+      "p95_ns": 4033.811971207087,
+      "p99_ns": 4231.623033333333,
+      "std_dev_ns": 157.89084859630037
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/intrusive_ring/1000",
+      "mean_ns": 42910.2850524789,
+      "median_ns": 39218.93410852713,
+      "p95_ns": 58798.580552119834,
+      "p99_ns": 59786.54141048829,
+      "std_dev_ns": 8273.098634996102
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/intrusive_ring/10000",
+      "mean_ns": 524804.0550000002,
+      "median_ns": 517069.625,
+      "p95_ns": 581940.8791666667,
+      "p99_ns": 612596.5391666668,
+      "std_dev_ns": 23227.100647641797
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque/100",
+      "mean_ns": 696.4249974441321,
+      "median_ns": 719.0397384296602,
+      "p95_ns": 724.2283126400581,
+      "p99_ns": 725.1986614189293,
+      "std_dev_ns": 47.19461390642779
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque/1000",
+      "mean_ns": 4906.088391117624,
+      "median_ns": 4940.513562594071,
+      "p95_ns": 5314.832558574278,
+      "p99_ns": 5365.862194511704,
+      "std_dev_ns": 291.88993111787653
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque/10000",
+      "mean_ns": 28173.336700295386,
+      "median_ns": 22826.227095820846,
+      "p95_ns": 47192.49016702586,
+      "p99_ns": 47292.96976891647,
+      "std_dev_ns": 9104.301981377672
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque_preallocated/100",
+      "mean_ns": 428.48142775704105,
+      "median_ns": 456.854670126653,
+      "p95_ns": 464.97351170728643,
+      "p99_ns": 470.7354429394814,
+      "std_dev_ns": 70.8148426658784
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque_preallocated/1000",
+      "mean_ns": 4065.191965656344,
+      "median_ns": 4434.192607919507,
+      "p95_ns": 4487.861585848255,
+      "p99_ns": 4572.6929809431085,
+      "std_dev_ns": 819.0460742607312
+    },
+    {
+      "name": "scheduler_intrusive_vs_vecdeque/vecdeque_preallocated/10000",
+      "mean_ns": 43975.688968397866,
+      "median_ns": 44274.40008741259,
+      "p95_ns": 44825.878174603175,
+      "p99_ns": 46056.28400000001,
+      "std_dev_ns": 2279.7817317422077
+    },
+    {
+      "name": "scheduler_lane_priority/mixed_lanes_pop_order",
+      "mean_ns": 146.63957488974629,
+      "median_ns": 140.91517803182916,
+      "p95_ns": 178.17930473901097,
+      "p99_ns": 189.43813273809528,
+      "std_dev_ns": 18.716664623949516
+    },
+    {
+      "name": "scheduler_lane_priority/ready_priority_ordering",
+      "mean_ns": 191.03345089368736,
+      "median_ns": 185.58328288387452,
+      "p95_ns": 244.66604016916696,
+      "p99_ns": 253.85214003164555,
+      "std_dev_ns": 31.603273805537594
+    },
+    {
+      "name": "scheduler_lane_priority/timed_edf_ordering",
+      "mean_ns": 155.00975805295792,
+      "median_ns": 152.5572187618601,
+      "p95_ns": 186.03167947558768,
+      "p99_ns": 204.2485379238701,
+      "std_dev_ns": 20.070585370660933
+    },
+    {
+      "name": "scheduler_local_queue/interleaved_push_pop",
+      "mean_ns": 19096.73350606678,
+      "median_ns": 16648.101276595742,
+      "p95_ns": 29528.835263157893,
+      "p99_ns": 58448.69930000002,
+      "std_dev_ns": 8940.762804064805
+    },
+    {
+      "name": "scheduler_local_queue/push_pop_single",
+      "mean_ns": 15465.636290977765,
+      "median_ns": 4777.270183399509,
+      "p95_ns": 62626.45390211639,
+      "p99_ns": 93725.3668750001,
+      "std_dev_ns": 23031.30615507009
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/10",
+      "mean_ns": 4158.955695717059,
+      "median_ns": 4031.3423649058896,
+      "p95_ns": 5793.617824074074,
+      "p99_ns": 6658.70972489735,
+      "std_dev_ns": 803.3610895633369
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/100",
+      "mean_ns": 11211.024491628763,
+      "median_ns": 10577.162312530238,
+      "p95_ns": 14775.763903985506,
+      "p99_ns": 17787.134549384777,
+      "std_dev_ns": 1896.093300417882
+    },
+    {
+      "name": "scheduler_local_queue/push_then_pop/1000",
+      "mean_ns": 80736.91819052168,
+      "median_ns": 73648.03498985802,
+      "p95_ns": 136598.96396739132,
+      "p99_ns": 142192.63071428574,
+      "std_dev_ns": 19311.04716030559
+    },
+    {
+      "name": "scheduler_parker/cross_thread_unpark",
+      "mean_ns": 81252.93897009776,
+      "median_ns": 81357.39184521718,
+      "p95_ns": 84133.38689292948,
+      "p99_ns": 87051.66429881658,
+      "std_dev_ns": 2010.2529587874103
+    },
+    {
+      "name": "scheduler_parker/park_timeout_zero",
+      "mean_ns": 108.0697730727786,
+      "median_ns": 108.87921024275845,
+      "p95_ns": 109.38229073344992,
+      "p99_ns": 110.19766774583091,
+      "std_dev_ns": 2.597527684127572
+    },
+    {
+      "name": "scheduler_parker/park_unpark_cycle_100",
+      "mean_ns": 29063.458331563772,
+      "median_ns": 28987.06850459482,
+      "p95_ns": 29402.806083202515,
+      "p99_ns": 30907.440125,
+      "std_dev_ns": 354.95616419925807
+    },
+    {
+      "name": "scheduler_parker/unpark_then_park",
+      "mean_ns": 335.4285981461731,
+      "median_ns": 332.2757383201333,
+      "p95_ns": 376.978853718939,
+      "p99_ns": 383.62408614675303,
+      "std_dev_ns": 15.185295438975553
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/10",
+      "mean_ns": 447.3255566028783,
+      "median_ns": 438.9859865275967,
+      "p95_ns": 766.2558943278941,
+      "p99_ns": 1043.723298921491,
+      "std_dev_ns": 197.14064441975592
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/100",
+      "mean_ns": 2057.552485872951,
+      "median_ns": 1540.462811667877,
+      "p95_ns": 3311.09136541314,
+      "p99_ns": 3862.938657728838,
+      "std_dev_ns": 756.314994822399
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_ready/1000",
+      "mean_ns": 11145.60213369664,
+      "median_ns": 11136.420392156862,
+      "p95_ns": 12284.301769301472,
+      "p99_ns": 13073.171717194573,
+      "std_dev_ns": 777.2775163463773
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/10",
+      "mean_ns": 1271.4352760781558,
+      "median_ns": 1599.595379032116,
+      "p95_ns": 2412.0838725734197,
+      "p99_ns": 2655.865371802055,
+      "std_dev_ns": 858.6668651111536
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/100",
+      "mean_ns": 3789.4528119378597,
+      "median_ns": 3202.812249258678,
+      "p95_ns": 6178.399194662479,
+      "p99_ns": 6513.605364934853,
+      "std_dev_ns": 1153.4338175153823
+    },
+    {
+      "name": "scheduler_priority/batch_schedule_then_pop/1000",
+      "mean_ns": 38133.06612542156,
+      "median_ns": 37270.17236467237,
+      "p95_ns": 44333.354443536664,
+      "p99_ns": 46718.60977288685,
+      "std_dev_ns": 2640.927801249194
+    },
+    {
+      "name": "scheduler_priority/dedup_same_task",
+      "mean_ns": 420.2239955168708,
+      "median_ns": 408.8326695526696,
+      "p95_ns": 954.8732951444267,
+      "p99_ns": 1013.8978730032862,
+      "std_dev_ns": 243.17847129590928
+    },
+    {
+      "name": "scheduler_priority/schedule_cancel_pop",
+      "mean_ns": 304.74569887474104,
+      "median_ns": 210.41026936026935,
+      "p95_ns": 724.4258230337078,
+      "p99_ns": 821.7369613719615,
+      "std_dev_ns": 205.2020335223439
+    },
+    {
+      "name": "scheduler_priority/schedule_ready_pop",
+      "mean_ns": 313.6138051900245,
+      "median_ns": 294.03198958670384,
+      "p95_ns": 619.1980923550799,
+      "p99_ns": 881.1873808847217,
+      "std_dev_ns": 209.68502555077674
+    },
+    {
+      "name": "scheduler_priority/schedule_timed_pop",
+      "mean_ns": 325.2222989163345,
+      "median_ns": 263.4353174603175,
+      "p95_ns": 649.1736607142857,
+      "p99_ns": 864.5668959867453,
+      "std_dev_ns": 197.3938710278692
+    },
+    {
+      "name": "scheduler_throughput/mixed_lane_cycle/1000",
+      "mean_ns": 33528.47449547051,
+      "median_ns": 33617.05984955892,
+      "p95_ns": 36058.7693115942,
+      "p99_ns": 36137.58417294686,
+      "std_dev_ns": 1682.2722435848425
+    },
+    {
+      "name": "scheduler_throughput/mixed_lane_cycle/10000",
+      "mean_ns": 450147.74259498535,
+      "median_ns": 446083.47222222225,
+      "p95_ns": 500144.1589002267,
+      "p99_ns": 517866.2022530864,
+      "std_dev_ns": 28785.52340925205
+    },
+    {
+      "name": "scheduler_throughput/schedule_pop_cycle/1000",
+      "mean_ns": 41372.013050225,
+      "median_ns": 41189.49948105864,
+      "p95_ns": 45085.633019639936,
+      "p99_ns": 45629.5258643617,
+      "std_dev_ns": 1904.5335935589592
+    },
+    {
+      "name": "scheduler_throughput/schedule_pop_cycle/10000",
+      "mean_ns": 602344.7756120055,
+      "median_ns": 591303.5535714286,
+      "p95_ns": 695848.246875,
+      "p99_ns": 729838.99,
+      "std_dev_ns": 49666.42955121513
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/16",
+      "mean_ns": 4310.977816908324,
+      "median_ns": 4361.59361844623,
+      "p95_ns": 5906.908827967807,
+      "p99_ns": 6465.256453125,
+      "std_dev_ns": 990.7163376457443
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/256",
+      "mean_ns": 11313.858084847874,
+      "median_ns": 11308.141091219095,
+      "p95_ns": 14917.471441372249,
+      "p99_ns": 16062.998903921569,
+      "std_dev_ns": 1898.2106182227199
+    },
+    {
+      "name": "scheduler_work_stealing/steal_batch/64",
+      "mean_ns": 7664.834883199842,
+      "median_ns": 7060.6015625,
+      "p95_ns": 11998.017376966007,
+      "p99_ns": 13060.86018067537,
+      "std_dev_ns": 2324.219822076705
+    },
+    {
+      "name": "scheduler_work_stealing/steal_empty",
+      "mean_ns": 4376.432474907569,
+      "median_ns": 3915.712096774194,
+      "p95_ns": 7395.6360085616425,
+      "p99_ns": 9350.485969650752,
+      "std_dev_ns": 1538.4842423506389
+    },
+    {
+      "name": "scheduler_work_stealing/steal_single",
+      "mean_ns": 3675.7581105085696,
+      "median_ns": 3692.114624505929,
+      "p95_ns": 5119.663523206752,
+      "p99_ns": 5393.828427128428,
+      "std_dev_ns": 828.6109894045865
+    },
+    {
+      "name": "state_snapshot/from_runtime_state/100",
+      "mean_ns": 186.28022674746663,
+      "median_ns": 186.1720619267316,
+      "p95_ns": 188.08825530855805,
+      "p99_ns": 188.78750233182245,
+      "std_dev_ns": 1.1166521200147064
+    },
+    {
+      "name": "state_snapshot/from_runtime_state/1000",
+      "mean_ns": 1944.2136450283995,
+      "median_ns": 1942.7166825385198,
+      "p95_ns": 1962.096869029663,
+      "p99_ns": 1978.4428578431375,
+      "std_dev_ns": 14.592535118746829
+    },
+    {
+      "name": "state_snapshot/from_runtime_state/10000",
+      "mean_ns": 34941.146231541556,
+      "median_ns": 35222.53903811134,
+      "p95_ns": 35820.3571812596,
+      "p99_ns": 35923.02324130582,
+      "std_dev_ns": 824.3434411002203
+    },
+    {
+      "name": "throughput/arena_inserts/100",
+      "mean_ns": 546.1459802666976,
+      "median_ns": 545.1225919168069,
+      "p95_ns": 558.2386415289257,
+      "p99_ns": 565.1771707988983,
+      "std_dev_ns": 6.866330338945637
+    },
+    {
+      "name": "throughput/arena_inserts/1000",
+      "mean_ns": 1818.9523156961918,
+      "median_ns": 1817.1238863869673,
+      "p95_ns": 1848.667847782972,
+      "p99_ns": 1859.7821804788214,
+      "std_dev_ns": 16.768357633794515
+    },
+    {
+      "name": "throughput/arena_inserts/10000",
+      "mean_ns": 15332.528556167606,
+      "median_ns": 15332.766930457601,
+      "p95_ns": 15506.059984301412,
+      "p99_ns": 15548.431083916084,
+      "std_dev_ns": 111.40822911515178
+    },
+    {
+      "name": "throughput/budget_combines/100",
+      "mean_ns": 44.96686305533464,
+      "median_ns": 44.916705808746826,
+      "p95_ns": 46.0105611347611,
+      "p99_ns": 46.51290918197141,
+      "std_dev_ns": 0.436326311047374
+    },
+    {
+      "name": "throughput/budget_combines/1000",
+      "mean_ns": 331.95324663036934,
+      "median_ns": 332.11004946514686,
+      "p95_ns": 335.97522540741033,
+      "p99_ns": 336.2828083420769,
+      "std_dev_ns": 2.829522490109932
+    },
+    {
+      "name": "throughput/budget_combines/10000",
+      "mean_ns": 3235.5466443609353,
+      "median_ns": 3233.251084124062,
+      "p95_ns": 3281.2581558506636,
+      "p99_ns": 3347.652964634715,
+      "std_dev_ns": 44.15359537841023
+    },
+    {
+      "name": "throughput/region_creates/100",
+      "mean_ns": 16544.25101777098,
+      "median_ns": 16590.014627994955,
+      "p95_ns": 16850.6877519938,
+      "p99_ns": 16994.519982743743,
+      "std_dev_ns": 247.33598386429205
+    },
+    {
+      "name": "throughput/region_creates/1000",
+      "mean_ns": 109485.67228156839,
+      "median_ns": 109472.86538461538,
+      "p95_ns": 110967.55248412698,
+      "p99_ns": 111234.18037365592,
+      "std_dev_ns": 907.5194878685055
+    },
+    {
+      "name": "throughput/region_creates/10000",
+      "mean_ns": 969525.1898968738,
+      "median_ns": 968411.9384615384,
+      "p95_ns": 982176.8233588779,
+      "p99_ns": 989310.1637301587,
+      "std_dev_ns": 6798.742475833371
+    },
+    {
+      "name": "time/as_nanos",
+      "mean_ns": 0.6393438279658674,
+      "median_ns": 0.6399032592144694,
+      "p95_ns": 0.645809713441677,
+      "p99_ns": 0.6484139040924144,
+      "std_dev_ns": 0.0042262514047609855
+    },
+    {
+      "name": "time/duration_since",
+      "mean_ns": 0.6396925752066741,
+      "median_ns": 0.6402835342220212,
+      "p95_ns": 0.6449762784481453,
+      "p99_ns": 0.6479033206889584,
+      "std_dev_ns": 0.003614300895164424
+    },
+    {
+      "name": "time/from_millis",
+      "mean_ns": 0.6385299342484493,
+      "median_ns": 0.6385559663581032,
+      "p95_ns": 0.645444268940419,
+      "p99_ns": 0.6467886102694664,
+      "std_dev_ns": 0.003715715581413328
+    },
+    {
+      "name": "time/from_nanos",
+      "mean_ns": 0.640690852533897,
+      "median_ns": 0.641209034460239,
+      "p95_ns": 0.6481226237748976,
+      "p99_ns": 0.6491678954883886,
+      "std_dev_ns": 0.004508293332702313
+    },
+    {
+      "name": "time/from_secs",
+      "mean_ns": 0.6411544460465456,
+      "median_ns": 0.6417871355977789,
+      "p95_ns": 0.6476310899154895,
+      "p99_ns": 0.6530619357793234,
+      "std_dev_ns": 0.0050946270158488145
+    },
+    {
+      "name": "time/saturating_add_nanos",
+      "mean_ns": 0.6424073396437839,
+      "median_ns": 0.6434521503887154,
+      "p95_ns": 0.648660503126925,
+      "p99_ns": 0.662738477933028,
+      "std_dev_ns": 0.005374079722192512
+    }
+  ]
+}

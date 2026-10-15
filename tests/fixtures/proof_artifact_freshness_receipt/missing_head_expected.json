@@ -1,0 +1,63 @@
+{
+  "agent": "TopazGoose",
+  "agent_mail_summary": "Proof receipt closeout summary: 1 total; 0 citeable; 0 rerun-required; 1 suppressed.\n- artifacts/proof/missing-head.json | classification=unverifiable-head | decision=suppress-as-unverifiable | safe_to_cite=false\n  command: RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_head cargo check -p asupersync --lib\n  top_remediation: Artifact lacks enough provenance to support a green claim.",
+  "artifact_errors": [],
+  "current_branch": "main",
+  "current_date": "2026-05-08",
+  "current_head_sha": "2222222222222222222222222222222222222222",
+  "generated_at": "2026-05-08T05:20:00Z",
+  "repo_path": "/repo",
+  "rows": [
+    {
+      "artifact_path": "artifacts/proof/missing-head.json",
+      "classification": "unverifiable-head",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_head cargo check -p asupersync --lib",
+      "decision": "suppress-as-unverifiable",
+      "evidence": {
+        "artifact_git_branch": "main",
+        "artifact_git_sha": "",
+        "current_branch": "main",
+        "current_head_sha": "2222222222222222222222222222222222222222",
+        "dirty_overlap_count": 0,
+        "dirty_overlaps": [],
+        "proof_output_byte_count": 0,
+        "proof_output_digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "proof_output_segment_count": 0
+      },
+      "generated_at": "2026-05-08T05:17:00Z",
+      "reason": "artifact or repository is missing git HEAD provenance",
+      "remediation": {
+        "next_steps": [
+          "produce a new artifact with git_sha, git_branch, command, and touched_files"
+        ],
+        "operator_note": "Artifact lacks enough provenance to support a green claim.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_missing_head cargo check -p asupersync --lib"
+      },
+      "safe_to_cite": false,
+      "status": "pass",
+      "touched_files": [
+        "src/runtime/state.rs"
+      ]
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "branch_or_worktree_operations": false,
+    "cargo_executed": false,
+    "destructive_commands_executed": false,
+    "executed_commands": [],
+    "mutating_commands_executed": false,
+    "non_mutating": true
+  },
+  "schema_version": "proof-artifact-freshness-receipt-v1",
+  "summary": {
+    "by_classification": {
+      "unverifiable-head": 1
+    },
+    "rerun_required": 0,
+    "safe_to_cite": 0,
+    "suppressed": 1,
+    "total": 1,
+    "unverifiable": 1
+  }
+}

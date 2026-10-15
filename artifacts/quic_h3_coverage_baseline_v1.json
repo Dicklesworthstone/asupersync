@@ -1,0 +1,100 @@
+{
+  "schema_version": "coverage-baseline-v1",
+  "generated_at": "2026-02-19T13:40:00Z",
+  "tool": "cargo-llvm-cov 0.8.1",
+  "toolchain": "nightly-2026-02-05",
+  "test_filter": "quic_core|quic_native|h3_native",
+  "total_tests": 253,
+  "ratchet_threshold_line_pct": 90.0,
+  "modules": [
+    {
+      "path": "src/http/h3_native.rs",
+      "lines_total": 1962,
+      "lines_missed": 73,
+      "line_pct": 96.28,
+      "functions_total": 107,
+      "functions_missed": 2,
+      "function_pct": 98.13,
+      "regions_total": 1308,
+      "regions_missed": 39,
+      "region_pct": 97.02,
+      "test_count": 70
+    },
+    {
+      "path": "src/net/quic_core/mod.rs",
+      "lines_total": 1383,
+      "lines_missed": 65,
+      "line_pct": 95.30,
+      "functions_total": 64,
+      "functions_missed": 0,
+      "function_pct": 100.00,
+      "regions_total": 829,
+      "regions_missed": 24,
+      "region_pct": 97.10,
+      "test_count": 36
+    },
+    {
+      "path": "src/net/quic_native/connection.rs",
+      "lines_total": 1316,
+      "lines_missed": 87,
+      "line_pct": 93.39,
+      "functions_total": 89,
+      "functions_missed": 3,
+      "function_pct": 96.63,
+      "regions_total": 770,
+      "regions_missed": 46,
+      "region_pct": 94.03,
+      "test_count": 43
+    },
+    {
+      "path": "src/net/quic_native/streams.rs",
+      "lines_total": 1892,
+      "lines_missed": 42,
+      "line_pct": 97.78,
+      "functions_total": 109,
+      "functions_missed": 4,
+      "function_pct": 96.33,
+      "regions_total": 1003,
+      "regions_missed": 12,
+      "region_pct": 98.80,
+      "test_count": 46
+    },
+    {
+      "path": "src/net/quic_native/tls.rs",
+      "lines_total": 482,
+      "lines_missed": 2,
+      "line_pct": 99.59,
+      "functions_total": 30,
+      "functions_missed": 0,
+      "function_pct": 100.00,
+      "regions_total": 279,
+      "regions_missed": 1,
+      "region_pct": 99.64,
+      "test_count": 12
+    },
+    {
+      "path": "src/net/quic_native/transport.rs",
+      "lines_total": 1370,
+      "lines_missed": 4,
+      "line_pct": 99.71,
+      "functions_total": 91,
+      "functions_missed": 0,
+      "function_pct": 100.00,
+      "regions_total": 787,
+      "regions_missed": 2,
+      "region_pct": 99.75,
+      "test_count": 46
+    }
+  ],
+  "aggregate": {
+    "lines_total": 8405,
+    "lines_missed": 273,
+    "line_pct": 96.75,
+    "functions_total": 490,
+    "functions_missed": 9,
+    "function_pct": 98.16,
+    "regions_total": 4976,
+    "regions_missed": 124,
+    "region_pct": 97.51
+  }
+}

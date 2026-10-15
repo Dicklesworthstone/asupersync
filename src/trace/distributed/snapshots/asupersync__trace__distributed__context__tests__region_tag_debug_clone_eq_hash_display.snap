@@ -1,0 +1,7 @@
+---
+source: src/trace/distributed/context.rs
+expression: t1
+---
+RegionTag(
+    "us-west-2",
+)

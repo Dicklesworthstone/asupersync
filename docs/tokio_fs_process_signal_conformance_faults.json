@@ -1,0 +1,214 @@
+{
+  "bead_id": "asupersync-2oh2u.3.7",
+  "title": "[T3.7] Deterministic conformance and fault-injection suites for fs/process/signal",
+  "version": 1,
+  "generated_at": "2026-03-04",
+  "generated_by": "SapphireHill",
+  "source_gaps": ["FS-G3", "PR-G4", "SG-G3", "SG-G4"],
+  "source_matrix": "docs/tokio_fs_process_signal_parity_matrix.md",
+  "domains": ["filesystem", "process", "signal", "conformance", "fault-injection", "determinism"],
+  "conformance_contracts": [
+    {
+      "id": "CF-FS-01",
+      "domain": "filesystem",
+      "title": "UnixVfs implements Vfs trait",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-FS-02",
+      "domain": "filesystem",
+      "title": "File create+write+read roundtrip produces identical content",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-FS-03",
+      "domain": "filesystem",
+      "title": "Directory create+list returns expected entries",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-FS-04",
+      "domain": "filesystem",
+      "title": "Path canonicalization is idempotent",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-FS-05",
+      "domain": "filesystem",
+      "title": "Metadata reflects file size after write",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-FS-06",
+      "domain": "filesystem",
+      "title": "sync_all completes without error after write",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "CF-PR-01",
+      "domain": "process",
+      "title": "Spawn with valid program returns Child with pid",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "CF-PR-02",
+      "domain": "process",
+      "title": "wait after kill returns non-success status",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "CF-PR-03",
+      "domain": "process",
+      "title": "kill_on_drop terminates child on scope exit",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "CF-PR-04",
+      "domain": "process",
+      "title": "try_wait is non-blocking",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "CF-SG-01",
+      "domain": "signal",
+      "title": "ShutdownController creates valid controller",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "CF-SG-02",
+      "domain": "signal",
+      "title": "ShutdownReceiver resolves after shutdown call",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "CF-SG-03",
+      "domain": "signal",
+      "title": "Multiple shutdown calls are idempotent (coalescing)",
+      "gap": "SG-G3"
+    },
+    {
+      "id": "CF-SG-04",
+      "domain": "signal",
+      "title": "Graceful shutdown returns ShutdownSignaled when signaled first",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "CF-SG-05",
+      "domain": "signal",
+      "title": "Graceful shutdown returns Completed when task finishes first",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "CF-X-01",
+      "domain": "cross-domain",
+      "title": "File operations complete during graceful shutdown",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "CF-X-02",
+      "domain": "cross-domain",
+      "title": "Process kill_on_drop fires during shutdown scope exit",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "CF-X-03",
+      "domain": "cross-domain",
+      "title": "Process output capture completes alongside FS operations",
+      "gap": "FS-G3"
+    }
+  ],
+  "fault_scenarios": [
+    {
+      "id": "FI-FS-01",
+      "domain": "filesystem",
+      "title": "Read from nonexistent path returns NotFound",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "FI-FS-02",
+      "domain": "filesystem",
+      "title": "Write to read-only file returns PermissionDenied",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "FI-FS-03",
+      "domain": "filesystem",
+      "title": "Remove nonexistent directory returns error",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "FI-FS-04",
+      "domain": "filesystem",
+      "title": "Create existing directory returns error",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "FI-FS-05",
+      "domain": "filesystem",
+      "title": "Read from empty file returns zero bytes",
+      "gap": "FS-G3"
+    },
+    {
+      "id": "FI-PR-01",
+      "domain": "process",
+      "title": "Spawn nonexistent binary returns error",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "FI-PR-02",
+      "domain": "process",
+      "title": "Kill already-exited process does not panic",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "FI-PR-03",
+      "domain": "process",
+      "title": "Read stdout from stderr-only process returns empty",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "FI-PR-04",
+      "domain": "process",
+      "title": "Empty environment variable is visible to child",
+      "gap": "PR-G4"
+    },
+    {
+      "id": "FI-SG-01",
+      "domain": "signal",
+      "title": "Subscribe after controller dropped resolves gracefully",
+      "gap": "SG-G4"
+    },
+    {
+      "id": "FI-SG-02",
+      "domain": "signal",
+      "title": "Multiple receivers all receive notification",
+      "gap": "SG-G3"
+    },
+    {
+      "id": "FI-SG-03",
+      "domain": "signal",
+      "title": "Shutdown during task startup produces deterministic outcome",
+      "gap": "SG-G4"
+    }
+  ],
+  "determinism_invariants": [
+    "VFS roundtrip: same write sequence always produces same read content",
+    "Path canonicalization: idempotent on same input",
+    "Spawn determinism: same command+args+env produces same behavior",
+    "Kill idempotency: kill on dead process does not corrupt state",
+    "Signal monotonicity: shutdown notification delivered at most once per receiver",
+    "Shutdown ordering: controller shutdown before receiver subscribe still delivers",
+    "Error determinism: same fault produces same error kind",
+    "Graceful outcome: with_graceful_shutdown always produces exactly one variant",
+    "Cross-domain isolation: FS fault does not corrupt process or signal state",
+    "No obligation leaks: all children reaped, all file handles closed"
+  ],
+  "summary": {
+    "total_conformance_contracts": 18,
+    "total_fault_scenarios": 12,
+    "total_invariants": 10,
+    "domains": ["filesystem", "process", "signal", "cross-domain"],
+    "gaps_targeted": ["FS-G3", "PR-G4", "SG-G3", "SG-G4"],
+    "dependent_beads": ["asupersync-2oh2u.3.9"]
+  }
+}

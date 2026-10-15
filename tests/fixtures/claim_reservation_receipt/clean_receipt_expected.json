@@ -1,0 +1,74 @@
+{
+  "agent": "TopazGoose",
+  "bead_id": "asupersync-aj7lx3.6",
+  "generated_at": "2026-05-08T04:30:00Z",
+  "implementation_reservation_status": "clear",
+  "message_status": "ready",
+  "planned_commands": [
+    {
+      "allowed_now": true,
+      "command": "br show asupersync-aj7lx3.6 --json",
+      "mutates": false,
+      "step": 1,
+      "tool": "br"
+    },
+    {
+      "allowed_now": true,
+      "command": "file_reservation_paths(project_key='/data/projects/asupersync', agent_name='TopazGoose', paths=[\".beads/issues.jsonl\", \".beads/beads.db\"], ttl_seconds=3600, exclusive=true)",
+      "mutates": true,
+      "step": 2,
+      "tool": "Agent Mail"
+    },
+    {
+      "allowed_now": true,
+      "command": "file_reservation_paths(project_key='/data/projects/asupersync', agent_name='TopazGoose', paths=[\"scripts/claim_reservation_receipt.py\", \"tests/claim_reservation_receipt_contract.rs\", \"tests/fixtures/claim_reservation_receipt/*.json\"], ttl_seconds=3600, exclusive=true)",
+      "mutates": true,
+      "step": 3,
+      "tool": "Agent Mail"
+    },
+    {
+      "allowed_now": true,
+      "command": "br update asupersync-aj7lx3.6 --status in_progress --assignee TopazGoose --json",
+      "mutates": true,
+      "step": 4,
+      "tool": "br"
+    },
+    {
+      "allowed_now": true,
+      "command": "send_message(project_key='/data/projects/asupersync', sender_name='TopazGoose', thread_id='asupersync-aj7lx3.6', subject='[asupersync-aj7lx3.6] start', body_md='Reserved paths: scripts/claim_reservation_receipt.py, tests/claim_reservation_receipt_contract.rs, tests/fixtures/claim_reservation_receipt/*.json')",
+      "mutates": true,
+      "step": 5,
+      "tool": "Agent Mail"
+    }
+  ],
+  "planned_paths": [
+    "scripts/claim_reservation_receipt.py",
+    "tests/claim_reservation_receipt_contract.rs",
+    "tests/fixtures/claim_reservation_receipt/*.json"
+  ],
+  "preflight": {
+    "dirty_index": {
+      "staged_paths": [],
+      "status": "clear"
+    },
+    "forbidden_command_tokens": [],
+    "reservation": {
+      "implementation": {
+        "conflicts": [],
+        "status": "clear"
+      },
+      "tracker": {
+        "conflicts": [],
+        "status": "clear"
+      }
+    }
+  },
+  "project_key": "/data/projects/asupersync",
+  "recommended_next_action": "run-claim-sequence",
+  "schema_version": "claim-reservation-start-receipt-v1",
+  "tracker_mutation_status": "ready",
+  "tracker_paths": [
+    ".beads/issues.jsonl",
+    ".beads/beads.db"
+  ]
+}

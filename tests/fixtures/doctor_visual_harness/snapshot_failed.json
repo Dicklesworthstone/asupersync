@@ -1,0 +1,10 @@
+{
+  "snapshot_id": "snapshot-golden-failed",
+  "viewport_width": 132,
+  "viewport_height": 44,
+  "focused_panel": "triage_panel",
+  "selected_node_id": "node-01",
+  "stage_digest": "len:2|success|failed",
+  "visual_profile": "frankentui-alert",
+  "capture_index": 0
+}

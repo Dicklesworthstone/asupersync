@@ -1,0 +1,6 @@
+{
+  "status_lines": [
+    "R  docs/old-tracker.md -> .beads/issues.jsonl",
+    "C  scripts/old_claim_helper.py -> scripts/claim_reservation_receipt.py"
+  ]
+}

@@ -1,0 +1,418 @@
+{
+  "contract_version": "agent-swarm-coordination-workload-contract-v1",
+  "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+  "event_schema_version": "agent-swarm-coordination-event-v1",
+  "bead_id": "asupersync-qn8i0p.1",
+  "description": "Redacted deterministic workload bundle contract for real Agent Mail, Beads, bv, rch, git dirty-frontier, and proof artifact coordination pressure.",
+  "artifact_root": "artifacts/agent-swarm-coordination-workloads",
+  "runtime_workload_corpus_contract": "runtime-workload-corpus-v1",
+  "runtime_workload_expansion_pack": {
+    "pack_id": "agent-swarm-coordination-pressure",
+    "baseline_denominator": false,
+    "compatible_runner": "scripts/run_runtime_workload_corpus.sh",
+    "scenario_families": [
+      "tracker_lock_contention",
+      "concurrent_rch_proofs",
+      "fail_closed_dirty_frontier",
+      "artifact_retrieval_tail",
+      "proof_runner_fanout",
+      "stale_in_progress_reclaim",
+      "coordination_latency_burst"
+    ],
+    "fail_closed_refusal_reasons": [
+      "missing_required_field",
+      "stale_source",
+      "unredacted_secret",
+      "unknown_schema_version",
+      "unsupported_source_kind"
+    ]
+  },
+  "record_layout": {
+    "format": "json",
+    "bundle_required_fields": [
+      "schema_version",
+      "run_id",
+      "event_schema_version",
+      "generated_at",
+      "source_bundle_hash",
+      "events",
+      "duplicate_policy",
+      "redaction_report",
+      "runtime_workload_expansion_pack"
+    ],
+    "event_required_fields": [
+      "schema_version",
+      "run_id",
+      "source_kind",
+      "source_agent",
+      "source_thread_or_bead",
+      "event_ts",
+      "stable_sequence",
+      "event_kind",
+      "correlation_id",
+      "command_class",
+      "workload_family",
+      "queue_depth_or_lock_state",
+      "file_frontier",
+      "artifact_refs",
+      "redaction_verdict",
+      "source_hash",
+      "refusal_reason"
+    ],
+    "deterministic_sort_key": [
+      "event_ts",
+      "stable_sequence",
+      "source_kind",
+      "source_thread_or_bead",
+      "event_kind",
+      "correlation_id"
+    ]
+  },
+  "duplicate_policy": {
+    "dedupe_key": [
+      "source_hash",
+      "correlation_id",
+      "event_kind"
+    ],
+    "action": "dedupe_then_sort",
+    "refusal_reason": "duplicate_event"
+  },
+  "stale_source_policy": {
+    "max_source_age_seconds": 86400,
+    "event_time_basis": "event_ts",
+    "refusal_reason": "stale_source"
+  },
+  "allowed_values": {
+    "source_kind": [
+      "agent_mail",
+      "artifact_store",
+      "beads",
+      "bv",
+      "git_dirty_frontier",
+      "rch",
+      "unknown"
+    ],
+    "event_kind": [
+      "artifact_published",
+      "bead_created",
+      "bead_status_changed",
+      "dependency_added",
+      "dirty_frontier_observed",
+      "input_refused",
+      "message_acknowledged",
+      "message_sent",
+      "reservation_conflict",
+      "reservation_granted",
+      "robot_plan_snapshot",
+      "rch_job_completed",
+      "rch_job_queued",
+      "rch_job_started"
+    ],
+    "command_class": [
+      "artifact",
+      "coordination",
+      "git_state",
+      "tracker",
+      "validation"
+    ],
+    "workload_family": [
+      "artifact_retrieval_tail",
+      "concurrent_rch_proofs",
+      "coordination_latency_burst",
+      "fail_closed_dirty_frontier",
+      "proof_runner_fanout",
+      "stale_in_progress_reclaim",
+      "tracker_lock_contention"
+    ],
+    "redaction_verdict": [
+      "metadata_only",
+      "pseudonymized",
+      "redacted",
+      "refused"
+    ],
+    "refusal_reason": [
+      "",
+      "duplicate_event",
+      "missing_required_field",
+      "nondeterministic_order",
+      "stale_source",
+      "unknown_schema_version",
+      "unredacted_secret",
+      "unsupported_source_kind"
+    ]
+  },
+  "redaction": {
+    "forbid_message_body_retention_by_default": true,
+    "forbid_raw_env_values": true,
+    "forbid_raw_home_paths": true,
+    "forbid_raw_hostnames": true,
+    "forbid_raw_worker_names": true,
+    "accepted_secret_placeholder": "<redacted>",
+    "stable_pseudonymization_inputs": [
+      "source_kind",
+      "source_agent",
+      "project_scoped_salt"
+    ],
+    "report_required_fields": [
+      "redacted_field_count",
+      "pseudonymized_field_count",
+      "metadata_only_field_count",
+      "refused_event_count",
+      "retained_field_summary"
+    ]
+  },
+  "core_runtime_dependency_policy": {
+    "collector_location": "scripts, fixtures, docs, tests, or optional tooling only",
+    "forbidden_core_runtime_dependencies": [
+      "mcp_agent_mail",
+      "agent-mail",
+      "beads",
+      "br",
+      "bv",
+      "rch"
+    ],
+    "allowed_core_runtime_surface": "consume generated JSON fixtures or replay stimuli only"
+  },
+  "acceptance_rules": [
+    "Every event must include all event_required_fields.",
+    "Events must be sorted by deterministic_sort_key after duplicate suppression.",
+    "Duplicate events are identified by duplicate_policy.dedupe_key and never increase workload pressure counts.",
+    "Accepted events must set refusal_reason to the empty string.",
+    "Refused events must set redaction_verdict to refused and include a non-empty refusal_reason.",
+    "source_kind unknown is valid only for refused events with refusal_reason unsupported_source_kind.",
+    "Inputs with unknown schema_version must be refused with unknown_schema_version.",
+    "Inputs older than stale_source_policy.max_source_age_seconds must be refused with stale_source.",
+    "Runtime workload expansion packs remain optional and must not change the runtime-workload-corpus-v1 core denominator.",
+    "The core runtime must not depend on Agent Mail, Beads, bv, or rch libraries."
+  ],
+  "sample_bundles": [
+    {
+      "sample_id": "accepted-reservation-conflict-burst",
+      "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+      "run_id": "coordination-sample-accepted-001",
+      "event_schema_version": "agent-swarm-coordination-event-v1",
+      "generated_at": "2026-05-05T04:40:00Z",
+      "source_bundle_hash": "sha256:coordination-sample-accepted-001",
+      "events": [
+        {
+          "schema_version": "agent-swarm-coordination-event-v1",
+          "run_id": "coordination-sample-accepted-001",
+          "source_kind": "agent_mail",
+          "source_agent": "agent:alpha",
+          "source_thread_or_bead": "asupersync-qn8i0p.1",
+          "event_ts": "2026-05-05T04:39:50Z",
+          "stable_sequence": "000001",
+          "event_kind": "reservation_conflict",
+          "correlation_id": "reservation:.beads/issues.jsonl",
+          "command_class": "coordination",
+          "workload_family": "tracker_lock_contention",
+          "queue_depth_or_lock_state": {
+            "lock_path": ".beads/issues.jsonl",
+            "state": "exclusive_conflict",
+            "holder_count": 1
+          },
+          "file_frontier": {
+            "changed_paths_count": 0,
+            "unsupported_dirty_paths_count": 0,
+            "path_hashes": []
+          },
+          "artifact_refs": [],
+          "redaction_verdict": "pseudonymized",
+          "source_hash": "sha256:reservation-conflict-000001",
+          "refusal_reason": ""
+        },
+        {
+          "schema_version": "agent-swarm-coordination-event-v1",
+          "run_id": "coordination-sample-accepted-001",
+          "source_kind": "rch",
+          "source_agent": "agent:beta",
+          "source_thread_or_bead": "asupersync-hxi1ga",
+          "event_ts": "2026-05-05T04:39:51Z",
+          "stable_sequence": "000002",
+          "event_kind": "rch_job_queued",
+          "correlation_id": "rch:job:proof-001",
+          "command_class": "validation",
+          "workload_family": "concurrent_rch_proofs",
+          "queue_depth_or_lock_state": {
+            "queue_depth": 3,
+            "worker_pool": "redacted"
+          },
+          "file_frontier": {
+            "changed_paths_count": 2,
+            "unsupported_dirty_paths_count": 0,
+            "path_hashes": [
+              "sha256:path-h2-proof",
+              "sha256:path-h2-connection"
+            ]
+          },
+          "artifact_refs": [
+            {
+              "artifact_id": "proof-log",
+              "path_hash": "sha256:artifact-proof-log",
+              "kind": "text"
+            }
+          ],
+          "redaction_verdict": "redacted",
+          "source_hash": "sha256:rch-queued-000002",
+          "refusal_reason": ""
+        }
+      ],
+      "duplicate_policy": {
+        "duplicate_count": 0,
+        "action": "dedupe_then_sort"
+      },
+      "redaction_report": {
+        "redacted_field_count": 4,
+        "pseudonymized_field_count": 2,
+        "metadata_only_field_count": 0,
+        "refused_event_count": 0,
+        "retained_field_summary": [
+          "event timing",
+          "lock state",
+          "queue depth",
+          "artifact kind"
+        ]
+      },
+      "runtime_workload_expansion_pack": {
+        "pack_id": "agent-swarm-coordination-pressure",
+        "baseline_denominator": false,
+        "covered_families": [
+          "tracker_lock_contention",
+          "concurrent_rch_proofs"
+        ]
+      }
+    },
+    {
+      "sample_id": "refused-unknown-source-kind",
+      "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+      "run_id": "coordination-sample-refused-unknown-001",
+      "event_schema_version": "agent-swarm-coordination-event-v1",
+      "generated_at": "2026-05-05T04:41:00Z",
+      "source_bundle_hash": "sha256:coordination-sample-refused-unknown-001",
+      "events": [
+        {
+          "schema_version": "agent-swarm-coordination-event-v1",
+          "run_id": "coordination-sample-refused-unknown-001",
+          "source_kind": "unknown",
+          "source_agent": "agent:unknown",
+          "source_thread_or_bead": "unknown",
+          "event_ts": "2026-05-05T04:40:58Z",
+          "stable_sequence": "000001",
+          "event_kind": "input_refused",
+          "correlation_id": "unknown:source:001",
+          "command_class": "coordination",
+          "workload_family": "coordination_latency_burst",
+          "queue_depth_or_lock_state": {},
+          "file_frontier": {
+            "changed_paths_count": 0,
+            "unsupported_dirty_paths_count": 0,
+            "path_hashes": []
+          },
+          "artifact_refs": [],
+          "redaction_verdict": "refused",
+          "source_hash": "sha256:unknown-source-000001",
+          "refusal_reason": "unsupported_source_kind"
+        }
+      ],
+      "duplicate_policy": {
+        "duplicate_count": 0,
+        "action": "dedupe_then_sort"
+      },
+      "redaction_report": {
+        "redacted_field_count": 0,
+        "pseudonymized_field_count": 1,
+        "metadata_only_field_count": 1,
+        "refused_event_count": 1,
+        "retained_field_summary": [
+          "refusal provenance"
+        ]
+      },
+      "runtime_workload_expansion_pack": {
+        "pack_id": "agent-swarm-coordination-pressure",
+        "baseline_denominator": false,
+        "covered_families": []
+      }
+    },
+    {
+      "sample_id": "refused-stale-or-unknown-schema",
+      "schema_version": "agent-swarm-coordination-workload-bundle-v1",
+      "run_id": "coordination-sample-refused-stale-001",
+      "event_schema_version": "agent-swarm-coordination-event-v1",
+      "generated_at": "2026-05-05T04:42:00Z",
+      "source_bundle_hash": "sha256:coordination-sample-refused-stale-001",
+      "events": [
+        {
+          "schema_version": "agent-swarm-coordination-event-v1",
+          "run_id": "coordination-sample-refused-stale-001",
+          "source_kind": "agent_mail",
+          "source_agent": "agent:gamma",
+          "source_thread_or_bead": "asupersync-stale",
+          "event_ts": "2026-05-03T04:41:59Z",
+          "stable_sequence": "000001",
+          "event_kind": "input_refused",
+          "correlation_id": "stale:agent-mail:001",
+          "command_class": "coordination",
+          "workload_family": "stale_in_progress_reclaim",
+          "queue_depth_or_lock_state": {},
+          "file_frontier": {
+            "changed_paths_count": 0,
+            "unsupported_dirty_paths_count": 0,
+            "path_hashes": []
+          },
+          "artifact_refs": [],
+          "redaction_verdict": "refused",
+          "source_hash": "sha256:stale-agent-mail-000001",
+          "refusal_reason": "stale_source"
+        },
+        {
+          "schema_version": "agent-swarm-coordination-event-v1",
+          "run_id": "coordination-sample-refused-stale-001",
+          "source_kind": "artifact_store",
+          "source_agent": "agent:gamma",
+          "source_thread_or_bead": "asupersync-schema-v0",
+          "event_ts": "2026-05-05T04:41:59Z",
+          "stable_sequence": "000002",
+          "event_kind": "input_refused",
+          "correlation_id": "artifact:schema-v0:001",
+          "command_class": "artifact",
+          "workload_family": "artifact_retrieval_tail",
+          "queue_depth_or_lock_state": {},
+          "file_frontier": {
+            "changed_paths_count": 0,
+            "unsupported_dirty_paths_count": 0,
+            "path_hashes": []
+          },
+          "artifact_refs": [
+            {
+              "artifact_id": "unsupported-schema",
+              "path_hash": "sha256:artifact-schema-v0",
+              "kind": "json"
+            }
+          ],
+          "redaction_verdict": "refused",
+          "source_hash": "sha256:unknown-schema-000002",
+          "refusal_reason": "unknown_schema_version"
+        }
+      ],
+      "duplicate_policy": {
+        "duplicate_count": 0,
+        "action": "dedupe_then_sort"
+      },
+      "redaction_report": {
+        "redacted_field_count": 1,
+        "pseudonymized_field_count": 1,
+        "metadata_only_field_count": 2,
+        "refused_event_count": 2,
+        "retained_field_summary": [
+          "refusal provenance",
+          "artifact kind"
+        ]
+      },
+      "runtime_workload_expansion_pack": {
+        "pack_id": "agent-swarm-coordination-pressure",
+        "baseline_denominator": false,
+        "covered_families": []
+      }
+    }
+  ]
+}

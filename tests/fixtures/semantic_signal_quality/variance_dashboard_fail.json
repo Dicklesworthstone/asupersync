@@ -1,0 +1,25 @@
+{
+  "schema_version": "sem-variance-dashboard-v1",
+  "suite_count": 2,
+  "unstable_suite_count": 1,
+  "suites": [
+    {
+      "suite": "witness_seed_equivalence",
+      "unstable": true,
+      "outcomes": {
+        "fail": 0
+      }
+    },
+    {
+      "suite": "cross_seed_replay",
+      "unstable": false,
+      "outcomes": {
+        "fail": 0
+      }
+    }
+  ],
+  "artifacts": {
+    "variance_events_ndjson": "flake/variance_events.ndjson",
+    "summary": "flake/summary.txt"
+  }
+}

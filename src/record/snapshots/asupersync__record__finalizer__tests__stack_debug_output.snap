@@ -1,0 +1,7 @@
+---
+source: src/record/finalizer.rs
+expression: finalizer_stack_debug_output()
+---
+empty: FinalizerStack { finalizers: [], escalation: BoundedLog }
+panic_escalation: FinalizerStack { finalizers: [], escalation: BoundedPanic }
+soft_escalation: FinalizerStack { finalizers: [], escalation: Soft }

@@ -1,0 +1,16 @@
+---
+source: src/cli/output.rs
+expression: snapshot
+---
+{
+  "error_kind": "BrokenPipe",
+  "error_message": "synthetic flush failure on call 1",
+  "flush_calls": 1,
+  "written_raw": "{\"id\":9,\"name\":\"partial-alpha\"}\n",
+  "written_values": [
+    {
+      "id": 9,
+      "name": "partial-alpha"
+    }
+  ]
+}

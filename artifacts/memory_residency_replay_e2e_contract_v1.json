@@ -1,0 +1,223 @@
+{
+  "schema_version": "memory-residency-replay-e2e-contract-v1",
+  "bead_id": "asupersync-memory-residency-control-ho2itz.4",
+  "parent_bead_id": "asupersync-memory-residency-control-ho2itz",
+  "status": "contract_guarded",
+  "generated_on": "2026-06-13",
+  "source_of_truth": {
+    "contract": "artifacts/memory_residency_replay_e2e_contract_v1.json",
+    "runner": "scripts/run_memory_residency_replay_e2e.sh",
+    "helper": "scripts/memory_residency_replay_e2e.py",
+    "contract_test": "tests/memory_residency_replay_e2e_contract.rs",
+    "docs": "docs/proof/memory_residency_replay_e2e.md",
+    "orchestrator": "scripts/run_all_e2e.sh",
+    "proof_lane_manifest": "artifacts/proof_lane_manifest_v1.json",
+    "proof_status_snapshot": "artifacts/proof_status_snapshot_v1.json",
+    "upstream_policy_contract": "artifacts/memory_residency_policy_contract_v1.json",
+    "upstream_accounting_contract": "artifacts/memory_residency_accounting_snapshot_v1.json"
+  },
+  "suite": {
+    "suite_id": "memory_residency_replay_e2e",
+    "scenario_id": "E2E-SUITE-MEMORY-RESIDENCY-REPLAY",
+    "orchestrator_suite": "memory-residency-replay",
+    "artifact_root": "target/e2e-results/memory_residency_replay_e2e",
+    "summary_file": "summary.json",
+    "events_file": "events.ndjson",
+    "scenario_report_file": "scenario_report.json",
+    "operator_report_file": "operator_report.md"
+  },
+  "large_host_fixture": {
+    "fixture_id": "large-host-64c-256g-memory-residency-v1",
+    "cpu_cores": 64,
+    "memory_gib": 256,
+    "worker_cohorts": 8,
+    "workers_per_cohort": 8,
+    "trace_profile": "LargeMemory256G",
+    "capacity_hint_expected_concurrent_tasks": 4096,
+    "deterministic_replay_only": true,
+    "live_host_probe": false
+  },
+  "proof_lane": {
+    "lane_id": "memory-residency-replay-e2e-contract",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
+    "covers": "Deterministic 64C/256G memory-residency replay fixture, e2e runner artifact contract, orchestrator registration, policy/accounting source linkage, stale/missing input failure output, proof manifest/status mapping, and no-claim boundaries.",
+    "explicit_not_covered": "Does not prove live host throughput, p50/p95/p999 improvement, memory reduction, cache hit-rate improvement, scheduler performance, production-on-by-default behavior, broad workspace health, release readiness, live RCH fleet availability, or source correctness outside this replay/e2e contract."
+  },
+  "required_artifacts": [
+    "summary.json",
+    "events.ndjson",
+    "scenario_report.json",
+    "operator_report.md"
+  ],
+  "required_scenario_ids": [
+    "fresh_topology_warm_evidence",
+    "stale_topology_fallback",
+    "no_win_locality",
+    "critical_memory_pressure",
+    "cold_evidence_budget_exhausted",
+    "artifact_cache_pressure_spill_available"
+  ],
+  "replay_scenarios": [
+    {
+      "scenario_id": "fresh_topology_warm_evidence",
+      "description": "Fresh 64C/256G topology and warm proof-pack evidence select warm retained evidence without live-task mutation.",
+      "input_fixture": {
+        "topology_age_seconds": 30,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 6500,
+        "artifact_pressure_bps": 1500,
+        "runtime_pressure": "healthy",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "warm",
+        "snapshot_status": "fresh",
+        "required_reason_codes": [
+          "policy_enabled",
+          "fresh_topology"
+        ],
+        "fail_closed": false,
+        "live_task_action": "recommend_only"
+      }
+    },
+    {
+      "scenario_id": "stale_topology_fallback",
+      "description": "Stale topology evidence fails closed to fallback and names the stale input in the replay output.",
+      "input_fixture": {
+        "topology_age_seconds": 901,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 6500,
+        "artifact_pressure_bps": 1500,
+        "runtime_pressure": "healthy",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "fallback",
+        "snapshot_status": "stale",
+        "required_reason_codes": [
+          "policy_enabled",
+          "stale_topology"
+        ],
+        "fail_closed": true,
+        "live_task_action": "recommend_only"
+      }
+    },
+    {
+      "scenario_id": "no_win_locality",
+      "description": "Balanced locality with no cohort win returns no_win and records a refusal boundary rather than an optimization claim.",
+      "input_fixture": {
+        "topology_age_seconds": 30,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 9000,
+        "artifact_pressure_bps": 1500,
+        "runtime_pressure": "healthy",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "no_win",
+        "snapshot_status": "fresh",
+        "required_reason_codes": [
+          "policy_enabled",
+          "no_win_locality"
+        ],
+        "fail_closed": true,
+        "live_task_action": "recommend_only"
+      }
+    },
+    {
+      "scenario_id": "critical_memory_pressure",
+      "description": "Critical runtime memory pressure overrides warm evidence and produces no_win with an explicit pressure reason.",
+      "input_fixture": {
+        "topology_age_seconds": 30,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 6500,
+        "artifact_pressure_bps": 1500,
+        "runtime_pressure": "critical",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "no_win",
+        "snapshot_status": "fresh",
+        "required_reason_codes": [
+          "policy_enabled",
+          "fresh_topology",
+          "critical_memory_pressure"
+        ],
+        "fail_closed": true,
+        "live_task_action": "recommend_only"
+      }
+    },
+    {
+      "scenario_id": "cold_evidence_budget_exhausted",
+      "description": "High artifact pressure with exhausted cold-evidence budget falls back and preserves the budget-exhausted reason.",
+      "input_fixture": {
+        "topology_age_seconds": 30,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 6500,
+        "artifact_pressure_bps": 9100,
+        "runtime_pressure": "healthy",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "fallback",
+        "snapshot_status": "fresh",
+        "required_reason_codes": [
+          "policy_enabled",
+          "fresh_topology",
+          "artifact_cache_pressure",
+          "cold_evidence_budget_exhausted"
+        ],
+        "fail_closed": true,
+        "live_task_action": "recommend_only"
+      }
+    },
+    {
+      "scenario_id": "artifact_cache_pressure_spill_available",
+      "description": "High artifact pressure with spill budget available selects cold evidence without claiming cache eviction is implemented.",
+      "input_fixture": {
+        "topology_age_seconds": 30,
+        "topology_confidence_percent": 95,
+        "remote_touch_budget_bps": 6500,
+        "artifact_pressure_bps": 8700,
+        "runtime_pressure": "healthy",
+        "proof_pack_warm": true,
+        "record_pool_counters": "available"
+      },
+      "expected": {
+        "policy_tier": "cold",
+        "snapshot_status": "fresh",
+        "required_reason_codes": [
+          "policy_enabled",
+          "fresh_topology",
+          "artifact_cache_pressure"
+        ],
+        "fail_closed": false,
+        "live_task_action": "recommend_only"
+      }
+    }
+  ],
+  "failure_contract": {
+    "missing_input_message": "missing input scenario_id=<scenario_id> from artifacts/memory_residency_replay_e2e_contract_v1.json",
+    "stale_input_message": "stale input scenario_id=stale_topology_fallback topology_age_seconds=901",
+    "copy_paste_rch_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
+    "local_cargo_fallback_allowed": false
+  },
+  "benchmark_evidence": {
+    "included": false,
+    "reason": "M4 records deterministic replay/e2e evidence only; no p50, p95, p999, throughput, memory-reduction, or no-regression benchmark result is included."
+  },
+  "no_claim_boundaries": [
+    "No runtime default behavior change.",
+    "No task drop, cancellation, migration, allocator mutation, or cache eviction implementation.",
+    "No throughput, p50, p95, p999, memory reduction, NUMA win, cache hit-rate, no-regression, release-readiness, or broad workspace-health claim.",
+    "No fresh benchmark evidence is included in this contract.",
+    "No local Cargo fallback is approved for the focused proof.",
+    "The replay runner emits deterministic fixture evidence only and does not probe live host topology."
+  ],
+  "next_child_bead": "asupersync-memory-residency-control-ho2itz.5"
+}

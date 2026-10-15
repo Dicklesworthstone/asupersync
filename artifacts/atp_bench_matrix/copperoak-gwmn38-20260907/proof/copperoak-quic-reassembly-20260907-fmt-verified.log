@@ -1,0 +1,44 @@
+  [2m2026-09-07T20:09:31.884477Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1153651 at root@38.242.134.66 (2 slots remaining after reservation, speed 67.7)[0m
+    [2;3mat[0m rch/src/hook.rs:2645 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:09:31.942759Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for asupersync (hash: bc171bee07fb2a72)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:510 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:09:31.942780Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 1 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:532 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:09:34.208966Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1153651...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:661 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:10:01.748439Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 6 pattern(s) from .rchignore (total: 44)[0m
+    [2;3mat[0m rch/src/transfer.rs:2028 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:10:01.748468Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/asupersync -> /data/tmp/rch/asupersync/bc171bee07fb2a72 on vmi1153651 (streaming)[0m
+    [2;3mat[0m rch/src/transfer.rs:3549 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:10:04.753706Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 7 files, 253181666 bytes in 28737ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:958 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:10:04.773210Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo fmt --check[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1018 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:32.011950Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 87238ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1150 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:32.024876Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1238 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:32.024897Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/tmp/rch/asupersync/bc171bee07fb2a72 on vmi1153651[0m
+    [2;3mat[0m rch/src/transfer.rs:4328 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:32.024935Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 3 retrieval exclude pattern(s) from .rchignore (total: 8)[0m
+    [2;3mat[0m rch/src/transfer.rs:2338 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:34.983580Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 2958ms (1 files, 3335 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:4383 [2;3mon[0m ThreadId(1)
+
+  [2m2026-09-07T20:11:34.983605Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 3335 bytes in 2958ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:1270 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1153651 (126.3s)
+[RCH] clean-overlay receipt: base=382bc5823989e8376995c7567a8d332b85294b11 overlay-fingerprint=9ff215e955b40e94412344f1e479dbc314492ae950987a9f26e8d1bf957633e6

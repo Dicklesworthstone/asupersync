@@ -1,0 +1,237 @@
+{
+  "schema_version": "artifact-governance-seed-backfill-v1",
+  "backfill_id": "artifact_governance_seed_backfill_v1",
+  "bead_id": "asupersync-artifact-governance-awdiwy.7",
+  "created_date": "2026-06-12",
+  "purpose": "Backfill representative high-value artifact families with explicit citeability, ownership-confidence, freshness, no-claim, and next-action metadata without claiming full-corpus completion.",
+  "source_of_truth": {
+    "backfill": "artifacts/artifact_governance_seed_backfill_v1.json",
+    "ledger": "artifacts/artifact_governance_ledger_v1.json",
+    "scanner": "artifacts/artifact_governance_scanner_v1.json",
+    "operator_report": "docs/proof/artifact_governance_seed_backfill.md",
+    "contract_test": "tests/artifact_governance_seed_backfill_contract.rs"
+  },
+  "coverage_policy": {
+    "corpus_coverage": "curated_representative_seed_backfill_not_exhaustive",
+    "full_corpus_claim": false,
+    "minimum_artifact_families": 8,
+    "ambiguous_owner_policy": "Represent conflicting owner signals explicitly and do not select a winner without a future ledger override.",
+    "non_destructive_policy": "This backfill only adds metadata. It does not delete, rename, rewrite, clean, branch, worktree, or authorize local Cargo fallback."
+  },
+  "ownership_confidence_catalog": {
+    "ledger_exact_owner": {
+      "meaning": "The governance ledger row names the owning bead and no conflicting scanner signal is represented in this seed row.",
+      "no_claim_boundary": "does_not_prove_owner_bead_closed"
+    },
+    "scanner_exact_owner": {
+      "meaning": "The scanner found a direct bead_id or equivalent exact owner signal on the artifact.",
+      "no_claim_boundary": "does_not_prove_fresh_contract_pass"
+    },
+    "ledger_route_plus_artifact_bead": {
+      "meaning": "The governance ledger routes citation ownership while the artifact or scanner exposes a separate producing bead.",
+      "no_claim_boundary": "does_not_merge_governance_and_producer_ownership"
+    },
+    "ambiguous_owner_signals": {
+      "meaning": "Two or more credible owner signals disagree and the row must stay explicit until a future override resolves it.",
+      "no_claim_boundary": "does_not_select_a_winner"
+    },
+    "generated_fixture_inventory": {
+      "meaning": "The row governs a generated artifact inventory or reproducible-output policy, not the raw generated output tree.",
+      "no_claim_boundary": "does_not_prove_generated_outputs_exist_locally"
+    },
+    "explicit_exclusion": {
+      "meaning": "The row intentionally excludes a generated, cache, or ephemeral path family from durable artifact citation.",
+      "no_claim_boundary": "does_not_authorize_deletion"
+    }
+  },
+  "seed_rows": [
+    {
+      "ledger_row": "proof-lane-manifest-canonical",
+      "artifact_family": "proof_manifest",
+      "artifact_path": "artifacts/proof_lane_manifest_v1.json",
+      "citeability_class": "blocked-frontier",
+      "ownership_confidence": "ledger_route_plus_artifact_bead",
+      "owner_beads": [
+        "asupersync-artifact-governance-awdiwy.1",
+        "asupersync-aj7lx3.1"
+      ],
+      "selected_owner": null,
+      "next_action": "Cite only for manifest structure and lane inventory; do not treat listed lanes as passed proof.",
+      "no_claim_boundaries": [
+        "does_not_prove_any_manifest_lane",
+        "does_not_prove_workspace_health",
+        "does_not_authorize_local_cargo_fallback"
+      ]
+    },
+    {
+      "ledger_row": "validation-frontier-inventory",
+      "artifact_family": "validation_frontier",
+      "artifact_path": "artifacts/validation_frontier_inventory_v1.json",
+      "citeability_class": "blocked-frontier",
+      "ownership_confidence": "ledger_exact_owner",
+      "owner_beads": [
+        "asupersync-validation-frontier-v2-b5cjsv.1"
+      ],
+      "selected_owner": "asupersync-validation-frontier-v2-b5cjsv.1",
+      "next_action": "Use as blocker routing context until each frontier lane has fresh remote-required proof receipts.",
+      "no_claim_boundaries": [
+        "does_not_prove_all_manifest_lanes_passed",
+        "does_not_prove_production_dependency_graph_health",
+        "does_not_prove_live_rch_fleet_availability"
+      ]
+    },
+    {
+      "ledger_row": "rch-stale-progress-receipt-contract",
+      "artifact_family": "rch_stale_receipt",
+      "artifact_path": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "citeability_class": "blocked-frontier",
+      "ownership_confidence": "ambiguous_owner_signals",
+      "owner_beads": [
+        "asupersync-validation-frontier-v2-b5cjsv.4",
+        "asupersync-artifact-governance-awdiwy.1"
+      ],
+      "selected_owner": null,
+      "ambiguity_reason": "The scanner found an artifact bead_id for validation-frontier ownership and a governance-ledger override for artifact-governance routing.",
+      "next_action": "Keep the row as blocker-class receipt shape until a future override resolves ownership and a fresh remote proof passes.",
+      "no_claim_boundaries": [
+        "does_not_select_a_winner",
+        "does_not_prove_source_correctness",
+        "does_not_prove_fresh_rch_pass"
+      ]
+    },
+    {
+      "ledger_row": "runtime-pressure-control-evidence-contract",
+      "artifact_family": "runtime_pressure",
+      "artifact_path": "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+      "citeability_class": "blocked-frontier",
+      "ownership_confidence": "ledger_exact_owner",
+      "owner_beads": [
+        "asupersync-bwcdfl.4"
+      ],
+      "selected_owner": "asupersync-bwcdfl.4",
+      "next_action": "Route as runtime-pressure contract evidence only; do not cite as production-on enforcement or throughput proof.",
+      "no_claim_boundaries": [
+        "does_not_prove_adaptive_controls_are_production_enabled",
+        "does_not_prove_real_host_throughput",
+        "does_not_prove_deadlock_absence"
+      ]
+    },
+    {
+      "ledger_row": "fifth-wave-live-swarm-telemetry-heatmap",
+      "artifact_family": "swarm_agent",
+      "artifact_path": "artifacts/fifth_wave_live_swarm_telemetry_heatmap_v1.json",
+      "citeability_class": "operator-report",
+      "ownership_confidence": "ledger_exact_owner",
+      "owner_beads": [
+        "asupersync-live-swarm-telemetry-heatmap-wt9b4r"
+      ],
+      "selected_owner": "asupersync-live-swarm-telemetry-heatmap-wt9b4r",
+      "next_action": "Use for operator routing and telemetry context only.",
+      "no_claim_boundaries": [
+        "does_not_prove_broad_observability_correctness",
+        "does_not_prove_performance_improvement",
+        "does_not_create_branches_or_worktrees"
+      ]
+    },
+    {
+      "ledger_row": "browser-wasm-artifact-integrity-manifest",
+      "artifact_family": "browser_wasm",
+      "artifact_path": "docs/wasm_browser_artifact_integrity_manifest_v1.json",
+      "citeability_class": "proof-bearing",
+      "ownership_confidence": "ledger_exact_owner",
+      "owner_beads": [
+        "asupersync-3qv04.7.2"
+      ],
+      "selected_owner": "asupersync-3qv04.7.2",
+      "next_action": "Cite only for listed browser and wasm package artifact hashes when the package integrity gate inputs match current main.",
+      "no_claim_boundaries": [
+        "does_not_execute_npm_publish",
+        "does_not_prove_full_workspace_health",
+        "does_not_prove_runtime_performance_or_scheduler_correctness"
+      ]
+    },
+    {
+      "ledger_row": "raptorq-gf256-multiscenario-refresh-v4",
+      "artifact_family": "raptorq",
+      "artifact_path": "artifacts/raptorq_track_e_gf256_multiscenario_refresh_v4.json",
+      "citeability_class": "advisory",
+      "ownership_confidence": "scanner_exact_owner",
+      "owner_beads": [
+        "asupersync-36m6p"
+      ],
+      "selected_owner": "asupersync-36m6p",
+      "next_action": "Use as mixed-signal RaptorQ context only; do not close Track E from this row.",
+      "no_claim_boundaries": [
+        "does_not_prove_track_e_closure",
+        "does_not_prove_no_regression",
+        "does_not_replace_closure_grade_guardrails"
+      ]
+    },
+    {
+      "ledger_row": "generated-smoke-artifact-inventory",
+      "artifact_family": "generated_fixture",
+      "artifact_path": "artifacts/generated_smoke_artifact_inventory_v1.json",
+      "citeability_class": "generated-fixture",
+      "ownership_confidence": "generated_fixture_inventory",
+      "owner_beads": [
+        "asupersync-beih6k"
+      ],
+      "selected_owner": "asupersync-beih6k",
+      "next_action": "Cite for retention and reproduction policy only, not for raw generated output existence.",
+      "no_claim_boundaries": [
+        "does_not_prove_generated_outputs_exist_locally",
+        "does_not_authorize_deletion",
+        "does_not_prove_runtime_correctness"
+      ]
+    },
+    {
+      "ledger_row": "remote-build-target-cache-roots",
+      "artifact_family": "excluded",
+      "artifact_path": "${TMPDIR:-/tmp}/rch_target_*",
+      "citeability_class": "excluded",
+      "ownership_confidence": "explicit_exclusion",
+      "owner_beads": [
+        "asupersync-artifact-governance-awdiwy.1"
+      ],
+      "selected_owner": "asupersync-artifact-governance-awdiwy.1",
+      "next_action": "Explain why remote build cache roots are not durable artifacts; never use this row as cleanup authorization.",
+      "no_claim_boundaries": [
+        "does_not_authorize_deletion",
+        "does_not_hide_future_durable_receipts",
+        "does_not_prove_artifact_absence"
+      ]
+    },
+    {
+      "ledger_row": "artifact-governance-producer-checklist",
+      "artifact_family": "artifact_governance",
+      "artifact_path": "artifacts/artifact_governance_producer_checklist_v1.json",
+      "citeability_class": "proof-bearing",
+      "ownership_confidence": "ledger_exact_owner",
+      "owner_beads": [
+        "asupersync-artifact-governance-awdiwy.5"
+      ],
+      "selected_owner": "asupersync-artifact-governance-awdiwy.5",
+      "next_action": "Use as the future producer guard for durable artifacts, with no full-corpus or deletion claim.",
+      "no_claim_boundaries": [
+        "does_not_prove_full_corpus_coverage",
+        "does_not_authorize_deletion",
+        "does_not_close_future_artifact_gaps"
+      ]
+    }
+  ],
+  "operator_summary": {
+    "seed_row_count": 10,
+    "artifact_family_count": 10,
+    "ambiguous_row_count": 1,
+    "ambiguous_rows": [
+      "rch-stale-progress-receipt-contract"
+    ],
+    "operator_report": "docs/proof/artifact_governance_seed_backfill.md"
+  },
+  "no_claim_boundaries": [
+    "does_not_prove_full_corpus_coverage",
+    "does_not_select_ambiguous_owners",
+    "does_not_authorize_deletion",
+    "does_not_prove_fresh_rch_pass"
+  ]
+}

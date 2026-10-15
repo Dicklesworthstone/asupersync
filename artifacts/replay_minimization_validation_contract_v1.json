@@ -1,0 +1,110 @@
+{
+  "contract_version": "replay-minimization-validation-contract-v1",
+  "bead_id": "asupersync-1508v.6.6",
+  "runner_bundle_schema_version": "replay-minimization-validation-smoke-bundle-v1",
+  "runner_report_schema_version": "replay-minimization-validation-smoke-run-report-v1",
+  "runner_script": "scripts/run_replay_minimization_validation_smoke.sh",
+  "validation_dimensions": [
+    {
+      "dimension_id": "canonicalization-equivalence",
+      "description": "Foata canonicalization preserves events and produces deterministic fingerprints",
+      "owner_files": ["src/trace/canonicalize.rs"],
+      "invariants": [
+        "Event set preserved (no drops, no duplicates)",
+        "Fingerprint is deterministic across runs",
+        "Foata layers respect independence relation"
+      ]
+    },
+    {
+      "dimension_id": "minimization-quality",
+      "description": "Delta debugging and scenario minimization produce strictly smaller traces",
+      "owner_files": ["src/trace/delta_debug.rs", "src/trace/minimizer.rs"],
+      "invariants": [
+        "Minimized trace is smaller than or equal to original",
+        "Budget cap (max_evaluations) is respected",
+        "Hierarchical pruning removes region subtrees first"
+      ]
+    },
+    {
+      "dimension_id": "geodesic-correctness",
+      "description": "Normalized traces are valid linear extensions with reduced switch cost",
+      "owner_files": ["src/trace/geodesic.rs"],
+      "invariants": [
+        "Normalized schedule respects happens-before",
+        "Switch count is <= original",
+        "Every fallback tier produces valid results"
+      ]
+    },
+    {
+      "dimension_id": "race-detection-soundness",
+      "description": "DPOR race analysis is sound on known racing and non-racing traces",
+      "owner_files": ["src/trace/dpor.rs"],
+      "invariants": [
+        "Independent events yield no races",
+        "Dependent events on same resource are detected",
+        "Race report covers all racing pairs"
+      ]
+    },
+    {
+      "dimension_id": "crashpack-integrity",
+      "description": "Crash packs are self-contained, deterministic, and well-formed",
+      "owner_files": ["src/trace/crashpack.rs"],
+      "invariants": [
+        "Schema version is stable",
+        "Fingerprint matches trace fingerprint",
+        "Replay command references correct seed and config"
+      ]
+    },
+    {
+      "dimension_id": "divergence-diagnostics",
+      "description": "Divergence reports pinpoint failures with structured context",
+      "owner_files": ["src/trace/divergence.rs"],
+      "invariants": [
+        "First-violation index is correct",
+        "Affected entities (tasks, regions) are identified",
+        "Context window includes surrounding events",
+        "Output is JSON-serializable"
+      ]
+    }
+  ],
+  "structured_log_fields_required": [
+    "dimension",
+    "trace_length",
+    "canonical_fingerprint",
+    "switch_count_before",
+    "switch_count_after",
+    "minimization_ratio",
+    "race_count",
+    "algorithm"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA06-VALID-CANONICALIZATION",
+      "description": "Verify Foata canonicalization preserves events and fingerprint stability",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract canonical -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-VALID-NORMALIZATION",
+      "description": "Verify geodesic normalization correctness and switch cost reduction",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract normalization -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-VALID-RACE-DETECTION",
+      "description": "Verify DPOR race detection soundness on known traces",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract race -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-VALID-CRASHPACK",
+      "description": "Verify crash pack integrity and fingerprint consistency",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract crashpack -- --nocapture"
+    },
+    {
+      "scenario_id": "AA06-VALID-DIVERGENCE",
+      "description": "Verify divergence diagnostics structure and context quality",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa063 cargo test --test replay_minimization_validation_contract divergence -- --nocapture"
+    }
+  ],
+  "downstream_beads": [
+    "asupersync-1508v.6.7"
+  ]
+}

@@ -1,0 +1,38 @@
+---
+source: src/grpc/web.rs
+expression: snapshot
+---
+[happy_path]
+frame[0]
+  flag=0x00
+  length=<14 bytes>
+  kind=data
+  compressed=false
+  payload_utf8="hello grpc-web"
+frame[1]
+  flag=0x80
+  length=<56 bytes>
+  kind=trailers
+  trailer_block="grpc-status: 0\r\nx-trace-id: trace-123\r\ntrace-bin: AQI=\r\n"
+  status_code=0
+  status_message="OK"
+  metadata[0] x-trace-id="trace-123"
+  metadata[1] trace-bin="AQI="
+[error_trailers_only]
+frame[0]
+  flag=0x80
+  length=<59 bytes>
+  kind=trailers
+  trailer_block="grpc-status: 3\r\ngrpc-message: bad%0Afield\r\nretry-after: 3\r\n"
+  status_code=3
+  status_message="bad\nfield"
+  metadata[0] retry-after="3"
+[trailers_only]
+frame[0]
+  flag=0x80
+  length=<31 bytes>
+  kind=trailers
+  trailer_block="grpc-status: 0\r\nx-cache: MISS\r\n"
+  status_code=0
+  status_message="OK"
+  metadata[0] x-cache="MISS"

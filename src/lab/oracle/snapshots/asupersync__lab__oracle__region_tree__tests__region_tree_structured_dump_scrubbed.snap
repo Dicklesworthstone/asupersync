@@ -1,0 +1,93 @@
+---
+source: src/lab/oracle/region_tree.rs
+expression: snapshot
+---
+scenario: branching
+root: [REGION_0]
+region_count: 5
+regions:
+- id: [REGION_0]
+  parent: none
+  depth: 0
+  created_at: Time(10ns)
+  children: [[REGION_1], [REGION_2]]
+- id: [REGION_1]
+  parent: [REGION_0]
+  depth: 1
+  created_at: Time(20ns)
+  children: [[REGION_3], [REGION_4]]
+- id: [REGION_2]
+  parent: [REGION_0]
+  depth: 1
+  created_at: Time(30ns)
+  children: []
+- id: [REGION_3]
+  parent: [REGION_1]
+  depth: 2
+  created_at: Time(40ns)
+  children: []
+- id: [REGION_4]
+  parent: [REGION_1]
+  depth: 2
+  created_at: Time(50ns)
+  children: []
+
+scenario: nested_chain
+root: [REGION_0]
+region_count: 5
+regions:
+- id: [REGION_0]
+  parent: none
+  depth: 0
+  created_at: Time(100ns)
+  children: [[REGION_1]]
+- id: [REGION_1]
+  parent: [REGION_0]
+  depth: 1
+  created_at: Time(110ns)
+  children: [[REGION_2]]
+- id: [REGION_2]
+  parent: [REGION_1]
+  depth: 2
+  created_at: Time(120ns)
+  children: [[REGION_3]]
+- id: [REGION_3]
+  parent: [REGION_2]
+  depth: 3
+  created_at: Time(130ns)
+  children: [[REGION_4]]
+- id: [REGION_4]
+  parent: [REGION_3]
+  depth: 4
+  created_at: Time(140ns)
+  children: []
+
+scenario: reparented_subtree
+root: [REGION_0]
+region_count: 5
+regions:
+- id: [REGION_0]
+  parent: none
+  depth: 0
+  created_at: Time(200ns)
+  children: [[REGION_1], [REGION_2]]
+- id: [REGION_1]
+  parent: [REGION_0]
+  depth: 1
+  created_at: Time(210ns)
+  children: []
+- id: [REGION_2]
+  parent: [REGION_0]
+  depth: 1
+  created_at: Time(220ns)
+  children: [[REGION_3]]
+- id: [REGION_3]
+  parent: [REGION_2]
+  depth: 2
+  created_at: Time(250ns)
+  children: [[REGION_4]]
+- id: [REGION_4]
+  parent: [REGION_3]
+  depth: 3
+  created_at: Time(240ns)
+  children: []

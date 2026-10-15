@@ -1,0 +1,19 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12346
+SQL: SELECT COUNT(*) FROM orders WHERE status = 'pending' AND created_at < NOW() - INTERVAL '1 day'
+Execution Time: 12ms
+Status: SUCCESS
+Rows Returned: 0
+
+--- Column Description ---
+Column 0: count
+  Type OID: 20
+  Type Size: 4
+  Table OID: 12345
+  Column ID: 1
+  Format: 0
+=====================================

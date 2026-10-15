@@ -1,0 +1,149 @@
+{
+  "contract_version": "crash-recovery-validation-v1",
+  "bead_id": "asupersync-1508v.9.6",
+  "description": "AA-09.3 soak, fault-injection, replay, and MTTR validation for crash-only mode.",
+  "runner_script": "scripts/run_crash_recovery_validation_smoke.sh",
+  "runner_bundle_schema_version": "crash-recovery-validation-smoke-bundle-v1",
+  "runner_report_schema_version": "crash-recovery-validation-smoke-run-report-v1",
+  "soak_scenarios": [
+    {
+      "scenario_id": "SOAK-REPEATED-CRASH",
+      "description": "Repeatedly crash and recover a region to verify no state leaks accumulate.",
+      "crash_count": 100,
+      "invariants": ["no_obligation_leaks", "no_task_leaks", "journal_truncation_works"]
+    },
+    {
+      "scenario_id": "SOAK-RESTART-STORM",
+      "description": "Concurrent crashes across multiple failure domains under load.",
+      "concurrent_domains": 8,
+      "invariants": ["domain_isolation_holds", "no_cross_domain_interference", "recovery_budget_respected"]
+    },
+    {
+      "scenario_id": "SOAK-PARTIAL-RECOVERY",
+      "description": "Crash during recovery phase itself to test nested crash handling.",
+      "nested_crash_depth": 3,
+      "invariants": ["max_consecutive_microreboots_enforced", "tombstone_on_exhaustion"]
+    },
+    {
+      "scenario_id": "SOAK-STUCK-CLEANUP",
+      "description": "Region crashes with obligations in mid-settlement to verify cleanup.",
+      "pending_obligations": 50,
+      "invariants": ["all_obligations_abandoned_or_settled", "no_dangling_references"]
+    }
+  ],
+  "fault_injection_points": [
+    {
+      "point_id": "FI-JOURNAL-WRITE",
+      "description": "Inject failure during journal checkpoint write.",
+      "expected_behavior": "Region remains in CRASHING state, retry or tombstone."
+    },
+    {
+      "point_id": "FI-REPLAY-MID",
+      "description": "Inject failure midway through journal replay.",
+      "expected_behavior": "Recovery aborted, re-attempt from last checkpoint."
+    },
+    {
+      "point_id": "FI-HOOK-TIMEOUT",
+      "description": "RH-PRE-RESTART hook exceeds timeout.",
+      "expected_behavior": "Hook aborted, recovery proceeds with defaults."
+    },
+    {
+      "point_id": "FI-AUTHORITY-RESTORE",
+      "description": "Failure during gradual authority restore after recovery.",
+      "expected_behavior": "Authority remains narrow (OBSERVE only), retry on next epoch."
+    },
+    {
+      "point_id": "FI-PARENT-CANCEL",
+      "description": "Parent region cancels during child microreboot.",
+      "expected_behavior": "Child immediately tombstoned per CR-PARENT-PROPAGATE."
+    }
+  ],
+  "recovery_metrics": {
+    "description": "Metrics for measuring recovery quality and performance.",
+    "metrics": [
+      {
+        "metric_id": "RM-MTTR",
+        "description": "Mean time to recovery from crash to RUNNING state.",
+        "unit": "milliseconds",
+        "slo_target": 5000
+      },
+      {
+        "metric_id": "RM-REPLAY-SUCCESS-RATE",
+        "description": "Fraction of journal replays that succeed on first attempt.",
+        "unit": "ratio",
+        "slo_target": 0.99
+      },
+      {
+        "metric_id": "RM-OBLIGATION-RECOVERY-RATE",
+        "description": "Fraction of pending obligations successfully re-entered after recovery.",
+        "unit": "ratio",
+        "slo_target": 0.95
+      },
+      {
+        "metric_id": "RM-INVARIANT-PRESERVATION",
+        "description": "Fraction of recoveries that preserve all region invariants.",
+        "unit": "ratio",
+        "slo_target": 1.0
+      },
+      {
+        "metric_id": "RM-EVIDENCE-COMPLETENESS",
+        "description": "Fraction of crash/recovery events with complete structured logs.",
+        "unit": "ratio",
+        "slo_target": 1.0
+      }
+    ]
+  },
+  "reproducibility_requirements": [
+    {
+      "requirement_id": "RR-DETERMINISTIC-REPLAY",
+      "description": "Given a crash pack and the source at the pinned commit, the failure is reproducible."
+    },
+    {
+      "requirement_id": "RR-JOURNAL-REPLAY-IDEMPOTENT",
+      "description": "Replaying the same journal twice produces the same recovered state."
+    },
+    {
+      "requirement_id": "RR-CRASH-PACK-SELF-CONTAINED",
+      "description": "Crash pack contains seed, config, trace prefix, and all data needed for reproduction."
+    },
+    {
+      "requirement_id": "RR-UNREPRODUCIBLE-BLOCKS-GRADUATION",
+      "description": "Any crash/recovery failure that cannot be reproduced blocks crash-only mode graduation."
+    }
+  ],
+  "structured_log_fields_required": [
+    "crash_id",
+    "recovery_id",
+    "domain_id",
+    "journal_id",
+    "replay_command",
+    "crash_reason",
+    "recovery_phase",
+    "mttr_ms",
+    "replay_entries",
+    "obligations_recovered",
+    "obligations_abandoned",
+    "invariants_checked",
+    "invariants_passed",
+    "fault_injection_point",
+    "soak_iteration"
+  ],
+  "smoke_scenarios": [
+    {
+      "scenario_id": "CRV-SMOKE-SOAK",
+      "description": "Validate soak scenario definitions and invariant coverage",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa093 cargo test --test crash_recovery_validation_contract soak -- --nocapture"
+    },
+    {
+      "scenario_id": "CRV-SMOKE-FAULT",
+      "description": "Validate fault injection points and expected behaviors",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa093 cargo test --test crash_recovery_validation_contract fault -- --nocapture"
+    },
+    {
+      "scenario_id": "CRV-SMOKE-METRICS",
+      "description": "Validate recovery metrics and reproducibility requirements",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch-codex-aa093 cargo test --test crash_recovery_validation_contract metric -- --nocapture"
+    }
+  ],
+  "downstream_beads": []
+}

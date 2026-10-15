@@ -1,0 +1,49 @@
+{
+  "agent_mail": {
+    "agents": [
+      {
+        "last_active_ts": "2026-05-08T04:18:00Z",
+        "name": "CopperSpring"
+      }
+    ],
+    "available": true,
+    "messages": [
+      {
+        "body_md": "I claimed asupersync-fresh1 and reserved the implementation files.",
+        "created_ts": "2026-05-08T04:20:00Z",
+        "from": "CopperSpring",
+        "subject": "[asupersync-fresh1] Starting",
+        "thread_id": "asupersync-fresh1"
+      }
+    ],
+    "reservations": [
+      {
+        "agent_name": "CopperSpring",
+        "exclusive": true,
+        "expires_ts": "2026-05-08T05:00:00Z",
+        "path_pattern": "tests/fresh_peer_contract.rs",
+        "reason": "asupersync-fresh1"
+      }
+    ],
+    "status": "ok"
+  },
+  "beads": {
+    "in_progress": [
+      {
+        "assignee": "CopperSpring",
+        "id": "asupersync-fresh1",
+        "title": "Fresh peer work",
+        "updated_at": "2026-05-08T04:10:00Z"
+      }
+    ],
+    "status": "ok"
+  },
+  "dirty_tree": {
+    "entries": [],
+    "status": "ok"
+  },
+  "git": {
+    "recent_commits": [],
+    "status": "ok"
+  }
+}

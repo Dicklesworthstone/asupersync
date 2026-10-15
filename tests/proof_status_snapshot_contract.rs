@@ -1,0 +1,1487 @@
+#![allow(missing_docs)]
+
+use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const AGENTS_PATH: &str = "AGENTS.md";
+const DURABLE_RECEIPT_FIXTURE_ROOT: &str = "tests/fixtures/durable_rch_proof_receipt";
+const FRONTIER_PATH: &str = "artifacts/validation_frontier_ledger_schema_v1.json";
+const MANIFEST_PATH: &str = "artifacts/proof_lane_manifest_v1.json";
+const NIGHTLY_WORKFLOW_PATH: &str = ".github/workflows/nightly-differential-stress.yml";
+const README_PATH: &str = "README.md";
+const SNAPSHOT_PATH: &str = "artifacts/proof_status_snapshot_v1.json";
+
+fn repo_path(relative: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(relative)
+}
+
+fn read_repo_file(relative: &str) -> String {
+    std::fs::read_to_string(repo_path(relative))
+        .unwrap_or_else(|err| panic!("read {relative}: {err}"))
+}
+
+fn json(relative: &str) -> Value {
+    serde_json::from_str(&read_repo_file(relative))
+        .unwrap_or_else(|err| panic!("parse {relative}: {err}"))
+}
+
+fn array<'a>(value: &'a Value, key: &str) -> &'a Vec<Value> {
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{key} must be an array"))
+}
+
+fn string<'a>(value: &'a Value, key: &str) -> &'a str {
+    let text = value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key} must be a string"));
+    assert!(!text.trim().is_empty(), "{key} must be nonempty");
+    text
+}
+
+fn optional_string<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    match value.get(key) {
+        Some(Value::Null) | None => None,
+        Some(Value::String(text)) => {
+            assert!(!text.trim().is_empty(), "{key} must be nonempty if present");
+            Some(text)
+        }
+        _ => panic!("{key} must be a string or null"),
+    }
+}
+
+fn string_vec(value: &Value, key: &str) -> Vec<String> {
+    array(value, key)
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .unwrap_or_else(|| panic!("{key} entries must be strings"))
+                .to_string()
+        })
+        .collect()
+}
+
+fn string_set(value: &Value, key: &str) -> BTreeSet<String> {
+    string_vec(value, key).into_iter().collect()
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or_else(|| panic!("{key} must be a boolean"))
+}
+
+fn u64_field(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{key} must be an unsigned integer"))
+}
+
+fn parse_iso_date_epoch_day(text: &str) -> Result<i64, String> {
+    let mut parts = text.split('-');
+    let year = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<i64>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    let month = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    let day = parts
+        .next()
+        .ok_or_else(|| format!("invalid ISO date {text:?}"))?
+        .parse::<u32>()
+        .map_err(|_| format!("invalid ISO date {text:?}"))?;
+    if parts.next().is_some() || text.len() != 10 || !(1970..=9999).contains(&year) {
+        return Err(format!("invalid ISO date {text:?}"));
+    }
+
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return Err(format!("invalid ISO date {text:?}")),
+    };
+    if day == 0 || day > days_in_month {
+        return Err(format!("invalid ISO date {text:?}"));
+    }
+
+    // Gregorian civil date to days since 1970-01-01. This keeps the checker
+    // dependency-free and makes fixed as-of-date fixtures deterministic.
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = i64::from(month) + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + i64::from(day) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Ok(era * 146_097 + day_of_era - 719_468)
+}
+
+fn freshness_as_of_epoch_day(policy: &Value) -> Result<i64, String> {
+    let override_env = string(policy, "as_of_override_env");
+    if let Some(value) = std::env::var_os(override_env) {
+        let value = value
+            .to_str()
+            .ok_or_else(|| format!("{override_env} must contain UTF-8"))?;
+        return parse_iso_date_epoch_day(value);
+    }
+
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock predates Unix epoch: {error}"))?;
+    Ok(i64::try_from(elapsed.as_secs() / 86_400).expect("current epoch day must fit in i64"))
+}
+
+fn validate_claim_freshness(
+    row: &Value,
+    fresh_status: &str,
+    evidence_date_field: &str,
+    maximum_age_days: u64,
+    as_of_epoch_day: i64,
+) -> Result<(), String> {
+    let claim_id = string(row, "claim_id");
+    if string(row, "proof_evidence_status") != fresh_status {
+        return Ok(());
+    }
+
+    let evidence_date = row
+        .get(evidence_date_field)
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!("{claim_id}: {fresh_status} requires string field {evidence_date_field}")
+        })?;
+    let evidence_epoch_day =
+        parse_iso_date_epoch_day(evidence_date).map_err(|error| format!("{claim_id}: {error}"))?;
+    let age_days = as_of_epoch_day - evidence_epoch_day;
+    if age_days < 0 {
+        return Err(format!(
+            "{claim_id}: fresh evidence date {evidence_date} is in the future"
+        ));
+    }
+    if age_days > i64::try_from(maximum_age_days).expect("maximum age must fit in i64") {
+        return Err(format!(
+            "{claim_id}: fresh evidence date {evidence_date} is {age_days} days old, exceeding the {maximum_age_days}-day limit; rerun the lane or demote the row"
+        ));
+    }
+
+    Ok(())
+}
+
+fn manifest_lanes(manifest: &Value) -> BTreeMap<String, Value> {
+    array(manifest, "lanes")
+        .iter()
+        .map(|lane| (string(lane, "lane_id").to_string(), lane.clone()))
+        .collect()
+}
+
+fn manifest_guarantees(manifest: &Value) -> BTreeMap<String, Value> {
+    array(manifest, "guarantees")
+        .iter()
+        .map(|guarantee| {
+            (
+                string(guarantee, "guarantee_id").to_string(),
+                guarantee.clone(),
+            )
+        })
+        .collect()
+}
+
+fn frontier_fixture_map(frontier: &Value) -> BTreeMap<String, Value> {
+    array(frontier, "fixtures")
+        .iter()
+        .map(|fixture| (string(fixture, "fixture_id").to_string(), fixture.clone()))
+        .collect()
+}
+
+fn proof_commands_for_lanes(
+    lane_ids: &BTreeSet<String>,
+    lanes: &BTreeMap<String, Value>,
+) -> BTreeSet<String> {
+    lane_ids
+        .iter()
+        .map(|lane_id| {
+            let lane = lanes
+                .get(lane_id)
+                .unwrap_or_else(|| panic!("snapshot references missing lane {lane_id}"));
+            string(lane, "command").to_string()
+        })
+        .collect()
+}
+
+fn lane_reuse_policy<'a>(lane: &'a Value, lane_id: &str) -> Result<&'a Value, String> {
+    lane.get("proof_reuse_policy")
+        .ok_or_else(|| format!("{lane_id}: missing proof_reuse_policy"))
+}
+
+fn validate_proof_reuse_status_row(
+    row: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let row_id = string(row, "row_id");
+    let status = string(row, "proof_evidence_status");
+    let lane_id = string(row, "manifest_lane_id");
+    let claim_scope = string(row, "claim_scope");
+    let dirty_status = string(row, "dirty_frontier_status");
+    let reason_codes = string_set(row, "reason_codes");
+    let rerun_command = string(row, "rerun_command");
+    let lane = lanes
+        .get(lane_id)
+        .ok_or_else(|| format!("{row_id}: unknown lane {lane_id}"))?;
+    let lane_command = string(lane, "command");
+    let reuse_policy = lane_reuse_policy(lane, lane_id)?;
+    let allowed_scopes = string_set(reuse_policy, "allowed_claim_scopes");
+    let non_citeable_scopes = string_set(reuse_policy, "non_citeable_claim_scopes");
+
+    if rerun_command != lane_command {
+        return Err(format!(
+            "{row_id}: rerun command must match manifest lane command"
+        ));
+    }
+    if bool_field(row, "cache_hit_is_fresh_rch_pass") {
+        return Err(format!("{row_id}: cache hit cannot be a fresh RCH pass"));
+    }
+
+    match status {
+        "fresh-rch-pass" => {
+            if dirty_status != "clean" || !reason_codes.is_empty() {
+                return Err(format!(
+                    "{row_id}: fresh pass rows must be clean and reason-free"
+                ));
+            }
+        }
+        "approved-cache-hit" => {
+            if !bool_field(reuse_policy, "cache_hits_allowed") {
+                return Err(format!("{row_id}: lane does not allow cache hits"));
+            }
+            if !allowed_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: claim scope {claim_scope} is not allowed for lane {lane_id}"
+                ));
+            }
+            if non_citeable_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: claim scope {claim_scope} is explicitly non-citeable"
+                ));
+            }
+            if dirty_status != "clean" || !reason_codes.is_empty() {
+                return Err(format!(
+                    "{row_id}: approved cache hits must be clean and reason-free"
+                ));
+            }
+        }
+        "rerun-required" => {
+            if dirty_status == "dirty-overlap"
+                && !bool_field(reuse_policy, "requires_fresh_rerun_when_dirty_overlap")
+            {
+                return Err(format!(
+                    "{row_id}: dirty-overlap rerun requires manifest policy support"
+                ));
+            }
+            if dirty_status == "dirty-overlap" && !reason_codes.contains("dirty-frontier-overlap") {
+                return Err(format!(
+                    "{row_id}: dirty-overlap rerun rows must include dirty-frontier-overlap"
+                ));
+            }
+        }
+        "stale-evidence" => {
+            if !reason_codes.contains("stale-head") {
+                return Err(format!("{row_id}: stale rows must carry stale-head"));
+            }
+        }
+        "blocked" => {
+            if reason_codes.is_empty() {
+                return Err(format!("{row_id}: blocked rows need reason codes"));
+            }
+        }
+        "no-win" => {
+            if reason_codes.iter().all(|reason| !reason.contains("no-win")) {
+                return Err(format!("{row_id}: no-win rows need a no-win reason"));
+            }
+        }
+        "unsupported" => {
+            if !reason_codes.contains("broad-claim-unsupported") {
+                return Err(format!(
+                    "{row_id}: unsupported rows need broad-claim-unsupported"
+                ));
+            }
+            if allowed_scopes.contains(claim_scope) && !non_citeable_scopes.contains(claim_scope) {
+                return Err(format!(
+                    "{row_id}: unsupported claim scope unexpectedly allowed by manifest"
+                ));
+            }
+        }
+        other => return Err(format!("{row_id}: unknown proof evidence status {other}")),
+    }
+
+    Ok(())
+}
+
+fn nested_value<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut cursor = value;
+    for key in path {
+        cursor = cursor.get(key)?;
+    }
+    Some(cursor)
+}
+
+fn nested_string<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    nested_value(value, path).and_then(Value::as_str)
+}
+
+fn nested_bool(value: &Value, path: &[&str]) -> Option<bool> {
+    nested_value(value, path).and_then(Value::as_bool)
+}
+
+fn nested_string_set(value: &Value, path: &[&str]) -> BTreeSet<String> {
+    nested_value(value, path)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .unwrap_or_else(|| panic!("{path:?} entries must be strings"))
+                        .to_string()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn durable_receipt_fixture(name: &str) -> Value {
+    let relative = format!("{DURABLE_RECEIPT_FIXTURE_ROOT}/{name}");
+    json(&relative)
+}
+
+fn durable_receipt_from_row(row: &Value) -> Value {
+    let fixture = durable_receipt_fixture(string(row, "fixture"));
+    let mut receipt = fixture
+        .get("receipt")
+        .unwrap_or_else(|| panic!("{}: fixture missing receipt", string(row, "row_id")))
+        .clone();
+
+    for mutation in row
+        .get("synthetic_mutations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        match mutation
+            .as_str()
+            .unwrap_or_else(|| panic!("{}: mutation must be a string", string(row, "row_id")))
+        {
+            "wrong-command-envelope" => {
+                receipt["command"]["command"] = Value::String(
+                    "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_wrong_durable_receipt CARGO_INCREMENTAL=0 cargo test -p asupersync --test wrong_contract -- --nocapture".to_string(),
+                );
+            }
+            other => panic!(
+                "{}: unknown durable receipt mutation {other}",
+                string(row, "row_id")
+            ),
+        }
+    }
+
+    receipt
+}
+
+fn durable_non_citeable_scopes(manifest: &Value) -> BTreeSet<String> {
+    manifest
+        .get("proof_reuse_policy")
+        .and_then(|policy| policy.get("durable_receipt_candidate_policy"))
+        .map(|policy| string_set(policy, "non_citeable_claim_scopes"))
+        .unwrap_or_default()
+}
+
+fn classify_durable_receipt_candidate(
+    receipt: &Value,
+    row: &Value,
+    manifest: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> BTreeSet<String> {
+    let mut reasons = BTreeSet::new();
+    let receipt_lane_id = optional_string(receipt, "manifest_lane_id").unwrap_or("");
+    let claim_scope = optional_string(receipt, "claim_scope").unwrap_or("");
+    let durable_non_citeable = durable_non_citeable_scopes(manifest);
+
+    if optional_string(receipt, "schema_version") != Some("durable-rch-proof-receipt-v1") {
+        reasons.insert("invalid-receipt-schema".to_string());
+    }
+    if optional_string(receipt, "lifecycle_state") != Some("terminal_pass")
+        || optional_string(receipt, "terminal_classification") != Some("pass")
+        || optional_string(receipt, "proof_evidence_status") != Some("fresh-rch-pass")
+        || nested_string(receipt, &["outcome", "status"]) != Some("pass")
+    {
+        reasons.insert("not-terminal-pass".to_string());
+    }
+
+    if nested_bool(receipt, &["command", "remote_required"]) != Some(true)
+        || nested_bool(receipt, &["command", "local_fallback_allowed"]) != Some(false)
+        || !nested_string_set(receipt, &["command", "local_fallback_markers"]).is_empty()
+    {
+        reasons.insert("local-fallback-detected".to_string());
+    }
+
+    if nested_string(receipt, &["source", "branch"]) != Some("main") {
+        reasons.insert("non-main-branch".to_string());
+    }
+    if nested_string(receipt, &["source", "head_commit"])
+        != nested_string(receipt, &["source", "expected_head"])
+    {
+        reasons.insert("stale-head".to_string());
+    }
+    if nested_string(receipt, &["source", "dirty_frontier_status"]) != Some("clean") {
+        reasons.insert("dirty-frontier-overlap".to_string());
+    }
+
+    let lane = match lanes.get(receipt_lane_id) {
+        Some(lane) => lane,
+        None => {
+            reasons.insert("missing-manifest-lane".to_string());
+            return reasons;
+        }
+    };
+
+    if nested_string(receipt, &["command", "command"]) != Some(string(lane, "command")) {
+        reasons.insert("command-envelope-mismatch".to_string());
+    }
+
+    let receipt_guarantees = string_set(receipt, "manifest_guarantee_ids");
+    let lane_guarantees = string_set(lane, "guarantee_ids");
+    if receipt_guarantees.is_empty() || receipt_guarantees.is_disjoint(&lane_guarantees) {
+        reasons.insert("manifest-guarantee-mismatch".to_string());
+    }
+
+    let expected_feature_flags = string_set(row, "expected_feature_flags");
+    let lane_feature_flags = string_set(lane, "feature_flags");
+    if expected_feature_flags != lane_feature_flags {
+        reasons.insert("wrong-feature-set".to_string());
+    }
+
+    let proof_reuse_policy = lane
+        .get("proof_reuse_policy")
+        .unwrap_or_else(|| panic!("{receipt_lane_id}: missing proof_reuse_policy"));
+    let allowed_scopes = string_set(proof_reuse_policy, "allowed_claim_scopes");
+    let non_citeable_scopes = string_set(proof_reuse_policy, "non_citeable_claim_scopes");
+    if durable_non_citeable.contains(claim_scope) || non_citeable_scopes.contains(claim_scope) {
+        reasons.insert("broad-claim-unsupported".to_string());
+    } else if !allowed_scopes.contains(claim_scope) {
+        reasons.insert("claim-scope-not-allowed".to_string());
+    }
+
+    reasons
+}
+
+fn validate_durable_receipt_status_row(
+    row: &Value,
+    manifest: &Value,
+    lanes: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let row_id = string(row, "row_id");
+    let row_lane_id = string(row, "manifest_lane_id");
+    let row_lane = lanes
+        .get(row_lane_id)
+        .ok_or_else(|| format!("{row_id}: unknown row lane {row_lane_id}"))?;
+    if string(row, "rerun_command") != string(row_lane, "command") {
+        return Err(format!(
+            "{row_id}: rerun command must match the row manifest lane command"
+        ));
+    }
+
+    let receipt = durable_receipt_from_row(row);
+    let actual_reasons = classify_durable_receipt_candidate(&receipt, row, manifest, lanes);
+    let expected_reasons = string_set(row, "reason_codes");
+    if actual_reasons != expected_reasons {
+        return Err(format!(
+            "{row_id}: durable receipt reasons drifted: expected {expected_reasons:?}, got {actual_reasons:?}"
+        ));
+    }
+
+    match string(row, "expected_decision") {
+        "accepted" if !actual_reasons.is_empty() => {
+            return Err(format!("{row_id}: accepted row has refusal reasons"));
+        }
+        "refused" if actual_reasons.is_empty() => {
+            return Err(format!("{row_id}: refused row has no refusal reasons"));
+        }
+        "accepted" | "refused" => {}
+        other => return Err(format!("{row_id}: unknown expected_decision {other}")),
+    }
+
+    let expected_status = if actual_reasons.is_empty() {
+        "fresh-rch-pass"
+    } else if actual_reasons.contains("broad-claim-unsupported") {
+        "unsupported"
+    } else if actual_reasons.contains("stale-head") {
+        "stale-evidence"
+    } else {
+        "blocked"
+    };
+    if string(row, "proof_evidence_status") != expected_status {
+        return Err(format!(
+            "{row_id}: proof_evidence_status must be {expected_status}"
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_claim_lane_mapping(
+    entry: &Value,
+    lanes: &BTreeMap<String, Value>,
+    guarantees: &BTreeMap<String, Value>,
+) -> Result<BTreeSet<String>, String> {
+    let claim_id = string(entry, "claim_id");
+    let lane_ids = string_set(entry, "manifest_lane_ids");
+    let guarantee_ids = string_set(entry, "manifest_guarantee_ids");
+    if lane_ids.is_empty() {
+        return Err(format!("{claim_id}: missing lane ids"));
+    }
+    if guarantee_ids.is_empty() {
+        return Err(format!("{claim_id}: missing guarantee ids"));
+    }
+
+    for lane_id in &lane_ids {
+        if !lanes.contains_key(lane_id) {
+            return Err(format!("{claim_id}: unknown lane {lane_id}"));
+        }
+    }
+    for guarantee_id in &guarantee_ids {
+        if !guarantees.contains_key(guarantee_id) {
+            return Err(format!("{claim_id}: unknown guarantee {guarantee_id}"));
+        }
+    }
+
+    for guarantee_id in &guarantee_ids {
+        let guarantee = guarantees
+            .get(guarantee_id)
+            .expect("guarantee existence checked above");
+        let mapped_lanes = string_set(guarantee, "lane_ids");
+        if mapped_lanes.is_disjoint(&lane_ids) {
+            return Err(format!(
+                "{claim_id}: guarantee {guarantee_id} must share at least one listed lane"
+            ));
+        }
+    }
+
+    for lane_id in &lane_ids {
+        let lane = lanes.get(lane_id).expect("lane existence checked above");
+        let lane_guarantees = string_set(lane, "guarantee_ids");
+        if lane_guarantees.is_disjoint(&guarantee_ids) {
+            return Err(format!(
+                "{claim_id}: lane {lane_id} must cover at least one listed guarantee"
+            ));
+        }
+    }
+
+    let expected_commands = proof_commands_for_lanes(&lane_ids, lanes);
+    let snapshot_commands = string_set(entry, "proof_commands");
+    if expected_commands != snapshot_commands {
+        return Err(format!(
+            "{claim_id}: proof commands must match the manifest lane commands"
+        ));
+    }
+
+    Ok(snapshot_commands)
+}
+
+fn validate_status_support(entry: &Value, lanes: &BTreeMap<String, Value>) -> Result<(), String> {
+    let claim_id = string(entry, "claim_id");
+    let status = string(entry, "status");
+    let lane_ids = string_set(entry, "manifest_lane_ids");
+    let lane_kinds = lane_ids
+        .iter()
+        .map(|lane_id| {
+            lanes
+                .get(lane_id)
+                .map(|lane| string(lane, "kind").to_string())
+                .ok_or_else(|| format!("{claim_id}: unknown lane {lane_id}"))
+        })
+        .collect::<Result<BTreeSet<_>, _>>()?;
+
+    match status {
+        "green" => {
+            let frontier_only_kinds = [
+                "compile_frontier",
+                "test_frontier",
+                "lint_frontier",
+                "format_frontier",
+                "documentation_frontier",
+            ];
+            let unsupported_frontier_lanes = lane_ids
+                .iter()
+                .filter_map(|lane_id| {
+                    let lane = lanes.get(lane_id)?;
+                    let kind = string(lane, "kind");
+                    if !frontier_only_kinds.contains(&kind) {
+                        return None;
+                    }
+                    let is_focused_behavioral_contract = kind == "test_frontier"
+                        && lane
+                            .get("focused_behavioral_contract")
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                        && lane
+                            .get("proof_reuse_policy")
+                            .and_then(|policy| policy.get("cache_hits_allowed"))
+                            .and_then(Value::as_bool)
+                            == Some(false);
+                    (!is_focused_behavioral_contract).then_some(lane_id.as_str())
+                })
+                .collect::<BTreeSet<_>>();
+            if !unsupported_frontier_lanes.is_empty() {
+                return Err(format!(
+                    "{claim_id}: frontier lane kinds cannot be represented as green: {lane_kinds:?}; unsupported lanes: {unsupported_frontier_lanes:?}"
+                ));
+            }
+        }
+        "yellow_frontier" => {
+            if !lane_kinds.iter().any(|kind| kind.ends_with("_frontier")) {
+                return Err(format!(
+                    "{claim_id}: yellow_frontier row must include at least one frontier lane"
+                ));
+            }
+        }
+        "yellow_scoped" => {
+            let notes = string(entry, "notes").to_ascii_lowercase();
+            if !(notes.contains("scoped") || notes.contains("quarantine")) {
+                return Err(format!(
+                    "{claim_id}: yellow_scoped row must explain its scope or quarantine"
+                ));
+            }
+        }
+        "red_blocked_external" => {}
+        other => return Err(format!("{claim_id}: unknown status {other}")),
+    }
+
+    Ok(())
+}
+
+fn validate_blocked_frontier_record(
+    blocked: &Value,
+    fixtures: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    let blocked = blocked
+        .as_object()
+        .ok_or_else(|| "red row must have a blocked_frontier object".to_string())?;
+    let fixture_id = blocked
+        .get("fixture_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "blocked fixture_id".to_string())?;
+    let fixture = fixtures
+        .get(fixture_id)
+        .ok_or_else(|| format!("missing frontier fixture {fixture_id}"))?;
+    let expected = fixture
+        .get("expected_record")
+        .ok_or_else(|| format!("{fixture_id}: missing expected_record"))?;
+    let first_failure = expected
+        .get("first_failure")
+        .ok_or_else(|| format!("{fixture_id}: missing expected first_failure"))?;
+    let blocked_failure = blocked
+        .get("first_failure")
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("{fixture_id}: blocked first_failure must be an object"))?;
+
+    for (blocked_key, expected_value) in [
+        ("command", fixture.get("command")),
+        ("decision", expected.get("decision")),
+        ("error_class", expected.get("error_class")),
+        ("summary", expected.get("summary")),
+        (
+            "supplemental_proof_command",
+            fixture.get("supplemental_proof_command"),
+        ),
+    ] {
+        if blocked.get(blocked_key) != expected_value {
+            return Err(format!(
+                "{fixture_id}: blocked_frontier.{blocked_key} no longer matches validation frontier fixture"
+            ));
+        }
+    }
+
+    for key in ["crate_or_surface", "target", "file", "line"] {
+        if blocked_failure.get(key) != first_failure.get(key) {
+            return Err(format!(
+                "{fixture_id}: first_failure.{key} must match validation frontier fixture"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_external_blocker_record(blocked: &Value) -> Result<(), String> {
+    let blocked = blocked
+        .as_object()
+        .ok_or_else(|| "blocked proof evidence row must have a blocker object".to_string())?;
+
+    for key in ["blocker_id", "blocked_at", "reason", "required_followup"] {
+        let value = blocked
+            .get(key)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("blocked proof evidence row must include {key}"))?;
+        if value.trim().is_empty() {
+            return Err(format!("blocked proof evidence row {key} must be nonempty"));
+        }
+    }
+
+    let blocked_at = blocked
+        .get("blocked_at")
+        .and_then(Value::as_str)
+        .expect("blocked_at checked above");
+    if !(blocked_at.contains('T') && blocked_at.ends_with('Z')) {
+        return Err("blocked_at must be an ISO-8601 UTC timestamp".to_string());
+    }
+
+    let followup = blocked
+        .get("required_followup")
+        .and_then(Value::as_str)
+        .expect("required_followup checked above");
+    if !followup.contains("Rerun") {
+        return Err("blocked proof evidence rows must require a rerun follow-up".to_string());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn snapshot_declares_schema_sources_and_required_categories() {
+    let snapshot = json(SNAPSHOT_PATH);
+    assert_eq!(
+        snapshot.get("contract_version").and_then(Value::as_str),
+        Some("proof-status-snapshot-v1")
+    );
+    assert_eq!(
+        snapshot.get("bead_id").and_then(Value::as_str),
+        Some("asupersync-aj7lx3.5")
+    );
+
+    let source = snapshot
+        .get("source_of_truth")
+        .expect("source_of_truth object");
+    assert_eq!(source["snapshot"].as_str(), Some(SNAPSHOT_PATH));
+    assert_eq!(source["proof_lane_manifest"].as_str(), Some(MANIFEST_PATH));
+    assert_eq!(
+        source["validation_frontier_ledger"].as_str(),
+        Some(FRONTIER_PATH)
+    );
+    assert_eq!(source["readme"].as_str(), Some(README_PATH));
+    assert_eq!(source["agent_instructions"].as_str(), Some(AGENTS_PATH));
+
+    let required = string_set(&snapshot, "required_claim_categories");
+    let actual = array(&snapshot, "claim_categories")
+        .iter()
+        .map(|entry| string(entry, "category").to_string())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        required, actual,
+        "required claim categories must exactly match snapshot entries"
+    );
+    assert_eq!(
+        actual.len(),
+        37,
+        "snapshot must cover the requested claim list"
+    );
+}
+
+#[test]
+fn statuses_are_known_and_include_live_green_and_frontier_rows() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let allowed = array(&snapshot, "status_catalog")
+        .iter()
+        .map(|entry| string(entry, "status").to_string())
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "green",
+        "yellow_scoped",
+        "yellow_frontier",
+        "red_blocked_external",
+    ] {
+        assert!(allowed.contains(expected), "missing status {expected}");
+    }
+
+    let mut seen = BTreeSet::new();
+    for entry in array(&snapshot, "claim_categories") {
+        let status = string(entry, "status");
+        assert!(allowed.contains(status), "unknown status {status}");
+        seen.insert(status.to_string());
+    }
+    for required in ["green", "yellow_frontier"] {
+        assert!(
+            seen.contains(required),
+            "dashboard must contain at least one {required} row"
+        );
+    }
+
+    let evidence_allowed = array(&snapshot, "proof_evidence_status_catalog")
+        .iter()
+        .map(|entry| string(entry, "status").to_string())
+        .collect::<BTreeSet<_>>();
+    for expected in [
+        "fresh-rch-pass",
+        "approved-cache-hit",
+        "rerun-required",
+        "stale-evidence",
+        "blocked",
+        "no-win",
+        "unsupported",
+    ] {
+        assert!(
+            evidence_allowed.contains(expected),
+            "missing proof evidence status {expected}"
+        );
+    }
+
+    for entry in array(&snapshot, "claim_categories") {
+        let proof_status = string(entry, "proof_evidence_status");
+        assert!(
+            evidence_allowed.contains(proof_status),
+            "{}: unknown proof evidence status {proof_status}",
+            string(entry, "claim_id")
+        );
+    }
+}
+
+#[test]
+fn fresh_claim_evidence_has_a_bounded_structured_date() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let policy = snapshot
+        .get("freshness_policy")
+        .expect("snapshot must declare freshness_policy");
+    assert_eq!(string(policy, "scope"), "claim_categories");
+    assert_eq!(
+        string(policy, "created_date_role"),
+        "contract-inception-not-dashboard-refresh"
+    );
+    assert_eq!(
+        string(policy, "over_age_behavior"),
+        "fail-contract-until-rerun-or-demoted"
+    );
+    assert!(!bool_field(policy, "mapped_green_is_fresh_proof"));
+    assert!(!bool_field(policy, "automatic_status_promotion"));
+
+    let fresh_status = string(policy, "fresh_status");
+    let evidence_date_field = string(policy, "evidence_date_field");
+    let maximum_age_days = u64_field(policy, "maximum_age_days");
+    assert_eq!(maximum_age_days, 30);
+    let as_of_epoch_day = freshness_as_of_epoch_day(policy)
+        .unwrap_or_else(|error| panic!("resolve freshness as-of date: {error}"));
+
+    // A truthful snapshot may have no current passes. Validate every claimed
+    // pass without requiring an operator to preserve an expired green row.
+    for row in array(&snapshot, "claim_categories") {
+        validate_claim_freshness(
+            row,
+            fresh_status,
+            evidence_date_field,
+            maximum_age_days,
+            as_of_epoch_day,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn freshness_checker_rejects_missing_invalid_expired_and_future_dates() {
+    let as_of = parse_iso_date_epoch_day("2026-08-31").expect("fixed as-of date");
+    let fresh_row = |evidence_date: Option<&str>| {
+        let mut row = serde_json::json!({
+            "claim_id": "freshness-fixture",
+            "proof_evidence_status": "fresh-rch-pass"
+        });
+        if let Some(date) = evidence_date {
+            row["evidence_date"] = Value::String(date.to_string());
+        }
+        row
+    };
+    let validate =
+        |row: &Value| validate_claim_freshness(row, "fresh-rch-pass", "evidence_date", 30, as_of);
+
+    validate(&fresh_row(Some("2026-08-01"))).expect("30-day boundary must remain fresh");
+    assert!(validate(&fresh_row(None)).unwrap_err().contains("requires"));
+    assert!(
+        validate(&fresh_row(Some("2026-02-29")))
+            .unwrap_err()
+            .contains("invalid ISO date")
+    );
+    assert!(
+        validate(&fresh_row(Some("2026-07-31")))
+            .unwrap_err()
+            .contains("31 days old")
+    );
+    assert!(
+        validate(&fresh_row(Some("2026-09-01")))
+            .unwrap_err()
+            .contains("future")
+    );
+}
+
+#[test]
+fn nightly_workflow_runs_the_bounded_freshness_check_without_overclaiming_proof() {
+    let workflow = read_repo_file(NIGHTLY_WORKFLOW_PATH);
+    assert!(workflow.contains("schedule:"));
+    assert!(workflow.contains("Reject expired proof-status evidence"));
+    assert!(workflow.contains(
+        "cargo test -p asupersync --test proof_status_snapshot_contract fresh_claim_evidence_has_a_bounded_structured_date -- --exact --nocapture"
+    ));
+    assert!(
+        workflow.contains("This is a local cadence/drift check, not remote-required RCH proof.")
+    );
+}
+
+#[test]
+fn native_cancellation_receipt_is_attributed_only_to_its_focused_claim() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|row| (string(row, "claim_id"), row))
+        .collect::<BTreeMap<_, _>>();
+
+    let native = by_claim
+        .get("native-parked-task-cancellation-contract")
+        .expect("native cancellation claim row");
+    assert_eq!(string(native, "status"), "green");
+    // This test preserves historical attribution, not perpetual freshness.
+    // Status catalog and dated freshness are checked separately above.
+    assert!(
+        string(native, "notes").contains("31 passed")
+            && string(native, "notes").contains("literal spawned guard-holder")
+            && string(native, "notes").contains("29972867244359836")
+            && string(native, "notes").contains("ovh-a")
+            && string(native, "notes").contains("95850 ms")
+            && string(native, "notes").contains("101155 ms total")
+            && string(native, "notes").contains("does not prove the broader"),
+        "native cancellation row must retain the exact focused RCH receipt and no-claim boundary"
+    );
+
+    let broad = by_claim
+        .get("cancellation-oracle-suite")
+        .expect("broad cancellation/oracle claim row");
+    assert_eq!(string(broad, "status"), "yellow_frontier");
+    assert_eq!(string(broad, "proof_evidence_status"), "rerun-required");
+}
+
+#[test]
+fn expired_native_receipt_can_be_demoted_without_losing_history() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let native = array(&snapshot, "claim_categories")
+        .iter()
+        .find(|row| string(row, "claim_id") == "native-parked-task-cancellation-contract")
+        .expect("native cancellation claim row");
+    let as_of = parse_iso_date_epoch_day("2026-09-15").expect("fixed regression date");
+    let mut historical = native.clone();
+    // Pin the old receipt's date independently of future dashboard refreshes.
+    historical["evidence_date"] = Value::String("2026-08-12".to_string());
+    historical["proof_evidence_status"] = Value::String("fresh-rch-pass".to_string());
+    assert!(
+        validate_claim_freshness(&historical, "fresh-rch-pass", "evidence_date", 30, as_of)
+            .unwrap_err()
+            .contains("34 days old")
+    );
+
+    for status in ["rerun-required", "stale-evidence", "blocked"] {
+        let mut demoted = historical.clone();
+        demoted["proof_evidence_status"] = Value::String(status.to_string());
+        validate_claim_freshness(&demoted, "fresh-rch-pass", "evidence_date", 30, as_of)
+            .expect("historical evidence may remain after truthful demotion");
+        assert_eq!(demoted["evidence_date"], historical["evidence_date"]);
+        assert_eq!(demoted["notes"], historical["notes"]);
+        assert_eq!(demoted["proof_commands"], historical["proof_commands"]);
+    }
+}
+
+#[test]
+fn every_claim_maps_to_manifest_lanes_guarantees_and_commands() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+
+    for entry in array(&snapshot, "claim_categories") {
+        let claim_id = string(entry, "claim_id");
+        let snapshot_commands = validate_claim_lane_mapping(entry, &lanes, &guarantees)
+            .unwrap_or_else(|error| panic!("{error}"));
+        for command in &snapshot_commands {
+            assert!(
+                command.starts_with("RCH_REQUIRE_REMOTE=1 rch exec -- "),
+                "{claim_id}: proof command must require remote rch execution: {command}"
+            );
+            if command.contains(" cargo ") {
+                assert!(
+                    command.contains("CARGO_TARGET_DIR="),
+                    "{claim_id}: cargo proof command must isolate target output: {command}"
+                );
+                assert!(
+                    !command.contains("rch exec -- cargo"),
+                    "{claim_id}: cargo proof command must not use bare rch cargo routing: {command}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn status_rows_do_not_overstate_frontier_or_scoped_claims() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+
+    for entry in array(&snapshot, "claim_categories") {
+        validate_status_support(entry, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn fourth_wave_status_rows_preserve_child_lane_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let expected_lanes = BTreeSet::from([
+        "fourth-wave-governor-schema-contract".to_string(),
+        "fourth-wave-governor-policy-engine".to_string(),
+        "fourth-wave-swarm-replay-corpus".to_string(),
+        "fourth-wave-runtime-bridge-contract".to_string(),
+        "fourth-wave-benchmark-contract".to_string(),
+        "fourth-wave-governor-signoff-runbook".to_string(),
+        "fourth-wave-governor-final-signoff".to_string(),
+    ]);
+
+    for claim_id in [
+        "fourth-wave-governor-schema-proof",
+        "fourth-wave-governor-policy-engine-proof",
+        "fourth-wave-swarm-replay-corpus",
+        "fourth-wave-runtime-bridge",
+        "fourth-wave-benchmark-no-claim-contract",
+        "fourth-wave-final-aggregated-signoff",
+    ] {
+        let entry = by_claim
+            .get(claim_id)
+            .unwrap_or_else(|| panic!("missing fourth-wave claim {claim_id}"));
+        validate_claim_lane_mapping(entry, &lanes, &guarantees)
+            .unwrap_or_else(|error| panic!("{error}"));
+        let proof_evidence_status = string(entry, "proof_evidence_status");
+        assert!(
+            ["blocked", "rerun-required"].contains(&proof_evidence_status),
+            "{claim_id}: fourth-wave status rows require a rerun or explicit blocker before proof citation"
+        );
+        if proof_evidence_status == "blocked" {
+            validate_external_blocker_record(
+                entry
+                    .get("blocked_frontier")
+                    .unwrap_or_else(|| panic!("{claim_id}: missing blocked_frontier")),
+            )
+            .unwrap_or_else(|error| panic!("{claim_id}: {error}"));
+        }
+        assert!(
+            string(entry, "notes").contains("does not prove")
+                || string(entry, "notes").contains("no-claim"),
+            "{claim_id}: notes must preserve non-claim language"
+        );
+    }
+
+    let aggregate = by_claim
+        .get("fourth-wave-final-aggregated-signoff")
+        .expect("aggregate row");
+    assert_eq!(string(aggregate, "status"), "yellow_scoped");
+    assert_eq!(string_set(aggregate, "manifest_lane_ids"), expected_lanes);
+    assert!(
+        string(aggregate, "notes").contains("operator checklist")
+            && string(aggregate, "notes").contains("live performance improvement")
+            && string(aggregate, "notes").contains("production-on-by-default"),
+        "aggregate row must stay scoped and non-performance"
+    );
+}
+
+#[test]
+fn browser_ga_status_row_preserves_js_ts_scope_and_no_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let row = by_claim
+        .get("browser-ga-final-signoff")
+        .expect("browser GA final signoff claim row");
+
+    validate_claim_lane_mapping(row, &lanes, &guarantees).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "status"), "yellow_scoped");
+    assert_eq!(string(row, "proof_evidence_status"), "rerun-required");
+    assert_eq!(
+        string_set(row, "manifest_lane_ids"),
+        BTreeSet::from(["browser-ga-final-signoff".to_string()])
+    );
+    assert_eq!(
+        string_set(row, "manifest_guarantee_ids"),
+        BTreeSet::from(["browser-ga-final-signoff".to_string()])
+    );
+    let notes = string(row, "notes");
+    for boundary in [
+        "scoped JS/TS package GA",
+        "does not execute npm publish",
+        "broad workspace health",
+        "Rust browser API to stable",
+        "service-worker direct runtime",
+        "shared-worker direct runtime",
+    ] {
+        assert!(
+            notes.contains(boundary),
+            "browser GA row must preserve boundary {boundary:?}"
+        );
+    }
+}
+
+#[test]
+fn stale_progress_receipt_status_row_preserves_no_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let rows = array(&snapshot, "claim_categories");
+    let by_claim = rows
+        .iter()
+        .map(|entry| (string(entry, "claim_id").to_string(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let row = by_claim
+        .get("rch-stale-progress-receipts")
+        .expect("stale progress receipt claim row");
+
+    validate_claim_lane_mapping(row, &lanes, &guarantees).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "status"), "green");
+    assert_eq!(string(row, "proof_evidence_status"), "rerun-required");
+    assert_eq!(
+        string_set(row, "manifest_lane_ids"),
+        BTreeSet::from(["rch-stale-progress-receipt-contract".to_string()])
+    );
+    let notes = string(row, "notes");
+    for non_claim in [
+        "does not prove source correctness",
+        "release readiness",
+        "live RCH fleet availability",
+        "permission to cancel peer-owned builds",
+    ] {
+        assert!(
+            notes.contains(non_claim),
+            "stale progress receipt row must preserve non-claim {non_claim:?}"
+        );
+    }
+}
+
+#[test]
+fn proof_reuse_status_rows_preserve_cache_hit_and_rerun_distinctions() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let rows = array(&snapshot, "proof_reuse_status_rows");
+    let statuses = rows
+        .iter()
+        .map(|row| string(row, "proof_evidence_status").to_string())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        statuses,
+        BTreeSet::from([
+            "approved-cache-hit".to_string(),
+            "blocked".to_string(),
+            "fresh-rch-pass".to_string(),
+            "no-win".to_string(),
+            "rerun-required".to_string(),
+            "stale-evidence".to_string(),
+            "unsupported".to_string(),
+        ]),
+        "proof reuse status rows must keep every operator outcome distinct"
+    );
+
+    for row in rows {
+        validate_proof_reuse_status_row(row, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn rch_topology_preflight_status_row_preserves_blocked_infrastructure_receipt() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let frontier = json(FRONTIER_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let fixtures = frontier_fixture_map(&frontier);
+    let row = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["row_id"].as_str() == Some("rch-topology-preflight-blocked"))
+        .expect("topology preflight blocked row");
+
+    validate_proof_reuse_status_row(row, &lanes).unwrap_or_else(|error| panic!("{error}"));
+    assert_eq!(string(row, "proof_evidence_status"), "blocked");
+    assert_eq!(
+        string(row, "manifest_lane_id"),
+        "rch-topology-preflight-canary"
+    );
+    assert_eq!(
+        string_set(row, "reason_codes"),
+        BTreeSet::from(["blocked_infrastructure:rch_topology_preflight".to_string()])
+    );
+    validate_blocked_frontier_record(
+        row.get("blocked_frontier")
+            .expect("topology preflight row must carry exact blocker fixture"),
+        &fixtures,
+    )
+    .unwrap_or_else(|error| panic!("{error}"));
+    let notes = string(row, "notes");
+    for required in [
+        "before Cargo starts",
+        "not a source failure",
+        "local or direct-SSH Cargo runs are not valid proof substitutes",
+    ] {
+        assert!(
+            notes.contains(required),
+            "topology preflight row must preserve boundary note {required:?}"
+        );
+    }
+}
+
+#[test]
+fn durable_rch_receipt_status_rows_preserve_manifest_and_claim_boundaries() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let rows = array(&snapshot, "durable_receipt_status_rows");
+    let row_ids = rows
+        .iter()
+        .map(|row| string(row, "row_id").to_string())
+        .collect::<BTreeSet<_>>();
+
+    for required in [
+        "durable-receipt-terminal-pass-candidate",
+        "durable-receipt-missing-manifest-lane",
+        "durable-receipt-stale-head",
+        "durable-receipt-wrong-command-envelope",
+        "durable-receipt-wrong-feature-set",
+        "durable-receipt-local-fallback-refused",
+        "durable-receipt-unsupported-broad-claim",
+    ] {
+        assert!(
+            row_ids.contains(required),
+            "durable receipt status rows must include {required}"
+        );
+    }
+
+    for row in rows {
+        validate_durable_receipt_status_row(row, &manifest, &lanes)
+            .unwrap_or_else(|error| panic!("{error}"));
+    }
+}
+
+#[test]
+fn synthetic_cache_hit_overclaims_are_rejected() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let reusable = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["row_id"].as_str() == Some("focused-contract-approved-cache-hit"))
+        .expect("approved cache hit row");
+
+    let mut broad_cache_hit = reusable.clone();
+    broad_cache_hit["claim_scope"] = Value::String("workspace-health".to_string());
+    let error = validate_proof_reuse_status_row(&broad_cache_hit, &lanes).unwrap_err();
+    assert!(
+        error.contains("not allowed") || error.contains("non-citeable"),
+        "unexpected broad-cache-hit error: {error}"
+    );
+
+    let mut dirty_cache_hit = reusable.clone();
+    dirty_cache_hit["dirty_frontier_status"] = Value::String("dirty-overlap".to_string());
+    dirty_cache_hit["reason_codes"] = serde_json::json!(["dirty-frontier-overlap"]);
+    let error = validate_proof_reuse_status_row(&dirty_cache_hit, &lanes).unwrap_err();
+    assert!(
+        error.contains("clean and reason-free"),
+        "unexpected dirty-cache-hit error: {error}"
+    );
+
+    let mut stale_without_reason = array(&snapshot, "proof_reuse_status_rows")
+        .iter()
+        .find(|row| row["proof_evidence_status"].as_str() == Some("stale-evidence"))
+        .expect("stale row")
+        .clone();
+    stale_without_reason["reason_codes"] = serde_json::json!([]);
+    let error = validate_proof_reuse_status_row(&stale_without_reason, &lanes).unwrap_err();
+    assert!(
+        error.contains("stale-head"),
+        "unexpected stale-cache-hit error: {error}"
+    );
+}
+
+#[test]
+fn doc_claim_markers_are_present_in_readme_and_agents() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let docs = BTreeMap::from([
+        (README_PATH, read_repo_file(README_PATH)),
+        (AGENTS_PATH, read_repo_file(AGENTS_PATH)),
+    ]);
+    let required_docs = docs.keys().copied().collect::<BTreeSet<_>>();
+
+    for entry in array(&snapshot, "claim_categories") {
+        let claim_id = string(entry, "claim_id");
+        let markers = entry
+            .get("doc_claim_markers")
+            .and_then(Value::as_object)
+            .unwrap_or_else(|| panic!("{claim_id}: doc_claim_markers must be an object"));
+        let marker_docs = markers.keys().map(String::as_str).collect::<BTreeSet<_>>();
+        assert_eq!(
+            marker_docs, required_docs,
+            "{claim_id}: each proof claim must carry README and AGENTS markers"
+        );
+        for (path, marker_values) in markers {
+            let doc = docs
+                .get(path.as_str())
+                .unwrap_or_else(|| panic!("{claim_id}: unexpected doc path {path}"));
+            let marker_array = marker_values
+                .as_array()
+                .unwrap_or_else(|| panic!("{claim_id}: markers for {path} must be an array"));
+            assert!(
+                !marker_array.is_empty(),
+                "{claim_id}: markers for {path} must be nonempty"
+            );
+            for marker in marker_array {
+                let marker = marker
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{claim_id}: marker must be a string"));
+                assert!(
+                    doc.contains(marker),
+                    "{claim_id}: {path} must contain marker {marker:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn red_rows_carry_exact_validation_frontier_records() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let frontier = json(FRONTIER_PATH);
+    let fixtures = frontier_fixture_map(&frontier);
+
+    for entry in array(&snapshot, "claim_categories") {
+        let status = string(entry, "status");
+        let proof_evidence_status = string(entry, "proof_evidence_status");
+        let blocked = entry.get("blocked_frontier").expect("blocked_frontier");
+        if status == "red_blocked_external" {
+            validate_blocked_frontier_record(blocked, &fixtures)
+                .unwrap_or_else(|error| panic!("{error}"));
+        } else if proof_evidence_status == "blocked" {
+            validate_external_blocker_record(blocked).unwrap_or_else(|error| panic!("{error}"));
+        } else {
+            assert!(
+                blocked.is_null(),
+                "non-red rows must not attach blocked frontier records"
+            );
+        }
+    }
+}
+
+#[test]
+fn synthetic_missing_lane_and_unsupported_green_claims_are_rejected() {
+    let manifest = json(MANIFEST_PATH);
+    let lanes = manifest_lanes(&manifest);
+    let guarantees = manifest_guarantees(&manifest);
+    let missing_lane = serde_json::json!({
+        "claim_id": "synthetic-missing-lane",
+        "status": "yellow_frontier",
+        "manifest_guarantee_ids": ["all-target-compile-frontier"],
+        "manifest_lane_ids": ["not-a-real-proof-lane"],
+        "proof_commands": [],
+        "blocked_frontier": null,
+        "notes": "frontier fixture"
+    });
+    let missing_lane_error =
+        validate_claim_lane_mapping(&missing_lane, &lanes, &guarantees).unwrap_err();
+    assert!(
+        missing_lane_error.contains("unknown lane not-a-real-proof-lane"),
+        "unexpected missing-lane error: {missing_lane_error}"
+    );
+
+    let unsupported_green = serde_json::json!({
+        "claim_id": "synthetic-frontier-green",
+        "status": "green",
+        "manifest_lane_ids": ["all-targets-check"],
+        "notes": "would overstate broad compile-frontier evidence"
+    });
+    let status_error = validate_status_support(&unsupported_green, &lanes).unwrap_err();
+    assert!(
+        status_error.contains("frontier lane kinds cannot be represented as green"),
+        "unexpected unsupported-green error: {status_error}"
+    );
+}
+
+#[test]
+fn synthetic_stale_blocker_rows_are_rejected() {
+    let frontier = json(FRONTIER_PATH);
+    let fixtures = frontier_fixture_map(&frontier);
+    let fixture = fixtures
+        .get("VF-RUSTC-COMPILE-STOP")
+        .expect("fixture exists");
+    let expected = fixture
+        .get("expected_record")
+        .expect("fixture expected_record");
+    let stale_blocker = serde_json::json!({
+        "fixture_id": "VF-RUSTC-COMPILE-STOP",
+        "command": fixture["command"].clone(),
+        "decision": expected["decision"].clone(),
+        "error_class": expected["error_class"].clone(),
+        "summary": "stale summary that no longer matches the validation frontier fixture",
+        "supplemental_proof_command": fixture["supplemental_proof_command"].clone(),
+        "first_failure": expected["first_failure"].clone()
+    });
+
+    let error = validate_blocked_frontier_record(&stale_blocker, &fixtures).unwrap_err();
+    assert!(
+        error.contains("blocked_frontier.summary no longer matches"),
+        "unexpected stale-blocker error: {error}"
+    );
+}
+
+#[test]
+fn documentation_points_to_snapshot_and_verifier() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let docs = snapshot
+        .get("documentation_contract")
+        .expect("documentation_contract");
+    let marker = string(docs, "required_marker");
+    let verifier = string(docs, "verifier_marker");
+
+    for path in string_vec(docs, "docs_must_reference_snapshot") {
+        let text = read_repo_file(&path);
+        assert!(text.contains(marker), "{path} must reference {marker}");
+        assert!(text.contains(verifier), "{path} must reference {verifier}");
+    }
+}
+
+#[test]
+fn null_and_string_field_helpers_cover_blocked_shape() {
+    let snapshot = json(SNAPSHOT_PATH);
+    let rows = array(&snapshot, "claim_categories");
+    let non_red = rows
+        .iter()
+        .find(|entry| string(entry, "status") != "red_blocked_external")
+        .expect("at least one non-red row");
+    assert!(optional_string(non_red, "missing_optional").is_none());
+}

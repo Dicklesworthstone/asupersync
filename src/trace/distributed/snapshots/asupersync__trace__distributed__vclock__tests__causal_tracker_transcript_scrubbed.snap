@@ -1,0 +1,60 @@
+---
+source: src/trace/distributed/vclock.rs
+expression: |-
+  scrub_vclock_output(json!({
+      "steps": [
+          {
+              "step": "a_local",
+              "node": node_a,
+              "clock": a_local.to_string(),
+          },
+          {
+              "step": "a_send",
+              "node": tracker_a.node().as_str(),
+              "clock": a_send.to_string(),
+              "order_vs_local": format!("{:?}", a_send.causal_order(&a_local)),
+          },
+          {
+              "step": "b_receive",
+              "node": node_b,
+              "clock": b_after_receive.to_string(),
+              "order_vs_send": format!("{:?}", b_after_receive.causal_order(&a_send)),
+          },
+          {
+              "step": "b_local",
+              "node": tracker_b.node().as_str(),
+              "clock": b_local.to_string(),
+              "send_happens_before": a_send.happens_before(&b_local),
+              "receive_happens_before": b_after_receive.happens_before(&b_local),
+          }
+      ]
+  }))
+---
+{
+  "steps": [
+    {
+      "clock": "[[NODE_A]=1]",
+      "node": "[NODE_A]",
+      "step": "a_local"
+    },
+    {
+      "clock": "[[NODE_A]=2]",
+      "node": "[NODE_A]",
+      "order_vs_local": "After",
+      "step": "a_send"
+    },
+    {
+      "clock": "[[NODE_A]=2, [NODE_B]=1]",
+      "node": "[NODE_B]",
+      "order_vs_send": "After",
+      "step": "b_receive"
+    },
+    {
+      "clock": "[[NODE_A]=2, [NODE_B]=2]",
+      "node": "[NODE_B]",
+      "receive_happens_before": true,
+      "send_happens_before": true,
+      "step": "b_local"
+    }
+  ]
+}

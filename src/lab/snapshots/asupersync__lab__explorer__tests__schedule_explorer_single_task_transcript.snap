@@ -1,0 +1,73 @@
+---
+source: src/lab/explorer.rs
+assertion_line: 1862
+expression: transcript
+---
+{
+  "certificate_divergences": [],
+  "coverage": {
+    "class_run_counts": {
+      "[FINGERPRINT_0]": 5
+    },
+    "equivalence_classes": 1,
+    "new_class_discoveries": 1,
+    "novelty_histogram": {
+      "0": 4,
+      "1": 1
+    },
+    "saturation": {
+      "existing_class_hits": 4,
+      "runs_since_last_new_class": 4,
+      "saturated": false,
+      "window": 10
+    },
+    "total_runs": 5
+  },
+  "runs": [
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": true,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": false,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": false,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": false,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    },
+    {
+      "certificate_hash": "[CERT_HASH]",
+      "fingerprint": "[FINGERPRINT]",
+      "is_new_class": false,
+      "seed": "[SEED]",
+      "steps": "[STEPS]",
+      "violation_count": 0
+    }
+  ],
+  "top_unexplored": [],
+  "total_runs": 5,
+  "unique_classes": 1,
+  "violation_seeds": [],
+  "violations": []
+}

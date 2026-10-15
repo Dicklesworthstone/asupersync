@@ -1,0 +1,16 @@
+{
+  "name": "asupersync-vite-vanilla-consumer-fixture",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "check:bundle": "node ./scripts/check-bundle.mjs"
+  },
+  "dependencies": {
+    "@asupersync/browser": "file:../packages/browser"
+  },
+  "devDependencies": {
+    "vite": "^7.3.1"
+  }
+}

@@ -1,0 +1,148 @@
+name: Tokio Parity Dashboard Drift Gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".beads/issues.jsonl"
+      - "docs/tokio_ecosystem_capability_inventory.md"
+      - "docs/tokio_parity_dashboard.json"
+      - "docs/tokio_parity_dashboard.md"
+      - "scripts/generate_tokio_parity_dashboard.py"
+      - "tests/tokio_parity_dashboard.rs"
+      - ".github/workflows/tokio_parity_dashboard_drift.yml"
+  push:
+    branches: [main]
+    paths:
+      - ".beads/issues.jsonl"
+      - "docs/tokio_ecosystem_capability_inventory.md"
+      - "docs/tokio_parity_dashboard.json"
+      - "docs/tokio_parity_dashboard.md"
+      - "scripts/generate_tokio_parity_dashboard.py"
+      - "tests/tokio_parity_dashboard.rs"
+      - ".github/workflows/tokio_parity_dashboard_drift.yml"
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+# Newest pending run per ref wins; in-progress runs on `main` finish (see ci.yml).
+concurrency:
+  group: tokio-parity-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Keep in sync with rust-toolchain.toml (issue #53: CI must exercise the
+  # same pinned nightly that local/rch/downstream builds resolve).
+  RUST_TOOLCHAIN: nightly-2026-07-05
+  RCH_BIN: ./scripts/rch_ci_fallback.sh
+
+jobs:
+  parity-dashboard-drift:
+    name: Parity Dashboard Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # upstream branch snapshot 2026-07-16
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Regenerate dashboard artifacts
+        run: |
+          generated_at="$(python3 - <<'PY'
+          import json
+
+          with open("docs/tokio_parity_dashboard.json", "r", encoding="utf-8") as handle:
+              print(json.load(handle)["generated_at"])
+          PY
+          )"
+          python3 scripts/generate_tokio_parity_dashboard.py --generated-at "$generated_at"
+
+      - name: Hard-fail if dashboard artifacts drift
+        run: |
+          git diff --exit-code -- docs/tokio_parity_dashboard.json docs/tokio_parity_dashboard.md
+
+      - name: Enforce hard-fail drift policy
+        run: |
+          python3 - <<'PY'
+          import json
+          import sys
+
+          with open("docs/tokio_parity_dashboard.json", "r", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          failures = []
+          for row in payload.get("tracks", []):
+              track = row.get("track", "<unknown>")
+              root_status = row.get("root_status")
+              evidence_ratio = row.get("evidence", {}).get("completeness_ratio", 0.0)
+              unresolved = row.get("unresolved_blocker_count", 0)
+              children_total = row.get("children_total", 0)
+              children_closed = row.get("children_closed", 0)
+
+              if root_status == "closed" and evidence_ratio < 1.0:
+                  failures.append(f"{track}: closed_with_missing_evidence")
+              if root_status == "closed" and unresolved > 0:
+                  failures.append(f"{track}: closed_with_unresolved_blockers")
+              if root_status == "closed" and children_closed < children_total:
+                  failures.append(f"{track}: closed_with_incomplete_children")
+
+          for chain in payload.get("blocker_chains", []):
+              if chain.get("cycle_detected"):
+                  failures.append(
+                      f"{chain.get('issue_id', '<unknown>')}: dependency_cycle_detected"
+                  )
+
+          if failures:
+              print("Hard-fail drift policy violations:")
+              for item in failures:
+                  print(f"- {item}")
+              routing = payload.get("drift_routing", {})
+              alerts = routing.get("alerts", [])
+              if alerts:
+                  print("Suggested drift routing actions:")
+                  for alert in alerts:
+                      actions = alert.get("bead_actions", {})
+                      agent_mail = alert.get("agent_mail", {})
+                      print(
+                          "- {condition} :: {issues}".format(
+                              condition=alert.get("condition", "<unknown>"),
+                              issues=", ".join(alert.get("affected_issue_ids", [])),
+                          )
+                      )
+                      print(
+                          "  status_flag_command: {cmd}".format(
+                              cmd=actions.get("status_flag_command", "<missing>")
+                          )
+                      )
+                      print(
+                          "  follow_up_template_command: {cmd}".format(
+                              cmd=actions.get("follow_up_template_command", "<missing>")
+                          )
+                      )
+                      print(
+                          "  agent_mail_thread: {thread}".format(
+                              thread=agent_mail.get("thread_id", "<missing>")
+                          )
+                      )
+              sys.exit(1)
+
+          print("Hard-fail drift policy: PASS")
+          PY
+
+      - name: Contract test
+        run: |
+          "$RCH_BIN" exec -- env CARGO_TARGET_DIR="${TMPDIR:-/tmp}/rch_target_tokio_parity_dashboard_docs" cargo test --test tokio_parity_dashboard -- --nocapture
+
+      - name: Upload parity dashboard artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tokio-parity-dashboard
+          path: |
+            docs/tokio_parity_dashboard.json
+            docs/tokio_parity_dashboard.md
+          retention-days: 30

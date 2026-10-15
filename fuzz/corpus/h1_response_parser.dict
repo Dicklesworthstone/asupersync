@@ -1,0 +1,57 @@
+# HTTP response status lines
+"HTTP/1.1 200 OK"
+"HTTP/1.1 404 Not Found"
+"HTTP/1.1 500 Internal Server Error"
+"HTTP/1.0 200 OK"
+"HTTP/2.0 200 OK"
+
+# HTTP header names
+"Content-Length:"
+"Transfer-Encoding:"
+"Content-Encoding:"
+"Content-Type:"
+"Cache-Control:"
+"Set-Cookie:"
+"Location:"
+"Server:"
+"Date:"
+"Last-Modified:"
+"ETag:"
+"X-Trailer:"
+"Connection:"
+
+# HTTP header values
+"chunked"
+"gzip"
+"deflate"
+"br"
+"text/html"
+"application/json"
+"text/plain"
+"close"
+"keep-alive"
+
+# Line endings
+"\r\n"
+"\n"
+"\r"
+"\r\n\r\n"
+
+# Chunk syntax
+"0\r\n\r\n"
+"5\r\n"
+"a\r\n"
+"ff\r\n"
+
+# Common numbers
+"0"
+"5"
+"10"
+"100"
+"1024"
+
+# Common strings
+"hello"
+"world"
+"test"
+""

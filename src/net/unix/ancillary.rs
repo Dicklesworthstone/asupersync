@@ -1,0 +1,374 @@
+//! Unix socket ancillary data for file descriptor passing.
+//!
+//! This module is implemented in terms of `nix::sys::socket::{sendmsg, recvmsg}` so the
+//! rest of the crate does not need to use `unsafe` for control-message plumbing.
+//!
+//! # Notes
+//!
+//! - This API is intentionally small: Asupersync currently exposes `SCM_RIGHTS` for FD passing.
+//! - When receiving, the ancillary buffer capacity determines how many control messages can be
+//!   captured. If it is too small, truncation is reported via [`SocketAncillary::is_truncated`].
+
+use smallvec::SmallVec;
+use std::os::unix::io::RawFd;
+
+/// Buffer and bookkeeping for Unix socket ancillary data.
+///
+/// This type is used for both sending and receiving `SCM_RIGHTS` messages.
+/// For receiving, it owns a `Vec<u8>` that is passed to `recvmsg`.
+#[derive(Debug, Default)]
+pub struct SocketAncillary {
+    /// Capacity-only buffer used by `recvmsg`. Length is always kept at 0.
+    recv_buf: Vec<u8>,
+    /// File descriptors queued for sending.
+    send_fds: SmallVec<[RawFd; 8]>,
+    /// File descriptors received from the last `recvmsg`.
+    recv_fds: SmallVec<[RawFd; 8]>,
+    truncated: bool,
+}
+
+impl SocketAncillary {
+    /// Create a new ancillary container with a given receive-buffer capacity (bytes).
+    ///
+    /// For a few file descriptors, a capacity like 128 bytes is typically sufficient.
+    #[must_use]
+    pub fn new(recv_capacity: usize) -> Self {
+        Self {
+            recv_buf: Vec::with_capacity(recv_capacity),
+            send_fds: SmallVec::new(),
+            recv_fds: SmallVec::new(),
+            truncated: false,
+        }
+    }
+
+    /// Returns the receive-buffer capacity (bytes).
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.recv_buf.capacity()
+    }
+
+    /// Returns `true` if no send fds are queued and no received fds are stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.send_fds.is_empty() && self.recv_fds.is_empty()
+    }
+
+    /// Returns `true` if the last receive indicated control-message truncation.
+    #[must_use]
+    pub fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    /// Clears all queued and received ancillary state.
+    pub fn clear(&mut self) {
+        self.send_fds.clear();
+        self.recv_fds.clear();
+        self.truncated = false;
+        // Keep capacity; ensure length is 0.
+        self.recv_buf.clear();
+    }
+
+    /// Adds file descriptors to be sent via `SCM_RIGHTS`.
+    ///
+    /// Returns `true` (there is no fixed buffer limit on the send side; `sendmsg` builds the
+    /// control-message buffer internally).
+    pub fn add_fds(&mut self, fds: &[RawFd]) -> bool {
+        self.send_fds.extend_from_slice(fds);
+        true
+    }
+
+    /// Returns an iterator over received ancillary messages.
+    #[must_use]
+    pub fn messages(&self) -> AncillaryMessages<'_> {
+        AncillaryMessages {
+            yielded: false,
+            recv_fds: &self.recv_fds,
+        }
+    }
+
+    pub(crate) fn send_fds(&self) -> &[RawFd] {
+        &self.send_fds
+    }
+
+    pub(crate) fn clear_send_fds(&mut self) {
+        self.send_fds.clear();
+    }
+
+    pub(crate) fn prepare_for_recv(&mut self) -> &mut [u8] {
+        self.recv_fds.clear();
+        self.truncated = false;
+        // nix::recvmsg reads from the slice length (not Vec capacity), so we expose
+        // a full-length initialized buffer each receive.
+        self.recv_buf.resize(self.recv_buf.capacity(), 0);
+        self.recv_buf.as_mut_slice()
+    }
+
+    pub(crate) fn push_received_fds(&mut self, fds: &[RawFd]) {
+        self.recv_fds.extend_from_slice(fds);
+    }
+
+    pub(crate) fn mark_truncated(&mut self) {
+        self.truncated = true;
+    }
+}
+
+/// Iterator over received ancillary messages.
+#[derive(Debug)]
+pub struct AncillaryMessages<'a> {
+    yielded: bool,
+    recv_fds: &'a [RawFd],
+}
+
+impl<'a> Iterator for AncillaryMessages<'a> {
+    type Item = AncillaryMessage<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.yielded {
+            return None;
+        }
+        self.yielded = true;
+        if self.recv_fds.is_empty() {
+            None
+        } else {
+            Some(AncillaryMessage::ScmRights(ScmRights {
+                fds: self.recv_fds,
+            }))
+        }
+    }
+}
+
+/// A parsed ancillary message.
+#[derive(Debug)]
+pub enum AncillaryMessage<'a> {
+    /// File descriptors passed via `SCM_RIGHTS`.
+    ScmRights(ScmRights<'a>),
+}
+
+/// File descriptors received via `SCM_RIGHTS`.
+///
+/// These are raw fds; the caller must either close them or wrap them in an owned type.
+#[derive(Debug)]
+pub struct ScmRights<'a> {
+    fds: &'a [RawFd],
+}
+
+impl Iterator for ScmRights<'_> {
+    type Item = RawFd;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.fds.split_first().map(|(fd, rest)| {
+            self.fds = rest;
+            *fd
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.fds.len(), Some(self.fds.len()))
+    }
+}
+
+impl ExactSizeIterator for ScmRights<'_> {}
+
+/// Computes a conservative buffer size for receiving ancillary data containing the given
+/// number of file descriptors.
+///
+/// This is an upper bound (it may over-allocate), but avoids `unsafe` access to libc's
+/// `CMSG_*` macros in this crate.
+#[must_use]
+pub fn ancillary_space_for_fds(fd_count: usize) -> usize {
+    if fd_count == 0 {
+        0
+    } else {
+        // Over-estimate by assuming one header per fd. This is fine: callers allocate once.
+        let per = nix::sys::socket::cmsg_space::<RawFd>();
+        fd_count.saturating_mul(per)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn test_ancillary_new() {
+        init_test("test_ancillary_new");
+        let ancillary = SocketAncillary::new(128);
+
+        crate::assert_with_log!(
+            ancillary.capacity() == 128,
+            "capacity",
+            128,
+            ancillary.capacity()
+        );
+        crate::assert_with_log!(ancillary.is_empty(), "is_empty", true, ancillary.is_empty());
+        crate::assert_with_log!(
+            !ancillary.is_truncated(),
+            "truncated",
+            false,
+            ancillary.is_truncated()
+        );
+        crate::test_complete!("test_ancillary_new");
+    }
+
+    #[test]
+    fn test_add_fds() {
+        init_test("test_add_fds");
+        let mut ancillary = SocketAncillary::new(128);
+
+        // Add deterministic test fds; this unit test does not send them.
+        let fds = [3, 4, 5];
+        let added = ancillary.add_fds(&fds);
+
+        crate::assert_with_log!(added, "added", true, added);
+        crate::assert_with_log!(
+            !ancillary.is_empty(),
+            "not empty",
+            false,
+            ancillary.is_empty()
+        );
+        crate::test_complete!("test_add_fds");
+    }
+
+    #[test]
+    fn test_add_fds_too_small_buffer() {
+        init_test("test_add_fds_too_small");
+        // Capacity only affects receive; send-side queueing is unbounded here.
+        let mut ancillary = SocketAncillary::new(4);
+
+        let fds = [3, 4, 5];
+        let added = ancillary.add_fds(&fds);
+
+        crate::assert_with_log!(added, "added", true, added);
+        crate::assert_with_log!(
+            !ancillary.is_empty(),
+            "not empty",
+            false,
+            ancillary.is_empty()
+        );
+        crate::test_complete!("test_add_fds_too_small");
+    }
+
+    #[test]
+    fn test_clear() {
+        init_test("test_ancillary_clear");
+        let mut ancillary = SocketAncillary::new(128);
+
+        ancillary.add_fds(&[3, 4]);
+        crate::assert_with_log!(
+            !ancillary.is_empty(),
+            "not empty",
+            false,
+            ancillary.is_empty()
+        );
+
+        ancillary.clear();
+        crate::assert_with_log!(
+            ancillary.is_empty(),
+            "empty after clear",
+            true,
+            ancillary.is_empty()
+        );
+        crate::test_complete!("test_ancillary_clear");
+    }
+
+    #[test]
+    fn test_ancillary_space_for_fds() {
+        init_test("test_ancillary_space_for_fds");
+
+        let space0 = ancillary_space_for_fds(0);
+        crate::assert_with_log!(space0 == 0, "space for 0", 0, space0);
+
+        let space1 = ancillary_space_for_fds(1);
+        crate::assert_with_log!(space1 > 0, "space for 1 > 0", true, space1 > 0);
+
+        let space3 = ancillary_space_for_fds(3);
+        crate::assert_with_log!(space3 > space1, "space for 3 > 1", true, space3 > space1);
+
+        crate::test_complete!("test_ancillary_space_for_fds");
+    }
+
+    #[test]
+    fn test_prepare_for_recv_exposes_full_buffer_len() {
+        init_test("test_prepare_for_recv_exposes_full_buffer_len");
+        let mut ancillary = SocketAncillary::new(128);
+        let recv_buf = ancillary.prepare_for_recv();
+        crate::assert_with_log!(recv_buf.len() == 128, "recv buf len", 128, recv_buf.len());
+        crate::test_complete!("test_prepare_for_recv_exposes_full_buffer_len");
+    }
+
+    #[test]
+    fn received_scm_rights_iterator_is_ordered_and_one_shot() {
+        init_test("received_scm_rights_iterator_is_ordered_and_one_shot");
+        let mut ancillary = SocketAncillary::new(128);
+        ancillary.push_received_fds(&[7, 8, 9]);
+
+        let mut messages = ancillary.messages();
+        let Some(message) = messages.next() else {
+            crate::assert_with_log!(false, "SCM_RIGHTS message present", true, false);
+            return;
+        };
+        let AncillaryMessage::ScmRights(mut rights) = message;
+
+        crate::assert_with_log!(
+            rights.size_hint() == (3, Some(3)),
+            "exact size hint before iteration",
+            (3, Some(3)),
+            rights.size_hint()
+        );
+        let first = rights.next();
+        crate::assert_with_log!(first == Some(7), "first fd", Some(7), first);
+        let second = rights.next();
+        crate::assert_with_log!(second == Some(8), "second fd", Some(8), second);
+        let third = rights.next();
+        crate::assert_with_log!(third == Some(9), "third fd", Some(9), third);
+        let exhausted = rights.next();
+        crate::assert_with_log!(
+            exhausted.is_none(),
+            "rights exhausted",
+            Option::<RawFd>::None,
+            exhausted
+        );
+        let extra_message = messages.next();
+        crate::assert_with_log!(
+            extra_message.is_none(),
+            "ancillary message iterator yields once",
+            true,
+            extra_message.is_none()
+        );
+        crate::test_complete!("received_scm_rights_iterator_is_ordered_and_one_shot");
+    }
+
+    // =========================================================================
+    // Wave 57 – pure data-type trait coverage
+    // =========================================================================
+
+    #[test]
+    fn socket_ancillary_debug_default() {
+        let anc = SocketAncillary::default();
+        let dbg = format!("{anc:?}");
+        assert!(dbg.contains("SocketAncillary"), "{dbg}");
+        assert_eq!(anc.capacity(), 0);
+        assert!(anc.is_empty());
+    }
+
+    #[test]
+    fn ancillary_messages_debug() {
+        let anc = SocketAncillary::new(0);
+        let msgs = anc.messages();
+        let dbg = format!("{msgs:?}");
+        assert!(dbg.contains("AncillaryMessages"), "{dbg}");
+    }
+}

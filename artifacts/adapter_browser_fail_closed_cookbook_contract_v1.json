@@ -1,0 +1,95 @@
+{
+  "contract_version": "adapter-browser-fail-closed-cookbook-contract-v1",
+  "bead_id": "asupersync-xeh8m0.6",
+  "created_date": "2026-05-08",
+  "status": "source_only_claims_bounded_to_existing_fixtures",
+  "scope": {
+    "adapter_boundary": "asupersync-tokio-compat I/O adapter",
+    "browser_fixture": "wasm browser support boundary contract",
+    "no_broad_support_claims": true,
+    "tracker_mutation": "manual_only"
+  },
+  "entries": [
+    {
+      "entry_id": "tokio-io-cancel-safety-boundary",
+      "boundary_kind": "adapter",
+      "claim_scope": "bounded_adapter_surface",
+      "support_posture": "supported_with_documented_cancel_safety_limits",
+      "claim": "TokioIo and AsupersyncIo bridge poll_read and poll_write while refusing blanket cancel-safety for read_exact and write_all.",
+      "source_paths": [
+        "asupersync-tokio-compat/src/io.rs",
+        "asupersync-tokio-compat/Cargo.toml"
+      ],
+      "fixture_paths": [
+        "tests/tokio_interop_support_matrix.rs",
+        "docs/tokio_interop_support_matrix.md"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_6_tokio_io cargo test -p asupersync-tokio-compat --features tokio-io io::tests::tokio_io_tests -- --nocapture",
+      "required_markers": [
+        "pub struct TokioIo<T>",
+        "pub struct AsupersyncIo<T>",
+        "#[cfg(feature = \"tokio-io\")]",
+        "`read_exact` and `write_all` are NOT cancel-safe through either adapter"
+      ],
+      "unsupported_claims": [
+        {
+          "claim": "read_exact_write_all_cancel_safe",
+          "expected": false,
+          "evidence_marker": "`read_exact` and `write_all` are NOT cancel-safe through either adapter"
+        },
+        {
+          "claim": "ambient_tokio_runtime_required",
+          "expected": false,
+          "evidence_marker": "does NOT require a running Tokio runtime"
+        }
+      ]
+    },
+    {
+      "entry_id": "browser-worker-direct-runtime-boundary",
+      "boundary_kind": "browser_fixture",
+      "claim_scope": "bounded_browser_fixture",
+      "support_posture": "direct_runtime_supported_only_for_main_thread_and_dedicated_worker",
+      "claim": "Browser main thread and dedicated worker direct runtime remain checked support, while service worker and shared worker direct runtime fail closed to explicit reason codes.",
+      "source_paths": [
+        "packages/browser/src/index.ts",
+        "src/runtime/builder.rs",
+        "docs/WASM.md",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json"
+      ],
+      "fixture_paths": [
+        "tests/wasm_browser_support_boundary_contract.rs",
+        "tests/fixtures/service-worker-broker-consumer",
+        "tests/fixtures/shared-worker-consumer"
+      ],
+      "proof_command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_asupersync_rckwas_contract cargo test -p asupersync --test wasm_browser_support_boundary_contract --features test-internals -- --nocapture",
+      "required_markers": [
+        "service_worker_direct_runtime_not_shipped",
+        "shared_worker_direct_runtime_not_shipped",
+        "direct runtime remains fail-closed",
+        "artifacts/wasm_browser_support_boundary_contract_v1.json"
+      ],
+      "unsupported_claims": [
+        {
+          "claim": "service_worker_direct_runtime_shipped",
+          "expected": false,
+          "scope_limit_key": "service_worker_direct_runtime_shipped"
+        },
+        {
+          "claim": "shared_worker_direct_runtime_shipped",
+          "expected": false,
+          "scope_limit_key": "shared_worker_direct_runtime_shipped"
+        },
+        {
+          "claim": "webtransport_implies_raw_socket_parity",
+          "expected": false,
+          "scope_limit_key": "webtransport_implies_raw_socket_parity"
+        }
+      ]
+    }
+  ],
+  "validation_commands": [
+    "python3 -m json.tool artifacts/adapter_browser_fail_closed_cookbook_contract_v1.json",
+    "rch exec -- rustfmt --edition 2024 --check tests/adapter_browser_fail_closed_cookbook_contract.rs",
+    "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_xeh8m0_6_adapter_browser_cookbook CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --test adapter_browser_fail_closed_cookbook_contract -- --nocapture"
+  ]
+}

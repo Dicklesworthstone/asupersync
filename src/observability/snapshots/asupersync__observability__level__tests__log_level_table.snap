@@ -1,0 +1,9 @@
+---
+source: src/observability/level.rs
+expression: level_table()
+---
+TRACE|T|trace
+DEBUG|D|debug
+INFO|I|info
+WARN|W|warn
+ERROR|E|error

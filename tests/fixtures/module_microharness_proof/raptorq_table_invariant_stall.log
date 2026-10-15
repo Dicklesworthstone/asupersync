@@ -1,0 +1,5 @@
+Selected worker: vmi1149989
+Executing command remotely: env CARGO_TARGET_DIR=/tmp/rch_target_l5m170_1_raptorq_table_invariant_stall cargo test -p asupersync --test raptorq_proof_table_invariant_microharness --no-default-features --features test-internals -- --nocapture
+Compiling asupersync v0.3.2 (/data/projects/asupersync)
+Compiling asupersync-conformance v0.3.1 (/data/projects/asupersync/conformance)
+module microharness wrapper timed out after 1200s

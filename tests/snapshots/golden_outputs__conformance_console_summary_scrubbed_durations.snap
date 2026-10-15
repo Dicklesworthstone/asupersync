@@ -1,0 +1,8 @@
+---
+source: tests/golden_outputs.rs
+expression: rendered
+---
+Conformance summary for golden-runtime
+Total: 2  Passed: 1  Failed: 1  Duration: 37ms
+- spawn.basic (spawns a task) [OK] 11ms
+- cancel.propagation (propagates cancellation) [FAILED] 26ms

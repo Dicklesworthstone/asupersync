@@ -1,0 +1,19 @@
+{
+  "schema_version": "swarm-coordination-replay-input-v1",
+  "events": [
+    {
+      "id": "claim-a",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "agent": "BlackDove",
+      "type": "claim",
+      "bead_id": "asupersync-aj7lx3.13"
+    },
+    {
+      "id": "claim-b",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "agent": "CopperSpring",
+      "type": "claim",
+      "bead_id": "asupersync-aj7lx3.13"
+    }
+  ]
+}

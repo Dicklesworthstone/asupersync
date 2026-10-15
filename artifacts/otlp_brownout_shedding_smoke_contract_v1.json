@@ -1,0 +1,152 @@
+{
+  "contract_version": "otlp-brownout-shedding-smoke-contract-v1",
+  "smoke_scenarios": [
+    {
+      "scenario_id": "AA-OTLP-BROWNOUT-PRIORITY-GATE",
+      "description": "Shared brownout replay that drops low-priority OTLP spans in degrade mode and retains summary-only evidence in shed-optional mode.",
+      "workload_class": "brownout-priority-gate",
+      "output_root": "target/otlp-brownout-shedding-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 404404,
+      "safe_fallback_profile": "standalone_fallback",
+      "expected_winner_profile": "brownout",
+      "brownout_profile": {
+        "enabled": true,
+        "observe_wake_to_run_p99_ns": 145000,
+        "degrade_wake_to_run_p99_ns": 210000,
+        "shed_optional_wake_to_run_p99_ns": 285000,
+        "observe_memory_pressure_bps": 7800,
+        "degrade_memory_pressure_bps": 8600,
+        "shed_optional_memory_pressure_bps": 9300,
+        "recovery_window_threshold": 2,
+        "allowed_optional_surfaces": [
+          "detailed_tracing",
+          "rich_diagnostics",
+          "debug_http",
+          "rich_export_formatting"
+        ],
+        "denied_optional_surfaces": []
+      },
+      "fixture": {
+        "windows": [
+          {
+            "window_id": "degrade_drop_low_priority",
+            "use_shared_brownout": true,
+            "previous_phase": "observe",
+            "wake_to_run_p99_ns": 228000,
+            "queue_residency_p99_ns": 246000,
+            "ready_backlog_p99": 208,
+            "cancel_debt_p99": 56,
+            "memory_pressure_bps": 8820,
+            "degradation_level": "Moderate",
+            "outer_tail_risk_decision": "defer",
+            "priorities": ["low", "high", "low", "high", "high"]
+          },
+          {
+            "window_id": "shed_summary_only",
+            "use_shared_brownout": true,
+            "previous_phase": "degrade",
+            "wake_to_run_p99_ns": 308000,
+            "queue_residency_p99_ns": 322000,
+            "ready_backlog_p99": 264,
+            "cancel_debt_p99": 72,
+            "memory_pressure_bps": 9450,
+            "degradation_level": "Heavy",
+            "outer_tail_risk_decision": "shed",
+            "priorities": ["high", "low", "high", "low"]
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "schema_version": "otlp-brownout-shedding-projection-v1",
+        "scenario_id": "AA-OTLP-BROWNOUT-PRIORITY-GATE",
+        "workload_class": "brownout-priority-gate",
+        "workload_seed": 404404,
+        "window_count": 2,
+        "phase_sequence": ["degrade", "shed_optional"],
+        "action_sequence": ["drop_low_priority", "retain_summary_only"],
+        "fallback_windows": [],
+        "fallback_activation_count": 0,
+        "dropped_low_priority_spans": 2,
+        "retained_summary_spans": 4,
+        "queue_dropped_spans": 0,
+        "exported_high_priority_spans": 3,
+        "exported_low_priority_spans": 0,
+        "final_shared_phase": "shed_optional",
+        "final_shared_reason_codes": [
+          "preserve_critical_surfaces",
+          "observe_pressure",
+          "degrade_pressure",
+          "shed_optional_pressure",
+          "tail_risk_outer_shed"
+        ],
+        "winner_profile": "brownout",
+        "no_win_trigger": false
+      }
+    },
+    {
+      "scenario_id": "AA-OTLP-BROWNOUT-STANDALONE-FALLBACK",
+      "description": "Missing brownout evidence replay that keeps the OTLP exporter on standalone export-all behavior with an explicit fallback verdict.",
+      "workload_class": "standalone-fallback",
+      "output_root": "target/otlp-brownout-shedding-smoke",
+      "execution_policy": "execute_or_dry_run",
+      "workload_seed": 505505,
+      "safe_fallback_profile": "standalone_fallback",
+      "expected_winner_profile": "standalone_fallback",
+      "brownout_profile": {
+        "enabled": true,
+        "observe_wake_to_run_p99_ns": 145000,
+        "degrade_wake_to_run_p99_ns": 210000,
+        "shed_optional_wake_to_run_p99_ns": 285000,
+        "observe_memory_pressure_bps": 7800,
+        "degrade_memory_pressure_bps": 8600,
+        "shed_optional_memory_pressure_bps": 9300,
+        "recovery_window_threshold": 2,
+        "allowed_optional_surfaces": [
+          "detailed_tracing",
+          "rich_diagnostics",
+          "debug_http",
+          "rich_export_formatting"
+        ],
+        "denied_optional_surfaces": []
+      },
+      "fixture": {
+        "windows": [
+          {
+            "window_id": "fallback_export_all",
+            "use_shared_brownout": false,
+            "previous_phase": "normal",
+            "wake_to_run_p99_ns": 118000,
+            "queue_residency_p99_ns": 120000,
+            "ready_backlog_p99": 96,
+            "cancel_debt_p99": 20,
+            "memory_pressure_bps": 7100,
+            "degradation_level": "None",
+            "outer_tail_risk_decision": "admit",
+            "priorities": ["low", "high", "low", "high"]
+          }
+        ]
+      },
+      "expected_report_projection": {
+        "schema_version": "otlp-brownout-shedding-projection-v1",
+        "scenario_id": "AA-OTLP-BROWNOUT-STANDALONE-FALLBACK",
+        "workload_class": "standalone-fallback",
+        "workload_seed": 505505,
+        "window_count": 1,
+        "phase_sequence": ["normal"],
+        "action_sequence": ["export_all"],
+        "fallback_windows": ["fallback_export_all"],
+        "fallback_activation_count": 1,
+        "dropped_low_priority_spans": 0,
+        "retained_summary_spans": 0,
+        "queue_dropped_spans": 0,
+        "exported_high_priority_spans": 2,
+        "exported_low_priority_spans": 2,
+        "final_shared_phase": "normal",
+        "final_shared_reason_codes": [],
+        "winner_profile": "standalone_fallback",
+        "no_win_trigger": true
+      }
+    }
+  ]
+}

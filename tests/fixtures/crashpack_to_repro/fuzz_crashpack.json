@@ -1,0 +1,25 @@
+{
+  "artifact_id": "fuzz-raptorq-decoder-crash-07",
+  "bead_id": "asupersync-xeh8m0.5",
+  "failure": {
+    "first_blocker": "panicked at src/raptorq/decoder.rs:417: block already decoded with corrupted payload",
+    "summary": "libFuzzer artifact for RaptorQ decoder duplicate-with-corruption path"
+  },
+  "fuzz": {
+    "artifact_path": "fuzz/artifacts/fuzz_raptorq_decoder/crash-07",
+    "libfuzzer_args": [
+      "-runs=1"
+    ],
+    "target": "fuzz_raptorq_decoder"
+  },
+  "repo": {
+    "commit": "fc8b7488a",
+    "cwd": "."
+  },
+  "schema_version": "crashpack-to-repro-input-v1",
+  "source_kind": "fuzz",
+  "touched_files": [
+    "fuzz/fuzz_targets/fuzz_raptorq_decoder.rs",
+    "src/raptorq/decoder.rs"
+  ]
+}

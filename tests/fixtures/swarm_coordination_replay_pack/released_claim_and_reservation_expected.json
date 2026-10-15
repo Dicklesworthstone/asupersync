@@ -1,0 +1,98 @@
+{
+  "action_items": [],
+  "current_date": "2026-05-08",
+  "forbidden_actions": {
+    "runs_agent_mail_mutation": false,
+    "runs_beads_mutation": false,
+    "runs_cargo": false,
+    "runs_destructive_command": false,
+    "runs_git_mutation": false
+  },
+  "generated_at": "2026-05-08T05:55:00Z",
+  "input_schema_version": "swarm-coordination-replay-input-v1",
+  "invariants": {
+    "closeouts_have_commit_and_remote_proof": true,
+    "no_duplicate_active_claims": true,
+    "no_exclusive_reservation_contention": true,
+    "proofs_have_remote_exit_events": true,
+    "successful_proofs_have_artifact_evidence": true
+  },
+  "non_mutating": true,
+  "schema_version": "swarm-coordination-replay-pack-v1",
+  "source": "tests/fixtures/swarm_coordination_replay_pack/released_claim_and_reservation.json",
+  "source_counts": {
+    "agents": 2,
+    "beads": 1,
+    "events": 6,
+    "proofs": 0
+  },
+  "summary": {
+    "error_count": 0,
+    "passes": true,
+    "violation_count": 0,
+    "warning_count": 0
+  },
+  "timeline": [
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.18",
+      "id": "claim-a",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:00:00Z",
+      "type": "claim"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "asupersync-aj7lx3.18",
+      "id": "stand-down",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:01:00Z",
+      "type": "stand_down"
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_id": "asupersync-aj7lx3.18",
+      "id": "claim-b",
+      "path": "",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:02:00Z",
+      "type": "claim"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "",
+      "id": "reservation-a",
+      "path": "tests/example.rs",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:03:00Z",
+      "type": "reservation"
+    },
+    {
+      "agent": "BlackDove",
+      "bead_id": "",
+      "id": "reservation-release",
+      "path": "tests/example.rs",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:04:00Z",
+      "type": "reservation"
+    },
+    {
+      "agent": "CopperSpring",
+      "bead_id": "",
+      "id": "reservation-b",
+      "path": "tests/example.rs",
+      "proof_id": "",
+      "summary": "",
+      "timestamp": "2026-05-08T05:05:00Z",
+      "type": "reservation"
+    }
+  ],
+  "violations": []
+}

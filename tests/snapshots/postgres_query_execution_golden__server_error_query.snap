@@ -1,0 +1,14 @@
+---
+source: tests/postgres_query_execution_golden.rs
+expression: log
+---
+=== PostgreSQL Query Execution Log ===
+Query ID: 12347
+SQL: SELECT * FROM nonexistent_table
+Execution Time: 5ms
+Status: ERROR
+Error: PostgreSQL error [42P01]: relation "nonexistent_table" does not exist (detail: The table name might be misspelled) (hint: Check the spelling and case of the table name)
+SQL State: 42P01
+Is Transient: false
+Is Retryable: false
+=====================================

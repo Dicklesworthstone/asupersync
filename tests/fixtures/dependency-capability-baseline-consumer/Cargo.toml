@@ -1,0 +1,29 @@
+[package]
+name = "asupersync-dependency-capability-baseline-consumer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# This is intentionally a standalone downstream workspace. It must resolve and
+# compile as a consumer of asupersync's public API, without inheriting root
+# workspace dev-dependencies or enabling `test-internals`.
+[workspace]
+
+[features]
+default = []
+config-profile = ["asupersync/config-file"]
+metrics-profile = ["asupersync/metrics"]
+tower-profile = ["asupersync/tower", "dep:tower"]
+compression-profile = ["asupersync/compression"]
+full-profile = [
+    "config-profile",
+    "metrics-profile",
+    "tower-profile",
+    "compression-profile",
+]
+
+[dependencies]
+asupersync = { path = "../../.." }
+prost = "=0.14.4"
+serde = { version = "=1.0.229", features = ["derive"] }
+tower = { version = "=0.5.3", optional = true }

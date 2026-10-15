@@ -1,0 +1,79 @@
+{
+  "schema_version": "proof-lane-disk-pressure-autopilot-handoff-v1",
+  "agent": "BeigeSnow",
+  "active_dirty_paths": [
+    {
+      "path": "fuzz/fuzz_targets/websocket_frame_fuzzing.rs",
+      "status": " M",
+      "owner": "RubyRobin"
+    }
+  ],
+  "chosen_next_lane": {
+    "category": "claim-ready-bead",
+    "candidate_id": "asupersync-lhx6m4.375",
+    "lane": "br-ready",
+    "title": "[proof-lane] Add end-to-end disk-pressure autopilot fixture",
+    "paths": [
+      "tests/fixtures/proof_lane_disk_pressure_autopilot",
+      "tests/proof_lane_disk_pressure_autopilot_contract.py"
+    ],
+    "reason": "first unblocked candidate by kind and priority"
+  },
+  "remote_proof_result": {
+    "status": "pass",
+    "exit_code": 0,
+    "line": 6,
+    "reason": "remote command finished with exit 0"
+  },
+  "artifact_retrieval_result": {
+    "status": "blocked",
+    "detail": "retrieval_incomplete",
+    "reason": "artifact retrieval started but no completion marker was observed",
+    "started": true,
+    "completed": false,
+    "partial": true,
+    "started_line": 7,
+    "blocker_kind": "local-disk-full",
+    "blocker_line": 9,
+    "blocker_text": "rsync: [receiver] write failed on \"/tmp/rch_target_beigesnow_autopilot/debug/deps/libasupersync.rmeta\": No space left on device (28)"
+  },
+  "disk_pressure": {
+    "work_finder_level": "critical",
+    "work_finder_available_bytes": 268435456,
+    "rch_heavy_work_allowed": false,
+    "receipt_local_status": "critical",
+    "receipt_signal": "enospc"
+  },
+  "cleanup_candidates": [
+    {
+      "path": "/tmp/rch_target_beigesnow_autopilot",
+      "classification": "stale-looking",
+      "authorization_candidate": true,
+      "size_bytes": 3221225472,
+      "reason": "path is old enough and has no observed open files"
+    },
+    {
+      "path": "/data/projects/asupersync/.rch-target-ts2-job-375",
+      "classification": "stale-looking",
+      "authorization_candidate": true,
+      "size_bytes": 5368709120,
+      "reason": "path is old enough and has no observed open files"
+    }
+  ],
+  "cleanup_summary": {
+    "total_candidates": 3,
+    "existing_candidates": 3,
+    "missing_candidates": 0,
+    "authorization_candidate_count": 2,
+    "active_looking_count": 1,
+    "permission_denied_count": 0,
+    "expected_recovered_bytes": 8589934592,
+    "expected_recovered_human": "8.0 GiB"
+  },
+  "deletion_policy": {
+    "requires_user_authorization": true,
+    "delete_command_available": false,
+    "work_finder_mutating_commands_executed": false,
+    "instruction": "Deletion requires explicit user authorization; this fixture never runs rm, git clean, or cleanup automation."
+  }
+}

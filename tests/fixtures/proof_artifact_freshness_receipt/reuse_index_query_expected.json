@@ -1,0 +1,368 @@
+{
+  "best_candidate": {
+    "cache_hit_is_fresh_rch_pass": false,
+    "candidate_id": "proof:reuse-index-reusable",
+    "citeable_claims": [
+      "proof-reuse-cache-schema"
+    ],
+    "classifier_decision": "reusable",
+    "command_fingerprint": "sha256:proof-reuse-cache-command",
+    "decision": "reusable",
+    "env_fingerprint": "sha256:env-index-current",
+    "feature_flags": [],
+    "freshness_classification": "current-clean",
+    "freshness_decision": "cite-as-current",
+    "manifest_lane_id": "proof-reuse-cache-contract",
+    "proof_id": "proof:reuse-index-reusable",
+    "rank": 1,
+    "rank_score": 0,
+    "reason_codes": [],
+    "remediation": {
+      "next_steps": [
+        "include the candidate id, request fingerprint, and cache-hit wording in closeout"
+      ],
+      "operator_note": "Candidate may be cited only as an approved cache hit for the requested scope."
+    },
+    "safe_to_reuse": true,
+    "source_fingerprint": "sha256:source-index-current",
+    "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/001_reusable.json",
+    "status": "pass",
+    "toolchain_fingerprint": "sha256:toolchain-index-current",
+    "touched_surfaces": [
+      "artifacts/proof_reuse_cache_contract_v1.json",
+      "tests/proof_reuse_cache_contract.rs"
+    ],
+    "tree_fingerprint": "git-tree:index-current"
+  },
+  "generated_at": "2026-05-08T05:20:00Z",
+  "index_summary": {
+    "by_freshness_classification": {
+      "current-clean": 2,
+      "dirty-surface-overlap": 1,
+      "failed-proof-artifact": 1,
+      "rch-local-fallback-proof": 1,
+      "superseded-head": 1
+    },
+    "by_lane": {
+      "all-targets-check": 1,
+      "proof-reuse-cache-contract": 5
+    },
+    "candidate_count": 6,
+    "freshness_refused": 4,
+    "safe_to_cite": 2
+  },
+  "logs": [
+    {
+      "approved_root_count": 1,
+      "approved_source_count": 6,
+      "candidate_count": 6,
+      "stage": "scan"
+    },
+    {
+      "accepted_count": 1,
+      "candidate_count": 6,
+      "candidate_pruned_count": 5,
+      "miss_count": 1,
+      "pruning_reason_counts": {
+        "dirty-frontier-overlap": 1,
+        "failed-proof-status": 1,
+        "lane-mismatch": 1,
+        "local-fallback-marker": 1,
+        "stale-head": 1
+      },
+      "refused_count": 4,
+      "stage": "classify"
+    },
+    {
+      "row_limit": 100,
+      "rows_emitted_count": 6,
+      "rows_omission_reason": "",
+      "rows_omitted_count": 0,
+      "stage": "project"
+    },
+    {
+      "chosen_proof_id": "proof:reuse-index-reusable",
+      "stage": "choose",
+      "top_rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+    }
+  ],
+  "request": {
+    "claim_scope": "proof-reuse-cache-schema",
+    "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture",
+    "command_fingerprint": "sha256:proof-reuse-cache-command",
+    "dirty_frontier_status": "clean",
+    "env_fingerprint": "sha256:env-index-current",
+    "feature_flags": [],
+    "manifest_lane_id": "proof-reuse-cache-contract",
+    "request_id": "proof-reuse-index-query",
+    "require_full_pass": true,
+    "source_fingerprint": "sha256:source-index-current",
+    "toolchain_fingerprint": "sha256:toolchain-index-current",
+    "touched_files": [
+      "artifacts/proof_reuse_cache_contract_v1.json",
+      "tests/proof_reuse_cache_contract.rs"
+    ],
+    "tree_fingerprint": "git-tree:index-current"
+  },
+  "rows": [
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-reusable",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "reusable",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "reusable",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "current-clean",
+      "freshness_decision": "cite-as-current",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "proof_id": "proof:reuse-index-reusable",
+      "rank": 1,
+      "rank_score": 0,
+      "reason_codes": [],
+      "remediation": {
+        "next_steps": [
+          "include the candidate id, request fingerprint, and cache-hit wording in closeout"
+        ],
+        "operator_note": "Candidate may be cited only as an approved cache hit for the requested scope."
+      },
+      "safe_to_reuse": true,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/001_reusable.json",
+      "status": "pass",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    },
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-stale",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "refused",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "refused",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "superseded-head",
+      "freshness_decision": "suppress-as-stale",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "proof_id": "proof:reuse-index-stale",
+      "rank": 2,
+      "rank_score": 201,
+      "reason_codes": [
+        "stale-head"
+      ],
+      "remediation": {
+        "next_steps": [
+          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
+        ],
+        "operator_note": "Rerun because candidate HEAD is stale.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+      },
+      "safe_to_reuse": false,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/002_stale.json",
+      "status": "pass",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    },
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-failed",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "refused",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "refused",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "failed-proof-artifact",
+      "freshness_decision": "rerun-required",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "proof_id": "proof:reuse-index-failed",
+      "rank": 3,
+      "rank_score": 221,
+      "reason_codes": [
+        "failed-proof-status"
+      ],
+      "remediation": {
+        "next_steps": [
+          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
+        ],
+        "operator_note": "Rerun because the candidate proof failed.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+      },
+      "safe_to_reuse": false,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/004_failed.json",
+      "status": "failed",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    },
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-local-fallback",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "refused",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "refused",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "rch-local-fallback-proof",
+      "freshness_decision": "rerun-required",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "proof_id": "proof:reuse-index-local-fallback",
+      "rank": 4,
+      "rank_score": 251,
+      "reason_codes": [
+        "local-fallback-marker"
+      ],
+      "remediation": {
+        "next_steps": [
+          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
+        ],
+        "operator_note": "Rerun remotely because candidate evidence records local fallback.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+      },
+      "safe_to_reuse": false,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/003_local_fallback.json",
+      "status": "pass",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    },
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-dirty-overlap",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "refused",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "refused",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "dirty-surface-overlap",
+      "freshness_decision": "rerun-required",
+      "manifest_lane_id": "proof-reuse-cache-contract",
+      "proof_id": "proof:reuse-index-dirty-overlap",
+      "rank": 5,
+      "rank_score": 301,
+      "reason_codes": [
+        "dirty-frontier-overlap"
+      ],
+      "remediation": {
+        "next_steps": [
+          "rerun the requested proof lane with RCH_REQUIRE_REMOTE=1"
+        ],
+        "operator_note": "Rerun after the dirty frontier is clean or non-overlapping.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+      },
+      "safe_to_reuse": false,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/005_dirty_overlap.json",
+      "status": "pass",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    },
+    {
+      "cache_hit_is_fresh_rch_pass": false,
+      "candidate_id": "proof:reuse-index-unrelated-lane",
+      "citeable_claims": [
+        "proof-reuse-cache-schema"
+      ],
+      "classifier_decision": "miss",
+      "command_fingerprint": "sha256:proof-reuse-cache-command",
+      "decision": "miss",
+      "env_fingerprint": "sha256:env-index-current",
+      "feature_flags": [],
+      "freshness_classification": "current-clean",
+      "freshness_decision": "cite-as-current",
+      "manifest_lane_id": "all-targets-check",
+      "proof_id": "proof:reuse-index-unrelated-lane",
+      "rank": 6,
+      "rank_score": 1001,
+      "reason_codes": [
+        "lane-mismatch"
+      ],
+      "remediation": {
+        "next_steps": [
+          "continue scanning candidates or rerun the requested proof lane"
+        ],
+        "operator_note": "Candidate does not cover the requested proof lane.",
+        "rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+      },
+      "safe_to_reuse": false,
+      "source_fingerprint": "sha256:source-index-current",
+      "source_path": "tests/fixtures/proof_artifact_freshness_receipt/reuse_index_receipts/006_unrelated_lane.json",
+      "status": "pass",
+      "toolchain_fingerprint": "sha256:toolchain-index-current",
+      "touched_surfaces": [
+        "artifacts/proof_reuse_cache_contract_v1.json",
+        "tests/proof_reuse_cache_contract.rs"
+      ],
+      "tree_fingerprint": "git-tree:index-current"
+    }
+  ],
+  "safety": {
+    "beads_mutated": false,
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "network_access_required": false,
+    "non_mutating": true,
+    "query_never_overrides_classifier": true,
+    "raw_proof_logs_embedded": false,
+    "tracker_mutation_allowed": false
+  },
+  "schema_version": "proof-reuse-query-result-v1",
+  "summary": {
+    "accepted_count": 1,
+    "by_reason_code": {
+      "dirty-frontier-overlap": 1,
+      "failed-proof-status": 1,
+      "lane-mismatch": 1,
+      "local-fallback-marker": 1,
+      "stale-head": 1
+    },
+    "candidate_count": 6,
+    "candidate_pruned_count": 5,
+    "chosen_proof_id": "proof:reuse-index-reusable",
+    "elapsed_time": {
+      "measured": false,
+      "reason": "deterministic CLI output omits wall-clock timing; contract tests log elapsed_ms"
+    },
+    "miss_count": 1,
+    "refused_count": 4,
+    "row_limit": 100,
+    "rows_emitted_count": 6,
+    "rows_omission_reason": "",
+    "rows_omitted_count": 0,
+    "top_rerun_command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_proof_reuse_cache_contract cargo test -p asupersync --test proof_reuse_cache_contract -- --nocapture"
+  }
+}

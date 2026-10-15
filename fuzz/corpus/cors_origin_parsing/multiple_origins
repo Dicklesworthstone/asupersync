@@ -1,0 +1,1 @@
+{"method":"Post","path":"/upload","origin_scenario":{"MultipleOrigins":{"origins":["https://site1.com","https://site2.com"]}},"extra_headers":[],"cors_policy_type":"AllowAny"}

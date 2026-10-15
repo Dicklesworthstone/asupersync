@@ -1,0 +1,34 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "mixed_services",
+    request: HealthCheckRequest {
+        service: "alpha.service",
+    },
+    response: Ok(
+        HealthCheckResponse {
+            status: Serving,
+        },
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                NotServing,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 0,
+            not_serving: 1,
+            service_unknown: 0,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "mixed_services",
+        description: "Health check with multiple services in different states",
+        async_method: false,
+    },
+}

@@ -1,0 +1,2281 @@
+{
+  "schema_version": "1.0.0",
+  "ledger_id": "lean.theorem_rule_traceability.v1",
+  "source_artifacts": {
+    "theorem_inventory": "formal/lean/coverage/theorem_surface_inventory.json",
+    "step_constructor_coverage": "formal/lean/coverage/step_constructor_coverage.json"
+  },
+  "stale_link_policy": {
+    "theorem_must_exist_in_inventory": true,
+    "rule_id_must_exist_in_step_constructor_catalog": true,
+    "enforce_via_test": "tests/lean_theorem_rule_traceability.rs"
+  },
+  "traceability_summary": {
+    "row_count": 136,
+    "distinct_theorem_count": 122,
+    "distinct_rule_id_count": 22,
+    "rule_id_catalog_parity": "22/22 matched with step_constructor_coverage",
+    "audit_bead": "asupersync-3cddg.6.5"
+  },
+  "rows": [
+    {
+      "theorem": "abort_preserves_wellformed",
+      "theorem_line": 2286,
+      "rule_id": "step.abort",
+      "semantic_intent": "Supports formal obligations for step.abort",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2286",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "abort_removes_from_ledger",
+      "theorem_line": 747,
+      "rule_id": "step.abort",
+      "semantic_intent": "Supports formal obligations for step.abort",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:747",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "abort_resolves",
+      "theorem_line": 691,
+      "rule_id": "step.abort",
+      "semantic_intent": "Supports formal obligations for step.abort",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:691",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "abort_resolves_obligation",
+      "theorem_line": 3518,
+      "rule_id": "step.abort",
+      "semantic_intent": "Supports formal obligations for step.abort",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3518",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "aborted_obligation_stable",
+      "theorem_line": 2898,
+      "rule_id": "step.abort",
+      "semantic_intent": "Supports formal obligations for step.abort",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2898",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_acknowledge_potential_decreases",
+      "theorem_line": 3186,
+      "rule_id": "step.cancelAcknowledge",
+      "semantic_intent": "Supports formal obligations for step.cancelAcknowledge",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3186",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_ack_step",
+      "theorem_line": 1686,
+      "rule_id": "step.cancelAcknowledge",
+      "semantic_intent": "Supports formal obligations for step.cancelAcknowledge",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1686",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_label_preserves_region_structure",
+      "theorem_line": 2413,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Supports formal obligations for step.cancelChild",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2413",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "cancel_propagation_bounded",
+      "theorem_line": 3333,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Supports formal obligations for step.cancelChild",
+      "assumptions": ["Monotone potential / bounded budget"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3333",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "step_preserves_wellformed",
+      "theorem_line": 3070,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Supports formal obligations for step.cancelChild",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3070",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "steps_preserve_wellformed",
+      "theorem_line": 3139,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Supports formal obligations for step.cancelChild",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3139",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "cancel_complete_potential_reaches_zero",
+      "theorem_line": 3213,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3213",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_complete_produces_cancelled",
+      "theorem_line": 1733,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1733",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_complete_step",
+      "theorem_line": 1713,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1713",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_protocol_terminates",
+      "theorem_line": 3254,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Monotone potential / bounded budget"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3254",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_steps_testable_bound",
+      "theorem_line": 3309,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3309",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_terminates_from_cancelling",
+      "theorem_line": 3282,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Monotone potential / bounded budget"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3282",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_terminates_from_finalizing",
+      "theorem_line": 3296,
+      "rule_id": "step.cancelComplete",
+      "semantic_intent": "Supports formal obligations for step.cancelComplete",
+      "assumptions": ["Monotone potential / bounded budget"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3296",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_finalize_potential_decreases",
+      "theorem_line": 3200,
+      "rule_id": "step.cancelFinalize",
+      "semantic_intent": "Supports formal obligations for step.cancelFinalize",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3200",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_finalize_step",
+      "theorem_line": 1700,
+      "rule_id": "step.cancelFinalize",
+      "semantic_intent": "Supports formal obligations for step.cancelFinalize",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1700",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_masked_potential_decreases",
+      "theorem_line": 3171,
+      "rule_id": "step.cancelMasked",
+      "semantic_intent": "Supports formal obligations for step.cancelMasked",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3171",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_masked_step",
+      "theorem_line": 1666,
+      "rule_id": "step.cancelMasked",
+      "semantic_intent": "Supports formal obligations for step.cancelMasked",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1666",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_label_preserves_region_structure",
+      "theorem_line": 2413,
+      "rule_id": "step.cancelPropagate",
+      "semantic_intent": "Supports formal obligations for step.cancelPropagate",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2413",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_propagation_bounded",
+      "theorem_line": 3333,
+      "rule_id": "step.cancelPropagate",
+      "semantic_intent": "Supports formal obligations for step.cancelPropagate",
+      "assumptions": ["Monotone potential / bounded budget"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3333",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_preserves_wellformed",
+      "theorem_line": 2373,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Supports formal obligations for step.cancelRequest",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2373",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_label_preserves_region_structure",
+      "theorem_line": 2413,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Supports formal obligations for step.cancelRequest",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2413",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_preserves_obligation",
+      "theorem_line": 1311,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Supports formal obligations for step.cancelRequest",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1311",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_step_strengthens_reason",
+      "theorem_line": 3475,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Supports formal obligations for step.cancelRequest",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3475",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancelling_from_cancel_requested",
+      "theorem_line": 1055,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Supports formal obligations for step.cancelRequest",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1055",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_complete_step",
+      "theorem_line": 1806,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1806",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_implies_finalizers_empty",
+      "theorem_line": 820,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:820",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_implies_ledger_empty",
+      "theorem_line": 808,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:808",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_implies_quiescent",
+      "theorem_line": 794,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:794",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_produces_closed_region",
+      "theorem_line": 3492,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3492",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_quiescence_decomposition",
+      "theorem_line": 889,
+      "rule_id": "step.close",
+      "semantic_intent": "Supports formal obligations for step.close",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:889",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_begin_step",
+      "theorem_line": 1747,
+      "rule_id": "step.closeBegin",
+      "semantic_intent": "Supports formal obligations for step.closeBegin",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1747",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_label_preserves_region_structure",
+      "theorem_line": 2413,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2413",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_cancel_children_step",
+      "theorem_line": 1757,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1757",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_children_exist_completed",
+      "theorem_line": 1407,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Supports formal obligations for step.closeCancelChildren",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1407",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_children_done_step",
+      "theorem_line": 1782,
+      "rule_id": "step.closeChildrenDone",
+      "semantic_intent": "Supports formal obligations for step.closeChildrenDone",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1782",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_subregions_exist_closed",
+      "theorem_line": 1446,
+      "rule_id": "step.closeChildrenDone",
+      "semantic_intent": "Supports formal obligations for step.closeChildrenDone",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1446",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_run_finalizer_step",
+      "theorem_line": 1794,
+      "rule_id": "step.closeRunFinalizer",
+      "semantic_intent": "Supports formal obligations for step.closeRunFinalizer",
+      "assumptions": ["Step constructor premises hold"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1794",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_preserves_wellformed",
+      "theorem_line": 2277,
+      "rule_id": "step.commit",
+      "semantic_intent": "Supports formal obligations for step.commit",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2277",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_removes_from_ledger",
+      "theorem_line": 723,
+      "rule_id": "step.commit",
+      "semantic_intent": "Supports formal obligations for step.commit",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:723",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_resolves",
+      "theorem_line": 675,
+      "rule_id": "step.commit",
+      "semantic_intent": "Supports formal obligations for step.commit",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:675",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_resolves_obligation",
+      "theorem_line": 3505,
+      "rule_id": "step.commit",
+      "semantic_intent": "Supports formal obligations for step.commit",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3505",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "committed_obligation_stable",
+      "theorem_line": 2488,
+      "rule_id": "step.commit",
+      "semantic_intent": "Supports formal obligations for step.commit",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2488",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "complete_preserves_obligation",
+      "theorem_line": 1295,
+      "rule_id": "step.complete",
+      "semantic_intent": "Supports formal obligations for step.complete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1295",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "complete_preserves_region",
+      "theorem_line": 1279,
+      "rule_id": "step.complete",
+      "semantic_intent": "Supports formal obligations for step.complete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1279",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "complete_preserves_wellformed",
+      "theorem_line": 1558,
+      "rule_id": "step.complete",
+      "semantic_intent": "Supports formal obligations for step.complete",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1558",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "completed_not_runnable",
+      "theorem_line": 989,
+      "rule_id": "step.complete",
+      "semantic_intent": "Supports formal obligations for step.complete",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:989",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "step_preserves_wellformed",
+      "theorem_line": 3070,
+      "rule_id": "step.enqueue",
+      "semantic_intent": "Supports formal obligations for step.enqueue",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3070",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "steps_preserve_wellformed",
+      "theorem_line": 3139,
+      "rule_id": "step.enqueue",
+      "semantic_intent": "Supports formal obligations for step.enqueue",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3139",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "leak_marks_leaked",
+      "theorem_line": 707,
+      "rule_id": "step.leak",
+      "semantic_intent": "Supports formal obligations for step.leak",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:707",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leak_preserves_wellformed",
+      "theorem_line": 2295,
+      "rule_id": "step.leak",
+      "semantic_intent": "Supports formal obligations for step.leak",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2295",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leak_removes_from_ledger",
+      "theorem_line": 770,
+      "rule_id": "step.leak",
+      "semantic_intent": "Supports formal obligations for step.leak",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:770",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leaked_obligation_stable",
+      "theorem_line": 2996,
+      "rule_id": "step.leak",
+      "semantic_intent": "Supports formal obligations for step.leak",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2996",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "lease_reserve_in_ledger",
+      "theorem_line": 918,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Supports formal obligations for step.reserve",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:918",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "reserve_adds_to_ledger",
+      "theorem_line": 1360,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Supports formal obligations for step.reserve",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1360",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "reserve_creates_reserved",
+      "theorem_line": 1032,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Supports formal obligations for step.reserve",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1032",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "reserve_holder_exists",
+      "theorem_line": 1215,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Supports formal obligations for step.reserve",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1215",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "reserve_preserves_wellformed",
+      "theorem_line": 1987,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Supports formal obligations for step.reserve",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1987",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "scheduler_change_preserves_wellformed",
+      "theorem_line": 2721,
+      "rule_id": "step.schedule",
+      "semantic_intent": "Supports formal obligations for step.schedule",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2721",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "step_preserves_wellformed",
+      "theorem_line": 3070,
+      "rule_id": "step.schedule",
+      "semantic_intent": "Supports formal obligations for step.schedule",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3070",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "steps_preserve_wellformed",
+      "theorem_line": 3139,
+      "rule_id": "step.schedule",
+      "semantic_intent": "Supports formal obligations for step.schedule",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3139",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNextFair_eq_popNext_when_below_limit",
+      "theorem_line": 2611,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2611",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNextFair_fallback_to_popNext",
+      "theorem_line": 2650,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2650",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNextFair_ready_when_limit_reached",
+      "theorem_line": 2634,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2634",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNextFair_timed_when_limit_reached",
+      "theorem_line": 2619,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2619",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNextFair_yields_non_cancel",
+      "theorem_line": 2662,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2662",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNext_cancel_priority",
+      "theorem_line": 2546,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2546",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNext_ready_when_others_empty",
+      "theorem_line": 2572,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2572",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "popNext_timed_priority",
+      "theorem_line": 2559,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2559",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "scheduler_change_preserves_wellformed",
+      "theorem_line": 2721,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2721",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "step_preserves_wellformed",
+      "theorem_line": 3070,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3070",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "steps_preserve_wellformed",
+      "theorem_line": 3139,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Supports formal obligations for step.scheduleStep",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3139",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "partial"
+    },
+    {
+      "theorem": "spawn_adds_child",
+      "theorem_line": 3462,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3462",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_creates_task",
+      "theorem_line": 3438,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3438",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_preserves_existing_task",
+      "theorem_line": 999,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:999",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_preserves_obligation",
+      "theorem_line": 1265,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1265",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_preserves_other_tasks",
+      "theorem_line": 3450,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3450",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_preserves_wellformed",
+      "theorem_line": 1844,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1844",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawned_task_created",
+      "theorem_line": 2692,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2692",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawned_task_in_region",
+      "theorem_line": 2706,
+      "rule_id": "step.spawn",
+      "semantic_intent": "Supports formal obligations for step.spawn",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:2706",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "tick_always_available",
+      "theorem_line": 1514,
+      "rule_id": "step.tick",
+      "semantic_intent": "Supports formal obligations for step.tick",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1514",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "tick_preserves_obligation",
+      "theorem_line": 1346,
+      "rule_id": "step.tick",
+      "semantic_intent": "Supports formal obligations for step.tick",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1346",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "tick_preserves_region",
+      "theorem_line": 1337,
+      "rule_id": "step.tick",
+      "semantic_intent": "Supports formal obligations for step.tick",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1337",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "tick_preserves_task",
+      "theorem_line": 1328,
+      "rule_id": "step.tick",
+      "semantic_intent": "Supports formal obligations for step.tick",
+      "assumptions": ["Constructor-specific premises from Step"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1328",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "tick_preserves_wellformed",
+      "theorem_line": 1530,
+      "rule_id": "step.tick",
+      "semantic_intent": "Supports formal obligations for step.tick",
+      "assumptions": ["Pre-state is wellformed"],
+      "downstream_impact": [
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Feeds Lean coverage matrix rollups for bd-3kzbt",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:1530",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "enqueue_preserves_wellformed_constructor",
+      "theorem_line": 3786,
+      "rule_id": "step.enqueue",
+      "semantic_intent": "Constructor-specific preservation coverage for step.enqueue",
+      "assumptions": ["Pre-state is wellformed", "Step.enqueue premises hold"],
+      "downstream_impact": [
+        "Completes constructor-total preservation coverage for step.enqueue",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3786",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "scheduleStep_preserves_wellformed_constructor",
+      "theorem_line": 3800,
+      "rule_id": "step.scheduleStep",
+      "semantic_intent": "Constructor-specific preservation coverage for step.scheduleStep",
+      "assumptions": ["Pre-state is wellformed", "Step.scheduleStep premises hold"],
+      "downstream_impact": [
+        "Completes constructor-total preservation coverage for step.scheduleStep",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3800",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "schedule_preserves_wellformed_constructor",
+      "theorem_line": 3809,
+      "rule_id": "step.schedule",
+      "semantic_intent": "Constructor-specific preservation coverage for step.schedule",
+      "assumptions": ["Pre-state is wellformed", "Step.schedule premises hold"],
+      "downstream_impact": [
+        "Completes constructor-total preservation coverage for step.schedule",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3809",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancelChild_preserves_wellformed_constructor",
+      "theorem_line": 3826,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Constructor-specific preservation coverage for step.cancelChild",
+      "assumptions": ["Pre-state is wellformed", "Step.cancelChild premises hold"],
+      "downstream_impact": [
+        "Completes constructor-total preservation coverage for step.cancelChild",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3826",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "task_cancel_requested_canonical_form",
+      "theorem_line": 3878,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Canonical-form decomposition for cancel-requested task states.",
+      "assumptions": ["Task state matches TaskState.cancelRequested _ _"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3878",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "task_cancelling_canonical_form",
+      "theorem_line": 3890,
+      "rule_id": "step.cancelAcknowledge",
+      "semantic_intent": "Canonical-form decomposition for cancelling task states.",
+      "assumptions": ["Task state matches TaskState.cancelling _ _"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3890",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "task_finalizing_canonical_form",
+      "theorem_line": 3902,
+      "rule_id": "step.cancelFinalize",
+      "semantic_intent": "Canonical-form decomposition for finalizing task states.",
+      "assumptions": ["Task state matches TaskState.finalizing _ _"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for cancellation ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3902",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_closing_canonical_form",
+      "theorem_line": 3914,
+      "rule_id": "step.closeBegin",
+      "semantic_intent": "Canonical-form decomposition for closing region states.",
+      "assumptions": ["Region state matches RegionState.closing"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3914",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_draining_canonical_form",
+      "theorem_line": 3926,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Canonical-form decomposition for draining region states.",
+      "assumptions": ["Region state matches RegionState.draining"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3926",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "region_finalizing_canonical_form",
+      "theorem_line": 3938,
+      "rule_id": "step.closeChildrenDone",
+      "semantic_intent": "Canonical-form decomposition for finalizing region states.",
+      "assumptions": ["Region state matches RegionState.finalizing"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for region close ladder proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3938",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_reserved_canonical_form",
+      "theorem_line": 3950,
+      "rule_id": "step.reserve",
+      "semantic_intent": "Canonical-form decomposition for reserved obligations.",
+      "assumptions": ["Obligation state matches ObligationState.reserved"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3950",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_committed_canonical_form",
+      "theorem_line": 3961,
+      "rule_id": "step.commit",
+      "semantic_intent": "Canonical-form decomposition for committed obligations.",
+      "assumptions": ["Obligation state matches ObligationState.committed"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3961",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_aborted_canonical_form",
+      "theorem_line": 3972,
+      "rule_id": "step.abort",
+      "semantic_intent": "Canonical-form decomposition for aborted obligations.",
+      "assumptions": ["Obligation state matches ObligationState.aborted"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3972",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "obligation_leaked_canonical_form",
+      "theorem_line": 3983,
+      "rule_id": "step.leak",
+      "semantic_intent": "Canonical-form decomposition for leaked obligations.",
+      "assumptions": ["Obligation state matches ObligationState.leaked"],
+      "downstream_impact": [
+        "Makes canonical-form witnesses explicit for obligation lifecycle proofs",
+        "Feeds constructor coverage status in formal/lean/coverage/step_constructor_coverage.json",
+        "Used for stale-link detection in CI/test automation"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:3983",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "step_preserves_single_owner",
+      "theorem_line": 4479,
+      "rule_id": "step.spawn",
+      "semantic_intent": "SingleOwner invariant preserved through spawn (adds task + extends children)",
+      "assumptions": ["Pre-state is wellformed", "Pre-state satisfies SingleOwner"],
+      "downstream_impact": [
+        "Closes SEM-06.F1 (asupersync-3cddg.6.6)",
+        "Feeds invariant_status_inventory.json upgrade to fully_proven"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4479",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "steps_preserve_single_owner",
+      "theorem_line": 4584,
+      "rule_id": "step.spawn",
+      "semantic_intent": "SingleOwner is an inductive invariant across all finite step sequences",
+      "assumptions": ["Initial state is wellformed and satisfies SingleOwner"],
+      "downstream_impact": [
+        "Closes SEM-06.F1 global inductive invariant",
+        "Provides multi-step closure guarantee"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4584",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_cancel_requested",
+      "theorem_line": 4637,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task already cancelRequested.",
+      "assumptions": ["Task state is cancelRequested"],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4637",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_cancelling",
+      "theorem_line": 4648,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is cancelling.",
+      "assumptions": ["Task state is cancelling"],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4648",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_finalizing",
+      "theorem_line": 4659,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is finalizing.",
+      "assumptions": ["Task state is finalizing"],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4659",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_blocked_when_completed",
+      "theorem_line": 4670,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Idempotence: cancelRequest precondition is unsatisfiable when task is completed.",
+      "assumptions": ["Task state is completed"],
+      "downstream_impact": [
+        "Closes idempotence gap in inv.cancel.protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4670",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_requires_pre_cancel_state",
+      "theorem_line": 4680,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Master idempotence: any task not in {created, running} is in cancel-protocol or completed.",
+      "assumptions": ["Task state is not created and not running"],
+      "downstream_impact": [
+        "Canonical theorem for cancel_request_idempotence family",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4680",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_child_blocked_when_cancel_protocol",
+      "theorem_line": 4702,
+      "rule_id": "step.cancelChild",
+      "semantic_intent": "Idempotence: cancelChild is blocked on tasks already in cancel-protocol states.",
+      "assumptions": [
+        "Task state is in cancel-protocol (cancelRequested, cancelling, or finalizing)"
+      ],
+      "downstream_impact": [
+        "Extends idempotence guarantee to cancelChild constructor",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4702",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_reason_monotone_incoming",
+      "theorem_line": 4712,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Monotonicity: strengthenOpt result rank >= incoming reason rank.",
+      "assumptions": ["Any CancelReason and Option CancelReason"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4712"],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancel_request_reason_monotone_existing",
+      "theorem_line": 4722,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Monotonicity: strengthenOpt result rank >= existing reason rank.",
+      "assumptions": ["Existing and incoming CancelReasons"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4722"],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "strengthen_opt_monotone_rank",
+      "theorem_line": 4731,
+      "rule_id": "step.cancelRequest",
+      "semantic_intent": "Generic monotonicity: strengthenOpt never weakens existing cancel reason rank.",
+      "assumptions": ["Current is some existing CancelReason"],
+      "downstream_impact": ["Supports monotone reason-strength invariant across cancel protocol"],
+      "artifacts": ["formal/lean/Asupersync.lean:4731"],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "closed_region_children_all_completed",
+      "theorem_line": 4781,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: if a region is closed, all children in its task list are completed.",
+      "assumptions": ["Region state is RegionState.closed", "Pre-state is wellformed"],
+      "downstream_impact": [
+        "Foundational for race_loser_drain_completeness",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4781",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "closed_region_child_completed",
+      "theorem_line": 4793,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: per-child specialization — any specific child of a closed region is completed.",
+      "assumptions": [
+        "Region state is RegionState.closed",
+        "Task is a member of the region's children list",
+        "Pre-state is wellformed"
+      ],
+      "downstream_impact": [
+        "Per-child version of closed_region_children_all_completed",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4793",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "loser_drained_from_quiescence",
+      "theorem_line": 4807,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: Quiescent region implies LoserDrained for any two race participants.",
+      "assumptions": [
+        "Region is Quiescent",
+        "Both race participants are members of the region's children list"
+      ],
+      "downstream_impact": [
+        "Core projection from Quiescent to LoserDrained",
+        "Feeds race_loser_drain_completeness"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4807",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_gate_requires_drain",
+      "theorem_line": 4843,
+      "rule_id": "step.close",
+      "semantic_intent": "Race-loser drain: decomposes Quiescent into allTasksCompleted + allRegionsClosed + empty obligations/finalizers.",
+      "assumptions": ["Region is Quiescent"],
+      "downstream_impact": [
+        "Quiescence decomposition for race-loser analysis",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4843",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "race_loser_drain_completeness",
+      "theorem_line": 4857,
+      "rule_id": "step.close",
+      "semantic_intent": "Central SEM-06.F3 theorem: after a close step sequence, race losers are fully drained (both participants completed).",
+      "assumptions": [
+        "Steps sequence from initial to final state",
+        "Region transitions from open to closed",
+        "Both race participants are children of the region"
+      ],
+      "downstream_impact": [
+        "Canonical theorem for race_loser_drain family",
+        "Closes inv.race.losers_drained invariant gap"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4857",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "cancelled_child_progress",
+      "theorem_line": 4873,
+      "rule_id": "step.closeCancelChildren",
+      "semantic_intent": "Liveness: a cancelled child's cancel potential strictly decreases, ensuring drain progress.",
+      "assumptions": [
+        "Task state is in cancel protocol (cancelRequested, cancelling, or finalizing)",
+        "Cancel potential is positive"
+      ],
+      "downstream_impact": [
+        "Liveness guarantee for child drain during close protocol",
+        "Feeds constructor coverage in formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4873",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "ledger_implies_reserved",
+      "theorem_line": 4912,
+      "rule_id": "step.reserve",
+      "semantic_intent": "No-leak: WF projection — obligation in ledger must be in reserved state.",
+      "assumptions": ["Pre-state is wellformed", "Obligation is in region's ledger"],
+      "downstream_impact": [
+        "Building block for non_reserved_excluded_from_ledger and leaked_not_in_ledger",
+        "Canonical theorem for obligation_no_leak family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4912",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "non_reserved_excluded_from_ledger",
+      "theorem_line": 4930,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-leak: contrapositive — non-reserved obligations excluded from all ledgers.",
+      "assumptions": ["Pre-state is wellformed", "Obligation state is not reserved"],
+      "downstream_impact": [
+        "Proves committed/aborted/leaked obligations cannot hide in ledger",
+        "Feeds leaked_not_in_ledger"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4930",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leaked_not_in_ledger",
+      "theorem_line": 4945,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: leaked obligations cannot appear in any region's ledger.",
+      "assumptions": ["Pre-state is wellformed", "Obligation state is leaked"],
+      "downstream_impact": [
+        "Core no-hiding guarantee: leaked obligations never block close",
+        "Feeds leaked_tracked_and_non_blocking"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4945",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leak_requires_completed_holder",
+      "theorem_line": 4960,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: characterizes leak precondition — requires completed task holding reserved obligation.",
+      "assumptions": ["A leak step fires"],
+      "downstream_impact": [
+        "Precondition characterization for bounded assumption reasoning",
+        "Feeds no_leak_from_proper_lifecycle"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4960",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_leak_from_proper_lifecycle",
+      "theorem_line": 4980,
+      "rule_id": "step.leak",
+      "semantic_intent": "No-leak: conditional — proper task lifecycle discipline prevents leak step from firing.",
+      "assumptions": ["No completed task holds reserved obligations"],
+      "downstream_impact": [
+        "Formalizes bounded assumption: zero leaked obligations under discipline",
+        "Closes gap for conditional no-leak execution guarantee"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:4980",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "execution_obligation_lifecycle_completeness",
+      "theorem_line": 5000,
+      "rule_id": "step.close",
+      "semantic_intent": "No-leak global: well-formed execution ending in close preserves WF, empties ledger, tracks all obligations.",
+      "assumptions": [
+        "Initial state is wellformed",
+        "Steps sequence to pre-close state",
+        "Close step fires"
+      ],
+      "downstream_impact": [
+        "Central global no-obligation-leak execution theorem",
+        "Canonical theorem for obligation_no_leak family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5000",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "leaked_tracked_and_non_blocking",
+      "theorem_line": 5021,
+      "rule_id": "step.close",
+      "semantic_intent": "No-leak: leaked obligations are permanently tracked, never block close, and remain stable.",
+      "assumptions": [
+        "Well-formed execution ending in close",
+        "Obligation exists and is in leaked state"
+      ],
+      "downstream_impact": [
+        "Proves leaked obligations are accounted damage — tracked, non-blocking, stable",
+        "Closes the obligation lifecycle soundness argument"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5021",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "spawn_authority_gated",
+      "theorem_line": 5119,
+      "rule_id": "step.spawn",
+      "semantic_intent": "No-ambient-authority: spawn requires open region and task absence — entity existence gates the effect.",
+      "assumptions": ["A spawn step fires"],
+      "downstream_impact": [
+        "Per-label authority gating for spawn constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5119",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "commit_holder_authority",
+      "theorem_line": 5131,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-ambient-authority: commit requires obligation holder match — entity ownership gates the effect.",
+      "assumptions": ["A commit step fires"],
+      "downstream_impact": [
+        "Per-label authority gating for commit constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5131",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "abort_holder_authority",
+      "theorem_line": 5143,
+      "rule_id": "step.abort",
+      "semantic_intent": "No-ambient-authority: abort requires obligation holder match — entity ownership gates the effect.",
+      "assumptions": ["An abort step fires"],
+      "downstream_impact": [
+        "Per-label authority gating for abort constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5143",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "close_authority_gated",
+      "theorem_line": 5157,
+      "rule_id": "step.close",
+      "semantic_intent": "No-ambient-authority: close requires region existence, finalizing state, and quiescence — entity existence gates the effect.",
+      "assumptions": ["A close step fires"],
+      "downstream_impact": [
+        "Per-label authority gating for close constructor",
+        "Feeds no_ambient_effect_without_context composite"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5157",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.spawn",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": [
+        "Central SEM-06.F5 theorem closing inv.authority.no_ambient",
+        "Canonical theorem for no_ambient_authority family"
+      ],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/invariant_status_inventory.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.commit",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for commit constructor"],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.abort",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for abort constructor"],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    },
+    {
+      "theorem": "no_ambient_effect_without_context",
+      "theorem_line": 5173,
+      "rule_id": "step.close",
+      "semantic_intent": "No-ambient-authority composite: every non-tau non-tick step requires entity existence witness (exhaustive over 22 constructors).",
+      "assumptions": ["Step fires with non-tau non-tick label"],
+      "downstream_impact": ["Cross-cutting authority gating coverage for close constructor"],
+      "artifacts": [
+        "formal/lean/Asupersync.lean:5173",
+        "formal/lean/coverage/step_constructor_coverage.json"
+      ],
+      "rule_status": "covered"
+    }
+  ]
+}

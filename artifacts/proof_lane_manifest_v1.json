@@ -1,0 +1,3814 @@
+{
+  "contract_version": "proof-lane-manifest-v1",
+  "bead_id": "asupersync-aj7lx3.1",
+  "created_date": "2026-05-29",
+  "description": "Canonical rch-routed proof-command manifest for production, feature, fuzz, broad validation, rustdoc, and formal proof lanes.",
+  "source_of_truth": {
+    "manifest": "artifacts/proof_lane_manifest_v1.json",
+    "contract_test": "tests/proof_lane_manifest_contract.rs",
+    "cargo_manifest": "Cargo.toml",
+    "agent_instructions": "AGENTS.md",
+    "readme": "README.md"
+  },
+  "command_policy": {
+    "all_commands_must_start_with": "RCH_REQUIRE_REMOTE=1 rch exec -- ",
+    "cpu_intensive_validation_must_use_rch": true,
+    "rch_must_fail_closed_to_remote": true,
+    "formal_lean_build_must_not_shell_wrap": true,
+    "broad_validation_is_frontier_evidence_not_local_change_proof": true
+  },
+  "resource_envelope_policy": {
+    "policy_id": "proof-lane-resource-envelope-policy-v1",
+    "schema_version": "proof-lane-resource-envelope-v1",
+    "scope_note": "Proof metadata only: these envelopes classify expected remote proof-lane resource pressure and fail-closed admission semantics. They do not implement, replace, or prove OS-level worker cgroup MemoryMax/CPU quota enforcement.",
+    "operator_log_fields": [
+      "lane_id",
+      "command_prefix",
+      "resource_envelope_class",
+      "timeout_seconds",
+      "memory_mb",
+      "remote_required",
+      "local_fallback_allowed",
+      "fail_closed_reason"
+    ],
+    "classes": [
+      {
+        "class_id": "dependency-graph-light",
+        "lane_kinds": [
+          "dependency_graph"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 4096,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Cargo dependency graph audits should be remote-routed but are expected to consume modest memory and wall time."
+      },
+      {
+        "class_id": "compile-frontier-heavy",
+        "lane_kinds": [
+          "compile_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad cargo check/build frontiers may compile large feature graphs and need explicit remote time and memory envelopes."
+      },
+      {
+        "class_id": "test-frontier-heavy",
+        "lane_kinds": [
+          "test_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 65536,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Broad lib/integration test frontiers can run large deterministic suites and must never silently fall back to local execution."
+      },
+      {
+        "class_id": "lint-frontier-heavy",
+        "lane_kinds": [
+          "lint_frontier"
+        ],
+        "timeout_seconds": 7200,
+        "memory_mb": 49152,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "high",
+        "description": "Workspace clippy frontiers are expensive compile-like proof lanes with strict remote-only routing."
+      },
+      {
+        "class_id": "format-frontier-light",
+        "lane_kinds": [
+          "format_frontier"
+        ],
+        "timeout_seconds": 600,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Formatting checks are cheap but still inherit the manifest's remote-required proof-command policy."
+      },
+      {
+        "class_id": "documentation-frontier-medium",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Rustdoc/API proof lanes are compile-adjacent and require a bounded remote envelope without being treated as broad workspace health."
+      },
+      {
+        "class_id": "formal-frontier-medium",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Lean/formal proof builds are remote-required proof lanes with explicit finite wall-clock and memory envelopes."
+      },
+      {
+        "class_id": "artifact-contract-medium",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
+        "timeout_seconds": 3600,
+        "memory_mb": 16384,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "medium",
+        "description": "Contract-only lanes run focused Rust verifier tests or artifact checks and should stay bounded without inheriting broad-suite pressure."
+      },
+      {
+        "class_id": "dependency-audit-light",
+        "lane_kinds": [
+          "dependency_audit"
+        ],
+        "timeout_seconds": 900,
+        "memory_mb": 2048,
+        "remote_required": true,
+        "local_fallback_allowed": false,
+        "resource_pressure": "low",
+        "description": "Shell dependency audits are lightweight remote-required proof lanes with explicit no-local-fallback semantics."
+      }
+    ]
+  },
+  "proof_reuse_policy": {
+    "policy_id": "strict-rch-proof-reuse-policy-v1",
+    "proof_reuse_cache_contract": "artifacts/proof_reuse_cache_contract_v1.json",
+    "cache_hit_is_never_fresh_rch_pass": true,
+    "durable_receipt_candidate_policy": {
+      "policy_id": "durable-rch-proof-receipt-candidate-policy-v1",
+      "receipt_schema_version": "durable-rch-proof-receipt-v1",
+      "receipt_contract": "artifacts/durable_rch_proof_receipt_contract_v1.json",
+      "candidate_evidence_only": true,
+      "must_pass_through_reuse_and_citation_classifiers": true,
+      "required_terminal_lifecycle_state": "terminal_pass",
+      "required_terminal_classification": "pass",
+      "required_proof_evidence_status": "fresh-rch-pass",
+      "requires_main_branch": true,
+      "requires_clean_dirty_frontier": true,
+      "requires_remote_required_command": true,
+      "local_fallback_allowed": false,
+      "required_receipt_fields": [
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "claim_scope",
+        "command.command",
+        "command.command_fingerprint",
+        "command.remote_required",
+        "command.local_fallback_allowed",
+        "command.local_fallback_markers",
+        "source.branch",
+        "source.head_commit",
+        "source.expected_head",
+        "source.source_tree_fingerprint",
+        "source.dirty_frontier_status",
+        "source.touched_files",
+        "source.touched_file_hashes",
+        "rch_provenance.worker_id",
+        "rch_provenance.remote_route_segments",
+        "outcome.status",
+        "outcome.output_digest",
+        "claim_boundaries.citable",
+        "claim_boundaries.explicit_not_covered",
+        "claim_boundaries.refusal_reason_codes"
+      ],
+      "non_citeable_claim_scopes": [
+        "fresh-rch-pass",
+        "release-readiness",
+        "workspace-health",
+        "live-rch-fleet-availability"
+      ]
+    },
+    "default_required_match_field_set": "strict-rch-proof-reuse-v1",
+    "required_match_field_sets": {
+      "strict-rch-proof-reuse-v1": [
+        "manifest_lane_id",
+        "manifest_guarantee_ids",
+        "command_fingerprint",
+        "source_tree_fingerprint",
+        "toolchain_fingerprint",
+        "head_commit",
+        "branch",
+        "dirty_frontier_status",
+        "touched_files",
+        "touched_file_hashes",
+        "feature_flags",
+        "cargo_lock_hash",
+        "rust_toolchain_toml_hash",
+        "status",
+        "proof_output_digest",
+        "rch_remote_worker",
+        "rch_remote_route_segments",
+        "local_fallback_markers"
+      ]
+    },
+    "default_non_citeable_claim_scopes": [
+      "fresh-rch-pass",
+      "release-readiness",
+      "workspace-health"
+    ]
+  },
+  "validation_frontier_v2_policy": {
+    "policy_id": "validation-frontier-v2-lane-semantics",
+    "schema_version": "validation-frontier-v2",
+    "description": "Machine-readable lane semantics for interpreting proof evidence without overclaiming compile-only, broad-frontier, conformance, or stale-progress outcomes.",
+    "default_stale_progress_policy": {
+      "policy_id": "rch-stale-progress-fail-closed-v1",
+      "receipt_schema_version": "rch-stale-progress-receipt-v1",
+      "receipt_contract": "artifacts/rch_stale_progress_receipt_contract_v1.json",
+      "wait_for_fresh_heartbeat": true,
+      "never_cancel_peer_owned_builds": true,
+      "receipt_required_before_retry": true,
+      "code_evidence_claimable": false,
+      "retry_policy": "retry only after a deterministic stale receipt or a real compiler/runtime diagnostic"
+    },
+    "lane_classes": [
+      {
+        "lane_class": "dependency_graph",
+        "lane_kinds": [
+          "dependency_graph",
+          "dependency_audit"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 256,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "compile_only",
+        "lane_kinds": [
+          "compile_frontier",
+          "lint_frontier",
+          "format_frontier"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "workspace feature graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "conformance",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "broad_frontier",
+        "lane_kinds": [
+          "test_frontier"
+        ],
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "test-internals",
+          "integration test harnesses"
+        ],
+        "max_expected_crates": 900,
+        "no_claim_boundaries": [
+          "focused-change-proof",
+          "release-readiness-without-clean-tree",
+          "fresh-rch-pass-without-rerun"
+        ]
+      },
+      {
+        "lane_class": "rustdoc",
+        "lane_kinds": [
+          "documentation_frontier"
+        ],
+        "expected_graph_roots": [
+          "README.md",
+          "src/lib.rs"
+        ],
+        "expected_heavy_edges": [
+          "rustdoc doctest graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "test-execution",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "formal",
+        "lane_kinds": [
+          "formal_frontier"
+        ],
+        "expected_graph_roots": [
+          "formal/lean"
+        ],
+        "expected_heavy_edges": [
+          "Lean proof graph"
+        ],
+        "max_expected_crates": 1,
+        "no_claim_boundaries": [
+          "cargo-compile",
+          "runtime-behavior",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_class": "artifact_contract",
+        "lane_kinds": [
+          "artifact_contract"
+        ],
+        "expected_graph_roots": [
+          "artifacts",
+          "tests"
+        ],
+        "expected_heavy_edges": [
+          "focused verifier test graph"
+        ],
+        "max_expected_crates": 700,
+        "no_claim_boundaries": [
+          "broad-workspace-health",
+          "runtime-behavior",
+          "release-readiness"
+        ]
+      }
+    ],
+    "lane_overrides": [
+      {
+        "lane_id": "channel-mpsc-select-e2e-public-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "Cargo.toml",
+          "src/bin/channel_mpsc_select_e2e.rs",
+          "examples/channel_mpsc_select_e2e.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 160,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "examples-benches-fuzz",
+          "performance",
+          "release-readiness",
+          "workspace-health"
+        ]
+      },
+      {
+        "lane_id": "fuzz-manifest-smoke",
+        "lane_class": "fuzz_smoke",
+        "expected_graph_roots": [
+          "fuzz/Cargo.toml",
+          "fuzz/fuzz_targets"
+        ],
+        "expected_heavy_edges": [
+          "fuzz-only OTLP generated-message graph"
+        ],
+        "max_expected_crates": 900,
+        "no_claim_boundaries": [
+          "production-consumer-proof",
+          "default-production-graph",
+          "metrics-production-graph",
+          "release-readiness"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-v044-cancel-compat-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 240,
+        "no_claim_boundaries": [
+          "all-FrankenGraphDB-behavior",
+          "broad-workspace-health",
+          "current-head-runtime-behavior",
+          "performance",
+          "release-readiness"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-default-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-default-kafka-test",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/kafka_producer_idempotence_audit.rs"
+        ],
+        "expected_heavy_edges": [],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "all-root-integration-tests-default-clean",
+          "broad-workspace-health",
+          "conformance-crate",
+          "conformance-dev-dependency-cycle-removal",
+          "kafka-backend-behavior",
+          "performance",
+          "release-readiness",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-metrics-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "metrics feature graph"
+        ],
+        "max_expected_crates": 320,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "performance",
+          "release-readiness",
+          "workspace-health",
+          "test-internals-public-api"
+        ]
+      },
+      {
+        "lane_id": "downstream-consumer-channel-profile-run",
+        "lane_class": "run_exact",
+        "expected_graph_roots": [
+          "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+          "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+        ],
+        "expected_heavy_edges": [
+          "channel-mpsc-select-e2e feature graph"
+        ],
+        "max_expected_crates": 220,
+        "no_claim_boundaries": [
+          "broad-lib-test-frontier",
+          "conformance-crate",
+          "examples-benches-fuzz",
+          "performance",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    ],
+    "conformance_masquerade_guard": {
+      "conformance_lane_class": "conformance",
+      "required_expected_graph_root": "conformance",
+      "required_no_claim_boundary": "focused-feature-proof"
+    }
+  },
+  "required_guarantee_ids": [
+    "default-production-tokio-free",
+    "metrics-production-tokio-free",
+    "atp-native-self-contained",
+    "arq-quic-loopback-e2e",
+    "arq-quic-lab-determinism",
+    "arq-quic-symbol-envelope-fuzz-smoke",
+    "arq-quic-bounded-memory-loopback",
+    "arq-quic-wire-conformance",
+    "arq-quic-fleet-benchmark-no-fresh-result",
+    "fuzz-tokio-quarantine",
+    "workspace-tokio-audit",
+    "full-graph-tokio-audit",
+    "feature-gated-native-surfaces",
+    "fuzz-manifest-smoke",
+    "lib-test-frontier",
+    "native-parked-task-cancellation",
+    "db-feature-lib-test-frontier",
+    "channel-mpsc-select-e2e-public-run",
+    "all-target-compile-frontier",
+    "clippy-frontier",
+    "cli-feature-clippy-frontier",
+    "rustfmt-frontier",
+    "rustdoc-api-frontier",
+    "formal-lean-core-invariants",
+    "runtime-pressure-control-evidence-contract",
+    "memory-residency-replay-e2e-contract",
+    "memory-residency-operator-safety-contract",
+    "fourth-wave-governor-schema-contract",
+    "fourth-wave-governor-policy-engine",
+    "fourth-wave-swarm-replay-corpus",
+    "fourth-wave-runtime-bridge-contract",
+    "fourth-wave-benchmark-contract",
+    "fourth-wave-governor-signoff-runbook",
+    "fourth-wave-governor-final-signoff",
+    "admission-aware-proof-lane-atlas",
+    "migration-readiness-planner-signoff",
+    "shared-main-commit-guard",
+    "durable-rch-final-signoff",
+    "rch-stale-progress-receipt",
+    "rch-topology-preflight-canary",
+    "unsafe-boundary-ledger-contract",
+    "proof-lane-manifest-verifier",
+    "downstream-consumer-v044-cancel-compatibility",
+    "downstream-consumer-default-public-api",
+    "downstream-consumer-direct-minimal-resolution",
+    "downstream-consumer-default-kafka-fail-closed",
+    "downstream-consumer-metrics-public-api",
+    "downstream-consumer-channel-public-api",
+    "downstream-consumer-default-tokio-free",
+    "downstream-consumer-internal-only-negative",
+    "downstream-consumer-proof-contract",
+    "lab-live-support-claim-report-contract",
+    "browser-ga-final-signoff",
+    "validation-frontier-final-signoff",
+    "doctor-e2e-proof-lane-contract",
+    "semantic-lint-proof-lane-contract",
+    "rust-crate-release-provenance-contract",
+    "artifact-governance-validation-harness",
+    "artifact-governance-final-signoff",
+    "clean-overlay-proof-orchestration-contract",
+    "proof-traffic-final-signoff",
+    "dependency-supply-chain-policy-contract",
+    "dependency-budget-contract",
+    "dependency-ci-provenance-final-signoff"
+  ],
+  "lanes": [
+    {
+      "lane_id": "default-production-tokio-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_default_tokio_tree cargo tree -e normal -p asupersync -i tokio",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "default-production-tokio-free"
+      ],
+      "covers": "Default production normal dependency graph has no tokio edge.",
+      "explicit_not_covered": "Workspace, dev-dependency, fuzz, conformance, and asupersync-tokio-compat graphs are outside this production proof.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
+      ],
+      "common_unrelated_blockers": [
+        "Cargo.lock or dependency graph drift from unrelated feature work"
+      ],
+      "escalation_notes": "Any tokio path here is a production regression; file or update a blocker bead with the full cargo-tree path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "default-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "metrics-production-tokio-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_metrics_tokio_tree cargo tree -e normal -p asupersync --features metrics -i tokio",
+      "package": "asupersync",
+      "feature_flags": [
+        "metrics"
+      ],
+      "guarantee_ids": [
+        "metrics-production-tokio-free"
+      ],
+      "covers": "Optional metrics production normal dependency graph has no tokio edge.",
+      "explicit_not_covered": "The fuzz feature deliberately enables OTLP generated messages through tonic/tokio and is not covered by this lane.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs",
+        "tests/no_tokio_production_feature_graph_regression.rs"
+      ],
+      "common_unrelated_blockers": [
+        "opentelemetry or opentelemetry_sdk feature drift",
+        "accidental metrics dependency on opentelemetry-proto"
+      ],
+      "escalation_notes": "Treat any tokio edge as a metrics production regression and capture the feature path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "metrics-production-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fuzz-tokio-quarantine-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_fuzz_tokio_tree cargo tree -e normal -p asupersync --features fuzz -i tokio",
+      "package": "asupersync",
+      "feature_flags": [
+        "fuzz"
+      ],
+      "guarantee_ids": [
+        "fuzz-tokio-quarantine"
+      ],
+      "covers": "The fuzz-only OTLP helper graph is expected to expose the quarantined opentelemetry-proto to tonic/tokio path.",
+      "explicit_not_covered": "This is not a production-consumer proof and must not be used to weaken default or metrics no-tokio claims.",
+      "expected_signal": "dependency path containing opentelemetry-proto, tonic or tonic-prost, and tokio",
+      "source_paths": [
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "fuzz feature dependency churn"
+      ],
+      "escalation_notes": "If the path disappears, update the quarantine contract; if it appears in default or metrics lanes, file a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-tokio-quarantine"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "workspace-normal-tokio-audit",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_workspace_tokio_tree cargo tree -e normal --workspace -i tokio",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "workspace-tokio-audit"
+      ],
+      "covers": "Workspace normal graph audit names expected scoped tokio edges in satellite crates and test/reference surfaces.",
+      "explicit_not_covered": "Not a default production proof; expected tokio edges are allowed when documented as scoped carve-outs.",
+      "expected_signal": "tokio paths are limited to documented workspace carve-outs",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "new workspace member enables tokio without documentation"
+      ],
+      "escalation_notes": "Compare output against AGENTS documented carve-outs before filing a regression.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "workspace-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "full-feature-tokio-audit",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_full_tokio_tree cargo tree -e features --workspace --invert tokio",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "full-graph-tokio-audit"
+      ],
+      "covers": "Full workspace feature/dev graph audit names expected scoped tokio edges in dev/test/reference, fuzz-helper, and satellite surfaces.",
+      "explicit_not_covered": "Not a default or metrics production proof; expected tokio edges are allowed only when documented as scoped non-production carve-outs.",
+      "expected_signal": "tokio paths are explained as scoped dev/test/fuzz/satellite audit edges",
+      "source_paths": [
+        "AGENTS.md",
+        "README.md",
+        "Cargo.toml",
+        "artifacts/no_tokio_feature_boundary_contract_v1.json",
+        "tests/no_tokio_feature_boundary_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "new dev-dependency enables tokio without documentation",
+        "new optional feature unifies into a production graph accidentally"
+      ],
+      "escalation_notes": "Classify every tokio path before citing this lane; any default or metrics overlap remains a production blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "full-graph-tokio-audit"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "native-feature-smoke",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_feature_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --no-default-features --features tls,sqlite,postgres,mysql,quic,http3,compression,tracing-integration",
+      "package": "asupersync",
+      "feature_flags": [
+        "tls",
+        "sqlite",
+        "postgres",
+        "mysql",
+        "quic",
+        "http3",
+        "compression",
+        "tracing-integration"
+      ],
+      "guarantee_ids": [
+        "feature-gated-native-surfaces"
+      ],
+      "covers": "Representative native optional runtime surfaces parse and typecheck together without default test helpers.",
+      "explicit_not_covered": "Does not prove external service behavior, broker availability, TLS trust roots, or every feature permutation.",
+      "expected_signal": "cargo check exits 0 or records the first unrelated compile frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs"
+      ],
+      "common_unrelated_blockers": [
+        "feature-specific compile drift",
+        "native dependency availability on remote workers"
+      ],
+      "escalation_notes": "If this fails before touched files compile, capture the first file/error as a validation frontier blocker.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "feature-gated-native-surfaces"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fuzz-manifest-smoke",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fuzz_manifest_smoke CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -j 2 --locked --manifest-path fuzz/Cargo.toml",
+      "package": "fuzz",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fuzz-manifest-smoke"
+      ],
+      "covers": "The tracked fuzz lock, fuzz manifest, and registered fuzz targets typecheck together as a cargo-fuzz workspace.",
+      "explicit_not_covered": "Does not run coverage-guided campaigns, sanitizers, or individual crash reproductions.",
+      "expected_signal": "cargo check exits 0 or records the first fuzz target compile blocker",
+      "source_paths": [
+        "fuzz/Cargo.toml",
+        "fuzz/fuzz_targets"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty fuzz target",
+        "shared fuzz/Cargo.toml registration conflict"
+      ],
+      "escalation_notes": "For one-target work, pair this broad lane with a narrower --bin target proof if the manifest is blocked elsewhere.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fuzz-manifest-smoke"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "lib-tests",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lib_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "lib-test-frontier"
+      ],
+      "covers": "Runtime crate unit-test frontier including inline module tests and test-internals helpers.",
+      "explicit_not_covered": "Integration tests, conformance crate, fuzz targets, examples, and benches are outside this lane.",
+      "expected_signal": "lib tests pass or the first failing compile/test frontier is recorded",
+      "source_paths": [
+        "src/lib.rs",
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "audit test compile drift",
+        "peer-dirty lib module",
+        "warning wall promoted by RUSTFLAGS"
+      ],
+      "escalation_notes": "Do not claim all-target health from this lane; use it as scoped lib-frontier evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "lib-test-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "native-parked-task-cancellation",
+      "kind": "test_frontier",
+      "focused_behavioral_contract": true,
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_native_parked_task_cancellation CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "native-parked-task-cancellation"
+      ],
+      "covers": "Native current-thread and owner-local task abort plus cross-thread abort delivery to a parked task on a multi-worker runtime, after proven parking on a mutex, bounded-channel send, or semaphore; the downstream-shaped test_utils::run_test plus public Cx::spawn sequence; documented spawn_blocking and spawn_blocking_in late-result discard; abort-before-first-poll delivery; cancellation arriving after a user future returned Pending; ordinary Cx::spawn preservation of typed results after cancellation acknowledgement while retaining v0.4.3 task-level attribution for cancellation-blind late values; panic classification in both mailbox and legacy state-threaded task producers; exact TaskHandle task-level versus domain-level cancellation results; acknowledged asynchronous cleanup across an additional Pending; waiter unlinking before the held resource unlocks; a complete TaskHandle-producer census; use of the centralized non-cancellable terminal-publication boundary; and Cx-independent terminal-result publication for RemoteHandle, actor/server, ATP transfer-actor, deterministic lab-network delivery, and conformance registration receipts.",
+      "explicit_not_covered": "Broad workspace health, every cancellation-blind future shape beyond the explicit late-value cases, forced future destruction or hard-stop semantics, timers, every I/O/backend primitive, LabRuntime/model refinement, downstream fastmcp_rust compilation, performance, release readiness beyond this mandatory behavioral boundary, or proof from structural source assertions alone.",
+      "expected_signal": "all unfiltered runtime_abort_vs_cancel_semantics_audit tests and every proof-runner named escaped-defect sentinel run and pass with nonzero behavioral test evidence",
+      "source_paths": [
+        ".github/workflows/ci.yml",
+        "scripts/run_proof_checks.sh",
+        "src/cx/cx.rs",
+        "src/cx/scope.rs",
+        "src/runtime/builder.rs",
+        "src/runtime/state.rs",
+        "src/runtime/task_handle.rs",
+        "src/sync/scope_cancellation_metamorphic.rs",
+        "src/remote.rs",
+        "src/lab/network/harness.rs",
+        "src/actor.rs",
+        "src/gen_server.rs",
+        "src/atp/transfer_actor.rs",
+        "src/conformance/mod.rs",
+        "src/test_utils.rs",
+        "tests/runtime_abort_vs_cancel_semantics_audit.rs",
+        "TESTING_FOR_AGENTS.md",
+        "TESTING.md",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "native runtime worker admission or compilation failure",
+        "unrelated compile drift in the integration-test dependency graph"
+      ],
+      "escalation_notes": "Any red, zero-test, filtered, skipped, unrun, or missing-required-sentinel result is release-blocking. Structural/source-shape checks are supplemental and cannot replace the native behavioral cases.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "db-feature-lib-tests",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_db_feature_tests CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo test -p asupersync --lib --features postgres,mysql,sqlite,test-internals database:: -- --test-threads=2",
+      "package": "asupersync",
+      "feature_flags": [
+        "postgres",
+        "mysql",
+        "sqlite",
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "db-feature-lib-test-frontier"
+      ],
+      "covers": "Database-feature lib-test frontier: the database:: module tree (sqlite, postgres, mysql, pool) compiled and executed under the postgres+mysql+sqlite feature set, which the standard lib-tests lane never enables (br-asupersync-uvqpga: this surface silently accumulated 26 latent failures, including a sqlite open() path-security bypass and a postgres binary-UUID decode gap).",
+      "explicit_not_covered": "Non-database modules under the DB feature set, integration tests (tests/database_e2e.rs needs live servers), conformance crate, fuzz targets, examples, and benches are outside this lane. This lane is module-filtered: it is not a full-lib frontier under DB features.",
+      "expected_signal": "database:: filtered lib tests pass under postgres,mysql,sqlite,test-internals or the first failing compile/test frontier is recorded",
+      "source_paths": [
+        "src/database",
+        "src/conformance/mod.rs",
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty database module mid-edit",
+        "rch worker roulette cold rebuild of the DB feature graph",
+        "rusqlite bundled SQLite C compile on cold workers"
+      ],
+      "escalation_notes": "Do not claim full-lib or workspace health from this lane; it is scoped DB-feature module evidence. A red run here is a regression against the green baseline established by br-asupersync-uvqpga/br-asupersync-vybwh6 (663 pass / 0 fail).",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "db-feature-lib-test-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "lib-test-frontier"
+        ]
+      }
+    },
+    {
+      "lane_id": "channel-mpsc-select-e2e-public-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_channel_mpsc_select_public_run CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run -p asupersync --bin channel_mpsc_select_e2e --features channel-mpsc-select-e2e",
+      "package": "asupersync",
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "guarantee_ids": [
+        "channel-mpsc-select-e2e-public-run"
+      ],
+      "covers": "A focused binary target executes the channel MPSC/select E2E scenarios through public APIs without enabling cfg(test) or compiling unrelated conformance surfaces.",
+      "explicit_not_covered": "Does not prove the broad lib-test frontier, conformance crate behavior, examples, benches, fuzz targets, performance, or no-tokio dependency graph claims.",
+      "expected_signal": "binary exits 0 after assertion-only public API scenarios or reports the first compile/runtime diagnostic",
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin/channel_mpsc_select_e2e.rs",
+        "examples/channel_mpsc_select_e2e.rs",
+        "src/lib.rs",
+        "src/channel/mpsc.rs",
+        "src/combinator/select.rs"
+      ],
+      "common_unrelated_blockers": [
+        "public channel/select API drift",
+        "binary target registration drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as focused channel MPSC/select execution evidence; do not cite it for broad test, conformance, all-target, or release-readiness claims.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "channel-mpsc-select-e2e-public-run"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "all-targets-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo check -p asupersync --all-targets",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "all-target-compile-frontier"
+      ],
+      "covers": "The runtime crate's lib, bins, tests, examples, and benches compile under the selected default feature profile.",
+      "explicit_not_covered": "Workspace satellite crates, fuzz manifest, clippy lints, runtime behavior, and feature combinations are separate lanes.",
+      "expected_signal": "cargo check exits 0 or records the first unrelated all-target blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/lib.rs",
+        "tests"
+      ],
+      "common_unrelated_blockers": [
+        "unrelated test compile drift",
+        "peer-staged conformance or audit files",
+        "feature-gated test missing cfg"
+      ],
+      "escalation_notes": "If blocked outside touched files, cite exact file/error and use a narrower supplemental proof for local changes.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "all-target-compile-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "clippy-all-targets",
+      "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clippy_all_targets CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --all-targets -- -D warnings",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "clippy-frontier"
+      ],
+      "covers": "Clippy warning-deny frontier for the runtime crate all-target profile.",
+      "explicit_not_covered": "Does not prove behavior, dependency graph policy, fuzz campaigns, or formal semantics.",
+      "expected_signal": "clippy exits 0 or records the first lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src",
+        "tests"
+      ],
+      "common_unrelated_blockers": [
+        "warning debt in unrelated audit modules",
+        "peer-dirty tests"
+      ],
+      "escalation_notes": "Preserve first lint file/error in Beads or validation-frontier records; avoid widening from unrelated lint debt.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "clippy-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "cli-feature-clippy",
+      "kind": "lint_frontier",
+      "resource_envelope_class": "lint-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_cli_feature_clippy CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-C debuginfo=0' cargo clippy -p asupersync --features cli -- -D warnings",
+      "package": "asupersync",
+      "feature_flags": [
+        "cli"
+      ],
+      "guarantee_ids": [
+        "cli-feature-clippy-frontier"
+      ],
+      "covers": "Clippy warning-deny frontier for the runtime crate's non-default cli feature surface, which default all-target clippy does not enable.",
+      "explicit_not_covered": "Does not prove behavior, every optional feature combination, workspace satellite crates, dependency graph policy, fuzz campaigns, release-readiness, or broad workspace health.",
+      "expected_signal": "clippy exits 0 under --features cli or records the first cli-feature lint frontier blocker",
+      "source_paths": [
+        "Cargo.toml",
+        "src/bin",
+        "src/lib.rs",
+        "src/tracing_compat.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty CLI module mid-edit",
+        "feature-gated dependency lint drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only for cli-feature lint coverage. It intentionally complements, rather than replaces, clippy-all-targets and native-feature-smoke.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "cli-feature-clippy-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "clippy-frontier",
+          "feature-gated-native-surfaces"
+        ]
+      }
+    },
+    {
+      "lane_id": "rustfmt-check",
+      "kind": "format_frontier",
+      "resource_envelope_class": "format-frontier-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_rustfmt cargo fmt --check",
+      "package": "workspace",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rustfmt-frontier"
+      ],
+      "covers": "Workspace rustfmt formatting frontier.",
+      "explicit_not_covered": "Does not compile or run tests; standalone Rust files may still need explicit --edition checks.",
+      "expected_signal": "rustfmt exits 0 or prints exact formatting diffs",
+      "source_paths": [
+        "Cargo.toml"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty formatting changes"
+      ],
+      "escalation_notes": "For narrow standalone files, include an explicit rustfmt --edition 2024 supplemental proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustfmt-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "rustdoc-api",
+      "kind": "documentation_frontier",
+      "resource_envelope_class": "documentation-frontier-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rustdoc_api CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc -p asupersync --no-deps --features test-internals",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "rustdoc-api-frontier"
+      ],
+      "covers": "Runtime crate public API documentation and doctest-visible examples build without dependency docs.",
+      "explicit_not_covered": "Does not run integration tests, conformance runners, or docs for every workspace member.",
+      "expected_signal": "cargo doc exits 0 or records the first rustdoc warning/error",
+      "source_paths": [
+        "src/lib.rs",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "rustdoc warning in unrelated public API",
+        "feature-gated doc cfg drift"
+      ],
+      "escalation_notes": "For method-level rustdoc work, cite the method-specific proof separately if this broad lane is blocked.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rustdoc-api-frontier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "formal-lean-build",
+      "kind": "formal_frontier",
+      "resource_envelope_class": "formal-frontier-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- lake --dir formal/lean build",
+      "package": "formal/lean",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "formal-lean-core-invariants"
+      ],
+      "covers": "Lean checks the formal core invariant project recorded in the formal proof posture contract.",
+      "explicit_not_covered": "Does not prove every adapter, protocol implementation, backend, or distributed transport lane.",
+      "expected_signal": "Build completed successfully",
+      "source_paths": [
+        "formal/lean/Asupersync.lean",
+        "formal/lean/lakefile.lean",
+        "artifacts/formal_proof_posture_contract_v1.json",
+        "tests/formal_proof_posture_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "Lean toolchain or lake cache availability on worker"
+      ],
+      "escalation_notes": "Keep this command direct; do not shell-wrap through bash or cd.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "formal-lean-core-invariants"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "runtime-pressure-control-evidence-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_runtime_pressure_control_evidence_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test runtime_pressure_control_evidence_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ],
+      "covers": "Pressure-control evidence artifact, docs, source schema versions, region memory-budget pressure rows, RCH proof-lane pressure rows, no-local-RCH fallback evidence, operator diagnostics bundle, scheduler pressure flamegraph attribution, deterministic lab scenario families, and operator scope limits remain aligned.",
+      "explicit_not_covered": "Does not prove real-host throughput, performance improvement, scheduler regression closure, RCH fleet availability, autonomous admission/backpressure behavior, scheduler rewrites, production-on-by-default controls, or a deadlock without trapped-cycle proof.",
+      "expected_signal": "runtime_pressure_control_evidence_contract tests pass",
+      "source_paths": [
+        "artifacts/runtime_pressure_control_evidence_contract_v1.json",
+        "tests/runtime_pressure_control_evidence_contract.rs",
+        "artifacts/phase6_methodology_gate_enforcement_contract_v1.json",
+        "tests/phase6_methodology_gate_contract.rs",
+        "src/runtime/rch_health/mod.rs",
+        "src/runtime/resource_monitor.rs",
+        "README.md",
+        "docs/proof_runner_usage.md",
+        "docs/runtime_pressure_triage_runbook.md"
+      ],
+      "common_unrelated_blockers": [
+        "runtime pressure schema version drift",
+        "documentation marker drift",
+        "proof lane command drift"
+      ],
+      "escalation_notes": "If this fails, update the artifact, docs, manifest lane, and verifier together before citing pressure-control evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "runtime-pressure-control-evidence-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-schema-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_schema_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-schema-contract"
+      ],
+      "covers": "Fourth-wave pressure snapshot and decision receipt schema fields, deterministic receipt ordering, fail-closed malformed/stale/local-fallback/advisory cases, redaction, and no-claim boundaries remain aligned.",
+      "explicit_not_covered": "Does not prove the pure runtime policy engine, opt-in SLO bridge behavior, real-host throughput, scheduler regression closure, RCH fleet health, or production-on-by-default control.",
+      "expected_signal": "fourth_wave_swarm_governor_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs",
+        "src/observability/swarm_pressure_governor.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "fourth-wave schema artifact drift",
+        "decision receipt field drift",
+        "redaction or no-claim text drift"
+      ],
+      "escalation_notes": "Use this lane for schema and receipt contract changes only; pair it with the policy, corpus, bridge, and benchmark lanes before making aggregate fourth-wave claims.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-schema-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-policy-engine",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_policy_engine CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --lib fourth_wave_governor --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "fourth-wave-governor-policy-engine"
+      ],
+      "covers": "The pure fourth-wave governor policy engine deterministically maps complete, stale, malformed, local-fallback, advisory-only, no-worker, pressure-spike, optional-brownout, and admit cases to explicit receipts.",
+      "explicit_not_covered": "Does not prove runtime bridge side effects, benchmark improvement, scheduler regression closure, RCH fleet availability, or production-on-by-default admission behavior.",
+      "expected_signal": "filtered fourth_wave_governor lib tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/observability/swarm_pressure_governor.rs",
+        "src/observability/mod.rs",
+        "artifacts/fourth_wave_swarm_governor_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "observability module compile drift",
+        "test-internals feature drift",
+        "policy receipt enum or action rename"
+      ],
+      "escalation_notes": "If the filter reports zero tests, treat the lane as blocked and update the command before citing policy-engine proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-policy-engine"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-swarm-replay-corpus",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_swarm_replay_corpus CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_workload_scenario_corpus_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ],
+      "covers": "The deterministic large-host swarm workload corpus keeps fourth-wave workload dimensions, pressure scenarios, agent run scenarios, what-if scenarios, replay fields, and stable hashes aligned.",
+      "explicit_not_covered": "Does not run fresh real-host benchmarks, prove policy-engine behavior, prove opt-in runtime bridge behavior, or claim production scheduler improvement.",
+      "expected_signal": "swarm_workload_scenario_corpus_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "tests/swarm_workload_scenario_corpus_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "scenario hash drift",
+        "runtime replay field rename",
+        "fixture source path drift"
+      ],
+      "escalation_notes": "Use this lane for deterministic corpus evidence only; benchmark claims require the benchmark contract and a fresh RCH refresh artifact.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-swarm-replay-corpus"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-runtime-bridge-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_runtime_bridge CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test slo_policy_bundle_contract runtime_slo_policy_bridge_fourth_wave --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ],
+      "covers": "The explicit opt-in runtime bridge preserves the base SLO decision, cancellation precedence, optional-work brownout, no-worker defer, fail-closed receipt handling, redaction, and non-claim propagation.",
+      "explicit_not_covered": "Does not enable production-on-by-default control, prove scheduler performance improvement, prove every SLO bundle path, or authorize local Cargo fallback.",
+      "expected_signal": "runtime_slo_policy_bridge_fourth_wave filtered tests pass with nonzero test evidence",
+      "source_paths": [
+        "src/runtime/slo_policy.rs",
+        "src/runtime/mod.rs",
+        "tests/slo_policy_bundle_contract.rs",
+        "artifacts/slo_policy_bundle_contract_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "SLO policy contract compile drift",
+        "test-internals feature drift",
+        "fourth-wave receipt enum drift"
+      ],
+      "escalation_notes": "If bridge evidence is weak, rollback by removing opt-in bridge callers and fall back to base SLO policy; do not widen the bridge from this lane alone.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-runtime-bridge-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-benchmark-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_benchmark_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_benchmark_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-benchmark-contract"
+      ],
+      "covers": "The large-host benchmark contract preserves scenario catalog, compare modes, metric fields, log fields, RCH-only refresh commands, flamegraph attribution targets, and no-claim report boundaries.",
+      "explicit_not_covered": "Contract receipts are not fresh benchmark results and do not prove improvement, no regression, scheduler performance, RCH fleet health, or production-on-by-default control.",
+      "expected_signal": "fourth_wave_swarm_governor_benchmark_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_swarm_governor_benchmark_contract_v1.json",
+        "tests/fourth_wave_swarm_governor_benchmark_contract.rs",
+        "artifacts/swarm_workload_scenario_corpus_v1.json",
+        "src/observability/swarm_pressure_governor.rs",
+        "src/runtime/slo_policy.rs"
+      ],
+      "common_unrelated_blockers": [
+        "benchmark scenario source path drift",
+        "flamegraph target path drift",
+        "metric field contract drift"
+      ],
+      "escalation_notes": "Do not cite this lane as a performance pass until a fresh RCH benchmark refresh artifact is committed and classified.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-benchmark-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-signoff-runbook",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_governor_runbook CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_swarm_governor_runbook_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ],
+      "covers": "The fourth-wave operator runbook, README/AGENTS markers, proof manifest rows, proof-status rows, no-local-fallback language, decision taxonomy, rollback guidance, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run child proof lanes, prove fresh benchmark improvement, prove broad workspace health, enable production admission control, or prove RCH fleet availability.",
+      "expected_signal": "fourth_wave_swarm_governor_runbook_contract tests pass",
+      "source_paths": [
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "tests/fourth_wave_swarm_governor_runbook_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "runbook marker drift",
+        "manifest/status row drift",
+        "README or AGENTS marker drift"
+      ],
+      "escalation_notes": "Use this lane for operator-facing fourth-wave signoff text; child lanes must still be run before any fresh proof or benchmark claim.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-signoff-runbook"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "fourth-wave-governor-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_fourth_wave_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test fourth_wave_governor_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "fourth-wave-governor-final-signoff"
+      ],
+      "covers": "The final fourth-wave signoff artifact, child bead evidence rows, freshness policy, fail-closed fixtures, deterministic operator report, proof manifest mapping, proof-status aggregate row, docs markers, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run child proof lanes, prove fresh benchmark improvement, prove broad workspace health, enable production-on-by-default admission control, or prove RCH fleet availability.",
+      "expected_signal": "fourth_wave_governor_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/fourth_wave_governor_final_signoff_v1.json",
+        "tests/fourth_wave_governor_final_signoff_contract.rs",
+        "docs/fourth_wave_swarm_governor_runbook.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "final signoff artifact drift",
+        "child proof row evidence-status drift",
+        "operator report field drift",
+        "README or AGENTS marker drift"
+      ],
+      "escalation_notes": "Use this lane for final fourth-wave signoff aggregation only; child proof lanes must still be rerun through RCH before closing the parent epic or making any fresh proof or performance claim.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "fourth-wave-governor-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "dirty-tree-ownership-receipt-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dirty_tree_ownership_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p asupersync --test dirty_tree_ownership_receipt_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "shared-main-commit-guard"
+      ],
+      "covers": "Dirty-tree ownership receipt and declared-path commit preflight protect shared-main commits from mixed ownership and shared-index races.",
+      "explicit_not_covered": "Does not execute commits in the project checkout, prove unrelated proof lanes, or override Agent Mail reservation policy.",
+      "expected_signal": "dirty_tree_ownership_receipt_contract tests pass",
+      "source_paths": [
+        "scripts/dirty_tree_ownership_receipt.py",
+        "tests/dirty_tree_ownership_receipt_contract.rs",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "git executable unavailable on worker",
+        "offline reservation artifact shape drift",
+        "dirty-tree golden fixture drift"
+      ],
+      "escalation_notes": "Use this lane for ASW-7 guard changes; if it fails, do not commit from a shared dirty checkout until the first failing scenario is understood.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "shared-main-commit-guard"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "durable-rch-proof-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_durable_rch_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test durable_rch_proof_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "durable-rch-final-signoff"
+      ],
+      "covers": "The durable RCH final signoff artifact, child proof evidence rows, refusal matrix, operator recipes, docs markers, manifest/status mapping, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not prove live RCH fleet availability, release readiness, broad workspace health, correctness of unrelated proof lanes, broad clippy, full release tests, or local Cargo fallback proof.",
+      "expected_signal": "durable_rch_proof_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/durable_rch_proof_final_signoff_v1.json",
+        "tests/durable_rch_proof_final_signoff_contract.rs",
+        "docs/proof_runner_usage.md",
+        "artifacts/durable_rch_proof_e2e_scenarios_v1.json",
+        "artifacts/durable_rch_proof_mail_templates_v1.json",
+        "artifacts/durable_rch_proof_receipt_contract_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "durable RCH child proof row drift",
+        "final signoff artifact drift",
+        "mail template or e2e refusal matrix drift",
+        "docs marker drift",
+        "peer-owned broad clippy or full-test release blockers"
+      ],
+      "escalation_notes": "Use this lane only for durable RCH proof-submission final signoff aggregation. It cannot be cited as release readiness, broad workspace health, live RCH fleet availability, unrelated proof-lane correctness, broad clippy proof, or full-test proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "durable-rch-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "swarm-proof-lane-planner-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_proof_lane_planner_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_proof_lane_planner_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "admission-aware-proof-lane-atlas"
+      ],
+      "covers": "Admission-aware proof-lane planner fixtures, atlas decision receipts, deterministic JSON/Markdown report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "explicit_not_covered": "Does not prove broad workspace release health, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target.",
+      "expected_signal": "swarm_proof_lane_planner_contract tests pass",
+      "source_paths": [
+        "artifacts/swarm_proof_lane_planner_contract_v1.json",
+        "tests/swarm_proof_lane_planner_contract.rs",
+        "src/lab/swarm_replay.rs",
+        "src/lab/mod.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md",
+        "docs/proof_runner_usage.md"
+      ],
+      "common_unrelated_blockers": [
+        "proof-lane planner fixture drift",
+        "docs marker drift",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane for admission-aware atlas/planner/renderer changes; do not cite it as broad release, conformance, or performance proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "admission-aware-proof-lane-atlas"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "migration-readiness-planner-signoff-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_migration_readiness_planner_signoff_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test migration_readiness_planner_contract migration_readiness_planner_signoff_artifact_is_complete -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "migration-readiness-planner-signoff"
+      ],
+      "covers": "Migration readiness planner signoff artifact, child bead evidence, fixture scenario catalog, report fields, docs markers, proof manifest mapping, and proof-status claim row stay aligned.",
+      "explicit_not_covered": "Does not prove broad workspace release health, live external repositories, conformance behavior, RCH fleet throughput, scheduler performance, or every Cargo target.",
+      "expected_signal": "migration_readiness_planner_signoff_artifact_is_complete test passes",
+      "source_paths": [
+        "artifacts/migration_readiness_planner_signoff_v1.json",
+        "scripts/migration_readiness_planner.py",
+        "tests/migration_readiness_planner_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "docs/integration.md",
+        "skills/asupersync-mega-skill/SKILL.md",
+        "tests/fixtures/migration_readiness_planner"
+      ],
+      "common_unrelated_blockers": [
+        "planner fixture drift",
+        "docs marker drift",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane for final migration planner signoff changes; do not cite it as broad workspace, conformance, performance, or release-health proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "migration-readiness-planner-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "unsafe-boundary-ledger-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_unsafe_boundary_ledger_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test unsafe_boundary_ledger_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "unsafe-boundary-ledger-contract"
+      ],
+      "covers": "Unsafe-boundary ledger schema, source locator scan, stale-row detection, unledgered-site diagnostics, docs alignment, manifest row, and proof-status row stay aligned.",
+      "explicit_not_covered": "This lexical contract does not prove unsafe correctness, does not execute platform FFI, does not prove every cfg-gated path on every host, and does not replace category-specific safety evidence.",
+      "expected_signal": "unsafe_boundary_ledger_contract tests pass",
+      "source_paths": [
+        "artifacts/unsafe_boundary_ledger_v1.json",
+        "docs/unsafe_boundary_ledger.md",
+        "tests/unsafe_boundary_ledger_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "peer-owned dirty source adds unsafe without updating the ledger",
+        "Rust syntax pattern appears outside the lexical scanner's supported surface",
+        "manifest or proof-status snapshot mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for unsafe-boundary ledger drift detection and proof metadata alignment. Passing it is not a safety proof for any specific unsafe operation.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "unsafe-boundary-ledger-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "proof-lane-manifest-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_lane_manifest CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_lane_manifest_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "proof-lane-manifest-verifier"
+      ],
+      "covers": "This manifest is machine-checked for command shape, guarantee coverage, feature freshness, path freshness, and docs pointers.",
+      "explicit_not_covered": "Does not execute every lane command; it verifies that the manifest remains internally complete and repo-fresh.",
+      "expected_signal": "proof_lane_manifest_contract tests pass",
+      "source_paths": [
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "Cargo.toml",
+        "AGENTS.md",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "manifest references a removed file",
+        "feature name drift in Cargo.toml"
+      ],
+      "escalation_notes": "This is the minimum proof for edits to the manifest itself.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "proof-lane-manifest-verifier"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "rch-topology-preflight-canary",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_topology_preflight_canary CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_ledger_contract rch_topology_preflight_fixtures_capture_cargo_started_boundary -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rch-topology-preflight-canary"
+      ],
+      "covers": "The RCH topology-preflight receipt fixtures, Cargo-started boundary classifier, proof-status blocked-infrastructure row, manifest mapping, and no-local-fallback language stay aligned.",
+      "explicit_not_covered": "Does not prove source correctness, does not prove release readiness, does not prove broad workspace health, and does not make direct-SSH or local Cargo fallback valid proof evidence.",
+      "expected_signal": "rch_topology_preflight_fixtures_capture_cargo_started_boundary test passes or emits an exact topology-preflight blocker receipt",
+      "source_paths": [
+        "artifacts/validation_frontier_ledger_schema_v1.json",
+        "tests/validation_frontier_ledger_contract.rs",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/proof_status_snapshot_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/proof_lane_manifest_contract.rs",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "docs/ci_proof_gates_contract.md"
+      ],
+      "common_unrelated_blockers": [
+        "RCH generated topology-preflight shell is rejected by worker /bin/sh before Cargo starts",
+        "remote-required RCH refuses local fallback after a preflight failure",
+        "validation-frontier fixture or proof-status blocker row drift"
+      ],
+      "escalation_notes": "Use this lane before expensive remote-required Cargo proof lanes when RCH may be failing before Cargo starts. A topology-preflight failure is infrastructure-blocked proof evidence, not a source compile or test failure.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rch-topology-preflight-canary"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "source-correctness",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "rch-stale-progress-receipt-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rch_stale_progress_receipt CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rch_stale_progress_receipt_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rch-stale-progress-receipt"
+      ],
+      "covers": "The deterministic RCH stale-progress receipt schema, fixture classifier, Markdown report, operator policy, manifest/status mapping, and fail-closed no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run live RCH, does not prove source correctness, does not prove release readiness, does not prove workspace health, and does not authorize canceling peer-owned builds.",
+      "expected_signal": "rch_stale_progress_receipt_contract tests pass",
+      "source_paths": [
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "docs/rch_stale_progress_receipt.md",
+        "scripts/rch_stale_progress_receipt.py",
+        "tests/rch_stale_progress_receipt_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "stale receipt fixture no longer matches helper output",
+        "proof status row command drift",
+        "manifest validation-frontier stale policy drift"
+      ],
+      "escalation_notes": "Use this lane only for deterministic stale-progress receipt contract evidence. Stale progress remains non-citeable as a green Cargo proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rch-stale-progress-receipt"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "atp-native-quic-dependency-audit",
+      "kind": "dependency_audit",
+      "resource_envelope_class": "dependency-audit-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- scripts/detect_forbidden_quic_deps.sh",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "atp-native-self-contained"
+      ],
+      "covers": "ATP native core remains self-contained with no external QUIC stacks or production Tokio dependencies.",
+      "explicit_not_covered": "Documented satellite crates (asupersync-tokio-compat), test features (fuzz), and conformance dependencies are outside this audit scope.",
+      "expected_signal": "exit code 0 with 'ATP Dependency Audit PASSED' message",
+      "source_paths": [
+        "Cargo.toml",
+        "scripts/detect_forbidden_quic_deps.sh",
+        "artifacts/atp_quic_dependency_audit_gate_contract_v1.json",
+        "artifacts/atp_native_quic_endpoint_contract_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "dependency version bump introduces forbidden transitive QUIC dependency",
+        "new feature accidentally pulls external QUIC stack",
+        "Tokio dependency creep in production profiles"
+      ],
+      "escalation_notes": "Any forbidden QUIC stack (quinn, s2n-quic, quiche) or Tokio dependency in ATP production profiles is a blocker. File immediately with dependency path.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "atp-native-self-contained"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-loopback-e2e",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_loopback_e2e CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test arq_quic_e2e_scripts_contract --features atp-cli,tls loopback_script_runs_real_atp_binary -- --ignored --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "guarantee_ids": [
+        "arq-quic-loopback-e2e"
+      ],
+      "covers": "Runs the retained ARQ/QUIC loopback E2E script through the ignored real-transfer test, proving the script can drive atp send/recv over loopback QUIC and verify retained artifacts.",
+      "explicit_not_covered": "Does not execute two-machine fleet transfer, does not prove G2 benchmark wins, does not prove broad workspace health, and does not cover provider/goodput/loss/fanout/off-overhead metrics outside the H5 script artifact.",
+      "expected_signal": "loopback_script_runs_real_atp_binary passes and retained summary/events artifacts validate",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "tests/arq_quic_e2e_scripts_contract.rs",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty ATP CLI JSON report surface",
+        "loopback port allocation conflict on the remote worker",
+        "TLS certificate fixture generation failure"
+      ],
+      "escalation_notes": "Use this lane only for loopback script/retained-artifact proof. Fleet transfer remains G1 and benchmark comparison remains G2.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-loopback-e2e"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-lab-determinism",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_lab_determinism CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_transport_quic_lab_contract --features test-internals -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "test-internals"
+      ],
+      "guarantee_ids": [
+        "arq-quic-lab-determinism"
+      ],
+      "covers": "Runs the ATP-over-QUIC LabRuntime contract that checks quiescence, cancellation oracles, loser drain, obligation leaks, and deterministic report shape for the public transport boundary.",
+      "explicit_not_covered": "Does not prove live UDP throughput, fleet behavior, benchmark performance, broad workspace health, or production security beyond the lab-runtime transport contract.",
+      "expected_signal": "atp_transport_quic_lab_contract tests pass with clean LabRunReport oracle evidence",
+      "source_paths": [
+        "tests/atp_transport_quic_lab_contract.rs",
+        "src/net/atp/transport_quic/mod.rs",
+        "src/net/atp/transport_quic/native_link.rs",
+        "src/lab"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty transport_quic implementation",
+        "LabRuntime oracle regression outside ARQ QUIC",
+        "test-internals feature graph compile blocker"
+      ],
+      "escalation_notes": "Use this lane only for deterministic lab contract evidence; pair it with loopback/fleet lanes before making live transport claims.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-lab-determinism"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_symbol_envelope_fuzz CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_symbol_envelope_fuzz -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ],
+      "covers": "Runs the proptest/property fuzz smoke for the RaptorQ-over-QUIC symbol-envelope codec: arbitrary decode totality, round-trip preservation, auth-posture mismatch fail-closed behavior, truncation, and byte corruption.",
+      "explicit_not_covered": "Does not run long coverage-guided fuzz campaigns, sanitizers, real UDP transfer, fleet behavior, or broad parser-fuzz inventory claims.",
+      "expected_signal": "atp_symbol_envelope_fuzz proptest suite passes",
+      "source_paths": [
+        "tests/atp_symbol_envelope_fuzz.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "proptest regression file captures a known failing case",
+        "peer-dirty symbol-envelope codec",
+        "transport_quic module compile blocker"
+      ],
+      "escalation_notes": "Use this lane as the bounded fuzz-smoke proof only; sustained fuzz campaigns need their own corpus/coverage receipts.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-symbol-envelope-fuzz-smoke"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-bounded-memory-loopback",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_bounded_memory CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' ARQ_QUIC_PAYLOAD_BYTES=10485760 scripts/run_arq_quic_loopback_e2e.sh",
+      "package": "asupersync",
+      "feature_flags": [
+        "atp-cli",
+        "tls"
+      ],
+      "guarantee_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ],
+      "covers": "Runs the ARQ/QUIC loopback script with a larger deterministic payload and validates sender, receiver, and peak RSS fields in the retained summary artifact.",
+      "explicit_not_covered": "Does not prove O(chunk) RSS across the full G2 payload matrix, NUMA behavior, fleet host memory, performance improvement, or broad workspace health.",
+      "expected_signal": "run_arq_quic_loopback_e2e.sh exits 0 and summary metrics contain sender_max_rss_kb, receiver_max_rss_kb, and peak_max_rss_kb",
+      "source_paths": [
+        "scripts/run_arq_quic_loopback_e2e.sh",
+        "src/bin/atp.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "remote worker disk pressure under artifact output",
+        "peer-dirty ATP CLI build surface",
+        "loopback port allocation conflict"
+      ],
+      "escalation_notes": "Use this lane only for retained loopback RSS artifact proof. G2 must still prove flat RSS across the fleet benchmark matrix.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-bounded-memory-loopback"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-wire-conformance",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_arq_quic_wire_conformance CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test atp_quic_symbol_envelope_conformance -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-wire-conformance"
+      ],
+      "covers": "Runs the external byte-level conformance suite for the ATP-over-QUIC RaptorQ symbol envelope carried inside QUIC DATAGRAM payloads.",
+      "explicit_not_covered": "Does not prove full QUIC RFC conformance, HTTP/3 behavior, live transfer convergence, fleet throughput, or broad workspace health.",
+      "expected_signal": "atp_quic_symbol_envelope_conformance tests pass",
+      "source_paths": [
+        "tests/atp_quic_symbol_envelope_conformance.rs",
+        "src/net/atp/transport_quic/symbol_envelope.rs",
+        "src/net/atp/transport_quic/mod.rs"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty symbol-envelope codec",
+        "public constant rename without conformance update",
+        "transport_quic module compile blocker"
+      ],
+      "escalation_notes": "Use this lane only for ARQ symbol-envelope wire compatibility; QUIC frame/RFC lanes remain separately scoped.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "arq-quic-wire-conformance"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "arq-quic-fleet-benchmark",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env SENDER=${SENDER:?set SENDER} RECEIVER=${RECEIVER:?set RECEIVER} RECEIVER_IP=${RECEIVER_IP:?set RECEIVER_IP} ATP_BIN_LOCAL=${ATP_BIN_LOCAL:?set ATP_BIN_LOCAL} scripts/atp_quic_vs_rsync_benchmark.sh all",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "arq-quic-fleet-benchmark-no-fresh-result"
+      ],
+      "covers": "Canonical G2 fleet benchmark command for RaptorQ-over-QUIC versus tuned rsync over the full payload matrix with SHA verification and sender/receiver metrics.",
+      "explicit_not_covered": "This manifest row records the lane only; until G2 runs it, it proves no performance improvement, no rsync win, no fleet throughput, no release readiness, and no broad workspace health.",
+      "expected_signal": "benchmark report records all payload rows, SHA verification success, RSS/load metrics, and honest rsync comparison",
+      "source_paths": [
+        "scripts/atp_quic_vs_rsync_benchmark.sh",
+        "scripts/atp_bench/collect_metrics.sh",
+        "scripts/atp_bench/report.py"
+      ],
+      "common_unrelated_blockers": [
+        "SENDER/RECEIVER fleet credentials unavailable",
+        "release atp binary missing from ATP_BIN_LOCAL",
+        "remote network path unavailable",
+        "peer-owned benchmark run in progress"
+      ],
+      "escalation_notes": "Do not cite this lane as a performance proof until G2 records a fresh remote-required benchmark result.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "rsync-win"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-v044-cancel-compat-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_v044_cancel_compat CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin v044_cancel_compat_consumer",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-v044-cancel-compatibility"
+      ],
+      "covers": "Runs an external consumer against the exact published =0.4.4 crate. It proves an ordinary Cx::spawn child is genuinely mutex-parked, acknowledges cancellation, finishes asynchronous cleanup, unlinks its waiter, and joins as Ok(()); an adjacent cancellation-blind child retains outer JoinError::Cancelled attribution; and the planted stale FrankenGraphDB expectation fails for the intended policy mismatch.",
+      "explicit_not_covered": "current-head runtime behavior, every FrankenGraphDB behavior, broad workspace health, performance, release-readiness.",
+      "expected_signal": "V044_CANCEL_COMPAT_NEGATIVE_RED and V044_CANCEL_COMPAT_POSITIVE_GREEN both appear before remote exit 0",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/bin/v044_cancel_compat_consumer.rs",
+        "scripts/run_proof_checks.sh"
+      ],
+      "common_unrelated_blockers": [
+        "crates.io or registry index unavailable",
+        "published =0.4.4 package unavailable",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Any remote failure, local fallback, missing negative/positive sentinel, or case-count drift is release-blocking for this compatibility claim. This lane is exact published-v0.4.4 evidence, not current-HEAD or broad FrankenGraphDB proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-default-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate against default asupersync features using only root public re-exports.",
+      "explicit_not_covered": "feature profiles not listed in the fixture, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "default_consumer exits 0 after exercising only root public re-exports",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-direct-minimal-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_direct_minimal_default CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo +nightly-2026-08-31 check -j 2 -Z direct-minimal-versions --locked --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin default_consumer",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-direct-minimal-resolution"
+      ],
+      "covers": "Compiles the default external consumer with the independent tracked lock generated by pinned nightly-2026-08-31 under Cargo's direct-minimal-versions policy.",
+      "explicit_not_covered": "full transitive-minimal resolution, numeric stable MSRV, other feature or target profiles, advisory cleanliness of downstream graphs, publisher identity, source trust, universal vendoring reproducibility, broad workspace health, performance, release-readiness.",
+      "expected_signal": "the independent direct-minimal lock compiles the default consumer on pinned nightly-2026-08-31 and exits 0",
+      "source_paths": [
+        "Cargo.toml",
+        "rust-toolchain.toml",
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/Cargo.lock",
+        "tests/fixtures/downstream-consumer-proof/src/bin/default_consumer.rs",
+        "artifacts/downstream_consumer_proof_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "crates.io or registry index unavailable",
+        "tracked direct-minimal lock drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "A green result is scoped to the checked direct-minimal lock. The full -Z minimal-versions probe remains a separate fail-closed blocker receipt and no local fallback is allowed.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": false,
+        "allowed_claim_scopes": [],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-default-kafka-test",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_kafka_default CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --test kafka_default_feature_surface -- --nocapture",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-kafka-fail-closed"
+      ],
+      "covers": "Runs the existing Kafka fail-closed assertions as an integration target of the external downstream fixture with only asupersync default features.",
+      "explicit_not_covered": "removing the root conformance dev-dependency cycle, proving every root integration test default-clean, Kafka backend behavior, conformance crate behavior, test-internals public API, broad workspace health, performance, release-readiness.",
+      "expected_signal": "kafka_default_feature_surface runs 2 tests successfully against the external fixture with only default asupersync features",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/kafka_producer_idempotence_audit.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public runtime API drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only for the representative downstream default-feature Kafka fail-closed branch; it does not repair or characterize the root package dev-dependency cycle broadly.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-kafka-fail-closed"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-metrics-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_metrics CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features metrics-profile --bin metrics_consumer",
+      "package": "asupersync",
+      "feature_flags": [
+        "metrics"
+      ],
+      "guarantee_ids": [
+        "downstream-consumer-metrics-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate while forwarding the asupersync metrics feature through the fixture feature profile.",
+      "explicit_not_covered": "feature profiles not listed in the fixture, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "metrics_consumer exits 0 with the fixture's metrics-profile forwarding asupersync/metrics",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/metrics_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-metrics-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-channel-profile-run",
+      "kind": "test_frontier",
+      "resource_envelope_class": "test-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_channel CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo run --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --features channel-mpsc-select-e2e-profile --bin channel_profile_consumer",
+      "package": "asupersync",
+      "feature_flags": [
+        "channel-mpsc-select-e2e"
+      ],
+      "guarantee_ids": [
+        "downstream-consumer-channel-public-api"
+      ],
+      "covers": "Runs the downstream fixture as an external crate while resolving the channel-mpsc-select-e2e public feature-gated runner without cfg(test).",
+      "explicit_not_covered": "full channel E2E execution, test-internals public API, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "channel_profile_consumer exits 0 after resolving the feature-gated public channel runner without cfg(test)",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/channel_profile_consumer.rs"
+      ],
+      "common_unrelated_blockers": [
+        "external fixture compile drift",
+        "public root re-export drift",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "Use this lane only as downstream-consumer public API evidence for the named fixture profile; do not cite it for broad workspace health or release readiness.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-channel-public-api"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-default-tokio-tree",
+      "kind": "dependency_graph",
+      "resource_envelope_class": "dependency-graph-light",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_tokio_tree cargo tree -e normal --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml -i tokio",
+      "package": "asupersync-downstream-consumer-proof",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-default-tokio-free"
+      ],
+      "covers": "Audits the external downstream fixture default normal dependency graph for tokio absence through cargo tree inversion.",
+      "explicit_not_covered": "metrics feature graph, fuzz graph, workspace graph, test execution, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "warning: nothing to print.",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs"
+      ],
+      "common_unrelated_blockers": [
+        "unexpected default dependency graph drift",
+        "cargo tree output format drift",
+        "remote worker cargo metadata pressure"
+      ],
+      "escalation_notes": "Use this lane only for the downstream default fixture no-tokio dependency graph; the root production no-tokio lanes remain the canonical production graph proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-default-tokio-free"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-internal-negative-check",
+      "kind": "compile_frontier",
+      "resource_envelope_class": "compile-frontier-heavy",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_internal_negative CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' sh -c 'cargo check --manifest-path tests/fixtures/downstream-consumer-proof/Cargo.toml --bin internal_only_negative 2> /tmp/asupersync_downstream_consumer_negative.err && exit 1; grep -q \"could not find .*test_utils.* in .*asupersync\" /tmp/asupersync_downstream_consumer_negative.err'",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-internal-only-negative"
+      ],
+      "covers": "Runs an expected-fail downstream compile check proving internal test helpers are not reachable without test-internals.",
+      "explicit_not_covered": "positive public API execution, test-internals-enabled behavior, workspace health, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "cargo check fails with E0433 because asupersync::test_utils is unavailable outside test-internals",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "tests/fixtures/downstream-consumer-proof/src/bin/internal_only_negative.rs"
+      ],
+      "common_unrelated_blockers": [
+        "compiler diagnostic wording drift",
+        "unexpected test-internals exposure",
+        "remote worker compile cache pressure"
+      ],
+      "escalation_notes": "This lane is a negative public-boundary guard: success means the forbidden internal helper stayed unavailable to the external fixture.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-internal-only-negative"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "downstream-consumer-proof-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_downstream_consumer_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test downstream_consumer_proof_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "downstream-consumer-proof-contract"
+      ],
+      "covers": "Verifies the downstream-consumer proof artifact, fixture layout, manifest lane mappings, negative fixture, and status snapshot claim wiring.",
+      "explicit_not_covered": "executing every downstream fixture command, fresh RCH proof for the fixture lanes, release-readiness, broad workspace health, conformance crate behavior, performance, release-readiness.",
+      "expected_signal": "downstream_consumer_proof_contract tests pass",
+      "source_paths": [
+        "tests/fixtures/downstream-consumer-proof/Cargo.toml",
+        "tests/fixtures/downstream-consumer-proof/src/lib.rs",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "tests/downstream_consumer_proof_contract.rs"
+      ],
+      "common_unrelated_blockers": [
+        "artifact schema drift",
+        "manifest/status mapping drift",
+        "fixture source path drift"
+      ],
+      "escalation_notes": "This is the focused verifier for VF5 metadata and fixture wiring; run the profile lanes for fresh downstream execution evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "downstream-consumer-proof-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "lab-live-support-claim-report-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_lab_live_support_claim_report CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test lab_live_support_claim_report_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "lab-live-support-claim-report-contract"
+      ],
+      "covers": "Verifies the lab-live support-claim report artifact, stale-evidence refusal, drift demotion, README/docs markers, manifest/status mapping, and no-claim boundaries.",
+      "explicit_not_covered": "Does not execute every child lab-live lane, prove broad workspace health, prove raw host filesystem parity, prove process or signal support, or strengthen README claims without fresh differential evidence.",
+      "expected_signal": "lab_live_support_claim_report_contract tests pass",
+      "source_paths": [
+        "artifacts/lab_live_support_claim_report_v1.json",
+        "docs/lab_live_support_claim_report.md",
+        "tests/lab_live_support_claim_report_contract.rs",
+        "tests/fixtures/lab_live_support_claim_report/fresh_filesystem_claim.json",
+        "tests/fixtures/lab_live_support_claim_report/stale_evidence_refusal.json",
+        "tests/fixtures/lab_live_support_claim_report/drift_demotion.json",
+        "artifacts/lab_live_differential_scenario_contract_v1.json",
+        "artifacts/lab_live_differential_v2_scenarios_v1.json",
+        "artifacts/lab_live_timing_platform_policy_v1.json",
+        "artifacts/lab_live_v2_filesystem_runner_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "lab-live child artifact drift",
+        "support-claim fixture drift",
+        "README/docs marker drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for the V4 support-claim report gate. It cannot be cited as raw adapter parity, broad workspace health, release readiness, or fresh proof for every child lab-live lane.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "lab-live-support-claim-report-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "raw-host-filesystem-parity",
+          "process-signal-support"
+        ]
+      }
+    },
+    {
+      "lane_id": "browser-ga-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_browser_ga_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test browser_ga_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "browser-ga-final-signoff"
+      ],
+      "covers": "Verifies the Browser Edition GA final signoff artifact, B1-B3 evidence aggregation, JS/TS package version and artifact hashes, rollback drill fixture, docs freshness markers, manifest/status mapping, and no-claim boundaries.",
+      "explicit_not_covered": "Does not execute npm publish, prove broad workspace health, prove full release readiness outside Browser Edition JS/TS package GA, promote Rust browser API to stable, promote service-worker direct runtime, or promote shared-worker direct runtime.",
+      "expected_signal": "browser_ga_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/browser_ga_final_signoff_v1.json",
+        "tests/browser_ga_final_signoff_contract.rs",
+        "tests/fixtures/browser_ga_final_signoff/rollback_drill.json",
+        "docs/browser_ga_final_signoff.md",
+        "artifacts/browser_edition_readiness_matrix_v1.json",
+        "artifacts/browser_package_integrity_gate_v1.json",
+        "artifacts/browser_consumer_compatibility_matrix_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md"
+      ],
+      "common_unrelated_blockers": [
+        "Browser GA artifact hash drift",
+        "B1/B2/B3 evidence artifact drift",
+        "docs marker drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for the scoped Browser Edition JS/TS package GA signoff packet. It cannot be cited as npm publish proof, broad workspace health, full release readiness, Rust browser stable parity, service-worker direct runtime support, or shared-worker direct runtime support.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "browser-ga-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "rust-browser-stable",
+          "npm-publish"
+        ]
+      }
+    },
+    {
+      "lane_id": "validation-frontier-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_validation_frontier_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test validation_frontier_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "validation-frontier-final-signoff"
+      ],
+      "covers": "Verifies the validation-frontier final signoff artifact, operator runbook, channel MPSC/select fixture split, inventory/stale-receipt/downstream/graph-budget child deliverables, e2e runner command list, proof manifest/status rows, README/AGENTS markers, deterministic Markdown summary, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, broad workspace health, release readiness, runtime correctness, performance improvement, no regression, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback, tracker closure, or file deletion.",
+      "expected_signal": "validation_frontier_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/validation_frontier_signoff_v1.json",
+        "docs/proof/validation_frontier_runbook.md",
+        "scripts/run_validation_frontier_signoff_e2e.sh",
+        "tests/validation_frontier_signoff_contract.rs",
+        "artifacts/validation_frontier_inventory_v1.json",
+        "artifacts/validation_frontier_graph_budgets_v1.json",
+        "artifacts/rch_stale_progress_receipt_contract_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "validation-frontier inventory drift",
+        "stale-progress receipt fixture drift",
+        "downstream-consumer proof artifact drift",
+        "graph-budget fixture drift",
+        "manifest projection golden drift",
+        "proof-status marker drift",
+        "RCH stale progress while refreshing child lanes"
+      ],
+      "escalation_notes": "Use this lane only for the VF7 validation-frontier final signoff packet and operator procedure. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance proof, no-regression proof, source correctness outside cited surfaces, live RCH fleet availability, local Cargo fallback approval, tracker closure, or permission to delete files.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "validation-frontier-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "performance",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "doctor-e2e-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_doctor_e2e_proof_lane_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test doctor_e2e_proof_lane_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ],
+      "covers": "Verifies the aggregate doctor E2E runner, orchestrator registration, docs, manifest/status mapping, local-fallback guard, artifact outputs, and no-claim boundaries.",
+      "explicit_not_covered": "executing the aggregate doctor runner, fresh RCH proof for child stages, release-readiness, broad workspace health, live RCH fleet availability, performance, or source correctness outside the doctor proof lane.",
+      "expected_signal": "doctor_e2e_proof_lane_contract tests pass",
+      "source_paths": [
+        "scripts/run_doctor_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/doctor_e2e_proof_lane_contract.rs",
+        "docs/doctor_e2e_harness_contract.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "doctor runner artifact schema drift",
+        "manifest/status mapping drift",
+        "orchestrator suite registry drift"
+      ],
+      "escalation_notes": "This is the focused verifier for D4 aggregate doctor proof-lane wiring; run scripts/run_doctor_e2e.sh for fresh aggregate doctor evidence.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "doctor-e2e-proof-lane-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "semantic-lint-proof-lane-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_semantic_lint_proof_lane CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 1 -p asupersync --test semantic_lint_proof_lane_contract --test semantic_lint_rule_inventory_contract --test semantic_lint_diagnostic_codes_contract --test error_code_registry_contract --test semantic_lint_ambient_contract --test semantic_lint_cleanup_budget_contract --test semantic_lint_core_tokio_contract --test semantic_lint_loop_checkpoint_contract --test semantic_lint_ignored_outcome_contract --test semantic_lint_await_holding_contract --test semantic_lint_drop_race_loser_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "semantic-lint-proof-lane-contract"
+      ],
+      "covers": "Verifies the aggregate semantic-lint proof-lane contract, rule inventory, ASUP diagnostic code mapping, per-rule fixture contracts, summary/events metadata artifacts, manifest mapping, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, formal cancel-correctness proof, broad workspace health, release-readiness, performance, or complete absence of semantic issues outside the declared rule contract surfaces.",
+      "expected_signal": "semantic_lint_proof_lane_contract and all semantic_lint_* contract tests pass",
+      "source_paths": [
+        "scripts/semantic_lint.py",
+        "artifacts/semantic_lint_proof_lane_contract_v1.json",
+        "artifacts/semantic_lint_proof_lane_summary_v1.json",
+        "artifacts/semantic_lint_proof_lane_events_v1.ndjson",
+        "artifacts/semantic_lint_rule_inventory_v1.json",
+        "artifacts/semantic_lint_ambient_rule_contract_v1.json",
+        "artifacts/semantic_lint_await_holding_rule_contract_v1.json",
+        "artifacts/semantic_lint_cleanup_budget_rule_contract_v1.json",
+        "artifacts/semantic_lint_core_tokio_rule_contract_v1.json",
+        "artifacts/semantic_lint_drop_race_loser_rule_contract_v1.json",
+        "artifacts/semantic_lint_ignored_outcome_rule_contract_v1.json",
+        "artifacts/semantic_lint_loop_checkpoint_rule_contract_v1.json",
+        "tests/semantic_lint_proof_lane_contract.rs",
+        "tests/semantic_lint_rule_inventory_contract.rs",
+        "tests/semantic_lint_diagnostic_codes_contract.rs",
+        "tests/semantic_lint_ambient_contract.rs",
+        "tests/semantic_lint_cleanup_budget_contract.rs",
+        "tests/semantic_lint_core_tokio_contract.rs",
+        "tests/semantic_lint_loop_checkpoint_contract.rs",
+        "tests/semantic_lint_ignored_outcome_contract.rs",
+        "tests/semantic_lint_await_holding_contract.rs",
+        "tests/semantic_lint_drop_race_loser_contract.rs",
+        "docs/semantic_lint_proof_lane.md",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "semantic lint rule-contract drift",
+        "ASUP diagnostic registry drift",
+        "manifest projection golden drift",
+        "missing Python semantic lint runner dependency"
+      ],
+      "escalation_notes": "This is the focused verifier for semantic-lint L4 proof-lane wiring; rerun the exact manifest command for fresh RCH evidence before citing the lane.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "semantic-lint-proof-lane-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health"
+        ]
+      }
+    },
+    {
+      "lane_id": "rust-crate-release-provenance-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_rust_crate_release_provenance_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test rust_crate_release_provenance_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "rust-crate-release-provenance-contract"
+      ],
+      "covers": "Rust crates.io release-provenance contract schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture dry-run/already-published semantics, companion integrity hashes, R5 deterministic dry-run e2e final signoff packet, manifest/status rows, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not perform cargo publish, does not run cargo publish --dry-run, does not prove release readiness, does not prove runtime correctness, does not prove broad workspace health, does not prove live crates.io publication, and does not prove real package tarball integrity for fixture rows.",
+      "expected_signal": "rust_crate_release_provenance_contract tests pass",
+      "source_paths": [
+        ".github/workflows/publish.yml",
+        "artifacts/rust_crate_release_provenance_contract_v1.json",
+        "artifacts/rust_crate_release_provenance_integrity_manifest_v1.json",
+        "artifacts/rust_crate_release_provenance_final_signoff_v1.json",
+        "artifacts/rust_crate_release_provenance_dry_run_e2e_v1.log",
+        "docs/rust_crate_release_provenance_final_signoff.md",
+        "docs/rust_crate_release_provenance_artifacts.md",
+        "docs/rust_crate_release_provenance_policy.md",
+        "tests/rust_crate_release_provenance_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "publish workflow crate list drift",
+        "publish workflow provenance gate drift",
+        "fixture digest or companion manifest drift",
+        "final signoff e2e/report drift",
+        "manifest/status mapping drift"
+      ],
+      "escalation_notes": "Use this lane only for Rust crate release-provenance metadata, fixture validation, publish-workflow provenance gate drift detection, and R5 deterministic final signoff packet drift. It cannot be cited as release readiness, live publish evidence, broad workspace health, runtime correctness, or real package tarball integrity proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "rust-crate-release-provenance-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-crates-io-publication",
+          "real-package-tarball-integrity"
+        ]
+      }
+    },
+    {
+      "lane_id": "memory-residency-replay-e2e-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_replay_e2e_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_replay_e2e_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "memory-residency-replay-e2e-contract"
+      ],
+      "covers": "Deterministic 64C/256G memory-residency replay fixture, E2E runner artifact contract, orchestrator registration, M2/M3 source linkage, stale/missing input failure output, proof manifest/status mapping, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not run live host probes, prove p50/p95/p999 improvement, prove memory reduction, prove cache hit-rate improvement, prove scheduler performance, prove production-on-by-default behavior, prove broad workspace health, prove release readiness, prove live RCH fleet availability, or prove source correctness outside this replay/e2e contract.",
+      "expected_signal": "memory_residency_replay_e2e_contract tests pass",
+      "source_paths": [
+        "artifacts/memory_residency_replay_e2e_contract_v1.json",
+        "scripts/memory_residency_replay_e2e.py",
+        "scripts/run_memory_residency_replay_e2e.sh",
+        "scripts/run_all_e2e.sh",
+        "tests/memory_residency_replay_e2e_contract.rs",
+        "docs/proof/memory_residency_replay_e2e.md",
+        "artifacts/memory_residency_policy_contract_v1.json",
+        "artifacts/memory_residency_accounting_snapshot_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "memory-residency replay scenario drift",
+        "E2E orchestrator registration drift",
+        "manifest projection golden drift",
+        "proof-status row drift"
+      ],
+      "escalation_notes": "Use this lane only for the M4 deterministic replay/e2e contract. It cannot be cited as live benchmark evidence, production scheduler improvement, broad workspace health, release readiness, live RCH fleet availability, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "memory-residency-replay-e2e-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement"
+        ]
+      }
+    },
+    {
+      "lane_id": "memory-residency-operator-safety-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_memory_residency_operator_safety_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test memory_residency_operator_safety_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "memory-residency-operator-safety-contract"
+      ],
+      "covers": "Memory-residency M5 operator safety artifact, runbook, enablement prerequisites, fail-closed M1-M4 safety gates, rollback guidance, Agent Mail handoff template, closeout checklist, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not prove runtime correctness, broad workspace health, release readiness, allocator replacement, live host throughput, p50/p95/p999 improvement, memory-use reduction, NUMA performance improvement, live RCH fleet availability, permission to delete files, or local Cargo fallback approval.",
+      "expected_signal": "memory_residency_operator_safety_contract tests pass",
+      "source_paths": [
+        "artifacts/memory_residency_operator_safety_contract_v1.json",
+        "docs/proof/memory_residency_operator_safety.md",
+        "tests/memory_residency_operator_safety_contract.rs",
+        "README.md",
+        "AGENTS.md",
+        "artifacts/memory_residency_inventory_v1.json",
+        "artifacts/memory_residency_policy_contract_v1.json",
+        "artifacts/memory_residency_accounting_snapshot_v1.json",
+        "artifacts/memory_residency_replay_e2e_contract_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "memory-residency upstream artifact drift",
+        "operator runbook no-claim drift",
+        "manifest projection golden drift",
+        "proof-status row drift"
+      ],
+      "escalation_notes": "Use this lane only for the M5 operator safety packet. It cannot be cited as release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to delete files, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "memory-residency-operator-safety-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "local-cargo-fallback"
+        ]
+      }
+    },
+    {
+      "lane_id": "artifact-governance-validation-harness",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_validation_harness CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "artifact-governance-validation-harness"
+      ],
+      "covers": "Verifies the artifact-governance A8 validation harness schema/parser fixtures, citation overclaim fixtures, supersession-chain fixtures, deterministic ledger-to-scanner-to-report-to-signoff flow log, no-local-fallback policy, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, full-corpus artifact coverage, artifact producer correctness outside cited fixtures, release readiness, workspace health, runtime correctness, performance improvement, live RCH fleet availability, or permission to delete files.",
+      "expected_signal": "artifact_governance_validation_harness_contract and artifact_governance_ledger_contract pass",
+      "source_paths": [
+        "artifacts/artifact_governance_validation_harness_v1.json",
+        "docs/proof/artifact_governance_validation_harness.md",
+        "tests/artifact_governance_validation_harness_contract.rs",
+        "artifacts/artifact_governance_ledger_v1.json",
+        "artifacts/artifact_governance_scanner_v1.json",
+        "artifacts/artifact_governance_operator_report_v1.json",
+        "artifacts/artifact_governance_producer_checklist_v1.json",
+        "artifacts/proof_lane_manifest_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json"
+      ],
+      "common_unrelated_blockers": [
+        "artifact-governance fixture drift",
+        "manifest projection golden drift",
+        "RCH admission saturation",
+        "ledger fixture drift"
+      ],
+      "escalation_notes": "Use this lane only for the scoped A8 validation harness. It cannot be cited as final artifact-governance signoff, broad workspace health, release readiness, runtime correctness, full-corpus artifact coverage, or permission to mutate/delete artifacts.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "artifact-governance-validation-harness"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "artifact-governance-final-signoff",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "local-cargo-fallback"
+        ]
+      }
+    },
+    {
+      "lane_id": "artifact-governance-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_artifact_governance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test artifact_governance_final_signoff_contract --test artifact_governance_validation_harness_contract --test artifact_governance_ledger_contract --test proof_lane_manifest_contract --test proof_status_snapshot_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "artifact-governance-final-signoff"
+      ],
+      "covers": "Verifies the artifact-governance final signoff artifact, A1-A5/A7/A8 child deliverable mapping, ledger registration, validation harness count drift, proof manifest/status rows, README/AGENTS markers, closeout checklist, and no-claim boundaries.",
+      "explicit_not_covered": "fresh execution evidence until the exact RCH command is rerun, full-corpus artifact coverage, release readiness, workspace health, runtime correctness, performance improvement, live RCH fleet availability, tracker closure when .beads is dirty, or permission to delete files.",
+      "expected_signal": "artifact_governance_final_signoff_contract and supporting artifact-governance/proof manifest/status contracts pass",
+      "source_paths": [
+        "artifacts/artifact_governance_final_signoff_v1.json",
+        "docs/proof/artifact_governance_final_signoff.md",
+        "tests/artifact_governance_final_signoff_contract.rs",
+        "artifacts/artifact_governance_ledger_v1.json",
+        "artifacts/artifact_governance_validation_harness_v1.json",
+        "tests/artifact_governance_validation_harness_contract.rs",
+        "tests/artifact_governance_ledger_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "artifact-governance child artifact drift",
+        "manifest projection golden drift",
+        "proof-status marker drift",
+        "unrelated dirty tracker rows blocking Beads closeout"
+      ],
+      "escalation_notes": "Use this lane only for the scoped artifact-governance A6 final signoff. It cannot be cited as broad workspace health, release readiness, runtime correctness, performance proof, full-corpus coverage, or permission to mutate/delete artifacts.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "artifact-governance-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "clean-overlay-proof-orchestration-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_clean_overlay_proof_orchestration_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test clean_overlay_proof_orchestration_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ],
+      "covers": "Clean-overlay proof-orchestration A4 operator-packet documentation and reference alignment: installed-capability admission and option-section parsing, when-to-use prerequisites, reservation expectations, RCH heartbeat-fresh/progress-stale cancellation guidance, peer-dirty and capability-drift blocker receipts, receipt-only blocked reproduction, non-destructive cleanup/rollback, Agent Mail and br comment handoff templates, README/AGENTS markers, proof manifest/status rows, and no-claim boundaries remain path-pinned to the A1-A3 lane surfaces; referenced behavioral tests are separate evidence.",
+      "explicit_not_covered": "Does not prove behavioral correctness of the referenced parser, command builder, or handshake, runtime correctness, broad workspace health, release readiness, performance improvement, live RCH fleet availability, permission to delete files or clean worktrees, local Cargo fallback approval, or peer-dirt exclusion without supported installed capability evidence plus an admitted command and terminal execution evidence.",
+      "expected_signal": "clean_overlay_proof_orchestration_contract tests pass",
+      "source_paths": [
+        "artifacts/clean_overlay_proof_orchestration_v1.json",
+        "docs/clean_overlay_proof_orchestration_runbook.md",
+        "tests/clean_overlay_proof_orchestration_contract.rs",
+        "README.md",
+        "AGENTS.md",
+        "src/audit/clean_overlay_planner.rs",
+        "src/audit/blocker_receipt.rs",
+        "src/audit/overlay_proof_command.rs",
+        "tests/proof_orch_clean_overlay_e2e.rs",
+        "src/audit/proof_traffic_overlay_handshake.rs",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+        "tests/clean_overlay_proof_planner_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json"
+      ],
+      "common_unrelated_blockers": [
+        "peer-dirty working tree drift",
+        "installed RCH clean-overlay capability drift",
+        "missing installed capability probe identity",
+        "operator runbook no-claim drift",
+        "manifest projection golden drift",
+        "proof-status row drift"
+      ],
+      "escalation_notes": "Use this lane only for the A4 clean-overlay proof-orchestration operator packet and its installed-capability gate. Unsupported or unidentified clients and blocked manifests emit receipts only. It cannot be cited as peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to delete files, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "clean-overlay-proof-orchestration-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "local-cargo-fallback",
+          "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
+        ]
+      }
+    },
+    {
+      "lane_id": "proof-traffic-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_proof_traffic_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test proof_traffic_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "proof-traffic-final-signoff"
+      ],
+      "covers": "Proof-traffic A6 final signoff artifact, A1-A5 evidence aggregation, capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, proof manifest/status rows, README/AGENTS markers, no-local-fallback and no-peer-cancel policies, dependency-cycle receipt/checklist, and no-claim boundaries stay aligned.",
+      "explicit_not_covered": "Does not prove release readiness, broad workspace health, runtime correctness, performance improvement, live RCH fleet availability, peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, local Cargo fallback approval, permission to delete files, or permission to cancel peer builds.",
+      "expected_signal": "proof_traffic_final_signoff_contract tests pass",
+      "source_paths": [
+        "artifacts/proof_traffic_final_signoff_v1.json",
+        "tests/proof_traffic_final_signoff_contract.rs",
+        "docs/proof_traffic_control.md",
+        "artifacts/proof_traffic_rch_capabilities_v1.json",
+        "tests/proof_traffic_rch_capability_contract.rs",
+        "artifacts/proof_traffic_admission_receipts_v1.json",
+        "tests/proof_traffic_admission_receipt_contract.rs",
+        "artifacts/proof_traffic_clean_overlay_runner_handshake_v1.json",
+        "tests/proof_traffic_clean_overlay_runner_handshake_contract.rs",
+        "artifacts/proof_traffic_parking_lot_v1.json",
+        "tests/proof_traffic_parking_lot_contract.rs",
+        "artifacts/proof_traffic_blocked_loop_e2e_v1.json",
+        "tests/proof_traffic_blocked_loop_e2e_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "capability drift in installed rch clean-overlay flags",
+        "RCH admission saturation or stale progress",
+        "docs marker drift",
+        "proof-status row drift",
+        "unrelated dirty tracker rows"
+      ],
+      "escalation_notes": "Use this lane only for the scoped proof-traffic A6 operator packet. It cannot be cited as peer-dirt exclusion without supported capability evidence plus an admitted command and terminal execution evidence, release readiness, broad workspace health, runtime correctness, performance evidence, live RCH fleet availability, permission to cancel peer builds, permission to delete files, or permission to use local Cargo fallback.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "proof-traffic-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability",
+          "performance-improvement",
+          "local-cargo-fallback",
+          "peer-build-cancellation",
+          "peer-dirt-exclusion-without-supported-admitted-terminal-receipt"
+        ]
+      }
+    },
+    {
+      "lane_id": "dependency-supply-chain-policy-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_supply_chain_policy CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_supply_chain_policy_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "dependency-supply-chain-policy-contract"
+      ],
+      "covers": "Dependency supply-chain policy schema, exact Cargo scanner versions, RustSec database freshness contract, tracked root and excluded-fuzz lockfile fingerprints, excluded-fuzz toolchain/native-edge/Tokio-quarantine declarations, advisory exception ownership and expiry, license/source policy, both duplicate ratchets, safe negative-fixture wiring, CI receipts, runbook boundaries, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Fresh scanner execution until scripts/ci/audit_dependencies.sh run is executed, fuzz-target compilation or behavior, undisclosed vulnerabilities, legal advice, publisher identity, release readiness, broad workspace health, runtime correctness, performance, or live RCH fleet availability.",
+      "expected_signal": "dependency_supply_chain_policy_contract tests pass",
+      "source_paths": [
+        ".gitignore",
+        "deny.toml",
+        ".cargo/audit.toml",
+        "rust-toolchain.toml",
+        "fuzz/Cargo.toml",
+        "fuzz/Cargo.lock",
+        "fuzz/conformance/Cargo.toml",
+        "scripts/ci/audit_dependencies.sh",
+        ".github/workflows/ci.yml",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "docs/dependency_supply_chain_policy.md",
+        "tests/dependency_supply_chain_policy_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "pinned Cargo scanner installation unavailable",
+        "RustSec advisory database missing or older than seven days",
+        "root Cargo.lock or policy baseline drift",
+        "excluded fuzz manifest, tracked lock, toolchain, native-edge, or duplicate-ratchet drift",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Use this lane only for the checked policy and integration contract. Cite live root or excluded-fuzz scanner health only from a current runner receipt; the Rust contract alone is not scanner execution evidence or fuzz-target proof.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-supply-chain-policy-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "fresh-scanner-pass",
+          "excluded-fuzz-health",
+          "no-undisclosed-vulnerabilities",
+          "legal-compliance",
+          "publisher-authentication",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "dependency-budget-contract",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_budget_contract CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --features dependency-ledger --test dependency_budget_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [
+        "dependency-ledger"
+      ],
+      "guarantee_ids": [
+        "dependency-budget-contract"
+      ],
+      "covers": "The exact direct-dependency allowset, frozen marginal-ledger fingerprint, synthesized-consumer profile/target/host/edge-kind partitions, package-version and unique-name ceilings, ratchet-down behavior, curated AGENTS key-dependency metadata and direct-edge joins, deterministic four-column rendering, read-only marker drift detection, fail-closed negative fixtures, reviewed-exception schema, generator/docs markers, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Complete display of every allowed direct edge, automatic local AGENTS rewriting, dependency removal or cutover authority, compilation beyond the Cargo-built contract surfaces, runtime correctness, security, performance, interoperability, release readiness, broad workspace health, workspace dev/build graph health, excluded fuzz health, or live RCH fleet availability.",
+      "expected_signal": "all dependency_budget_contract tests pass, including Cargo-built AGENTS render/check and fail-closed mutation coverage",
+      "source_paths": [
+        "artifacts/dependency_budget_contract_v1.json",
+        "artifacts/dependency_marginal_ledger_v1.json",
+        "src/bin/dependency_marginal_ledger.rs",
+        "docs/dependency_budget_contract.md",
+        "tests/dependency_budget_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "frozen marginal-ledger fingerprint drift",
+        "Cargo.toml direct-edge inventory drift",
+        "unreviewed synthesized-consumer graph growth",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Regenerate the marginal ledger before the budget whenever Cargo or lock resolution changes. A rare upward exception must be added to the existing budget before regeneration and must identify its reviewer, approval, expiry, review reference, rationale, and exact edge or graph cell.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-budget-contract"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "dependency-removal-authority",
+          "dependency-cutover-authority",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "security",
+          "performance",
+          "excluded-fuzz-health",
+          "live-rch-fleet-availability"
+        ]
+      }
+    },
+    {
+      "lane_id": "dependency-ci-provenance-final-signoff",
+      "kind": "artifact_contract",
+      "resource_envelope_class": "artifact-contract-medium",
+      "command": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_dependency_ci_provenance_final_signoff CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -j 2 -p asupersync --test dependency_ci_provenance_final_signoff_contract -- --nocapture",
+      "package": "asupersync",
+      "feature_flags": [],
+      "guarantee_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ],
+      "covers": "The P1-P5 child tracker outcomes, content-pinned policy artifacts, reviewed full-SHA action inventory, owner-selected static-only JavaScript receipt, recorded fresh root/excluded-fuzz scanner receipt, fuzz native/Tokio quarantine, feature/target/host graph projection, direct-minimal pass plus preserved transitive blocker, generated AGENTS drift receipt, fail-closed overclaim mutations, deterministic replay commands, closeout checklist, docs markers, and proof manifest/status mapping stay aligned.",
+      "explicit_not_covered": "Executable JavaScript package-tree audit or lock closure, package-manager authority, action trustworthiness or workflow execution, undisclosed-vulnerability absence, legal compliance, publisher identity, fuzz-target behavior, full transitive-minimal support, numeric stable MSRV, universal vendoring reproducibility, dependency or feature cutover, file deletion, release readiness, broad workspace health, runtime correctness, performance, live RCH fleet availability, local Cargo fallback, or parent-epic closure by inference.",
+      "expected_signal": "all dependency_ci_provenance_final_signoff_contract tests pass with the STATIC_ONLY and KEEP/DEFER boundaries intact",
+      "source_paths": [
+        "artifacts/dependency_ci_provenance_final_signoff_v1.json",
+        "artifacts/github_actions_provenance_v1.json",
+        "artifacts/dependency_supply_chain_policy_v1.json",
+        "artifacts/downstream_consumer_proof_v1.json",
+        "artifacts/dependency_budget_contract_v1.json",
+        ".github/wasm_typescript_package_policy.json",
+        "docs/dependency_ci_provenance_final_signoff.md",
+        "tests/dependency_ci_provenance_final_signoff_contract.rs",
+        "artifacts/proof_lane_manifest_v1.json",
+        "artifacts/proof_status_snapshot_v1.json",
+        "tests/fixtures/proof_lane_manifest/manifest_projection.json",
+        "README.md",
+        "AGENTS.md"
+      ],
+      "common_unrelated_blockers": [
+        "a P1-P5 child is no longer closed with its accepted scoped outcome",
+        "a content-pinned child artifact or static package inventory drifts",
+        "the RustSec database receipt is missing or stale",
+        "excluded-fuzz native-edge or Tokio-quarantine metadata drifts",
+        "the direct-minimal pass or transitive-minimal blocker is overstated",
+        "the generated AGENTS projection drifts",
+        "manifest projection golden drift",
+        "proof-status marker drift"
+      ],
+      "escalation_notes": "Rerun scripts/ci/audit_dependencies.sh run before citing current scanner health. Preserve the owner-selected JavaScript STATIC_ONLY outcome; this lane cannot invoke a package manager or upgrade absent executable evidence to green. Preserve every child no-claim boundary and KEEP/DEFER whenever dependency-exit authority is absent.",
+      "proof_reuse_policy": {
+        "cache_hits_allowed": true,
+        "allowed_claim_scopes": [
+          "dependency-ci-provenance-final-signoff"
+        ],
+        "required_match_field_set": "strict-rch-proof-reuse-v1",
+        "requires_fresh_rerun_when_dirty_overlap": true,
+        "non_citeable_claim_scopes": [
+          "fresh-rch-pass",
+          "fresh-scanner-pass",
+          "javascript-package-tree-health",
+          "package-manager-authority",
+          "action-trustworthiness",
+          "workflow-execution",
+          "dependency-removal-authority",
+          "dependency-cutover-authority",
+          "release-readiness",
+          "workspace-health",
+          "runtime-correctness",
+          "security",
+          "performance",
+          "fuzz-target-behavior",
+          "live-rch-fleet-availability"
+        ]
+      }
+    }
+  ],
+  "guarantees": [
+    {
+      "guarantee_id": "default-production-tokio-free",
+      "description": "Default asupersync production normal dependency graph has no tokio edge.",
+      "lane_ids": [
+        "default-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "metrics-production-tokio-free",
+      "description": "Metrics production normal dependency graph has no tokio edge.",
+      "lane_ids": [
+        "metrics-production-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-tokio-quarantine",
+      "description": "Fuzz-only OTLP generated-message tokio edge is quarantined and documented.",
+      "lane_ids": [
+        "fuzz-tokio-quarantine-tree"
+      ]
+    },
+    {
+      "guarantee_id": "workspace-tokio-audit",
+      "description": "Workspace normal graph tokio edges are audited as scoped carve-outs rather than production regressions.",
+      "lane_ids": [
+        "workspace-normal-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "full-graph-tokio-audit",
+      "description": "Full workspace feature/dev graph tokio edges are audited as scoped non-production carve-outs rather than production regressions.",
+      "lane_ids": [
+        "full-feature-tokio-audit"
+      ]
+    },
+    {
+      "guarantee_id": "atp-native-self-contained",
+      "description": "ATP native core dependency tree contains no external QUIC stacks or Tokio runtime paths in production profiles.",
+      "lane_ids": [
+        "atp-native-quic-dependency-audit"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-loopback-e2e",
+      "description": "ARQ/QUIC loopback E2E script has a canonical remote-required retained-artifact proof command.",
+      "lane_ids": [
+        "arq-quic-loopback-e2e"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-lab-determinism",
+      "description": "ATP-over-QUIC LabRuntime deterministic contract has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-lab-determinism"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-symbol-envelope-fuzz-smoke",
+      "description": "RaptorQ-over-QUIC symbol-envelope property fuzz smoke has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-symbol-envelope-fuzz-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-bounded-memory-loopback",
+      "description": "ARQ/QUIC loopback RSS artifact validation has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-bounded-memory-loopback"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-wire-conformance",
+      "description": "RaptorQ-over-QUIC symbol-envelope wire conformance has a canonical remote-required proof command.",
+      "lane_ids": [
+        "arq-quic-wire-conformance"
+      ]
+    },
+    {
+      "guarantee_id": "arq-quic-fleet-benchmark-no-fresh-result",
+      "description": "ARQ/QUIC fleet benchmark lane is registered with an explicit no-fresh-result boundary until G2 runs.",
+      "lane_ids": [
+        "arq-quic-fleet-benchmark"
+      ]
+    },
+    {
+      "guarantee_id": "feature-gated-native-surfaces",
+      "description": "Representative native optional surfaces have a canonical compile-frontier command.",
+      "lane_ids": [
+        "native-feature-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "fuzz-manifest-smoke",
+      "description": "Fuzz manifest and registered targets have a canonical smoke command.",
+      "lane_ids": [
+        "fuzz-manifest-smoke"
+      ]
+    },
+    {
+      "guarantee_id": "lib-test-frontier",
+      "description": "Runtime crate lib-test frontier has a canonical rch command.",
+      "lane_ids": [
+        "lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "native-parked-task-cancellation",
+      "description": "Native cancel-aware parked tasks preserve domain-level cancellation through TaskHandle terminal publication and clean their registered waiters without changing cooperative cleanup semantics.",
+      "lane_ids": [
+        "native-parked-task-cancellation"
+      ]
+    },
+    {
+      "guarantee_id": "db-feature-lib-test-frontier",
+      "description": "Database-feature (postgres,mysql,sqlite) lib-test frontier for the database:: module tree has a canonical rch command.",
+      "lane_ids": [
+        "db-feature-lib-tests"
+      ]
+    },
+    {
+      "guarantee_id": "channel-mpsc-select-e2e-public-run",
+      "description": "Focused channel MPSC/select E2E public API scenarios have a canonical binary-run command that avoids cfg(test) conformance tails.",
+      "lane_ids": [
+        "channel-mpsc-select-e2e-public-run"
+      ]
+    },
+    {
+      "guarantee_id": "all-target-compile-frontier",
+      "description": "Runtime crate all-target compile frontier has a canonical rch command.",
+      "lane_ids": [
+        "all-targets-check"
+      ]
+    },
+    {
+      "guarantee_id": "clippy-frontier",
+      "description": "Runtime crate all-target clippy warning-deny frontier has a canonical rch command.",
+      "lane_ids": [
+        "clippy-all-targets"
+      ]
+    },
+    {
+      "guarantee_id": "cli-feature-clippy-frontier",
+      "description": "Runtime crate non-default cli feature clippy warning-deny frontier has a canonical rch command.",
+      "lane_ids": [
+        "cli-feature-clippy"
+      ]
+    },
+    {
+      "guarantee_id": "rustfmt-frontier",
+      "description": "Workspace rustfmt frontier has a canonical rch command.",
+      "lane_ids": [
+        "rustfmt-check"
+      ]
+    },
+    {
+      "guarantee_id": "rustdoc-api-frontier",
+      "description": "Runtime crate rustdoc API frontier has a canonical rch command.",
+      "lane_ids": [
+        "rustdoc-api"
+      ]
+    },
+    {
+      "guarantee_id": "formal-lean-core-invariants",
+      "description": "Lean core-invariant proof build has a canonical direct rch command.",
+      "lane_ids": [
+        "formal-lean-build"
+      ]
+    },
+    {
+      "guarantee_id": "runtime-pressure-control-evidence-contract",
+      "description": "Pressure-control evidence claims, schema versions, docs, and scoped proof command stay aligned.",
+      "lane_ids": [
+        "runtime-pressure-control-evidence-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-schema-contract",
+      "description": "Fourth-wave pressure snapshot and decision receipt schema, fail-closed cases, redaction, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-schema-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-policy-engine",
+      "description": "The pure fourth-wave governor policy engine has a focused remote-required verifier command for deterministic decision receipts.",
+      "lane_ids": [
+        "fourth-wave-governor-policy-engine"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-swarm-replay-corpus",
+      "description": "The deterministic fourth-wave large-host swarm replay corpus has a canonical contract verifier command.",
+      "lane_ids": [
+        "fourth-wave-swarm-replay-corpus"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-runtime-bridge-contract",
+      "description": "The explicit opt-in fourth-wave runtime bridge has a focused verifier command for cancellation, brownout, no-worker, fail-closed, redaction, and non-claim behavior.",
+      "lane_ids": [
+        "fourth-wave-runtime-bridge-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-benchmark-contract",
+      "description": "Fourth-wave large-host benchmark scenarios, metrics, RCH refresh commands, flamegraph targets, and no-claim report boundaries have a canonical contract verifier command.",
+      "lane_ids": [
+        "fourth-wave-benchmark-contract"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-signoff-runbook",
+      "description": "Fourth-wave operator runbook, manifest rows, status rows, README/AGENTS markers, rollback guidance, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-signoff-runbook"
+      ]
+    },
+    {
+      "guarantee_id": "fourth-wave-governor-final-signoff",
+      "description": "Fourth-wave final signoff aggregation, child bead evidence rows, freshness policy, fail-closed fixtures, deterministic operator report, docs markers, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "fourth-wave-governor-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "admission-aware-proof-lane-atlas",
+      "description": "Admission-aware proof-lane planner fixtures, atlas receipts, deterministic report goldens, docs markers, manifest mapping, and proof-status claim rows stay aligned.",
+      "lane_ids": [
+        "swarm-proof-lane-planner-contract"
+      ]
+    },
+    {
+      "guarantee_id": "migration-readiness-planner-signoff",
+      "description": "Executable migration readiness planner signoff artifact, child evidence, report fields, validation commands, docs markers, manifest lane, and proof-status row stay aligned.",
+      "lane_ids": [
+        "migration-readiness-planner-signoff-contract"
+      ]
+    },
+    {
+      "guarantee_id": "shared-main-commit-guard",
+      "description": "Shared-main dirty-tree ownership guard and declared-path commit preflight have a canonical no-mock contract lane.",
+      "lane_ids": [
+        "dirty-tree-ownership-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "durable-rch-final-signoff",
+      "description": "Durable RCH final signoff aggregation, child proof evidence rows, refusal matrix, operator recipes, docs markers, manifest/status mapping, main-only closeout notes, ignored-artifact force-add note, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "durable-rch-proof-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "rch-stale-progress-receipt",
+      "description": "Deterministic stale-progress receipts for remote-required RCH lanes have a canonical verifier command and explicit no-claim boundaries.",
+      "lane_ids": [
+        "rch-stale-progress-receipt-contract"
+      ]
+    },
+    {
+      "guarantee_id": "rch-topology-preflight-canary",
+      "description": "Deterministic topology-preflight receipts distinguish RCH infrastructure failures before Cargo starts from source compile or test failures.",
+      "lane_ids": [
+        "rch-topology-preflight-canary"
+      ]
+    },
+    {
+      "guarantee_id": "unsafe-boundary-ledger-contract",
+      "description": "Unsafe-boundary ledger source locator coverage, stale-row detection, unledgered-site diagnostics, docs alignment, manifest mapping, and proof-status row have a canonical verifier command.",
+      "lane_ids": [
+        "unsafe-boundary-ledger-contract"
+      ]
+    },
+    {
+      "guarantee_id": "proof-lane-manifest-verifier",
+      "description": "The proof-lane manifest has a canonical verifier command.",
+      "lane_ids": [
+        "proof-lane-manifest-contract"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-v044-cancel-compatibility",
+      "description": "The exact published-v0.4.4 external cancellation canary distinguishes acknowledged-cleanup Ok(()) from cancellation-blind outer JoinError::Cancelled and requires the planted stale downstream policy to fail.",
+      "lane_ids": [
+        "downstream-consumer-v044-cancel-compat-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-public-api",
+      "description": "default-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-default-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-direct-minimal-resolution",
+      "description": "The standalone downstream fixture has a checked independent lock generated with pinned Cargo direct-minimal resolution and a remote locked default-consumer compile lane with explicit full-transitive-minimal and MSRV no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-direct-minimal-check"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-kafka-fail-closed",
+      "description": "default-kafka-fail-closed-test runs the representative Kafka boundary as a true external default-feature test without root dev-dependency feature unification.",
+      "lane_ids": [
+        "downstream-consumer-default-kafka-test"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-metrics-public-api",
+      "description": "metrics-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-metrics-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-channel-public-api",
+      "description": "channel-mpsc-select-public-surface-run is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-channel-profile-run"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-default-tokio-free",
+      "description": "default-no-tokio-tree is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-default-tokio-tree"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-internal-only-negative",
+      "description": "internal-only-negative-check is represented by a downstream-consumer proof lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-internal-negative-check"
+      ]
+    },
+    {
+      "guarantee_id": "downstream-consumer-proof-contract",
+      "description": "downstream-consumer-proof-contract is represented by the VF5 artifact verifier lane with explicit no-claim boundaries.",
+      "lane_ids": [
+        "downstream-consumer-proof-contract"
+      ]
+    },
+    {
+      "guarantee_id": "lab-live-support-claim-report-contract",
+      "description": "Lab-live support-claim report artifact, stale-evidence refusal, drift demotion, docs markers, manifest/status mapping, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "lab-live-support-claim-report-contract"
+      ]
+    },
+    {
+      "guarantee_id": "browser-ga-final-signoff",
+      "description": "Browser Edition GA final signoff packet, B1-B3 aggregation, package hashes, rollback drill, docs markers, manifest/status mapping, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "browser-ga-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "validation-frontier-final-signoff",
+      "description": "Validation-frontier final signoff artifact, operator runbook, child deliverable mapping, channel fixture split, e2e runner commands, manifest/status rows, deterministic Markdown summary, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "validation-frontier-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "memory-residency-replay-e2e-contract",
+      "description": "Memory-residency M4 deterministic replay/e2e artifact, runner, orchestrator registration, manifest/status mapping, stale/missing input failures, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "memory-residency-replay-e2e-contract"
+      ]
+    },
+    {
+      "guarantee_id": "memory-residency-operator-safety-contract",
+      "description": "Memory-residency M5 operator safety artifact, runbook, fail-closed M1-M4 gates, rollback guidance, Agent Mail handoff, closeout checklist, manifest/status rows, README/AGENTS markers, and no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "memory-residency-operator-safety-contract"
+      ]
+    },
+    {
+      "guarantee_id": "doctor-e2e-proof-lane-contract",
+      "description": "doctor-e2e-proof-lane-contract is represented by the D4 aggregate doctor proof-lane verifier with explicit no-claim boundaries.",
+      "lane_ids": [
+        "doctor-e2e-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "semantic-lint-proof-lane-contract",
+      "description": "semantic-lint-proof-lane-contract is represented by the L4 aggregate semantic-lint verifier with explicit no-claim boundaries.",
+      "lane_ids": [
+        "semantic-lint-proof-lane-contract"
+      ]
+    },
+    {
+      "guarantee_id": "rust-crate-release-provenance-contract",
+      "description": "Rust crate release-provenance artifact schema, publish-workflow crate surface, fail-closed prepublish provenance gate, fixture outcomes, integrity hashes, R5 deterministic final signoff packet, proof manifest/status rows, and overclaim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "rust-crate-release-provenance-contract"
+      ]
+    },
+    {
+      "guarantee_id": "artifact-governance-validation-harness",
+      "description": "Artifact-governance A8 validation harness fixtures, deterministic e2e flow log, no-local-fallback policy, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "artifact-governance-validation-harness"
+      ]
+    },
+    {
+      "guarantee_id": "artifact-governance-final-signoff",
+      "description": "Artifact-governance final signoff artifact, child deliverable mapping, proof manifest/status rows, README/AGENTS markers, closeout checklist, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "artifact-governance-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "clean-overlay-proof-orchestration-contract",
+      "description": "Clean-overlay proof-orchestration A4 operator-packet documentation and reference alignment for installed-capability admission, option-section parsing, receipt-only blocked reproduction, operator guidance, handoff templates, manifest/status rows, README/AGENTS markers, and no-claim boundaries has a canonical verifier command; referenced behavioral tests are separate evidence.",
+      "lane_ids": [
+        "clean-overlay-proof-orchestration-contract"
+      ]
+    },
+    {
+      "guarantee_id": "proof-traffic-final-signoff",
+      "description": "Proof-traffic A6 final signoff artifact, A1-A5 evidence aggregation, capability-drift gate, admission receipt taxonomy, clean-overlay handshake, proof parking lot, blocked-loop e2e packet, manifest/status rows, README/AGENTS markers, no-local-fallback and no-peer-cancel policies, dependency-cycle receipt/checklist, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "proof-traffic-final-signoff"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-supply-chain-policy-contract",
+      "description": "Pinned Cargo scanner policy, RustSec freshness receipts, workspace graph scope, expiring exceptions, license/source rules, duplicate ratchets, negative fixtures, CI/runbook wiring, excluded-fuzz quarantine, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-supply-chain-policy-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-budget-contract",
+      "description": "The exact direct-edge allowset, synthesized-consumer package-ID graph ceilings, automatic downward ratchet, reviewed upward-exception path, safe negative fixtures, and scoped no-claim boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-budget-contract"
+      ]
+    },
+    {
+      "guarantee_id": "dependency-ci-provenance-final-signoff",
+      "description": "The P1-P5 dependency CI/provenance child outcomes, content-pinned sources, static-only JavaScript decision, fresh Cargo scanner receipt, excluded-fuzz quarantine, downstream minimum-version boundary, generated-document drift receipt, safe overclaim fixtures, operator replay, proof mapping, and scoped KEEP/DEFER boundaries have a canonical verifier command.",
+      "lane_ids": [
+        "dependency-ci-provenance-final-signoff"
+      ]
+    }
+  ],
+  "documentation_contract": {
+    "docs_must_reference_manifest": [
+      "README.md",
+      "AGENTS.md",
+      "docs/proof_runner_usage.md"
+    ],
+    "required_marker": "artifacts/proof_lane_manifest_v1.json",
+    "verifier_marker": "tests/proof_lane_manifest_contract.rs"
+  }
+}

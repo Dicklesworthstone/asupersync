@@ -1,0 +1,1 @@
+SUB metrics.requests worker 42\r\nUNSUB 42 10\r\n

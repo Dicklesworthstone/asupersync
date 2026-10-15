@@ -1,0 +1,929 @@
+//! Progress reporting for CLI tools.
+//!
+//! Provides streaming progress updates that work for both human and machine consumers.
+//! Automatically formats based on output mode.
+
+use serde::Serialize;
+use std::io::{self, IsTerminal, Write};
+use std::time::{Duration, Instant};
+
+use super::output::{ColorChoice, OutputFormat};
+
+/// Progress update types.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressKind {
+    /// Operation started.
+    Started,
+
+    /// Progress update with percentage or count.
+    Update,
+
+    /// Operation completed successfully.
+    Completed,
+
+    /// Operation failed.
+    Failed,
+
+    /// Operation was cancelled.
+    Cancelled,
+}
+
+/// A progress update event.
+#[derive(Clone, Debug, Serialize)]
+pub struct ProgressEvent {
+    /// Type of progress event.
+    pub kind: ProgressKind,
+
+    /// Current item or step (0-indexed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current: Option<u64>,
+
+    /// Total items or steps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+
+    /// Human-readable message.
+    pub message: String,
+
+    /// Elapsed time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_ms: Option<u64>,
+
+    /// Operation name/identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+}
+
+impl ProgressEvent {
+    /// Create a new started event.
+    #[must_use]
+    pub fn started(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProgressKind::Started,
+            current: None,
+            total: None,
+            message: message.into(),
+            elapsed_ms: None,
+            operation: None,
+        }
+    }
+
+    /// Create a new update event.
+    #[must_use]
+    pub fn update(current: u64, total: u64, message: impl Into<String>) -> Self {
+        Self {
+            kind: ProgressKind::Update,
+            current: Some(current),
+            total: Some(total),
+            message: message.into(),
+            elapsed_ms: None,
+            operation: None,
+        }
+    }
+
+    /// Create a completed event.
+    #[must_use]
+    pub fn completed(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProgressKind::Completed,
+            current: None,
+            total: None,
+            message: message.into(),
+            elapsed_ms: None,
+            operation: None,
+        }
+    }
+
+    /// Create a failed event.
+    #[must_use]
+    pub fn failed(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProgressKind::Failed,
+            current: None,
+            total: None,
+            message: message.into(),
+            elapsed_ms: None,
+            operation: None,
+        }
+    }
+
+    /// Create a cancelled event.
+    #[must_use]
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self {
+            kind: ProgressKind::Cancelled,
+            current: None,
+            total: None,
+            message: message.into(),
+            elapsed_ms: None,
+            operation: None,
+        }
+    }
+
+    /// Set the operation name.
+    #[must_use]
+    pub fn operation(mut self, name: impl Into<String>) -> Self {
+        self.operation = Some(name.into());
+        self
+    }
+
+    /// Set elapsed time.
+    #[must_use]
+    pub const fn elapsed(mut self, duration: Duration) -> Self {
+        let ms = duration.as_millis();
+        self.elapsed_ms = Some(if ms > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            ms as u64
+        });
+        self
+    }
+
+    /// Calculate percentage if current and total are set.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)] // Precision loss acceptable for percentage display
+    pub fn percentage(&self) -> Option<f64> {
+        match (self.current, self.total) {
+            (Some(current), Some(total)) if total > 0 => {
+                Some((current.min(total) as f64 / total as f64) * 100.0)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Progress reporter that handles output formatting.
+pub struct ProgressReporter {
+    format: OutputFormat,
+    color: ColorChoice,
+    start_time: Instant,
+    writer: Box<dyn Write>,
+    operation: Option<String>,
+    last_line_length: usize,
+    update_line_active: bool,
+    target_is_terminal: bool,
+}
+
+impl ProgressReporter {
+    /// Create a new progress reporter.
+    #[must_use]
+    pub fn new(format: OutputFormat) -> Self {
+        let target_is_terminal = io::stderr().is_terminal();
+        Self {
+            format,
+            color: ColorChoice::auto_detect_for(target_is_terminal),
+            start_time: Instant::now(),
+            writer: Box::new(io::stderr()),
+            operation: None,
+            last_line_length: 0,
+            update_line_active: false,
+            target_is_terminal,
+        }
+    }
+
+    /// Create with a custom writer.
+    #[must_use]
+    pub fn with_writer<W: Write + 'static>(format: OutputFormat, writer: W) -> Self {
+        Self {
+            format,
+            color: ColorChoice::Never,
+            start_time: Instant::now(),
+            writer: Box::new(writer),
+            operation: None,
+            last_line_length: 0,
+            update_line_active: false,
+            target_is_terminal: false,
+        }
+    }
+
+    /// Set the operation name.
+    #[must_use]
+    pub fn operation(mut self, name: impl Into<String>) -> Self {
+        self.operation = Some(name.into());
+        self
+    }
+
+    /// Set color choice.
+    #[must_use]
+    pub fn with_color(mut self, color: ColorChoice) -> Self {
+        self.color = color;
+        self
+    }
+
+    /// Report a progress event.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn report(&mut self, mut event: ProgressEvent) -> io::Result<()> {
+        // Add operation if not set on event
+        if event.operation.is_none() {
+            event.operation = self.operation.clone();
+        }
+
+        // Add elapsed time
+        event.elapsed_ms = Some(
+            self.start_time
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
+
+        match self.format {
+            OutputFormat::Human => self.report_human(&event),
+            OutputFormat::Json | OutputFormat::StreamJson => self.report_json(&event),
+            OutputFormat::JsonPretty => self.report_json_pretty(&event),
+            OutputFormat::Tsv => self.report_tsv(&event),
+        }
+    }
+
+    /// Report for human consumption.
+    fn report_human(&mut self, event: &ProgressEvent) -> io::Result<()> {
+        let use_color = self.color.should_colorize_for(self.target_is_terminal);
+
+        // Clear the currently rendered in-place update line before rewriting
+        // another update or emitting a terminal status line.
+        if self.update_line_active {
+            write!(self.writer, "\r{}\r", " ".repeat(self.last_line_length))?;
+        }
+
+        let mut line = String::new();
+
+        // Status indicator with color
+        let (indicator, color_code) = match event.kind {
+            ProgressKind::Started => ("▶", "\x1b[34m"),   // Blue
+            ProgressKind::Update => ("⋯", "\x1b[33m"),    // Yellow
+            ProgressKind::Completed => ("✓", "\x1b[32m"), // Green
+            ProgressKind::Failed => ("✗", "\x1b[31m"),    // Red
+            ProgressKind::Cancelled => ("⊘", "\x1b[33m"), // Yellow
+        };
+
+        if use_color {
+            line.push_str(color_code);
+        }
+        line.push_str(indicator);
+        if use_color {
+            line.push_str("\x1b[0m");
+        }
+        line.push(' ');
+
+        // Progress bar for updates
+        if let Some(pct) = event.percentage() {
+            use std::fmt::Write;
+            let bar_width: usize = 20;
+            let clamped_pct = pct.clamp(0.0, 100.0);
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let filled = ((clamped_pct / 100.0) * bar_width as f64) as usize;
+            let empty = bar_width - filled;
+
+            line.push('[');
+            if use_color {
+                line.push_str("\x1b[32m");
+            }
+            line.push_str(&"█".repeat(filled));
+            if use_color {
+                line.push_str("\x1b[0m");
+            }
+            line.push_str(&"░".repeat(empty));
+            let _ = write!(line, "] {pct:.1}% ");
+        }
+
+        // Message
+        line.push_str(&event.message);
+
+        // Elapsed time for completion/failure
+        if matches!(
+            event.kind,
+            ProgressKind::Completed | ProgressKind::Failed | ProgressKind::Cancelled
+        ) {
+            if let Some(ms) = event.elapsed_ms {
+                use std::fmt::Write;
+                if use_color {
+                    line.push_str("\x1b[2m");
+                }
+                #[allow(clippy::cast_precision_loss)] // Acceptable for duration display
+                let secs = ms as f64 / 1000.0;
+                let _ = write!(line, " ({secs:.2}s)");
+                if use_color {
+                    line.push_str("\x1b[0m");
+                }
+            }
+        }
+
+        // Use newline for terminal states, just carriage return for updates
+        if event.kind == ProgressKind::Update {
+            write!(self.writer, "{line}")?;
+            self.last_line_length = line.len();
+            self.update_line_active = true;
+        } else {
+            writeln!(self.writer, "{line}")?;
+            self.last_line_length = 0;
+            self.update_line_active = false;
+        }
+
+        self.writer.flush()
+    }
+
+    /// Report as JSON.
+    fn report_json(&mut self, event: &ProgressEvent) -> io::Result<()> {
+        let json = serde_json::to_string(event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        writeln!(self.writer, "{json}")?;
+        self.writer.flush()
+    }
+
+    /// Report as pretty JSON.
+    fn report_json_pretty(&mut self, event: &ProgressEvent) -> io::Result<()> {
+        let json = serde_json::to_string_pretty(event)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        writeln!(self.writer, "{json}")?;
+        self.writer.flush()
+    }
+
+    /// Report as TSV.
+    fn report_tsv(&mut self, event: &ProgressEvent) -> io::Result<()> {
+        let pct = event
+            .percentage()
+            .map_or_else(|| "-".to_string(), |p| format!("{p:.1}"));
+        let elapsed = event
+            .elapsed_ms
+            .map_or_else(|| "-".to_string(), |ms| ms.to_string());
+
+        writeln!(
+            self.writer,
+            "{:?}\t{}\t{}\t{}",
+            event.kind, pct, elapsed, event.message
+        )?;
+        self.writer.flush()
+    }
+
+    /// Report that an operation has started.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn start(&mut self, message: impl Into<String>) -> io::Result<()> {
+        self.start_time = Instant::now();
+        self.report(ProgressEvent::started(message))
+    }
+
+    /// Report a progress update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn update(
+        &mut self,
+        current: u64,
+        total: u64,
+        message: impl Into<String>,
+    ) -> io::Result<()> {
+        self.report(ProgressEvent::update(current, total, message))
+    }
+
+    /// Report completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn complete(&mut self, message: impl Into<String>) -> io::Result<()> {
+        self.report(ProgressEvent::completed(message))
+    }
+
+    /// Report failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn fail(&mut self, message: impl Into<String>) -> io::Result<()> {
+        self.report(ProgressEvent::failed(message))
+    }
+
+    /// Report cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.
+    pub fn cancel(&mut self, message: impl Into<String>) -> io::Result<()> {
+        self.report(ProgressEvent::cancelled(message))
+    }
+
+    /// Get elapsed time since start.
+    #[must_use]
+    pub fn elapsed(&self) -> Duration {
+        self.start_time.elapsed()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use insta::assert_json_snapshot;
+    use parking_lot::Mutex;
+    use std::io::{self, Cursor, Write};
+    use std::sync::Arc;
+
+    #[derive(Clone, Default)]
+    struct SharedBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl SharedBuffer {
+        fn snapshot(&self) -> Vec<u8> {
+            self.0.lock().clone()
+        }
+
+        fn snapshot_string(&self) -> String {
+            String::from_utf8(self.snapshot()).expect("shared buffer should contain UTF-8")
+        }
+    }
+
+    impl Write for SharedBuffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[derive(Serialize)]
+    struct ProgressRenderSnapshot {
+        indeterminate: String,
+        zero_percent: String,
+        fifty_percent: String,
+        one_hundred_percent: String,
+    }
+
+    fn capture_human_progress(event: ProgressEvent) -> String {
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared);
+        reporter
+            .report(event)
+            .expect("human progress event should render");
+        inspector.snapshot_string()
+    }
+
+    #[test]
+    fn progress_event_percentage() {
+        init_test("progress_event_percentage");
+        let event = ProgressEvent::update(50, 100, "test");
+        let percentage = event.percentage();
+        crate::assert_with_log!(
+            percentage == Some(50.0),
+            "percentage 50",
+            Some(50.0),
+            percentage
+        );
+
+        let event = ProgressEvent::update(25, 100, "test");
+        let percentage = event.percentage();
+        crate::assert_with_log!(
+            percentage == Some(25.0),
+            "percentage 25",
+            Some(25.0),
+            percentage
+        );
+
+        let event = ProgressEvent::started("test");
+        let percentage: Option<f64> = event.percentage();
+        crate::assert_with_log!(
+            percentage.is_none(),
+            "percentage none",
+            "None",
+            format!("{:?}", percentage)
+        );
+
+        let event = ProgressEvent::update(0, 0, "test");
+        let percentage: Option<f64> = event.percentage();
+        crate::assert_with_log!(
+            percentage.is_none(),
+            "percentage none for 0/0",
+            "None",
+            format!("{:?}", percentage)
+        );
+        crate::test_complete!("progress_event_percentage");
+    }
+
+    #[test]
+    fn progress_event_serializes() {
+        init_test("progress_event_serializes");
+        let event = ProgressEvent::update(5, 10, "Processing")
+            .operation("sync")
+            .elapsed(Duration::from_millis(1500));
+
+        let json = serde_json::to_string(&event).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        crate::assert_with_log!(
+            parsed["kind"] == "update",
+            "kind",
+            "update",
+            parsed["kind"].clone()
+        );
+        crate::assert_with_log!(
+            parsed["current"] == 5,
+            "current",
+            5,
+            parsed["current"].clone()
+        );
+        crate::assert_with_log!(parsed["total"] == 10, "total", 10, parsed["total"].clone());
+        crate::assert_with_log!(
+            parsed["message"] == "Processing",
+            "message",
+            "Processing",
+            parsed["message"].clone()
+        );
+        crate::assert_with_log!(
+            parsed["operation"] == "sync",
+            "operation",
+            "sync",
+            parsed["operation"].clone()
+        );
+        crate::assert_with_log!(
+            parsed["elapsed_ms"] == 1500,
+            "elapsed_ms",
+            1500,
+            parsed["elapsed_ms"].clone()
+        );
+        crate::test_complete!("progress_event_serializes");
+    }
+
+    #[test]
+    fn progress_reporter_json_output() {
+        init_test("progress_reporter_json_output");
+
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter =
+            ProgressReporter::with_writer(OutputFormat::Json, cursor).operation("test");
+
+        reporter.start("Starting").unwrap();
+        crate::test_complete!("progress_reporter_json_output");
+    }
+
+    #[test]
+    fn progress_reporter_tracks_elapsed() {
+        init_test("progress_reporter_tracks_elapsed");
+        let reporter = ProgressReporter::new(OutputFormat::Human);
+        std::thread::sleep(Duration::from_millis(10));
+        let elapsed = reporter.elapsed().as_millis();
+        crate::assert_with_log!(elapsed >= 10, "elapsed >= 10ms", ">= 10ms", elapsed);
+        crate::test_complete!("progress_reporter_tracks_elapsed");
+    }
+
+    #[test]
+    fn progress_kind_serializes_snake_case() {
+        init_test("progress_kind_serializes_snake_case");
+        let json = serde_json::to_string(&ProgressKind::Started).unwrap();
+        crate::assert_with_log!(json == "\"started\"", "started json", "\"started\"", json);
+
+        let json = serde_json::to_string(&ProgressKind::Completed).unwrap();
+        crate::assert_with_log!(
+            json == "\"completed\"",
+            "completed json",
+            "\"completed\"",
+            json
+        );
+        crate::test_complete!("progress_kind_serializes_snake_case");
+    }
+
+    #[test]
+    fn progress_kind_debug() {
+        init_test("progress_kind_debug");
+        let dbg = format!("{:?}", ProgressKind::Started);
+        assert_eq!(dbg, "Started");
+        let dbg = format!("{:?}", ProgressKind::Update);
+        assert_eq!(dbg, "Update");
+        let dbg = format!("{:?}", ProgressKind::Completed);
+        assert_eq!(dbg, "Completed");
+        let dbg = format!("{:?}", ProgressKind::Failed);
+        assert_eq!(dbg, "Failed");
+        let dbg = format!("{:?}", ProgressKind::Cancelled);
+        assert_eq!(dbg, "Cancelled");
+        crate::test_complete!("progress_kind_debug");
+    }
+
+    #[test]
+    fn progress_kind_clone_copy() {
+        init_test("progress_kind_clone_copy");
+        let k = ProgressKind::Completed;
+        let k2 = k;
+        let k3 = k;
+        assert_eq!(k2, k3);
+        crate::test_complete!("progress_kind_clone_copy");
+    }
+
+    #[test]
+    fn progress_kind_eq() {
+        init_test("progress_kind_eq");
+        assert_eq!(ProgressKind::Started, ProgressKind::Started);
+        assert_ne!(ProgressKind::Started, ProgressKind::Failed);
+        crate::test_complete!("progress_kind_eq");
+    }
+
+    #[test]
+    fn progress_event_debug() {
+        init_test("progress_event_debug");
+        let ev = ProgressEvent::started("hello");
+        let dbg = format!("{ev:?}");
+        assert!(dbg.contains("ProgressEvent"));
+        crate::test_complete!("progress_event_debug");
+    }
+
+    #[test]
+    fn progress_event_clone() {
+        init_test("progress_event_clone");
+        let ev = ProgressEvent::update(3, 10, "cloning");
+        let ev2 = ev;
+        assert_eq!(ev2.kind, ProgressKind::Update);
+        assert_eq!(ev2.current, Some(3));
+        assert_eq!(ev2.total, Some(10));
+        assert_eq!(ev2.message, "cloning");
+        crate::test_complete!("progress_event_clone");
+    }
+
+    #[test]
+    fn progress_event_started() {
+        init_test("progress_event_started");
+        let ev = ProgressEvent::started("begin");
+        assert_eq!(ev.kind, ProgressKind::Started);
+        assert_eq!(ev.message, "begin");
+        assert!(ev.current.is_none());
+        assert!(ev.total.is_none());
+        assert!(ev.elapsed_ms.is_none());
+        assert!(ev.operation.is_none());
+        crate::test_complete!("progress_event_started");
+    }
+
+    #[test]
+    fn progress_event_completed() {
+        init_test("progress_event_completed");
+        let ev = ProgressEvent::completed("done");
+        assert_eq!(ev.kind, ProgressKind::Completed);
+        assert_eq!(ev.message, "done");
+        crate::test_complete!("progress_event_completed");
+    }
+
+    #[test]
+    fn progress_event_failed() {
+        init_test("progress_event_failed");
+        let ev = ProgressEvent::failed("error");
+        assert_eq!(ev.kind, ProgressKind::Failed);
+        assert_eq!(ev.message, "error");
+        crate::test_complete!("progress_event_failed");
+    }
+
+    #[test]
+    fn progress_event_cancelled() {
+        init_test("progress_event_cancelled");
+        let ev = ProgressEvent::cancelled("abort");
+        assert_eq!(ev.kind, ProgressKind::Cancelled);
+        assert_eq!(ev.message, "abort");
+        crate::test_complete!("progress_event_cancelled");
+    }
+
+    #[test]
+    fn progress_event_update_fields() {
+        init_test("progress_event_update_fields");
+        let ev = ProgressEvent::update(5, 20, "processing");
+        assert_eq!(ev.kind, ProgressKind::Update);
+        assert_eq!(ev.current, Some(5));
+        assert_eq!(ev.total, Some(20));
+        assert_eq!(ev.message, "processing");
+        crate::test_complete!("progress_event_update_fields");
+    }
+
+    #[test]
+    fn progress_event_operation_builder() {
+        init_test("progress_event_operation_builder");
+        let ev = ProgressEvent::started("go").operation("sync");
+        assert_eq!(ev.operation, Some("sync".to_string()));
+        crate::test_complete!("progress_event_operation_builder");
+    }
+
+    #[test]
+    fn progress_event_elapsed_builder() {
+        init_test("progress_event_elapsed_builder");
+        let ev = ProgressEvent::completed("done").elapsed(Duration::from_millis(2500));
+        assert_eq!(ev.elapsed_ms, Some(2500));
+        crate::test_complete!("progress_event_elapsed_builder");
+    }
+
+    #[test]
+    fn progress_event_percentage_100() {
+        init_test("progress_event_percentage_100");
+        let ev = ProgressEvent::update(100, 100, "done");
+        assert_eq!(ev.percentage(), Some(100.0));
+        crate::test_complete!("progress_event_percentage_100");
+    }
+
+    #[test]
+    fn progress_event_percentage_clamps_above_100() {
+        init_test("progress_event_percentage_clamps_above_100");
+        let ev = ProgressEvent::update(15, 10, "over-complete");
+        assert_eq!(ev.percentage(), Some(100.0));
+        crate::test_complete!("progress_event_percentage_clamps_above_100");
+    }
+
+    #[test]
+    fn progress_reporter_with_writer_and_operation() {
+        init_test("progress_reporter_with_writer_and_operation");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter =
+            ProgressReporter::with_writer(OutputFormat::Json, cursor).operation("test_op");
+        reporter.start("starting").unwrap();
+        reporter.update(1, 10, "step 1").unwrap();
+        reporter.complete("finished").unwrap();
+        // No panic means success
+        crate::test_complete!("progress_reporter_with_writer_and_operation");
+    }
+
+    #[test]
+    fn progress_reporter_fail_and_cancel() {
+        init_test("progress_reporter_fail_and_cancel");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Json, cursor);
+        reporter.fail("oops").unwrap();
+        // Create a separate reporter for cancel
+        let cursor2 = Cursor::new(Vec::new());
+        let mut reporter2 = ProgressReporter::with_writer(OutputFormat::Json, cursor2);
+        reporter2.cancel("aborted").unwrap();
+        crate::test_complete!("progress_reporter_fail_and_cancel");
+    }
+
+    #[test]
+    fn progress_reporter_human_format() {
+        init_test("progress_reporter_human_format");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, cursor);
+        reporter.start("begin").unwrap();
+        reporter.update(5, 10, "half").unwrap();
+        reporter.complete("end").unwrap();
+        crate::test_complete!("progress_reporter_human_format");
+    }
+
+    #[test]
+    fn progress_reporter_human_clamps_over_100_percent() {
+        init_test("progress_reporter_human_clamps_over_100_percent");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, cursor);
+        reporter.start("begin").unwrap();
+        reporter.update(15, 10, "over-complete").unwrap();
+        reporter.complete("done").unwrap();
+        crate::test_complete!("progress_reporter_human_clamps_over_100_percent");
+    }
+
+    #[test]
+    fn progress_reporter_human_terminal_event_replaces_update_line() {
+        init_test("progress_reporter_human_terminal_event_replaces_update_line");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared);
+        reporter.start("begin").unwrap();
+        reporter.update(5, 10, "half").unwrap();
+        reporter.complete("end").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            output.contains("half\r"),
+            "update line terminated with carriage return",
+            "contains `half\\r`",
+            output
+        );
+        crate::assert_with_log!(
+            !output.contains("half✓"),
+            "terminal line not concatenated to update line",
+            "does not contain `half✓`",
+            output
+        );
+        crate::test_complete!("progress_reporter_human_terminal_event_replaces_update_line");
+    }
+
+    #[test]
+    fn progress_reporter_tsv_format() {
+        init_test("progress_reporter_tsv_format");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Tsv, cursor);
+        reporter.start("tsv test").unwrap();
+        reporter.complete("done").unwrap();
+        crate::test_complete!("progress_reporter_tsv_format");
+    }
+
+    #[test]
+    fn progress_reporter_json_pretty_format() {
+        init_test("progress_reporter_json_pretty_format");
+        let cursor = Cursor::new(Vec::new());
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::JsonPretty, cursor);
+        reporter.start("pretty test").unwrap();
+        reporter.complete("done").unwrap();
+        crate::test_complete!("progress_reporter_json_pretty_format");
+    }
+
+    #[test]
+    fn progress_reporter_tsv_clamps_percentage_above_100() {
+        init_test("progress_reporter_tsv_clamps_percentage_above_100");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Tsv, shared);
+        reporter.update(15, 10, "over-complete").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        let line = output.trim_end();
+        crate::assert_with_log!(
+            line.starts_with("Update\t100.0\t"),
+            "tsv percentage is clamped",
+            "prefix `Update\\t100.0\\t`",
+            line
+        );
+        crate::test_complete!("progress_reporter_tsv_clamps_percentage_above_100");
+    }
+
+    #[test]
+    fn progress_reporter_with_color() {
+        init_test("progress_reporter_with_color");
+        let reporter = ProgressReporter::new(OutputFormat::Human).with_color(ColorChoice::Never);
+        let dbg = format!("{:?}", reporter.elapsed());
+        assert!(!dbg.is_empty());
+        crate::test_complete!("progress_reporter_with_color");
+    }
+
+    #[test]
+    fn progress_reporter_auto_color_follows_target_terminal_state() {
+        init_test("progress_reporter_auto_color_follows_target_terminal_state");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared)
+            .with_color(ColorChoice::Auto);
+        reporter.target_is_terminal = true;
+
+        reporter.start("begin").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            output.contains("\x1b[34m"),
+            "started event color follows terminal target",
+            "contains blue ANSI prefix",
+            output
+        );
+        crate::test_complete!("progress_reporter_auto_color_follows_target_terminal_state");
+    }
+
+    #[test]
+    fn progress_reporter_auto_color_avoids_redirected_target() {
+        init_test("progress_reporter_auto_color_avoids_redirected_target");
+        let shared = SharedBuffer::default();
+        let inspector = shared.clone();
+        let mut reporter = ProgressReporter::with_writer(OutputFormat::Human, shared)
+            .with_color(ColorChoice::Auto);
+        reporter.target_is_terminal = false;
+
+        reporter.start("begin").unwrap();
+
+        let output = String::from_utf8(inspector.snapshot()).unwrap();
+        crate::assert_with_log!(
+            !output.contains("\x1b["),
+            "auto color avoids redirected target",
+            "no ANSI escapes",
+            output
+        );
+        crate::test_complete!("progress_reporter_auto_color_avoids_redirected_target");
+    }
+
+    #[test]
+    fn progress_bar_render_snapshot() {
+        init_test("progress_bar_render_snapshot");
+
+        let snapshot = ProgressRenderSnapshot {
+            indeterminate: capture_human_progress(ProgressEvent::started("Connecting to cluster")),
+            zero_percent: capture_human_progress(ProgressEvent::update(0, 100, "Queued")),
+            fifty_percent: capture_human_progress(ProgressEvent::update(50, 100, "Syncing")),
+            one_hundred_percent: capture_human_progress(ProgressEvent::update(
+                100,
+                100,
+                "Finalize verification",
+            )),
+        };
+
+        assert_json_snapshot!("progress_bar_render_states", snapshot);
+        crate::test_complete!("progress_bar_render_snapshot");
+    }
+}

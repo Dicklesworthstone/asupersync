@@ -1,0 +1,98 @@
+---
+source: tests/conformance/raptorq_proof_correctness.rs
+assertion_line: 511
+expression: scrubbed
+---
+{
+  "config": {
+    "h": 10,
+    "k": 6,
+    "l": 27,
+    "object_id": "[deterministic]",
+    "s": 7,
+    "sbn": 0,
+    "seed": "[deterministic]",
+    "symbol_size": 24
+  },
+  "content_hash": "0x61798932e473a61569bc121cce2bd6cc9ce8ba786cc319004fe06faaef9606fc",
+  "elimination": {
+    "inactivated": 0,
+    "inactive_cols_preview": [],
+    "inactive_cols_truncated": false,
+    "pivot_events_preview": [],
+    "pivot_events_truncated": false,
+    "pivots": 0,
+    "row_ops": 0,
+    "strategy": "AllAtOnce",
+    "strategy_transitions": [],
+    "strategy_transitions_truncated": false
+  },
+  "outcome": {
+    "kind": "Failure",
+    "reason": {
+      "actual": 32,
+      "expected": 24,
+      "type": "SymbolSizeMismatch"
+    }
+  },
+  "peeling": {
+    "solved": 0,
+    "solved_indices_preview": [],
+    "truncated": false
+  },
+  "received": {
+    "esi_multiset_hash": "0xa22ffb6f37a91072",
+    "esis_preview": [
+      0,
+      0,
+      1,
+      1,
+      2,
+      2,
+      3,
+      3,
+      4,
+      4,
+      5,
+      5,
+      6,
+      6,
+      7,
+      7,
+      8,
+      8,
+      9,
+      9,
+      10,
+      10,
+      11,
+      11,
+      12,
+      12,
+      13,
+      13,
+      14,
+      14,
+      15,
+      15,
+      16,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26
+    ],
+    "repair_count": 38,
+    "source_count": 6,
+    "total": 44,
+    "truncated": false
+  },
+  "test_vector": "symbol_size_mismatch",
+  "version": 2
+}

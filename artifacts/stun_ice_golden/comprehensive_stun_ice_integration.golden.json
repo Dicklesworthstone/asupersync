@@ -1,0 +1,42 @@
+{
+  "ice_candidate_types": [
+    "Host",
+    "ServerReflexive",
+    "PeerReflexive",
+    "Relay"
+  ],
+  "sample_ice_candidates": [
+    {
+      "address": "192.168.1.100:54400",
+      "candidate_type": "Host",
+      "component": 1,
+      "foundation": "1",
+      "priority": 2113667326,
+      "protocol": "udp",
+      "related_address": null
+    },
+    {
+      "address": "203.0.113.45:54401",
+      "candidate_type": "ServerReflexive",
+      "component": 1,
+      "foundation": "2",
+      "priority": 1686052606,
+      "protocol": "udp",
+      "related_address": "192.168.1.100:54400"
+    }
+  ],
+  "stun_message_types": [
+    "BindingRequest",
+    "BindingResponse",
+    "BindingError"
+  ],
+  "test_suite": "STUN/ICE Golden Artifacts",
+  "test_vectors": {
+    "ipv4_host": "192.168.1.100:54400",
+    "ipv4_reflexive": "203.0.113.45:54401",
+    "ipv6_host": "[2001:db8::1]:54400",
+    "stun_server": "stun.l.google.com:19302"
+  },
+  "timestamp": "2026-05-26T07:00:00Z",
+  "version": "1.0.0"
+}

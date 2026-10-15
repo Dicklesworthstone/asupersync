@@ -1,0 +1,36 @@
+{
+  "schema_version": "parser-fuzz-coverage-input-v1",
+  "parser_surfaces": [
+    {
+      "id": "grpc_timeout_parse",
+      "path": "src/grpc/server.rs",
+      "symbol": "parse_grpc_timeout",
+      "visibility": "pub",
+      "input_kind": "&str",
+      "risk": "medium",
+      "category": "grpc"
+    },
+    {
+      "id": "internal_validated_status_parse",
+      "path": "src/http/h3_native.rs",
+      "symbol": "parse_status_code",
+      "visibility": "pub",
+      "input_kind": "&str",
+      "risk": "low",
+      "category": "http3"
+    }
+  ],
+  "fuzz_targets": [],
+  "exemptions": [
+    {
+      "surface_id": "grpc_timeout_parse",
+      "reason": "covered by a spec-derived conformance matrix until a fuzz seam is exposed",
+      "expires": "2026-06-01"
+    },
+    {
+      "surface_id": "internal_validated_status_parse",
+      "reason": "only reachable after pseudo-header validation",
+      "expires": "2026-05-01"
+    }
+  ]
+}

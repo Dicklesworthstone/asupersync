@@ -1,0 +1,77 @@
+{
+  "expected_scenario_outcome": "blocked-as-expected",
+  "scenario_id": "blocked_path",
+  "stages": [
+    {
+      "audit_target_dir": true,
+      "command": "rch exec -- env CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_autopilot_e2e cargo test --test swarm_autopilot_e2e_contract",
+      "expect": {
+        "classification": "local_fallback",
+        "decision": "invalid",
+        "schema_version": "rch-retrieval-receipt-v1",
+        "target_dir_audit_status": "blocker"
+      },
+      "kind": "rch-retrieval-receipt",
+      "log": "tests/fixtures/rch_retrieval_receipt/local_fallback.log",
+      "proof_lane": "swarm-autopilot-e2e",
+      "stage_id": "proof_receipt"
+    },
+    {
+      "agent": "CopperSpring",
+      "expect": {
+        "candidate_blockers": [
+          {
+            "candidate_id": "custom-scan:src",
+            "kind": "unapproved-fallback-lane"
+          }
+        ],
+        "candidate_statuses": {
+          "custom-scan:src": "blocked"
+        },
+        "recommendation_candidate_id": "custom-scan:src",
+        "recommendation_category": "blocked-no-safe-work",
+        "schema_version": "reservation-aware-work-finder-v1"
+      },
+      "fixture": "tests/fixtures/reservation_aware_work_finder/unapproved_lane.json",
+      "kind": "reservation-aware-work-finder",
+      "stage_id": "work_finder"
+    },
+    {
+      "expect": {
+        "auto_create_beads": false,
+        "dry_run": true,
+        "review_required": true,
+        "schema_version": "fuzz-oracle-debt-bead-template-v1",
+        "template_count": 0
+      },
+      "kind": "fuzz-oracle-bead-template",
+      "root": "tests/fixtures/fuzz_oracle_debt_scanner/guards",
+      "stage_id": "scanner_templates"
+    },
+    {
+      "expect": {
+        "overall_status": "fail",
+        "row_statuses": {
+          "reservations_released": "fail"
+        },
+        "schema_version": "closeout-verifier-v1"
+      },
+      "fixture": "tests/fixtures/closeout_verifier/missing_reservation_release.json",
+      "kind": "closeout-verifier",
+      "stage_id": "closeout_verifier"
+    },
+    {
+      "agent": "CopperSpring",
+      "expect": {
+        "first_classification": "probably-stale",
+        "first_proposed_action_kind": "br-update-command",
+        "probably_stale": 1,
+        "schema_version": "stale-in-progress-receipt-v1",
+        "total_in_progress": 1
+      },
+      "fixture": "tests/fixtures/stale_in_progress_receipt/expired_reservation_inactive_agent.json",
+      "kind": "stale-in-progress-receipt",
+      "stage_id": "stale_reclaim"
+    }
+  ]
+}

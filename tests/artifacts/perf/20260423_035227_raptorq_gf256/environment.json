@@ -1,0 +1,19 @@
+{
+  "run_id": "20260423_035227_raptorq_gf256",
+  "timestamp": "2026-04-23T07:49:27Z",
+  "git_sha": "HEAD",
+  "host": {
+    "os": "Linux 6.17.0-22-generic",
+    "cpu_model": "unknown",
+    "cpu_cores": "unknown",
+    "memory_gb": "unknown",
+    "hostname": "unknown"
+  },
+  "toolchain": {
+    "rustc_version": "unknown",
+    "cargo_version": "unknown",
+    "build_profile": "unknown"
+  },
+  "workload_isolation": "none",
+  "cache_state": "warm"
+}

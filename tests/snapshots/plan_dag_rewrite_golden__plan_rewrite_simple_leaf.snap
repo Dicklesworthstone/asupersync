@@ -1,0 +1,56 @@
+---
+source: tests/plan_dag_rewrite_golden.rs
+expression: golden
+---
+{
+  "scenario": "simple_leaf",
+  "input_metadata": {
+    "node_count": 1,
+    "root_node": 0,
+    "node_types": [
+      "leaf"
+    ],
+    "max_depth": 0,
+    "description": "Single leaf node - no transformations possible"
+  },
+  "rewrite_policy": {
+    "policy_name": "conservative",
+    "associativity": true,
+    "commutativity": false,
+    "distributivity": true,
+    "require_binary_joins": true,
+    "timeout_simplification": true
+  },
+  "transformation_result": {
+    "input_plan": {
+      "root": 0,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        }
+      ],
+      "canonical_form": "task_a"
+    },
+    "output_plan": {
+      "root": 0,
+      "nodes": [
+        {
+          "id": 0,
+          "node_type": "leaf",
+          "details": {
+            "label": "task_a"
+          }
+        }
+      ],
+      "canonical_form": "task_a"
+    },
+    "applicable_rules": [],
+    "rules_applied": [],
+    "transformed": false,
+    "transformation_steps": []
+  }
+}

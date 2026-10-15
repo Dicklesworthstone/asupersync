@@ -1,0 +1,151 @@
+{
+  "schema_version": "1.0.0",
+  "bead_id": "asupersync-2oh2u.6.11",
+  "track": "T6",
+  "title": "Migration Packs for Database and Messaging Ecosystems",
+  "upstream_dependencies": [
+    { "bead_id": "asupersync-2oh2u.6.10", "title": "Deterministic integration and fault injection" },
+    { "bead_id": "asupersync-2oh2u.6.12", "title": "Exhaustive unit-test matrix" }
+  ],
+  "downstream_dependents": [
+    { "bead_id": "asupersync-2oh2u.11.2", "title": "Domain-specific migration cookbooks" },
+    { "bead_id": "asupersync-2oh2u.10.9", "title": "Final replacement-readiness gate" }
+  ],
+  "migration_packs": [
+    {
+      "id": "MIG-PG",
+      "source_crate": "sqlx",
+      "target_module": "database::postgres",
+      "scenarios": [
+        { "id": "MIG-PG-01", "title": "Connection setup", "source_pattern": "PgPoolOptions::new().connect(url).await?", "target_pattern": "PgConnection::connect(&cx, url).resolved()?" },
+        { "id": "MIG-PG-02", "title": "Query execution", "source_pattern": "sqlx::query().fetch_all(&pool).await?", "target_pattern": "conn.query(&cx, sql).resolved()?" },
+        { "id": "MIG-PG-03", "title": "Parameterized queries", "source_pattern": "sqlx::query().bind(val).fetch_all()", "target_pattern": "conn.query_params(&cx, sql, &[&val]).resolved()?" },
+        { "id": "MIG-PG-04", "title": "Transactions", "source_pattern": "pool.begin().await?", "target_pattern": "with_pg_transaction(&mut conn, &cx, |tx, cx| async { ... })" },
+        { "id": "MIG-PG-05", "title": "Prepared statements", "source_pattern": "implicit via sqlx::query", "target_pattern": "conn.prepare(&cx, sql).resolved()?" },
+        { "id": "MIG-PG-06", "title": "Error handling", "source_pattern": "err.as_database_error()", "target_pattern": "err.is_unique_violation() / err.is_serialization_failure()" },
+        { "id": "MIG-PG-07", "title": "Row access", "source_pattern": "row.get::<i32, _>(col)", "target_pattern": "row.get_i32(col) / row.get_typed::<i32>(col)" }
+      ]
+    },
+    {
+      "id": "MIG-PG-TOKIO",
+      "source_crate": "tokio-postgres",
+      "target_module": "database::postgres",
+      "scenarios": [
+        { "id": "MIG-PG-TOKIO-01", "title": "Connection (no spawn)", "source_pattern": "tokio_postgres::connect(url, NoTls).await?; tokio::spawn(conn)", "target_pattern": "PgConnection::connect(&cx, url).resolved()?" },
+        { "id": "MIG-PG-TOKIO-02", "title": "Query execution", "source_pattern": "client.query(sql, &[&val]).await?", "target_pattern": "conn.query_params(&cx, sql, &[&val]).resolved()?" }
+      ]
+    },
+    {
+      "id": "MIG-MY",
+      "source_crate": "sqlx",
+      "target_module": "database::mysql",
+      "scenarios": [
+        { "id": "MIG-MY-01", "title": "Connection setup", "source_pattern": "MySqlPoolOptions::new().connect(url).await?", "target_pattern": "MySqlConnection::connect(&cx, url).resolved()?" },
+        { "id": "MIG-MY-02", "title": "Query execution", "source_pattern": "sqlx::query().fetch_all(&pool).await?", "target_pattern": "conn.query(&cx, sql).resolved()?" },
+        { "id": "MIG-MY-03", "title": "Transactions", "source_pattern": "pool.begin().await?", "target_pattern": "with_mysql_transaction(&mut conn, &cx, ...)" },
+        { "id": "MIG-MY-04", "title": "Error handling", "source_pattern": "err.as_database_error().code()", "target_pattern": "err.server_code() / err.is_deadlock()" }
+      ]
+    },
+    {
+      "id": "MIG-MY-TOKIO",
+      "source_crate": "mysql_async",
+      "target_module": "database::mysql",
+      "scenarios": [
+        { "id": "MIG-MY-TOKIO-01", "title": "Connection", "source_pattern": "Pool::new(url); pool.get_conn().await?", "target_pattern": "MySqlConnection::connect(&cx, url).resolved()?" },
+        { "id": "MIG-MY-TOKIO-02", "title": "Queries", "source_pattern": "conn.query_drop(sql).await?", "target_pattern": "conn.execute(&cx, sql).resolved()?" }
+      ]
+    },
+    {
+      "id": "MIG-SQ",
+      "source_crate": "sqlx",
+      "target_module": "database::sqlite",
+      "scenarios": [
+        { "id": "MIG-SQ-01", "title": "Connection setup", "source_pattern": "SqlitePoolOptions::new().connect(url).await?", "target_pattern": "SqliteConnection::open(&cx, path).resolved()?" },
+        { "id": "MIG-SQ-02", "title": "Query execution", "source_pattern": "sqlx::query().execute(&pool).await?", "target_pattern": "conn.execute(&cx, sql, &[]).resolved()?" },
+        { "id": "MIG-SQ-03", "title": "Transactions", "source_pattern": "pool.begin().await?", "target_pattern": "with_sqlite_transaction(&conn, &cx, ...)" },
+        { "id": "MIG-SQ-04", "title": "Row access", "source_pattern": "row.get::<i64, _>(col)", "target_pattern": "row.get_i64(col)" },
+        { "id": "MIG-SQ-05", "title": "Error handling", "source_pattern": "err.as_database_error()", "target_pattern": "err.is_busy() / err.is_transient() / err.is_constraint_violation()" }
+      ]
+    },
+    {
+      "id": "MIG-POOL",
+      "source_crate": "bb8/deadpool",
+      "target_module": "database::pool",
+      "scenarios": [
+        { "id": "MIG-POOL-01", "title": "Pool creation", "source_pattern": "Pool::builder().max_size(10).build(mgr).await?", "target_pattern": "DbPool::new(mgr, DbPoolConfig::default().max_size(10))" },
+        { "id": "MIG-POOL-02", "title": "Connection checkout", "source_pattern": "pool.get().await?", "target_pattern": "pool.get()?" },
+        { "id": "MIG-POOL-03", "title": "Pool configuration", "source_pattern": "max_size/min_idle/idle_timeout/etc.", "target_pattern": "DbPoolConfig fluent builder" },
+        { "id": "MIG-POOL-04", "title": "Pool stats", "source_pattern": "pool.state().connections", "target_pattern": "pool.stats().total" },
+        { "id": "MIG-POOL-05", "title": "Pool lifecycle", "source_pattern": "drop pool", "target_pattern": "pool.close() + pool.evict_stale() + pool.warm_up()" },
+        { "id": "MIG-POOL-06", "title": "Retry with pool", "source_pattern": "manual retry loop", "target_pattern": "pool.get_with_retry(&policy)?" }
+      ]
+    },
+    {
+      "id": "MIG-RD",
+      "source_crate": "redis",
+      "target_module": "messaging::redis",
+      "scenarios": [
+        { "id": "MIG-RD-01", "title": "Connection", "source_pattern": "Client::open(url)?; get_multiplexed_async_connection().await?", "target_pattern": "RedisClient::connect(&cx, url)?" },
+        { "id": "MIG-RD-02", "title": "Commands", "source_pattern": "con.get/set/del/incr.await?", "target_pattern": "client.get/set/del/incr(&cx, ...)?" },
+        { "id": "MIG-RD-03", "title": "Pub/Sub", "source_pattern": "con.into_pubsub(); pubsub.subscribe().await?", "target_pattern": "client.pubsub(&cx)?; ps.subscribe(&cx, ch)?" },
+        { "id": "MIG-RD-04", "title": "Transactions", "source_pattern": "redis::transaction(&mut con, keys, |pipe| ...)", "target_pattern": "client.watch(); client.transaction(); tx.exec()?" },
+        { "id": "MIG-RD-05", "title": "Error handling", "source_pattern": "err.kind() / err.is_io_error()", "target_pattern": "err.is_connection_error() / err.is_transient() / err.is_capacity_error()" }
+      ]
+    },
+    {
+      "id": "MIG-NT",
+      "source_crate": "async-nats",
+      "target_module": "messaging::nats + messaging::jetstream",
+      "scenarios": [
+        { "id": "MIG-NT-01", "title": "NATS connection", "source_pattern": "async_nats::connect(url).await?", "target_pattern": "NatsClient::connect(&cx, url)?" },
+        { "id": "MIG-NT-02", "title": "Publish/Subscribe", "source_pattern": "client.publish/subscribe().await?", "target_pattern": "client.publish/subscribe(&cx, ...)?" },
+        { "id": "MIG-NT-03", "title": "JetStream", "source_pattern": "async_nats::jetstream::new(client)", "target_pattern": "JetStreamContext::new(client)" },
+        { "id": "MIG-NT-04", "title": "Error handling", "source_pattern": "match on error variants", "target_pattern": "err.is_transient() / err.is_connection_error()" }
+      ]
+    },
+    {
+      "id": "MIG-KF",
+      "source_crate": "rdkafka",
+      "target_module": "messaging::kafka + messaging::kafka_consumer",
+      "scenarios": [
+        { "id": "MIG-KF-01", "title": "Producer setup", "source_pattern": "ClientConfig::new().create::<FutureProducer>()?", "target_pattern": "KafkaProducer::new(ProducerConfig::new(servers))?" },
+        { "id": "MIG-KF-02", "title": "Producing messages", "source_pattern": "producer.send(FutureRecord::to(topic)...).await?", "target_pattern": "producer.send(topic, key, value)?" },
+        { "id": "MIG-KF-03", "title": "Consumer setup", "source_pattern": "ClientConfig::new().create::<StreamConsumer>()?", "target_pattern": "KafkaConsumer::new(ConsumerConfig::new(servers, group))?" },
+        { "id": "MIG-KF-04", "title": "Consuming messages", "source_pattern": "consumer.stream().next().await", "target_pattern": "consumer.poll(&cx, timeout)?" },
+        { "id": "MIG-KF-05", "title": "Transactional producer", "source_pattern": "init_transactions(); begin_transaction()", "target_pattern": "producer.begin_transaction(&cx)?" },
+        { "id": "MIG-KF-06", "title": "Error handling", "source_pattern": "match KafkaError::MessageProduction(...)", "target_pattern": "err.is_capacity_error() / err.is_transient()" }
+      ]
+    }
+  ],
+  "cross_cutting": [
+    { "id": "CX-01", "title": "Cancellation semantics", "description": "All operations require &Cx; Outcome<T,E> replaces Result<T,E>" },
+    { "id": "CX-02", "title": "Error classification parity", "description": "Consistent is_transient/is_connection_error/is_retryable across all backends" },
+    { "id": "CX-03", "title": "Pool vs direct connection", "description": "DbPool<M> is orthogonal to connection types via ConnectionManager trait" },
+    { "id": "CX-04", "title": "Transaction helpers", "description": "with_*_transaction and with_*_transaction_retry free functions" }
+  ],
+  "caveats": [
+    { "id": "CAV-01", "title": "Feature flags", "description": "Database modules require sqlite/postgres/mysql features" },
+    { "id": "CAV-02", "title": "Outcome vs Result", "description": "Use .resolved()? for quick migration from Result-based code" },
+    { "id": "CAV-03", "title": "No global runtime", "description": "All operations require explicit Cx context" },
+    { "id": "CAV-04", "title": "Synchronous pool API", "description": "DbPool::get() is synchronous unlike bb8/deadpool" }
+  ],
+  "thresholds": {
+    "total_migration_packs": 9,
+    "total_scenarios": 49,
+    "cross_cutting_items": 4,
+    "caveats": 4,
+    "source_crates_covered": 9
+  },
+  "source_module_references": [
+    "src/database/pool.rs",
+    "src/database/transaction.rs",
+    "src/database/postgres.rs",
+    "src/database/mysql.rs",
+    "src/database/sqlite.rs",
+    "src/messaging/redis.rs",
+    "src/messaging/nats.rs",
+    "src/messaging/jetstream.rs",
+    "src/messaging/kafka.rs",
+    "src/messaging/kafka_consumer.rs"
+  ]
+}

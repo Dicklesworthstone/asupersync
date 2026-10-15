@@ -1,0 +1,34 @@
+---
+source: tests/golden_grpc_health.rs
+expression: capture
+---
+HealthResponseCapture {
+    scenario: "empty_service",
+    request: HealthCheckRequest {
+        service: "",
+    },
+    response: Ok(
+        HealthCheckResponse {
+            status: ServiceUnknown,
+        },
+    ),
+    service_state: ServiceStateSnapshot {
+        services: [
+            (
+                "",
+                ServiceUnknown,
+            ),
+        ],
+        status_counts: StatusCounts {
+            unknown: 0,
+            serving: 0,
+            not_serving: 0,
+            service_unknown: 1,
+        },
+    },
+    metadata: ResponseCaptureMetadata {
+        test_name: "empty_service",
+        description: "Health check against completely empty service with no registered services",
+        async_method: false,
+    },
+}

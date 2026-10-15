@@ -1,0 +1,413 @@
+{
+  "schema_version": "swarm-lane-closeout-contract-v1",
+  "contract_id": "swarm-lane-closeout-receipt-contract",
+  "bead_id": "asupersync-ol11aa.9.4",
+  "helper": "scripts/swarm_lane_closeout_receipt.py",
+  "required_classifications": [
+    "admissible-closeout",
+    "failed-proof-cited-green",
+    "missing-remote-worker-evidence",
+    "zero-test-exact-filter",
+    "expired-reservation-gap",
+    "unverified-pushed-refs",
+    "peer-dirt-shared-main"
+  ],
+  "expected_summary": {
+    "scenario_count": 7,
+    "admissible_count": 2,
+    "non_admissible_count": 5,
+    "fail_closed_count": 5,
+    "peer_dirt_admissible_count": 1,
+    "proof_command_count": 7,
+    "highest_severity_scenario": "failed-rch-cited-green"
+  },
+  "validation": {
+    "focused_rch_contract": "RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR=\"${TMPDIR:-/tmp}/rch_target_swarm_lane_closeout_receipt\" CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 RUSTFLAGS='-D warnings -C debuginfo=0' cargo test -p asupersync --test swarm_lane_closeout_receipt_contract -- --nocapture",
+    "script_self_check": "python3 scripts/swarm_lane_closeout_receipt.py --fixture artifacts/swarm_lane_closeout_receipt_contract_v1.json --generated-at 2026-06-06T15:30:00Z --output json"
+  },
+  "fixture": {
+    "schema_version": "swarm-lane-closeout-fixture-v1",
+    "fixture_id": "swarm-lane-closeout-contract-fixture",
+    "scenario_defaults": {
+      "description": "A complete shared-main closeout receipt with remote RCH proof, verified refs, released reservations, and no remaining owned dirt.",
+      "owned_paths": [
+        ".beads/issues.jsonl",
+        "scripts/swarm_lane_closeout_receipt.py",
+        "artifacts/swarm_lane_closeout_receipt_contract_v1.json",
+        "tests/swarm_lane_closeout_receipt_contract.rs",
+        "docs/swarm_lane_closeout_receipt.md"
+      ],
+      "bead": {
+        "id": "asupersync-ol11aa.9.4",
+        "title": "[ol11aa.9] Emit machine-readable swarm lane closeout receipts",
+        "pre_status": "open",
+        "post_status": "closed",
+        "assignee": "PinkStream",
+        "close_reason": "Implemented deterministic closeout receipt helper, fixture, docs, and contract proof."
+      },
+      "agent_mail": {
+        "agent_name": "PinkStream",
+        "thread_id": "asupersync-ol11aa.9.4",
+        "messages_sent": [
+          {
+            "id": "20178",
+            "subject": "Claiming asupersync-ol11aa.9.4 closeout receipts",
+            "to": [
+              "SapphireHill",
+              "NobleDeer",
+              "BeigeOriole"
+            ],
+            "created_at": "2026-06-06T15:02:00Z"
+          }
+        ],
+        "ack_required_messages": [
+          {
+            "id": "19930",
+            "from": "NobleDeer",
+            "acknowledged": true,
+            "acknowledged_at": "2026-06-06T02:36:14Z"
+          },
+          {
+            "id": "19877",
+            "from": "BeigeOriole",
+            "acknowledged": true,
+            "acknowledged_at": "2026-06-05T09:42:00Z"
+          }
+        ],
+        "active_agents": [
+          {
+            "name": "PinkStream",
+            "active": true,
+            "last_active_at": "2026-06-06T15:30:00Z"
+          },
+          {
+            "name": "SapphireHill",
+            "active": true,
+            "last_active_at": "2026-06-06T15:24:00Z"
+          },
+          {
+            "name": "NobleDeer",
+            "active": true,
+            "last_active_at": "2026-06-06T15:10:00Z"
+          },
+          {
+            "name": "BeigeOriole",
+            "active": true,
+            "last_active_at": "2026-06-06T15:06:00Z"
+          }
+        ]
+      },
+      "reservations": {
+        "validation_started_at": "2026-06-06T15:10:00Z",
+        "validation_finished_at": "2026-06-06T15:24:00Z",
+        "held": [
+          {
+            "id": 32667,
+            "path": ".beads/issues.jsonl",
+            "exclusive": true,
+            "granted_at": "2026-06-06T15:01:47Z",
+            "expires_at": "2026-06-06T17:01:47Z",
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32668,
+            "path": "scripts/swarm_lane_closeout_receipt.py",
+            "exclusive": true,
+            "granted_at": "2026-06-06T15:01:47Z",
+            "expires_at": "2026-06-06T17:01:47Z",
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32669,
+            "path": "artifacts/swarm_lane_closeout_receipt_contract_v1.json",
+            "exclusive": true,
+            "granted_at": "2026-06-06T15:01:47Z",
+            "expires_at": "2026-06-06T17:01:47Z",
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32670,
+            "path": "tests/swarm_lane_closeout_receipt_contract.rs",
+            "exclusive": true,
+            "granted_at": "2026-06-06T15:01:47Z",
+            "expires_at": "2026-06-06T17:01:47Z",
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32671,
+            "path": "docs/swarm_lane_closeout_receipt.md",
+            "exclusive": true,
+            "granted_at": "2026-06-06T15:01:47Z",
+            "expires_at": "2026-06-06T17:01:47Z",
+            "released_at": "2026-06-06T15:29:00Z"
+          }
+        ],
+        "renewed": [],
+        "released": [
+          {
+            "id": 32667,
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32668,
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32669,
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32670,
+            "released_at": "2026-06-06T15:29:00Z"
+          },
+          {
+            "id": 32671,
+            "released_at": "2026-06-06T15:29:00Z"
+          }
+        ]
+      },
+      "proof_commands": [
+        {
+          "command_id": "focused-contract-rch",
+          "argv": [
+            "rch",
+            "exec",
+            "--",
+            "env",
+            "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_lane_closeout_receipt",
+            "CARGO_INCREMENTAL=0",
+            "CARGO_PROFILE_TEST_DEBUG=0",
+            "RUSTFLAGS=-D warnings -C debuginfo=0",
+            "cargo",
+            "test",
+            "-p",
+            "asupersync",
+            "--test",
+            "swarm_lane_closeout_receipt_contract",
+            "--",
+            "--nocapture"
+          ],
+          "env": {
+            "RCH_REQUIRE_REMOTE": "1"
+          },
+          "rch_remote_required": true,
+          "worker_identity": "rch-worker-17",
+          "exit_code": 0,
+          "tests_run": 8,
+          "exact_filter": false,
+          "target_dir_class": "focused-contract",
+          "artifact_digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+          "source_fingerprint": "git:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "cited_as_green": true
+        }
+      ],
+      "git": {
+        "starting_head": "git:1111111111111111111111111111111111111111",
+        "committed_head": "git:2222222222222222222222222222222222222222",
+        "origin_main": {
+          "push_success": true,
+          "verified": true,
+          "post_push_ahead_behind": {
+            "ahead": 0,
+            "behind": 0,
+            "verified": true
+          }
+        },
+        "legacy_mirror": {
+          "source_ref": "main",
+          "target_ref": "legacy-url-compat-ref",
+          "push_success": true,
+          "verified": true
+        }
+      },
+      "dirty_tree": []
+    },
+    "scenarios": [
+      {
+        "scenario_id": "successful-lane"
+      },
+      {
+        "scenario_id": "failed-rch-cited-green",
+        "description": "A failed remote proof was still cited as green, so the receipt must fail closed.",
+        "proof_commands": [
+          {
+            "command_id": "focused-contract-rch",
+            "argv": [
+              "rch",
+              "exec",
+              "--",
+              "env",
+              "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_lane_closeout_receipt",
+              "CARGO_INCREMENTAL=0",
+              "CARGO_PROFILE_TEST_DEBUG=0",
+              "RUSTFLAGS=-D warnings -C debuginfo=0",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "swarm_lane_closeout_receipt_contract",
+              "--",
+              "--nocapture"
+            ],
+            "env": {
+              "RCH_REQUIRE_REMOTE": "1"
+            },
+            "rch_remote_required": true,
+            "worker_identity": "rch-worker-17",
+            "exit_code": 101,
+            "tests_run": 4,
+            "exact_filter": false,
+            "target_dir_class": "focused-contract",
+            "artifact_digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            "source_fingerprint": "git:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cited_as_green": true
+          }
+        ]
+      },
+      {
+        "scenario_id": "missing-remote-worker",
+        "description": "Remote-required RCH proof has no worker identity.",
+        "proof_commands": [
+          {
+            "command_id": "focused-contract-rch",
+            "argv": [
+              "rch",
+              "exec",
+              "--",
+              "env",
+              "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_lane_closeout_receipt",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "swarm_lane_closeout_receipt_contract"
+            ],
+            "env": {
+              "RCH_REQUIRE_REMOTE": "1"
+            },
+            "rch_remote_required": true,
+            "worker_identity": "",
+            "exit_code": 0,
+            "tests_run": 8,
+            "exact_filter": false,
+            "target_dir_class": "focused-contract",
+            "artifact_digest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+            "source_fingerprint": "git:cccccccccccccccccccccccccccccccccccccccc",
+            "cited_as_green": true
+          }
+        ]
+      },
+      {
+        "scenario_id": "zero-test-filter",
+        "description": "An exact filter succeeded but ran zero tests.",
+        "proof_commands": [
+          {
+            "command_id": "focused-exact-filter-rch",
+            "argv": [
+              "rch",
+              "exec",
+              "--",
+              "env",
+              "CARGO_TARGET_DIR=${TMPDIR:-/tmp}/rch_target_swarm_lane_closeout_receipt",
+              "cargo",
+              "test",
+              "-p",
+              "asupersync",
+              "--test",
+              "swarm_lane_closeout_receipt_contract",
+              "nonexistent_exact_filter",
+              "--",
+              "--exact"
+            ],
+            "env": {
+              "RCH_REQUIRE_REMOTE": "1"
+            },
+            "rch_remote_required": true,
+            "worker_identity": "rch-worker-19",
+            "exit_code": 0,
+            "tests_run": 0,
+            "exact_filter": true,
+            "target_dir_class": "focused-contract",
+            "artifact_digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            "source_fingerprint": "git:dddddddddddddddddddddddddddddddddddddddd",
+            "cited_as_green": true
+          }
+        ]
+      },
+      {
+        "scenario_id": "expired-reservation-gap",
+        "description": "One reserved path expired before validation finished.",
+        "reservations": {
+          "validation_started_at": "2026-06-06T15:10:00Z",
+          "validation_finished_at": "2026-06-06T15:24:00Z",
+          "held": [
+            {
+              "id": 32671,
+              "path": "docs/swarm_lane_closeout_receipt.md",
+              "exclusive": true,
+              "granted_at": "2026-06-06T15:01:47Z",
+              "expires_at": "2026-06-06T15:12:00Z",
+              "released_at": "2026-06-06T15:29:00Z"
+            }
+          ],
+          "renewed": [],
+          "released": [
+            {
+              "id": 32671,
+              "released_at": "2026-06-06T15:29:00Z"
+            }
+          ]
+        }
+      },
+      {
+        "scenario_id": "unverified-push-or-mirror",
+        "description": "The commit exists locally, but pushed refs were not verified.",
+        "git": {
+          "starting_head": "git:1111111111111111111111111111111111111111",
+          "committed_head": "git:2222222222222222222222222222222222222222",
+          "origin_main": {
+            "push_success": true,
+            "verified": false,
+            "post_push_ahead_behind": {
+              "ahead": 1,
+              "behind": 0,
+              "verified": false
+            }
+          },
+          "legacy_mirror": {
+            "source_ref": "main",
+            "target_ref": "legacy-url-compat-ref",
+            "push_success": false,
+            "verified": false
+          }
+        }
+      },
+      {
+        "scenario_id": "peer-dirt-shared-main",
+        "description": "The lane is clean for owned paths while unrelated shared-main dirt remains classified.",
+        "dirty_tree": [
+          {
+            "path": "Cargo.toml",
+            "classification": "peer-owned",
+            "owner": "BeigeOriole",
+            "reason": "preexisting dependency lane dirt"
+          },
+          {
+            "path": "audit_index.jsonl",
+            "classification": "intentionally-unstaged",
+            "owner": "audit-sidecar",
+            "reason": "append-only audit row staged by another lane"
+          },
+          {
+            "path": "src/lib.rs",
+            "classification": "peer-owned",
+            "owner": "NobleDeer",
+            "reason": "preexisting runtime lane dirt"
+          }
+        ]
+      }
+    ]
+  }
+}
