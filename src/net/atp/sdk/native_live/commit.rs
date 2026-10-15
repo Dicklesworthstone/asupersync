@@ -244,9 +244,9 @@ pub use manifest_sink::{ManifestFileSink, ManifestFileSinkConfig};
 mod manifest_sink {
     use super::{LiveStreamCommitSink, LiveStreamReceipt};
     use super::super::MAX_LIVE_EPOCH_BYTES;
-    use crate::atp::journal::sparse_writer::{ScopedSparseWriter, ScopedWriterResult};
+    use crate::atp::journal::sparse_writer::{ScopedSparseWriter, ScopedWriterResult, SparseWriterError};
     use crate::atp::journal::{SparseWriterConfig, WriteOptions};
-    use crate::atp::manifest::Manifest;
+    use crate::atp::manifest::{ChunkBoundary, Manifest};
     use crate::atp::manifest_chunk_commitment::ManifestChunkCommitment;
     use crate::atp::object::{ObjectId, ObjectKind};
     use crate::cx::Cx;
@@ -301,6 +301,74 @@ mod manifest_sink {
         digest: [u8; 32],
     }
 
+    // Only the descriptor cursor and one crossing hash survive a batch. The
+    // immutable manifest remains the sole owner of the descriptor table.
+    #[derive(Default)]
+    struct ChunkChecks {
+        next: usize,
+        partial: Option<Sha256>,
+    }
+
+    impl ChunkChecks {
+        fn accept(
+            &mut self,
+            boundaries: &[ChunkBoundary],
+            offset: u64,
+            bytes: &[u8],
+            digest: [u8; 32],
+        ) -> io::Result<()> {
+            let end = offset.checked_add(bytes.len() as u64)
+                .ok_or_else(|| integrity_error("manifest sink chunk offset overflows".to_owned()))?;
+            while let Some(boundary) = boundaries.get(self.next) {
+                if boundary.byte_offset > end { break; }
+                if boundary.size_bytes == 0 {
+                    // Construction already checked the range and empty digest.
+                    self.next += 1;
+                    continue;
+                }
+                if boundary.byte_offset == end { break; }
+                let boundary_end = boundary.byte_offset.checked_add(boundary.size_bytes)
+                    .ok_or_else(|| integrity_error("manifest chunk range overflows".to_owned()))?;
+                let from = offset.max(boundary.byte_offset);
+                let to = end.min(boundary_end);
+                if from >= to {
+                    return Err(integrity_error("manifest sink skipped a chunk range".to_owned()));
+                }
+                let actual = if boundary.byte_offset == offset && boundary_end == end
+                    && self.partial.is_none()
+                {
+                    // This digest was computed locally for exactly this batch.
+                    digest
+                } else {
+                    self.partial.get_or_insert_with(Sha256::new)
+                        .update(&bytes[(from - offset) as usize..(to - offset) as usize]);
+                    if to < boundary_end { break; }
+                    self.partial.take().expect("partial chunk was hashed").finalize().into()
+                };
+                if actual != boundary.content_hash {
+                    return Err(integrity_error(format!("manifest chunk {} hash mismatch", boundary.index)));
+                }
+                self.next += 1;
+            }
+            Ok(())
+        }
+
+        fn finish(&mut self, boundaries: &[ChunkBoundary], offset: u64) -> io::Result<()> {
+            while let Some(boundary) = boundaries.get(self.next) {
+                if boundary.size_bytes != 0 || boundary.byte_offset > offset { break; }
+                self.next += 1;
+            }
+            if self.next != boundaries.len() || self.partial.is_some() {
+                return Err(integrity_error("manifest sink ended before chunk verification".to_owned()));
+            }
+            Ok(())
+        }
+    }
+
+    fn integrity_error(reason: String) -> io::Error {
+        io::Error::other(SparseWriterError::VerificationFailed(reason))
+    }
+
     #[derive(Clone, Debug)]
     struct Failure(Arc<io::Error>);
 
@@ -329,6 +397,15 @@ mod manifest_sink {
     /// staging inode but never publishes. Commit checks the live receipt's length
     /// and raw stream hash, then invokes fresh canonical manifest verification
     /// and publication. A valid peer stream alone cannot authorize different data.
+    /// Completed manifest chunks are checked before their completing write is
+    /// submitted. A mismatch permanently refuses this sink; earlier fragments
+    /// may already be staged. Optional hints authenticate only their own ranges:
+    /// final on-disk and whole-object authentication remain mandatory.
+    ///
+    /// Ingress hashing runs on the polling thread over a batch of at most 64 KiB,
+    /// as did the local write digest. One crossing hash survives in the sink,
+    /// without copying the manifest's table or submitting another blocking job.
+    /// Descriptor traversal additionally scales with the supplied manifest.
     ///
     /// New trait operations capture the CURRENT polling task's Cx, not the
     /// constructor's context. A sink prepared before spawn therefore admits disk
@@ -353,6 +430,7 @@ mod manifest_sink {
     /// live connection's nonce, epoch chain or replay window from a disk journal.
     pub struct ManifestFileSink {
         writer: ScopedSparseWriter,
+        object_id: ObjectId,
         manifest: Arc<Manifest>,
         expected: Option<ManifestChunkCommitment>,
         expected_bytes: u64,
@@ -360,6 +438,7 @@ mod manifest_sink {
         written: u64,
         chunks: u32,
         hash: Sha256,
+        checks: ChunkChecks,
         flushed: Option<u64>,
         pending: Option<Work>,
         unreported: Option<WriteReceipt>,
@@ -391,14 +470,15 @@ mod manifest_sink {
                 let length = validate(&config)?;
                 Ok((config, length))
             }).await.map_err(io::Error::other)?;
+            let object_id = config.object_id.clone();
             let writer = domain(ScopedSparseWriter::new(
                 cx, config.object_id, config.destination, config.writer,
             ).await)?;
             domain(writer.set_expected_size(cx, expected_bytes).await)?;
             Ok(Self {
-                writer, manifest: config.manifest, expected: config.expected_chunk_commitment,
+                writer, object_id, manifest: config.manifest, expected: config.expected_chunk_commitment,
                 expected_bytes, max_chunks: config.max_chunks, written: 0, chunks: 0,
-                hash: Sha256::new(), flushed: None, pending: None, unreported: None,
+                hash: Sha256::new(), checks: ChunkChecks::default(), flushed: None, pending: None, unreported: None,
                 receipt: None, published: None, failure: None, shutdown: false, poisoned: false,
             })
         }
@@ -503,6 +583,15 @@ mod manifest_sink {
                 );
                 let payload = bytes[..count].to_vec();
                 let digest = Sha256::digest(&payload).into();
+                let checked = match this.manifest.objects.get(&this.object_id) {
+                    Some(object) => this.checks.accept(&object.chunk_boundaries, this.written, &payload, digest),
+                    None => Err(integrity_error("selected manifest object is absent".to_owned())),
+                };
+                if let Err(error) = checked {
+                    // No disk job for the completing batch, and no later method
+                    // may continue a cursor partially consumed by a failed hash.
+                    return Poll::Ready(Err(this.fail(error)));
+                }
                 let mut next_hash = this.hash.clone();
                 next_hash.update(&payload);
                 let writer = this.writer.clone();
@@ -581,6 +670,13 @@ mod manifest_sink {
                 {
                     return Poll::Ready(Err(this.fail(invalid("commit receipt does not match staged stream"))));
                 }
+                let checked = match this.manifest.objects.get(&this.object_id) {
+                    Some(object) => this.checks.finish(&object.chunk_boundaries, this.written),
+                    None => Err(integrity_error("selected manifest object is absent".to_owned())),
+                };
+                if let Err(error) = checked {
+                    return Poll::Ready(Err(this.fail(error)));
+                }
                 let cx = match current_context() {
                     Ok(cx) => cx,
                     Err(error) => return Poll::Ready(Err(error)),
@@ -644,6 +740,12 @@ mod manifest_sink {
             let end = chunk.byte_offset.checked_add(chunk.size_bytes)
                 .filter(|end| *end <= length)
                 .ok_or_else(|| invalid("manifest chunk lies outside the expected file"))?;
+            if chunk.size_bytes == 0 {
+                let empty: [u8; 32] = Sha256::digest(b"").into();
+                if chunk.content_hash != empty {
+                    return Err(integrity_error(format!("manifest chunk {} hash mismatch", chunk.index)));
+                }
+            }
             if chunk_only && (chunk.size_bytes == 0 || chunk.byte_offset != covered) {
                 return Err(invalid("chunk-only manifest must cover the entire file"));
             }
@@ -715,6 +817,283 @@ mod manifest_sink {
 
         async fn commit(sink: &mut ManifestFileSink, receipt: &LiveStreamReceipt) -> io::Result<()> {
             poll_fn(|task| Pin::new(&mut *sink).poll_commit(task, receipt)).await
+        }
+
+        fn with_hints(
+            mut options: ManifestFileSinkConfig, bytes: &[u8], ranges: &[(usize, usize)],
+        ) -> ManifestFileSinkConfig {
+            use crate::atp::manifest::{ChunkStrategy, MerkleRoot};
+            let manifest = Arc::make_mut(&mut options.manifest);
+            manifest.objects.get_mut(&options.object_id).unwrap().chunk_boundaries =
+                ranges.iter().enumerate().map(|(index, &(start, end))| ChunkBoundary {
+                    index: index as u32, byte_offset: start as u64, size_bytes: (end - start) as u64,
+                    content_hash: Sha256::digest(&bytes[start..end]).into(),
+                    strategy: ChunkStrategy::FixedSize, metadata: None,
+                }).collect();
+            manifest.merkle_root = MerkleRoot::from_manifest_components(
+                &manifest.objects, &manifest.chunk_plan, &manifest.raptorq_layout,
+                &manifest.compression_policy, &manifest.encryption_policy,
+                &manifest.capability_policy, &manifest.transform_order,
+                &manifest.transform_proof_policy, &manifest.repair_groups,
+            );
+            manifest.validate().unwrap();
+            options
+        }
+
+        #[test]
+        fn live_chunk_cursor_agrees_with_direct_hashes_at_every_split() {
+            use crate::atp::manifest::ChunkStrategy;
+            let expected = b"abcdefgh";
+            for start in 0..=8 {
+                for end in start..=8 {
+                    let boundaries = [ChunkBoundary {
+                        index: 0, byte_offset: start as u64, size_bytes: (end - start) as u64,
+                        content_hash: Sha256::digest(&expected[start..end]).into(),
+                        strategy: ChunkStrategy::FixedSize, metadata: None,
+                    }];
+                    for split in 1..=9 {
+                        for changed in 0..=8 {
+                            let mut bytes = *expected;
+                            if changed != 8 { bytes[changed] ^= 1; }
+                            let mut checks = ChunkChecks::default();
+                            let result = bytes.chunks(split).enumerate().try_for_each(|(index, batch)| {
+                                checks.accept(&boundaries, (index * split) as u64, batch,
+                                    Sha256::digest(batch).into())
+                            }).and_then(|()| checks.finish(&boundaries, 8));
+                            assert_eq!(result.is_ok(), !(start..end).contains(&changed),
+                                "range {start}..{end}, split {split}, changed {changed}");
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn live_chunk_failure_stops_before_the_completing_write_and_stays_terminal() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                        for bad_prefix in [false, true] {
+                            let path = directory.path().join(format!("early-{policy:?}-{bad_prefix}"));
+                            cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
+                            let options = with_hints(config(b"abcdefghijkl", path.clone(), policy),
+                                b"abcdefghijkl", &[(0, 6), (6, 12)]);
+                            let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                            let prefix = if bad_prefix { b"Xbc" } else { b"abc" };
+                            sink.write_all(prefix).await.unwrap();
+                            sink.flush().await.unwrap();
+                            let suffix = if bad_prefix { b"def" } else { b"Xef" };
+                            let error = sink.write_all(suffix).await.unwrap_err();
+                            assert_eq!(error.kind(), io::ErrorKind::Other);
+                            assert!(error.to_string().contains("manifest chunk 0 hash mismatch"));
+                            assert_eq!(sink.written_bytes(), 3);
+                            assert_eq!(sink.chunks, 1);
+                            assert!(sink.pending.is_none());
+                            let stats = sink.writer.get_stats(&cx).await.unwrap().unwrap();
+                            assert_eq!(stats.total_bytes_written, 3);
+                            assert_eq!(stats.chunk_count, 1);
+                            let hash: [u8; 32] = sink.hash.clone().finalize().into();
+                            assert_eq!(hash, <[u8; 32]>::from(Sha256::digest(prefix)));
+                            assert_eq!(sink.write(b"ghijkl").await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(sink.flush().await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(commit(&mut sink, &receipt(b"abcdefghijkl")).await.unwrap_err().to_string(), error.to_string());
+                            assert!(sink.published_path().is_none());
+                            assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                            sink.cancel(&cx).await.unwrap();
+                            assert_eq!(std::fs::read(path).unwrap(), b"original");
+                        }
+                    }
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_chunk_checks_preserve_valid_fragmented_publication() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                        for split in [1, 3, 8] {
+                            let path = directory.path().join(format!("chunks-{policy:?}-{split}"));
+                            let options = with_hints(config(b"abcdefgh", path.clone(), policy),
+                                b"abcdefgh", &[(0, 0), (0, 2), (2, 5), (5, 8), (8, 8)]);
+                            let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                            for batch in b"abcdefgh".chunks(split) {
+                                sink.write_all(batch).await.unwrap();
+                            }
+                            sink.flush().await.unwrap();
+                            assert!(!path.exists());
+                            commit(&mut sink, &receipt(b"abcdefgh")).await.unwrap();
+                            assert_eq!(sink.checks.next, 5);
+                            assert!(sink.checks.partial.is_none());
+                            assert_eq!(std::fs::read(path).unwrap(), b"abcdefgh");
+                        }
+                    }
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn invalid_empty_chunk_digest_refuses_before_any_writer_construction() {
+            for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(1, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut options = with_hints(config(data, directory.path().join("absent"), CommitPolicy::AtomicRename),
+                        data, &[(data.len(), data.len())]);
+                    let manifest = Arc::make_mut(&mut options.manifest);
+                    manifest.objects.get_mut(&options.object_id).unwrap().chunk_boundaries[0].content_hash[0] ^= 1;
+                    // Legacy root/structural validation deliberately permits this
+                    // descriptor change. The new content preflight must reject it.
+                    manifest.validate().unwrap();
+                    let error = ManifestFileSink::new(&cx, options).await.unwrap_err();
+                    assert!(error.to_string().contains("manifest chunk 0 hash mismatch"));
+                    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn partial_live_hints_cannot_replace_final_whole_object_authentication() {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2, 2);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let path = directory.path().join("partial-hints");
+                cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
+                let options = with_hints(config(b"abcdefgh", path.clone(), CommitPolicy::CopyAndVerify),
+                    b"abcdefgh", &[(1, 3), (5, 7)]);
+                let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                sink.write_all(b"XbcdYfgZ").await.unwrap();
+                assert_eq!(sink.checks.next, 2);
+                assert_eq!(sink.written_bytes(), 8);
+                let error = commit(&mut sink, &receipt(b"XbcdYfgZ")).await.unwrap_err();
+                assert!(error.to_string().contains("hash mismatch"));
+                assert!(sink.published_path().is_none());
+                assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                sink.cancel(&cx).await.unwrap();
+            });
+            drained(&runtime);
+        }
+
+        #[test]
+        fn dropped_write_wait_preserves_a_crossing_manifest_hash() {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2, 1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let path = directory.path().join("crossing-hash");
+                let options = with_hints(config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
+                    b"abcdefgh", &[(0, 8)]);
+                let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                sink.write_all(b"abc").await.unwrap();
+                assert!(sink.checks.partial.is_some());
+                let (started, mut start) = oneshot::channel();
+                let (release, wait) = mpsc::channel();
+                let fs = cx.scoped_fs();
+                let mut blocker = Box::pin(fs.run_io(move |_| {
+                    started.send_blocking(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                }));
+                poll_fn(|task| { assert!(blocker.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                start.recv(&cx).await.unwrap();
+                let mut writing = Box::pin(sink.write_all(b"def"));
+                poll_fn(|task| { assert!(writing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                drop(writing);
+                assert!(sink.pending.is_some());
+                assert_eq!(sink.written_bytes(), 3);
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                sink.write_all(b"def").await.unwrap();
+                assert_eq!(sink.written_bytes(), 6);
+                sink.write_all(b"gh").await.unwrap();
+                assert_eq!(sink.chunks, 3);
+                assert_eq!(sink.checks.next, 1);
+                assert!(sink.checks.partial.is_none());
+                commit(&mut sink, &receipt(b"abcdefgh")).await.unwrap();
+                assert_eq!(std::fs::read(path).unwrap(), b"abcdefgh");
+            });
+            drained(&runtime);
+        }
+
+        struct CountingSource {
+            data: &'static [u8],
+            position: usize,
+            consumed: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl crate::io::AsyncRead for CountingSource {
+            fn poll_read(mut self: Pin<&mut Self>, _: &mut Context<'_>, buf: &mut crate::io::ReadBuf<'_>) -> Poll<io::Result<()>> {
+                let count = buf.remaining().min(self.data.len() - self.position);
+                buf.put_slice(&self.data[self.position..self.position + count]);
+                self.position += count;
+                self.consumed.store(self.position, Ordering::SeqCst);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        #[test]
+        fn real_mtls_chunk_mismatch_stops_the_sender_before_its_second_epoch() {
+            use crate::net::atp::sdk::{AtpSdk, NativeClientAuthorization, NativeClientCertificateId, SessionConfig};
+            use crate::net::atp::sdk::native_auth::live::{LiveStreamConfig, LiveStreamError};
+            use rustls::pki_types::ServerName;
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let scope = cx.scope();
+                    let sdk = AtpSdk::new_in_process(SessionConfig { max_concurrent_transfers: 1, ..SessionConfig::default() });
+                    let roots = || { let mut roots = rustls::RootCertStore::empty(); roots.add(certificate("ca")).unwrap(); roots };
+                    let mut options = LiveStreamConfig::default();
+                    options.epoch_bytes = 4;
+                    options.max_bytes = 12;
+                    options.operation_timeout = Duration::from_secs(5);
+                    let sender = sdk.live_stream_sender(options.clone(), ServerName::try_from("localhost").unwrap(), roots(), identity("allowed")).unwrap();
+                    let client = NativeClientCertificateId::from_certificate(&certificate("allowed"));
+                    let receiver = sdk.live_stream_receiver(options, identity("server"), NativeClientAuthorization::new(roots(), [client]).unwrap()).unwrap();
+                    let listener = receiver.bind(&cx, "127.0.0.1:0".parse().unwrap()).await.unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let path = directory.path().join("early-network");
+                    cx.scoped_fs().write(path.clone(), b"original".to_vec()).await.unwrap();
+                    let options = with_hints(config(b"abcdefghijkl", path.clone(), CommitPolicy::CopyAndVerify),
+                        b"abcdefghijkl", &[(0, 4), (4, 12)]);
+                    let sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                    let gate = Arc::new(Gate::default());
+                    // A pre-fix receiver must not hang at this test boundary;
+                    // it reaches finalization and fails the assertions below.
+                    gate.released.store(true, Ordering::SeqCst);
+                    let mut receiving = listener.spawn_receive_committing(&cx, &scope,
+                        GatedSink { inner: sink, gate: Arc::clone(&gate) }).unwrap();
+                    let consumed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                    let source = CountingSource { data: b"Xbcdefghijkl", position: 0, consumed: Arc::clone(&consumed) };
+                    let mut sending = sender.spawn_send_reader(&cx, &scope, address, source).unwrap();
+                    let (sent, received) = futures_lite::future::zip(sending.join(&cx), receiving.join(&cx)).await;
+                    let received = received.unwrap();
+                    assert!(sent.unwrap().outcome.is_err(), "no final peer Proof for refused data");
+                    assert!(matches!(received.outcome, Err(LiveStreamError::Io(error))
+                        if error.kind() == io::ErrorKind::Other && error.to_string().contains("manifest chunk 0 hash mismatch")));
+                    assert_eq!(received.sink_written_bytes, 0);
+                    let prefix = received.prefix.expect("authenticated hello completed");
+                    assert_eq!(prefix.bytes, 0);
+                    assert_eq!(prefix.epochs, 0);
+                    assert_eq!(consumed.load(Ordering::SeqCst), 4, "do not read the next source epoch");
+                    assert!(!gate.entered.load(Ordering::SeqCst), "never invoke application commit");
+                    assert_eq!(std::fs::read(path).unwrap(), b"original");
+                    assert_eq!(receiver.active_streams(), 0);
+                });
+                drained(&runtime);
+            }
         }
 
         #[test]
@@ -814,6 +1193,21 @@ mod manifest_sink {
                         }
                         let data = if corrupt { b"tampered" } else { b"abcdefgh" };
                         let mut sink = ManifestFileSink::new(&cx, options).await.unwrap();
+                        if corrupt && pinned {
+                            // Chunk commitments reject before accepting the bad
+                            // batch, rather than postponing failure until commit.
+                            let error = sink.write_all(data).await.unwrap_err();
+                            assert_eq!(error.kind(), io::ErrorKind::Other);
+                            assert!(error.to_string().contains("hash mismatch"));
+                            assert_eq!(sink.written_bytes(), 0);
+                            assert_eq!(sink.writer.get_stats(&cx).await.unwrap().unwrap().chunk_count, 0);
+                            assert_eq!(sink.flush().await.unwrap_err().to_string(), error.to_string());
+                            assert_eq!(commit(&mut sink, &receipt(data)).await.unwrap_err().to_string(), error.to_string());
+                            assert!(sink.published_path().is_none());
+                            assert_eq!(std::fs::read(&path).unwrap(), b"original destination");
+                            sink.cancel(&cx).await.unwrap();
+                            continue;
+                        }
                         sink.write_all(data).await.unwrap();
                         sink.flush().await.unwrap();
                         assert_eq!(std::fs::read(&path).unwrap(), b"original destination");
