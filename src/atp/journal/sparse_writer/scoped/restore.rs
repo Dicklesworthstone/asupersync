@@ -880,7 +880,7 @@ mod tests {
                 let child = region.cx();
                 let (started, mut start) = oneshot::channel();
                 let (release, wait) = mpsc::channel();
-                let mut checkpointing = Box::pin(writer.checkpoint_with(&child,
+                let mut checkpointing = Box::pin(writer.checkpoint_with(child,
                     request(journal(directory.path()), manifest), move |file, path| {
                         started.send_blocking(()).unwrap();
                         wait.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -918,7 +918,7 @@ mod tests {
             let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
             let child = region.cx();
             child.cancel_with(CancelKind::User, Some("before checkpoint"));
-            assert!(matches!(writer.checkpoint_to_journal(&child, request(journal(directory.path()), manifest)).await,
+            assert!(matches!(writer.checkpoint_to_journal(child, request(journal(directory.path()), manifest)).await,
                 Err(ScopedFsError::Checkpoint(_))));
             assert!(writer.writer.lock_state().temp_file.is_none());
             assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
@@ -1461,7 +1461,7 @@ mod finalization {
                     let child = region.cx();
                     let (started, mut start) = oneshot::channel();
                     let (release, wait) = mpsc::channel();
-                    let mut committing = Box::pin(writer.commit_to_journal_with(&child,
+                    let mut committing = Box::pin(writer.commit_to_journal_with(child,
                         request(reopen(directory.path()), manifest), persist_terminal, move |core| {
                             started.send_blocking(()).unwrap();
                             wait.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -1505,7 +1505,7 @@ mod finalization {
                 let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
                 let child = region.cx();
                 child.cancel_with(CancelKind::User, Some("before journal commit"));
-                assert!(matches!(writer.verify_and_commit_to_journal(&child,
+                assert!(matches!(writer.verify_and_commit_to_journal(child,
                     request(reopen(directory.path()), manifest.clone())).await, Err(ScopedFsError::Checkpoint(_))));
                 region.close().await.unwrap();
                 let id = writer.writer.lock_state().object_id.clone();

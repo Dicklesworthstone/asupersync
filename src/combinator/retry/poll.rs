@@ -1,5 +1,8 @@
 //! Polling and admission for the retry state machine.
 
+// This split implementation intentionally uses its parent module's private
+// retry state machine as one cohesive unit (as remote/admission.rs does).
+#[allow(clippy::wildcard_imports)]
 use super::*;
 
 // Re-read at admission boundaries: both the attempt and the retry predicate
