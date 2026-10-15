@@ -63,6 +63,7 @@ use rustls::{ClientConfig, ServerConfig};
 use sha2::{Digest, Sha256};
 
 use crate::bytes::{Bytes, BytesMut};
+use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
@@ -70,9 +71,11 @@ use crate::net::atp::datagram::congestion::{
     CongestionConfig, CongestionController, DatagramRateConfig, DatagramRateController,
     DatagramRateDecision, DatagramRateSample, DatagramSendAdmission,
 };
-use crate::net::atp::protocol::frames::{Frame, FrameType};
+use crate::net::atp::protocol::codec::AtpFrameCodec;
+use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
+use crate::net::atp::transport_common::codec::{self, CodecAccept, CodecOffer, EntryCompression};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -282,7 +285,11 @@ async fn keep_peer_alive_while<T>(
                 // Keep trying at every tick: a transient failure must not
                 // silence the receiver for the rest of the step. The last
                 // failure is still reported once the step has finished.
-                if let Err(failure) = emit_keep_alive(cx, link, control).await {
+                // The emission is boxed behind `dyn Future + Send` (one
+                // allocation per tick) so the Send proof of every caller
+                // stops here instead of nesting through the flush
+                // (br-asupersync-c2unfu).
+                if let Err(failure) = erase_send(emit_keep_alive(cx, link, control)).await {
                     quic_rqtrace!("receiver: keep_alive_failed error={failure:?}");
                     keep_alive_failure = Some(failure);
                 }
@@ -486,6 +493,9 @@ const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 48;
 /// packets amplified loss tails on shaped netns links, while this envelope keeps
 /// the repair tail small and avoids IP fragmentation.
 const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 512 * 1024;
+/// The largest raw chunk a receiver decodes from one compressed source-stream
+/// frame, and so the bound on the frame it buffers (br-asupersync-t1fblr.29).
+const QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK: u32 = 1 << 20;
 /// Upper bound on un-flushed send-side stream bytes; the disk reader waits on
 /// paced flushes past this, so sender RSS stays a few bursts deep instead of
 /// scaling with the transfer size.
@@ -900,6 +910,33 @@ async fn receiver_member_path_delay_for_testing(cx: &Cx) {
 #[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
 #[allow(clippy::unused_async)]
 async fn receiver_member_path_delay_for_testing(_cx: &Cx) {}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+std::thread_local! {
+    static RECEIVER_IGNORES_CODEC_OFFERS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test hook (br-asupersync-t1fblr.29): receives polled on this thread ignore
+/// compression offers, as receivers that predate compression do.
+///
+/// A test can then show that an offering sender streams raw. Drive the
+/// receive on the calling thread, as `block_on` does; other threads are
+/// unaffected. `false`, the default, turns it off.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+pub fn set_receiver_ignores_codec_offers_for_testing(ignore: bool) {
+    RECEIVER_IGNORES_CODEC_OFFERS.with(|cell| cell.set(ignore));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+fn receiver_ignores_codec_offers() -> bool {
+    RECEIVER_IGNORES_CODEC_OFFERS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
+const fn receiver_ignores_codec_offers() -> bool {
+    false
+}
 
 /// Socket waits shorter than this are drain-grace polls between batches,
 /// not idle parks; `pump_idle` traces only real parks.
@@ -3892,7 +3929,19 @@ impl QuicLink {
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
+    ///
+    /// The work is boxed behind `dyn Future + Send` (one allocation per
+    /// flush), so a caller's Send proof stops here instead of nesting through
+    /// the packet build and send. The same holds for `pump_inbound_for` and
+    /// `retransmit_stream_frames`: proving a session Send through them
+    /// overflowed rustc's default recursion depth in builds of bin atp
+    /// (br-asupersync-c2unfu).
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
+        erase_send(self.flush_inner(cx)).await
+    }
+
+    /// The body of [`Self::flush`].
+    async fn flush_inner(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
         struct PlainOneRttPacket {
             packet_number: u64,
             header: [u8; ONE_RTT_HEADER_LEN],
@@ -5047,7 +5096,18 @@ impl QuicLink {
         self.pending_fountain_feedback_count() > 0
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn retransmit_stream_frames(
+        &mut self,
+        cx: &Cx,
+        frames: &[SentControlStreamFrame],
+        reason: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.retransmit_stream_frames_inner(cx, frames, reason)).await
+    }
+
+    /// The body of [`Self::retransmit_stream_frames`].
+    async fn retransmit_stream_frames_inner(
         &mut self,
         cx: &Cx,
         frames: &[SentControlStreamFrame],
@@ -5487,7 +5547,19 @@ impl QuicLink {
         Ok(())
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn pump_inbound_for_with_drain_budget(
+        &mut self,
+        cx: &Cx,
+        timeout: Duration,
+        max_drain_batches: usize,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.pump_inbound_for_with_drain_budget_inner(cx, timeout, max_drain_batches))
+            .await
+    }
+
+    /// The body of [`Self::pump_inbound_for_with_drain_budget`].
+    async fn pump_inbound_for_with_drain_budget_inner(
         &mut self,
         cx: &Cx,
         timeout: Duration,
@@ -8282,7 +8354,16 @@ async fn wait_source_stream_send_admission(
         }
         if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
             pending_stall = classify_source_stream_admission(true, true, true);
-            drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+            // Boxed (one allocation per admission stall) so the sender's
+            // Send proof stops here instead of nesting through the flush and
+            // its retransmits (br-asupersync-c2unfu).
+            erase_send(drive_native_source_stream_flush(
+                cx,
+                link,
+                config.idle_timeout,
+                false,
+            ))
+            .await?;
             check_source_stream_control(cx, link, control, early).await?;
             continue;
         }
@@ -8396,15 +8477,32 @@ async fn send_native_source_stream_entries_pumped(
     stream: StreamId,
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
+    chunk_codec: Option<&CodecAccept>,
+    options: super::QuicSendOptions,
 ) -> Result<u64, QuicTransportError> {
     let max_chunk = link
         .max_app_payload
         .saturating_sub(usize::try_from(QUIC_STREAM_PACKET_OVERHEAD_BUDGET).unwrap_or(usize::MAX))
         .max(1);
     let flush_chunk = usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX);
-    let mut buf = vec![0_u8; max_chunk.min(flush_chunk).max(1)];
+    let piece = max_chunk.min(flush_chunk).max(1);
+    // A framed (compressed) stream reads one codec chunk per frame; a raw
+    // stream reads one write's worth at a time.
+    let read_len = chunk_codec.map_or(piece, |accept| {
+        usize::try_from(accept.max_chunk_raw)
+            .unwrap_or(piece)
+            .max(1)
+    });
+    let mut buf = vec![0_u8; read_len];
+    // Logical (raw) bytes: what the manifest totals, compressed or not.
     let mut streamed = 0u64;
     let mut queued_since_flush = 0u64;
+    // Framed chunks compress on the blocking pool, up to
+    // `compression_parallelism` at once, and go out in order; consecutive
+    // entries share the pipeline (t1fblr.25).
+    #[cfg(feature = "zstd")]
+    let mut pipeline = chunk_codec
+        .map(|accept| codec::ChunkPipeline::new(*accept, options.compression_parallelism()));
 
     for entry in &prepared.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -8418,6 +8516,10 @@ async fn send_native_source_stream_entries_pumped(
             })?;
         let mut hasher = Sha256::new();
         let mut read = 0u64;
+        // The entry's decisions (t1fblr.24): only outcomes of its own chunks
+        // still decide.
+        let mut decisions =
+            EntryCompression::new(options.compression(), &entry.abs_path.to_string_lossy());
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let n = file.read(&mut buf).await.map_err(|err| {
@@ -8436,38 +8538,75 @@ async fn send_native_source_stream_entries_pumped(
             }
             hasher.update(&buf[..n]);
             let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
-            // Never write past the receiver's bounded window: `write_stream_bytes`
-            // consumes send credit at queue time and fails on exhaustion, so a
-            // credit shortfall waits on the ACK/advertisement clock instead.
-            if link.conn.stream_send_credit_remaining(stream) < n_u64 {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
-                queued_since_flush = 0;
-                wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config)
+            match chunk_codec {
+                None => {
+                    queue_source_stream_bytes(
+                        cx,
+                        link,
+                        control,
+                        early,
+                        stream,
+                        config,
+                        &buf[..n],
+                        &mut queued_since_flush,
+                    )
                     .await?;
+                }
+                #[cfg(feature = "zstd")]
+                Some(_) => {
+                    if let Some(pipeline) = pipeline.as_mut() {
+                        pipeline.push(
+                            cx,
+                            &mut decisions,
+                            entry.index,
+                            read - n_u64,
+                            buf[..n].to_vec(),
+                        );
+                        while pipeline.is_full() {
+                            let Some(chunk) = pipeline.next(entry.index, &mut decisions).await
+                            else {
+                                break;
+                            };
+                            let frame = pipelined_chunk_frame(chunk)?;
+                            queue_source_stream_frame(
+                                cx,
+                                link,
+                                control,
+                                early,
+                                stream,
+                                config,
+                                &frame,
+                                piece,
+                                &mut queued_since_flush,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                #[cfg(not(feature = "zstd"))]
+                Some(accept) => {
+                    let frame = source_stream_chunk_frame(
+                        accept,
+                        &mut decisions,
+                        entry.index,
+                        read - n_u64,
+                        &buf[..n],
+                    )?;
+                    queue_source_stream_frame(
+                        cx,
+                        link,
+                        control,
+                        early,
+                        stream,
+                        config,
+                        &frame,
+                        piece,
+                        &mut queued_since_flush,
+                    )
+                    .await?;
+                }
             }
-            link.conn
-                .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
             streamed = streamed.saturating_add(n_u64);
-            queued_since_flush = queued_since_flush.saturating_add(n_u64);
-            if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
-                queued_since_flush = 0;
-                // Bound sender-side buffering (RSS), sent-but-unacked bytes
-                // (runaway guard), and the next flush window's send credit:
-                // without the first, the disk reader queues the entire file
-                // ahead of the pacer (~540 MB RSS on a 500 MB transfer);
-                // without the second, a mis-estimated pacing rate streams the
-                // file into a loss gap faster than the receiver can
-                // reassemble; the third keeps writes inside the receiver's
-                // advertised reassembly window. All waits are ACK/pacer
-                // clocked, not spins.
-                // Credit is gated per-write above (demanding a full flush
-                // window of credit here quantized the transfer into one
-                // window per RTT); this wait only enforces the queue and
-                // unacked ceilings.
-                wait_source_stream_send_admission(cx, link, control, early, stream, 0, config)
-                    .await?;
-            }
         }
         if read != entry.size {
             return Err(QuicTransportError::Source(format!(
@@ -8485,6 +8624,27 @@ async fn send_native_source_stream_entries_pumped(
             )));
         }
     }
+    // The chunks still compressing go out after the last entry is read. Their
+    // outcomes no longer decide anything, so they record into a throwaway.
+    #[cfg(feature = "zstd")]
+    if let Some(pipeline) = pipeline.as_mut() {
+        let mut finished = EntryCompression::new(options.compression(), "");
+        while let Some(chunk) = pipeline.next(u32::MAX, &mut finished).await {
+            let frame = pipelined_chunk_frame(chunk)?;
+            queue_source_stream_frame(
+                cx,
+                link,
+                control,
+                early,
+                stream,
+                config,
+                &frame,
+                piece,
+                &mut queued_since_flush,
+            )
+            .await?;
+        }
+    }
 
     // Source exhausted: everything from here (tail drain, FIN, proof
     // exchange) is app-limited for the delivery sampler.
@@ -8493,6 +8653,219 @@ async fn send_native_source_stream_entries_pumped(
         .write_stream_bytes(cx, stream, Bytes::new(), true)?;
     drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
     Ok(streamed)
+}
+
+/// Queues `bytes` (at most one write's worth) on the source stream, waiting
+/// for send credit and draining the queue the way every source-stream write
+/// does.
+async fn queue_source_stream_bytes(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+    stream: StreamId,
+    config: &QuicConfig,
+    bytes: &[u8],
+    queued_since_flush: &mut u64,
+) -> Result<(), QuicTransportError> {
+    let n_u64 = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    // Never write past the receiver's bounded window: `write_stream_bytes`
+    // consumes send credit at queue time and fails on exhaustion, so a
+    // credit shortfall waits on the ACK/advertisement clock instead.
+    if link.conn.stream_send_credit_remaining(stream) < n_u64 {
+        drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+        *queued_since_flush = 0;
+        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config).await?;
+    }
+    link.conn
+        .write_stream_bytes(cx, stream, Bytes::copy_from_slice(bytes), false)?;
+    *queued_since_flush = queued_since_flush.saturating_add(n_u64);
+    if *queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
+        drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+        *queued_since_flush = 0;
+        // Bound sender-side buffering (RSS), sent-but-unacked bytes
+        // (runaway guard), and the next flush window's send credit:
+        // without the first, the disk reader queues the entire file
+        // ahead of the pacer (~540 MB RSS on a 500 MB transfer);
+        // without the second, a mis-estimated pacing rate streams the
+        // file into a loss gap faster than the receiver can
+        // reassemble; the third keeps writes inside the receiver's
+        // advertised reassembly window. All waits are ACK/pacer
+        // clocked, not spins.
+        // Credit is gated per-write above (demanding a full flush
+        // window of credit here quantized the transfer into one
+        // window per RTT); this wait only enforces the queue and
+        // unacked ceilings.
+        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config).await?;
+    }
+    Ok(())
+}
+
+/// The largest raw chunk one compressed source-stream frame carries: the
+/// configured chunk size, within what a receiver decodes per frame.
+fn source_stream_codec_chunk(config: &QuicConfig) -> usize {
+    config.chunk_size.clamp(
+        1,
+        usize::try_from(QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK).unwrap_or(usize::MAX),
+    )
+}
+
+/// The `ObjectData` frame for the source-stream chunk at `offset` of entry
+/// `index`: the chunk compressed when `entry` decides to try and that makes
+/// the frame smaller, with a [`codec::CHUNK_CODEC_EXTENSION`] record, and raw
+/// otherwise. The payload is the TCP transport's: a 4-byte entry index, an
+/// 8-byte offset, then the chunk. With `zstd` the sender goes through
+/// [`codec::ChunkPipeline`] instead; tests build single frames with this.
+#[cfg(any(test, not(feature = "zstd")))]
+fn source_stream_chunk_frame(
+    accept: &CodecAccept,
+    entry: &mut EntryCompression,
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    #[cfg(feature = "zstd")]
+    if let Some((record, compressed)) = entry.compress(accept, offset, chunk) {
+        return source_stream_compressed_frame(index, offset, record, &compressed);
+    }
+    #[cfg(not(feature = "zstd"))]
+    let _ = (accept, entry);
+    source_stream_data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed source-stream
+/// chunk at `offset` of entry `index`, with its
+/// [`codec::CHUNK_CODEC_EXTENSION`] record.
+#[cfg(feature = "zstd")]
+fn source_stream_compressed_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    let mut frame = source_stream_data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
+}
+
+/// The frame for a chunk leaving the compression pipeline.
+#[cfg(feature = "zstd")]
+fn pipelined_chunk_frame(
+    chunk: Result<codec::PipelinedChunk, crate::runtime::JoinError>,
+) -> Result<Frame, QuicTransportError> {
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => QuicTransportError::Cancelled,
+        other => QuicTransportError::Source(format!("compressing a chunk failed: {other}")),
+    })?;
+    match &chunk.compressed {
+        Some((record, payload)) => {
+            source_stream_compressed_frame(chunk.index, chunk.offset, *record, payload)
+        }
+        None => source_stream_data_frame(chunk.index, chunk.offset, &chunk.raw),
+    }
+}
+
+/// Queues `frame` on the source stream in write-sized pieces, so each write
+/// still fits the receiver's window, however small.
+async fn queue_source_stream_frame(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+    stream: StreamId,
+    config: &QuicConfig,
+    frame: &Frame,
+    piece: usize,
+    queued_since_flush: &mut u64,
+) -> Result<(), QuicTransportError> {
+    let wire = frame
+        .to_wire_bytes()
+        .map_err(|error| QuicTransportError::Frame(error.to_string()))?;
+    for bytes in wire.chunks(piece.max(1)) {
+        queue_source_stream_bytes(
+            cx,
+            link,
+            control,
+            early,
+            stream,
+            config,
+            bytes,
+            queued_since_flush,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn source_stream_data_frame(
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    let mut payload = Vec::with_capacity(12 + chunk.len());
+    payload.extend_from_slice(&index.to_be_bytes());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(chunk);
+    Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
+        .map_err(|error| QuicTransportError::Frame(error.to_string()))
+}
+
+/// The raw bytes a compressed-mode source-stream frame carries for the entry
+/// `index` at `offset`, with `remaining` bytes still to come. The frame must
+/// be the next `ObjectData` frame of that entry, carry at least one byte,
+/// and not run past the entry. A compressed chunk is decoded into `scratch`
+/// within those bounds, before anything else is allocated for it.
+fn source_stream_frame_chunk<'a>(
+    frame: &'a Frame,
+    accept: &CodecAccept,
+    index: u32,
+    offset: u64,
+    remaining: u64,
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], QuicTransportError> {
+    let refuse = |reason: String| {
+        QuicTransportError::Integrity(format!("compressed source stream frame: {reason}"))
+    };
+    if frame.frame_type() != FrameType::ObjectData {
+        return Err(refuse(format!(
+            "{:?} where ObjectData was due",
+            frame.frame_type()
+        )));
+    }
+    let payload = frame.payload();
+    let (head, chunk) = payload
+        .split_at_checked(12)
+        .ok_or_else(|| refuse("shorter than its 12-byte header".to_string()))?;
+    let frame_index = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    let frame_offset = u64::from_be_bytes([
+        head[4], head[5], head[6], head[7], head[8], head[9], head[10], head[11],
+    ]);
+    if (frame_index, frame_offset) != (index, offset) {
+        return Err(refuse(format!(
+            "entry {frame_index} at {frame_offset}, expected entry {index} at {offset}"
+        )));
+    }
+    let raw = match frame.header.extensions.get(&codec::CHUNK_CODEC_EXTENSION) {
+        Some(record) => {
+            codec::decompress_chunk(record, Some(accept), remaining, chunk, scratch)
+                .map_err(|error| refuse(error.to_string()))?;
+            scratch.as_slice()
+        }
+        None => chunk,
+    };
+    if raw.is_empty() {
+        return Err(refuse("an empty chunk".to_string()));
+    }
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > remaining {
+        return Err(refuse(format!(
+            "{} bytes where the entry lacks {remaining}",
+            raw.len()
+        )));
+    }
+    Ok(raw)
 }
 
 #[allow(
@@ -8554,6 +8927,7 @@ async fn run_sender_session(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     peer_id: &str,
+    options: super::QuicSendOptions,
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
     let config = &config;
@@ -8577,6 +8951,10 @@ async fn run_sender_session(
         } else {
             None
         };
+    // Only the reliable source stream can carry compressed chunks, so a sender
+    // that offers no source stream offers no codec either.
+    let codec_offer = offered_source_stream
+        .and_then(|_| codec::local_offer(options.compression(), source_stream_codec_chunk(config)));
     super::send_native_sender_hello(
         cx,
         &mut link.conn,
@@ -8587,6 +8965,7 @@ async fn run_sender_session(
         offered_source_stream,
         manifest.total_bytes,
         delta_sender_nonce,
+        codec_offer.as_ref(),
     )?;
     link.flush(cx).await?;
     let hello_frames = link.last_flushed_stream_frames();
@@ -8610,6 +8989,18 @@ async fn run_sender_session(
         }
         _ => None,
     };
+    // Compress the source stream only after an accept that fits this offer,
+    // and only when the stream itself was accepted.
+    let chunk_codec = codec_offer
+        .filter(|_| source_stream.is_some())
+        .and_then(|offer| {
+            ack_frame
+                .header
+                .extensions
+                .get(&codec::CODEC_ACCEPT_EXTENSION)
+                .and_then(|bytes| CodecAccept::from_bytes(bytes))
+                .filter(|accept| offer.admits(accept))
+        });
     if let (Some(stream), Some(window)) = (source_stream, ack.source_stream_recv_window) {
         // Honor the receiver's bounded reassembly window: cap initial send
         // credit at one window; MAX_STREAM_DATA advertisements (re-attached to
@@ -8744,7 +9135,9 @@ async fn run_sender_session(
             // A control frame read while the stream was still queueing, other
             // than a refusal, which ends the send at once.
             let mut early_control: Option<Frame> = None;
-            let bytes_streamed = send_native_source_stream_entries_pumped(
+            // Boxed (one allocation per transfer), as the receiver's
+            // source-stream receive is (br-asupersync-c2unfu).
+            let bytes_streamed = erase_send(send_native_source_stream_entries_pumped(
                 cx,
                 link,
                 &mut control,
@@ -8752,7 +9145,9 @@ async fn run_sender_session(
                 source_stream,
                 prepared,
                 config,
-            )
+                chunk_codec.as_ref(),
+                options,
+            ))
             .await?;
             if bytes_streamed != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
@@ -10640,7 +11035,15 @@ async fn receive_native_source_stream_entries_pumped(
     manifest: &TransferManifest,
     staged: &mut [QuicStagedEntryReceive],
     config: &QuicConfig,
+    chunk_codec: Option<&CodecAccept>,
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
+    if let Some(accept) = chunk_codec {
+        // Boxed, as its caller is (br-asupersync-c2unfu).
+        return erase_send(receive_compressed_source_stream_entries(
+            cx, link, stream, manifest, staged, config, accept,
+        ))
+        .await;
+    }
     let mut received = 0u64;
     // Profiling-only (env ATP_QUIC_RECV_PROFILE): attribute the source-stream receiver's
     // per-byte CPU between pump+AEAD-decrypt (read chunk), staging write, and per-chunk
@@ -10729,6 +11132,114 @@ async fn receive_native_source_stream_entries_pumped(
         quic_rqtrace!(
             "receiver: native_source_stream byte-complete before FIN bytes={} stream={}",
             received,
+            stream.0
+        );
+    }
+    flush_cached_quic_staging_files(staged).await?;
+    Ok((received, 0, super::QuicDecodeStats::default()))
+}
+
+/// The source stream as the compressed mode carries it: one `ObjectData`
+/// frame per chunk, compressed or raw, in entry order (br-asupersync-t1fblr.29).
+/// Each frame must name the entry and offset that are due. Its chunk is
+/// decoded within what the entry still lacks, then written exactly as a raw
+/// stream's bytes are, so SHA-256 and the merkle root are checked on raw bytes.
+/// A frame is buffered whole, and no frame may exceed one codec chunk plus its
+/// header.
+async fn receive_compressed_source_stream_entries(
+    cx: &Cx,
+    link: &mut QuicLink,
+    stream: StreamId,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    config: &QuicConfig,
+    accept: &CodecAccept,
+) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
+    // A compressed chunk is never larger than its raw chunk, so a frame holds
+    // at most the 12-byte chunk header, one codec chunk and its header slack.
+    // The 256 bytes of slack also bound the frame's header extensions: a
+    // sender that attached more than about 240 bytes of them to data frames
+    // would be refused here (fail closed), so a new extension on data frames
+    // must raise this bound for receivers first.
+    let max_frame = u64::from(accept.max_chunk_raw).saturating_add(12 + 256);
+    let mut frames = AtpFrameCodec::with_max_frame_size(max_frame);
+    let mut pending = BytesMut::new();
+    let mut scratch = Vec::new();
+    let mut received = 0u64;
+    let mut wire = 0u64;
+    for (entry_index, entry) in manifest.entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let staged_entry = staged.get_mut(entry_index).ok_or_else(|| {
+            QuicTransportError::Integrity(format!(
+                "source stream has no staging slot for entry {}",
+                entry.index
+            ))
+        })?;
+        let mut entry_offset = 0u64;
+        while entry_offset < entry.size {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let frame = loop {
+                if let Some(frame) = frames
+                    .decode(&mut pending)
+                    .map_err(|error| QuicTransportError::Frame(error.to_string()))?
+                {
+                    break frame;
+                }
+                let bytes = read_native_source_stream_chunk(
+                    cx,
+                    link,
+                    stream,
+                    super::QUIC_SOURCE_STREAM_READ_CHUNK,
+                    config.idle_timeout,
+                )
+                .await?;
+                if bytes.is_empty() {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "source stream ended before entry {} completed ({} of {} bytes)",
+                        entry.index, entry_offset, entry.size
+                    )));
+                }
+                wire = wire.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                pending.extend_from_slice(&bytes);
+            };
+            let remaining = entry.size.saturating_sub(entry_offset);
+            let chunk = source_stream_frame_chunk(
+                &frame,
+                accept,
+                entry.index,
+                entry_offset,
+                remaining,
+                &mut scratch,
+            )?;
+            staged_entry.write_range(entry, entry_offset, chunk).await?;
+            let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            entry_offset = entry_offset.saturating_add(n);
+            received = received.saturating_add(n);
+            let flushed = link.flush(cx).await?;
+            quic_rqtrace!(
+                "receiver: compressed_source_chunk entry={} end_offset={entry_offset} len={n} wire={wire} flush_packets={flushed}",
+                entry.index
+            );
+        }
+    }
+    if !pending.is_empty() || !link.conn.read_stream_bytes(cx, stream, 1)?.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "compressed source stream carried bytes after the last chunk".to_string(),
+        ));
+    }
+    // The transport saw stream offsets, which count compressed bytes.
+    let fin_seen = validate_native_source_stream_observed_completion(link, wire)?;
+    if received != manifest.total_bytes {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream delivered {received} bytes, expected {}",
+            manifest.total_bytes
+        )));
+    }
+    if !fin_seen && !link.conn.is_stream_read_eof(stream)? {
+        quic_rqtrace!(
+            "receiver: compressed source stream byte-complete before FIN bytes={} wire={} stream={}",
+            received,
+            wire,
             stream.0
         );
     }
@@ -10932,7 +11443,31 @@ async fn run_receiver_session(
         delta_receiver_nonce: delta_handshake.map(|binding| binding.receiver_nonce),
         delta_destination_root: delta_handshake.map(|binding| binding.destination_root),
     };
-    let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    let mut ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    // Accept a compression offer this build can decode, for the source stream
+    // only. Senders that predate compression make no offer and get no accept,
+    // so their stream stays raw (br-asupersync-t1fblr.29).
+    let chunk_codec = if accepted_source_stream && !receiver_ignores_codec_offers() {
+        hello_frame
+            .header
+            .extensions
+            .get(&codec::CODEC_OFFER_EXTENSION)
+            .and_then(|bytes| CodecOffer::from_bytes(bytes))
+            .and_then(|offer| {
+                codec::negotiate(
+                    &codec::local_decode_capability(QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK),
+                    &offer,
+                )
+            })
+    } else {
+        None
+    };
+    if let Some(accept) = &chunk_codec {
+        ack_frame
+            .header
+            .extensions
+            .insert(codec::CODEC_ACCEPT_EXTENSION, accept.to_bytes());
+    }
     control.send(cx, &mut link.conn, &ack_frame)?;
     link.flush(cx).await?;
     let mut ack_frames = link.last_flushed_stream_frames();
@@ -11243,15 +11778,19 @@ async fn run_receiver_session(
                     source_stream.0
                 )));
             }
+            // Boxed (one allocation per transfer) so the session's Send proof
+            // does not nest through the source-stream receive and its flushes
+            // (br-asupersync-c2unfu).
             let (bytes_received, symbols_accepted, decode_stats) =
-                receive_native_source_stream_entries_pumped(
+                erase_send(receive_native_source_stream_entries_pumped(
                     cx,
                     link,
                     source_stream,
                     &manifest,
                     &mut staged,
                     config,
-                )
+                    chunk_codec.as_ref(),
+                ))
                 .await?;
             quic_rqtrace!(
                 "receiver: native_source_stream received bytes={} stream={} symbols_accepted={} decode_count={}",
@@ -11260,7 +11799,9 @@ async fn run_receiver_session(
                 symbols_accepted,
                 decode_stats.decode_count
             );
-            let (mut receipt, committed_paths) = commit_staged_entries(
+            // Boxed (one allocation per transfer), as at the symbol-round
+            // commit below (br-asupersync-c2unfu).
+            let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
                 cx,
                 link,
                 &mut control,
@@ -11269,7 +11810,7 @@ async fn run_receiver_session(
                 &mut staged,
                 config,
                 options,
-            )
+            ))
             .await?;
             receipt.symbols_accepted = symbols_accepted;
             receipt.feedback_rounds = 0;
@@ -11769,7 +12310,12 @@ async fn run_receiver_session(
         intake_stats.trace_summary(cx, manifest.transfer_id.as_str());
         send_native_keep_alive(cx, &mut link.conn, &mut control)?;
         link.flush(cx).await?;
-        let (mut receipt, committed_paths) = commit_staged_entries(
+        // The commit is boxed behind `dyn Future + Send` (one allocation per
+        // transfer): proving run_receiver_session Send through the commit,
+        // keep-alive and flush chain overflowed rustc's default recursion
+        // depth in a build of bin atp (recursion_depth_exceeding_limit,
+        // br-asupersync-c2unfu; the same cut as br-asupersync-lf8muy).
+        let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
             cx,
             link,
             &mut control,
@@ -11778,7 +12324,7 @@ async fn run_receiver_session(
             &mut staged,
             config,
             options,
-        )
+        ))
         .await?;
         receipt.symbols_accepted = symbols_accepted;
         receipt.feedback_rounds = feedback_rounds;
@@ -11851,6 +12397,7 @@ pub(crate) async fn send_prepared_over_udp(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     peer_id: &str,
+    options: super::QuicSendOptions,
 ) -> Result<(SendReport, QuicSendLimiterReport), QuicTransportError> {
     let config = prepared.effective_config(config);
     config.validate()?;
@@ -11868,7 +12415,7 @@ pub(crate) async fn send_prepared_over_udp(
     // sessions are erased the same way.
     let mut link = erase_send(connect(cx, addr, client_tls, &config)).await?;
     let report = erase_send(run_sender_session(
-        cx, &mut link, prepared, &config, peer_id,
+        cx, &mut link, prepared, &config, peer_id, options,
     ))
     .await?;
     let limiter = link.limiter_report();

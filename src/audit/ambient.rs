@@ -1640,7 +1640,22 @@ fn test_function() {
     // (sparse_writer/copy_commit.rs, transport_common/file_hash.rs,
     // append_journal/compaction.rs). No scanner exemption or detection
     // pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 809;
+    // 809 -> 811 (2026-10-15, the ATP zstd chain merged after the above): the
+    // TCP sender's pipelined path (send_full_entries_pipelined,
+    // br-asupersync-t1fblr.25) opens each source file with
+    // crate::fs::File::open, with the same authority and line text as
+    // send_file_streaming's open. transport_common/streaming.rs's
+    // SyncFileHash::open (br-asupersync-dfdwyt) opens a source file with
+    // std::fs::File::open on the blocking pool, after the same
+    // io_gate::require_ambient_io check crate::fs::File::open makes. No
+    // scanner exemption or detection pattern changed.
+    // 811 -> 813 (re-blessed 2026-10-15 in the same merge, after an API-lane
+    // commit landed without the inventory): atp/journal/sparse_writer/scoped/
+    // restore.rs opens the caller-named restore source with File::open, and
+    // its scoped/restore/tests.rs (a plain tests.rs, scanned as production)
+    // writes its fixture with std::fs::write. No scanner exemption or
+    // detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 813;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")

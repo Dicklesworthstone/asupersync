@@ -47,6 +47,8 @@ expression: inventory
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions
 1	Io	atp/journal/sparse_writer.rs	File::open(
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(
+1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(
+1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(
 1	Io	atp/mailbox/relay.rs	TcpStream::
 1	Io	atp/mailbox/storage.rs	std::fs::read(
 1	Io	atp/mailbox/storage.rs	std::fs::write(
@@ -104,6 +106,7 @@ expression: inventory
 2	Io	net/atp/transport_common/metadata.rs	std::fs::File::open
 7	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions
+1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open
 4	Io	net/atp/transport_quic/mod.rs	File::open(
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::create
 1	Io	net/atp/transport_quic/mod.rs	std::fs::File::open
@@ -118,7 +121,7 @@ expression: inventory
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(
 1	Io	net/atp/transport_tcp/mod.rs	File::create(
-6	Io	net/atp/transport_tcp/mod.rs	File::open(
+7	Io	net/atp/transport_tcp/mod.rs	File::open(
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::
 1	Io	net/atp/transport_tcp/mod.rs	std::fs::OpenOptions
 1	Io	net/dns/resolver.rs	TcpStream::
@@ -381,6 +384,8 @@ expression: inventory
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions	match std::fs::OpenOptions::new()
 1	Io	atp/journal/sparse_writer.rs	File::open(	File::open(parent)
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(	File::open(path)
+1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(	let source = match File::open(&request.source_path) {
+1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(	std::fs::write(&source, data).unwrap();
 1	Io	atp/mailbox/relay.rs	TcpStream::	let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|err| {
 1	Io	atp/mailbox/storage.rs	std::fs::read(	std::fs::read(&chunk_path).map_err(|e| MailboxError::NetworkError {
 1	Io	atp/mailbox/storage.rs	std::fs::write(	if let Err(error) = std::fs::write(&full_path, &prepared.bytes) {
@@ -458,6 +463,7 @@ expression: inventory
 1	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut file = std::fs::OpenOptions::new()
 6	Io	net/atp/transport_common/metadata.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
 1	Io	net/atp/transport_common/mirror.rs	std::fs::OpenOptions	let mut options = std::fs::OpenOptions::new();
+1	Io	net/atp/transport_common/streaming.rs	std::fs::File::open	let file = std::fs::File::open(path)
 2	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(abs_path).await.map_err(|err| {
 1	Io	net/atp/transport_quic/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
@@ -485,7 +491,7 @@ expression: inventory
 1	Io	net/atp/transport_rq/mod.rs	std::fs::File::open	let mut source = std::fs::File::open(&staging_path)?;
 1	Io	net/atp/transport_rq/mod.rs	std::fs::write(	std::fs::write(&member.write_path, &staged[start..end])?;
 1	Io	net/atp/transport_tcp/mod.rs	File::create(	let file = crate::fs::File::create(staging_path).await?;
-2	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
+3	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&entry.abs_path)
 1	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(&path)
 3	Io	net/atp/transport_tcp/mod.rs	File::open(	let mut file = crate::fs::File::open(path)
 1	Io	net/atp/transport_tcp/mod.rs	TcpStream::	with_transport_timeout(cx, config.idle_timeout, , TcpStream::connect(addr))
