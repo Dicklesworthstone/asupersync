@@ -1148,16 +1148,25 @@ export function createBrowserFetchManager(dependencies: {
       }
     },
     async drainScopes(scopeKeys: Set<string>, reason: string): Promise<Outcome<void>> {
+      // Own this active snapshot, not the outcomes of historically retired
+      // handles. Those handles keep their independent retirement receipts.
       const operations = Array.from(active.values()).filter((operation) => scopeKeys.has(operation.scopeKey));
       const receipts = await Promise.all(operations.map(async (operation) => {
         const receipt = await operation.requestCancel(reason, reason);
         // Domain errors and admitted cancellation can both finish cleanup.
         // A refused cancellation or terminal publication still owns its slot.
-        return operation.creditHeld
-          ? receipt.outcome === "ok"
+        // Preserve that refusal: do not turn a retryable explicit scope drain
+        // into retirement's implicit, one-way stop-on-refusal operation.
+        if (operation.creditHeld) {
+          return receipt.outcome === "ok"
             ? failure("fetch cleanup retained its owned task", "internal_failure")
-            : receipt
-          : Outcomes.ok(undefined);
+            : receipt;
+        }
+        // Released credit is not proof that host cleanup succeeded. Join the
+        // same memoized cleanup receipt as handle.retire(), including launch
+        // and admitted reads, without rewriting the original scope-close kind
+        // or treating an ordinary request failure as failed cleanup.
+        return operation.retireAndJoin(reason);
       }));
       return receipts.find((receipt) => receipt.outcome !== "ok") ?? Outcomes.ok(undefined);
     },
