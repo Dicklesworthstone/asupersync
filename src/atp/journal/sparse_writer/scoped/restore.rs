@@ -311,3 +311,620 @@ fn restore_file(
 
 #[cfg(test)]
 mod tests;
+
+// The producer and physical recovery share one compiled source boundary.
+mod checkpoint {
+//! Produce the durable receipt chain consumed by physical writer restoration.
+
+use super::super::ScopedSparseWriter;
+use crate::atp::journal::append_journal::JournalError;
+use crate::atp::journal::sparse_writer::{SparseWriter, SparseWriterError, VerificationState};
+use crate::atp::journal::{
+    AppendJournal, JournalCheckpoint, JournalCheckpointReport, JournalCheckpointRequest,
+    JournalRecord, TransferResumeStatus,
+};
+use crate::atp::object::ObjectKind;
+use crate::cx::Cx;
+use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
+use crate::fs::scoped::ScopedFsError;
+use crate::security::AuthenticationTag;
+use crate::types::Outcome;
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, Write};
+use std::path::Path;
+use std::sync::Arc;
+
+// Preserve all four journal outcomes instead of treating interruption as an
+// empty history or translating an actual effect into a cancellation guess.
+macro_rules! journal_value {
+    ($expression:expr) => {
+        match $expression {
+            Outcome::Ok(value) => value,
+            Outcome::Err(error) => return Outcome::Err(journal_error(error)),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
+    };
+}
+
+impl ScopedSparseWriter {
+    /// Persist reusable staging progress into the journal used by restoration.
+    ///
+    /// Ownership of the journal moves into the same region-owned job as the
+    /// writer's admission permit. The returned report gives it back on success
+    /// AND ordinary domain refusal, including its fenced state after uncertain
+    /// storage. An outer gateway error or abandoned result drops that owner;
+    /// reopen its existing files, never assume that no record reached storage.
+    /// Do not use another writer for the journal directory concurrently.
+    ///
+    /// This validates the expected file identity, root, length, receipt bounds
+    /// and existing history before effects. It rehashes every local write receipt,
+    /// flushes/synchronizes the staging inode and, on Unix, its directory, then
+    /// appends missing Received -> Verified -> Written records and synchronizes
+    /// the journal, even with automatic force_sync disabled. Identical checkpoints
+    /// add no records. Interrupted chains can continue from their last valid phase.
+    ///
+    /// A chunk receipt authenticates locally retained bytes, not an independently
+    /// authorized remote object. This does not promote content verification,
+    /// publish a destination, acknowledge a peer, or persist a commit decision.
+    /// Fresh final manifest verification is still required. The snapshot's path
+    /// must be retained by the application's trusted recovery catalog; journal
+    /// path strings do not grant restoration authority.
+    ///
+    /// The started job drains as one operation, including hashing and compaction;
+    /// it has no additional mid-operation cancellation checkpoints. Bounds cover
+    /// object/receipt sizes, not total journal history or a syscall deadline.
+    /// External mutation and hostile parent paths are outside this contract.
+    /// Non-Unix directory-entry durability remains the existing platform limit.
+    pub async fn checkpoint_to_journal<Caps>(
+        &self,
+        cx: &Cx<Caps>,
+        request: JournalCheckpointRequest,
+    ) -> Result<JournalCheckpointReport, ScopedFsError>
+    where
+        Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+    {
+        self.checkpoint_with(cx, request, sync_staging).await
+    }
+
+    // Inject only the physical barrier, not receipt selection or journal writes.
+    // Tests gate/fail the actual owned path without another filesystem executor.
+    async fn checkpoint_with<Caps, F>(
+        &self,
+        cx: &Cx<Caps>,
+        request: JournalCheckpointRequest,
+        sync: F,
+    ) -> Result<JournalCheckpointReport, ScopedFsError>
+    where
+        Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+        F: FnOnce(&File, &Path) -> io::Result<()> + Send + 'static,
+    {
+        let permit = self.reserve(cx).await?;
+        let writer = Arc::clone(&self.writer);
+        cx.scoped_fs()
+            .run_io(move |_| {
+                let _permit = permit;
+                let JournalCheckpointRequest {
+                    mut journal, transfer_id, manifest, limits, timestamp,
+                } = request;
+                let outcome = checkpoint_writer(
+                    &writer, &mut journal, &transfer_id, &manifest, limits, timestamp, sync,
+                );
+                Ok(JournalCheckpointReport { journal, outcome })
+            })
+            .await
+    }
+}
+
+fn invalid(message: impl Into<String>) -> SparseWriterError {
+    SparseWriterError::VerificationFailed(message.into())
+}
+
+fn journal_error(error: JournalError) -> SparseWriterError {
+    SparseWriterError::WriteFailed(format!("checkpoint journal: {error}"))
+}
+
+fn sync_staging(file: &File, path: &Path) -> io::Result<()> {
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        let parent = path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        File::open(parent)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
+fn checkpoint_writer(
+    writer: &SparseWriter,
+    journal: &mut AppendJournal,
+    transfer_id: &str,
+    manifest: &crate::atp::manifest::Manifest,
+    limits: crate::atp::journal::JournalRestoreLimits,
+    timestamp: u64,
+    sync: impl FnOnce(&File, &Path) -> io::Result<()>,
+) -> Outcome<JournalCheckpoint, SparseWriterError> {
+    let _operation = writer.operation.lock();
+    let mut state = writer.lock_state();
+    if let Err(error) = SparseWriter::require_accepting(&state) {
+        return Outcome::Err(error);
+    }
+    if transfer_id.is_empty() || limits.max_chunk_bytes == 0 {
+        return Outcome::Err(invalid("checkpoint requires a transfer ID and nonzero receipt limit"));
+    }
+    if let Err(error) = manifest.validate() {
+        return Outcome::Err(invalid(format!("checkpoint manifest: {error}")));
+    }
+    let Some(object) = manifest.objects.get(&state.object_id) else {
+        return Outcome::Err(invalid("checkpoint manifest does not contain the selected file"));
+    };
+    let Some(length) = object.size_bytes else {
+        return Outcome::Err(invalid("checkpoint requires the offered file length"));
+    };
+    if object.id != state.object_id || object.kind != ObjectKind::FileObject
+        || state.expected_size != Some(length)
+    {
+        return Outcome::Err(invalid("checkpoint file identity or expected length mismatch"));
+    }
+    if length > limits.max_bytes
+        || u64::try_from(state.written_chunks.len()).map_or(true, |n| n > u64::from(limits.max_chunks))
+        || state.written_chunks.values().any(|chunk| {
+            chunk.size == 0
+                || usize::try_from(chunk.size).map_or(true, |size| size > limits.max_chunk_bytes)
+                || chunk.offset.checked_add(chunk.size).is_none_or(|end| end > length)
+        })
+    {
+        return Outcome::Err(invalid("checkpoint exceeds object or receipt bounds"));
+    }
+
+    // Summary authentication covers the same immutable entries inspected below.
+    // A terminal/uncertain history cannot be rebound to an accepting writer.
+    let summary = journal_value!(journal.get_resume_summary(transfer_id));
+    if !matches!(summary.status, TransferResumeStatus::Unknown | TransferResumeStatus::Resumable) {
+        return Outcome::Err(invalid("checkpoint refuses a terminal or commit-intent journal"));
+    }
+    let entries = journal_value!(journal.get_transfer_entries(transfer_id));
+    let mut offered = false;
+    let mut phases = BTreeMap::<u64, u8>::new();
+    for entry in &entries {
+        let (offset, size, hash, phase) = match &entry.record {
+            JournalRecord::Offer { object_id, manifest_root, total_size, .. } => {
+                if object_id != &state.object_id || manifest_root != &manifest.merkle_root || *total_size != length {
+                    return Outcome::Err(invalid("checkpoint conflicts with the journal's offered object"));
+                }
+                offered = true;
+                continue;
+            }
+            JournalRecord::ChunkReceived { chunk_offset, chunk_size, chunk_hash, .. } =>
+                (*chunk_offset, *chunk_size, Some(chunk_hash), 1),
+            JournalRecord::ChunkVerified { chunk_offset, chunk_size, verified_hash, .. } =>
+                (*chunk_offset, *chunk_size, Some(verified_hash), 2),
+            JournalRecord::ChunkWritten { chunk_offset, chunk_size, .. } =>
+                (*chunk_offset, *chunk_size, None, 3),
+            JournalRecord::Accept { .. } | JournalRecord::ProofDigest { .. } => continue,
+            _ => return Outcome::Err(invalid("checkpoint history contains an unsupported transfer transition")),
+        };
+        let Some(chunk) = state.written_chunks.get(&offset) else {
+            return Outcome::Err(invalid("checkpoint journal names bytes absent from this writer"));
+        };
+        if !offered || chunk.size != size || hash.is_some_and(|hash| *hash != chunk.hash) {
+            return Outcome::Err(invalid("checkpoint journal receipt differs from this writer"));
+        }
+        let previous = phases.get(&offset).copied().unwrap_or(0);
+        // Exact repeated phases are harmless. Missing prerequisites, reordered
+        // phases and regressions cannot become reusable progress by set union.
+        if phase < previous || phase > previous + 1 {
+            return Outcome::Err(invalid("checkpoint journal receipt order is inconsistent"));
+        }
+        phases.insert(offset, phase);
+    }
+    if !entries.is_empty() && !offered {
+        return Outcome::Err(invalid("checkpoint cannot adopt history without an offer"));
+    }
+
+    // No journal mutation precedes acquiring and validating the actual staging
+    // descriptor. Empty/no-progress checkpoints still retain a real source inode.
+    if let Err(error) = writer.ensure_temp_file_open_locked(&mut state) {
+        return Outcome::Err(error);
+    }
+    let Some(path) = state.temp_path.clone() else {
+        return Outcome::Err(SparseWriterError::NoTempFile);
+    };
+    let checked = (|| -> Result<(), SparseWriterError> {
+        let file = state.temp_file.as_mut().ok_or(SparseWriterError::NoTempFile)?;
+        file.flush().map_err(|error| SparseWriterError::SyncFailed(error.to_string()))?;
+        let metadata = file.metadata().map_err(|error| invalid(error.to_string()))?;
+        if !metadata.is_file() || metadata.len() > length {
+            return Err(invalid("checkpoint staging has an incompatible file length"));
+        }
+        let mut reader = file.try_clone().map_err(|error| invalid(error.to_string()))?;
+        for chunk in state.written_chunks.values() {
+            if chunk.offset.checked_add(chunk.size).is_none_or(|end| end > metadata.len()) {
+                return Err(invalid("checkpoint staging was truncated"));
+            }
+            if SparseWriter::hash_file_range(&mut reader, chunk.offset, chunk.size)? != chunk.hash {
+                return Err(invalid(format!("checkpoint staging hash mismatch at offset {}", chunk.offset)));
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = checked {
+        state.verification_state = VerificationState::Failed { reason: error.to_string() };
+        return Outcome::Err(error);
+    }
+    let Some(file) = state.temp_file.as_ref() else {
+        return Outcome::Err(SparseWriterError::NoTempFile);
+    };
+    if let Err(error) = sync(file, &path) {
+        return Outcome::Err(SparseWriterError::SyncFailed(error.to_string()));
+    }
+    for chunk in state.written_chunks.values_mut() {
+        chunk.synced = true;
+    }
+
+    // The complete physical barrier precedes even the offer. Partial journal
+    // appends can only expose already-synchronized bytes. AppendJournal fences
+    // uncertain writes and carries these original records through compaction.
+    if !offered {
+        journal_value!(journal.append(JournalRecord::Offer {
+            transfer_id: transfer_id.to_owned(), object_id: state.object_id.clone(),
+            manifest_root: manifest.merkle_root.clone(), total_size: length, timestamp,
+            auth_tag: AuthenticationTag::zero(),
+        }));
+    }
+    for (offset, chunk) in &state.written_chunks {
+        let phase = phases.get(offset).copied().unwrap_or(0);
+        if phase < 1 {
+            journal_value!(journal.append(JournalRecord::ChunkReceived {
+                transfer_id: transfer_id.to_owned(), chunk_offset: *offset, chunk_size: chunk.size,
+                chunk_hash: chunk.hash, timestamp, auth_tag: AuthenticationTag::zero(),
+            }));
+        }
+        if phase < 2 {
+            journal_value!(journal.append(JournalRecord::ChunkVerified {
+                transfer_id: transfer_id.to_owned(), chunk_offset: *offset, chunk_size: chunk.size,
+                verified_hash: chunk.hash, timestamp, auth_tag: AuthenticationTag::zero(),
+            }));
+        }
+        if phase < 3 {
+            journal_value!(journal.append(JournalRecord::ChunkWritten {
+                transfer_id: transfer_id.to_owned(), chunk_offset: *offset, chunk_size: chunk.size,
+                // Diagnostic only. Restore always requires application-selected
+                // paths/descriptors; this lossy spelling is never open authority.
+                file_path: path.to_string_lossy().into_owned(), timestamp,
+                auth_tag: AuthenticationTag::zero(),
+            }));
+        }
+    }
+    journal_value!(journal.flush());
+    let summary = journal_value!(journal.get_resume_summary(transfer_id));
+    Outcome::Ok(JournalCheckpoint { source_path: path, summary })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::atp::journal::{
+        CommitPolicy, FsyncPolicy, JournalConfig, JournalRestoreLimits, JournalRestoreRequest,
+        ScopedReceiveOptions, SparseWriterConfig, WriteOptions,
+    };
+    use crate::atp::manifest::{Manifest, MerkleRoot};
+    use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
+    use crate::channel::oneshot;
+    use crate::cx::ChildRegionSpec;
+    use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
+    use crate::security::AuthKey;
+    use crate::types::CancelKind;
+    use std::future::{Future, poll_fn};
+    use std::sync::mpsc;
+    use std::task::Poll;
+    use std::time::Duration;
+
+    fn runtime(workers: usize) -> Runtime {
+        let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+            else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+        builder.blocking_threads(1, 2).build().unwrap()
+    }
+
+    fn drained(runtime: &Runtime) {
+        let report = runtime.shutdown_drained(Duration::from_secs(5));
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    fn limits() -> JournalRestoreLimits {
+        JournalRestoreLimits { max_bytes: 64, max_chunks: 16, max_chunk_bytes: 8 }
+    }
+
+    fn journal_config(base: &Path) -> JournalConfig {
+        JournalConfig {
+            base_dir: base.join("journal"), force_sync: false,
+            max_journal_size: u64::MAX, recent_entries_limit: 1,
+            ..JournalConfig::default()
+        }
+    }
+
+    fn journal(base: &Path) -> AppendJournal {
+        AppendJournal::new(journal_config(base), AuthKey::from_seed(42)).unwrap()
+    }
+
+    fn request(journal: AppendJournal, manifest: Arc<Manifest>) -> JournalCheckpointRequest {
+        JournalCheckpointRequest {
+            journal, transfer_id: "checkpoint".to_owned(), manifest, limits: limits(), timestamp: 17,
+        }
+    }
+
+    async fn writer(cx: &Cx, base: &Path, data: &[u8]) -> (ScopedSparseWriter, Arc<Manifest>) {
+        let object = Object::file(data.to_vec());
+        let id = object.id.clone();
+        let mut graph = ObjectGraph::new();
+        graph.add_root(object).unwrap();
+        let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+        let writer = ScopedSparseWriter::new(cx, id, base.join("destination"), SparseWriterConfig {
+            enable_preallocation: false, fsync_policy: FsyncPolicy::Never,
+            ..SparseWriterConfig::default()
+        }).await.unwrap().unwrap();
+        writer.set_expected_size(cx, data.len() as u64).await.unwrap().unwrap();
+        (writer, manifest)
+    }
+
+    #[test]
+    fn produced_checkpoint_reopens_restores_and_receives_only_the_missing_suffix() {
+        for workers in [1, 2] {
+            for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let (writer, manifest) = writer(&cx, directory.path(), b"abcdefgh").await;
+                    writer.write_chunk(&cx, 0, b"abcd".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                    let report = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest.clone())).await.unwrap();
+                    let saved = report.outcome.unwrap();
+                    assert_eq!(saved.summary.durable_bytes, 4);
+                    assert_eq!(saved.summary.contiguous_prefix_bytes, 4);
+                    assert_eq!(saved.summary.total_size, Some(8));
+                    assert_eq!(writer.get_stats(&cx).await.unwrap().unwrap().verification_state, VerificationState::Pending);
+                    assert!(!directory.path().join("destination").exists());
+                    let before = report.journal.get_stats().sequence;
+                    assert_eq!(before, 4); // Offer and the ordered three-record receipt.
+                    let mut again = writer.checkpoint_to_journal(&cx, request(report.journal, manifest.clone())).await.unwrap();
+                    assert_eq!(again.outcome.unwrap().summary, saved.summary);
+                    assert_eq!(again.journal.get_stats().sequence, before);
+                    again.journal.compact().unwrap();
+                    drop(again.journal);
+                    drop(writer);
+                    let destination = directory.path().join("restored");
+                    let restored = ScopedSparseWriter::restore_from_storage(&cx, JournalRestoreRequest {
+                        journal_config: journal_config(directory.path()), auth_key: AuthKey::from_seed(42),
+                        transfer_id: "checkpoint".to_owned(), source_path: saved.source_path.clone(),
+                        final_path: destination.clone(), writer_config: SparseWriterConfig {
+                            enable_preallocation: false, commit_policy: policy, ..SparseWriterConfig::default()
+                        }, limits: limits(),
+                    }).await.unwrap().unwrap();
+                    assert_eq!(restored.checked_receive_offset(&cx).await.unwrap().unwrap(), 4);
+                    let mut receiving = restored.resume_exact_at(&cx, b"efghNEXT".as_slice(), manifest,
+                        ScopedReceiveOptions { max_bytes: 8, max_chunks: 8, chunk_size: 2 }, 4).unwrap();
+                    assert_eq!(receiving.wait().await.unwrap().unwrap(), destination);
+                    assert_eq!(receiving.take_source().unwrap(), b"NEXT");
+                    assert_eq!(std::fs::read(destination).unwrap(), b"abcdefgh");
+                    assert_eq!(std::fs::read(saved.source_path).unwrap(), b"abcd");
+                });
+                drained(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn empty_and_sparse_checkpoints_keep_extent_and_never_invent_missing_bytes() {
+        for data in [b"".as_slice(), b"abcdefghijkl".as_slice()] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), data).await;
+                if !data.is_empty() {
+                    writer.write_chunk(&cx, 8, b"ijkl".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                    writer.write_chunk(&cx, 0, b"abcd".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                }
+                let report = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest)).await.unwrap();
+                let saved = report.outcome.unwrap();
+                assert!(saved.source_path.is_file());
+                assert_eq!(saved.summary.total_size, Some(data.len() as u64));
+                assert_eq!(saved.summary.durable_bytes, if data.is_empty() { 0 } else { 8 });
+                assert_eq!(saved.summary.contiguous_prefix_bytes, if data.is_empty() { 0 } else { 4 });
+                let offsets: Vec<_> = saved.summary.durable_chunks.iter().map(|chunk| chunk.chunk_offset).collect();
+                assert_eq!(offsets, if data.is_empty() { vec![] } else { vec![0, 8] });
+                assert!(matches!(writer.commit(&cx).await,
+                    Ok(Outcome::Err(SparseWriterError::NotVerified | SparseWriterError::IncompleteData))));
+                assert!(!directory.path().join("destination").exists());
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn incomplete_receipt_chains_are_completed_once_without_replaying_old_phases() {
+        for retained in 1..=4 {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+                writer.write_chunk(&cx, 0, b"data".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                let report = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest.clone())).await.unwrap();
+                report.outcome.unwrap();
+                let entries = report.journal.get_transfer_entries("checkpoint").unwrap();
+                let partial_base = directory.path().join("partial");
+                let mut partial = journal(&partial_base);
+                for entry in entries.iter().take(retained) {
+                    partial.append(entry.record.clone()).unwrap();
+                }
+                partial.flush().unwrap();
+                let report = writer.checkpoint_to_journal(&cx, request(partial, manifest)).await.unwrap();
+                assert_eq!(report.outcome.unwrap().summary.durable_bytes, 4);
+                assert_eq!(report.journal.get_stats().sequence, 4);
+                assert_eq!(report.journal.get_transfer_entries("checkpoint").unwrap().len(), 4);
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn physical_barrier_failure_and_panic_cannot_append_a_progress_record() {
+        for panics in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+                writer.write_chunk(&cx, 0, b"data".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                let result = writer.checkpoint_with(&cx, request(journal(directory.path()), manifest.clone()), move |_, _| {
+                    assert!(!panics, "checkpoint barrier panic");
+                    Err(io::Error::other("checkpoint barrier failure"))
+                }).await;
+                if panics {
+                    assert!(matches!(result, Err(ScopedFsError::Join(crate::runtime::JoinError::Panicked(_)))));
+                } else {
+                    let report = result.unwrap();
+                    assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::SyncFailed(message))
+                        if message == "checkpoint barrier failure"));
+                    assert_eq!(report.journal.get_stats().sequence, 0);
+                }
+                assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
+                assert_eq!(writer.admission.available_permits(), 1);
+                assert!(writer.writer.lock_state().written_chunks.values().all(|chunk| !chunk.synced));
+                let report = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest)).await.unwrap();
+                assert_eq!(report.outcome.unwrap().summary.durable_bytes, 4);
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn changed_payload_refuses_before_journal_effects_and_invalidates_old_verification() {
+        for changed in [b"bad!".as_slice(), b"cut".as_slice(), b"larger".as_slice()] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+                writer.write_chunk(&cx, 0, b"data".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                writer.verify(&cx, manifest.clone()).await.unwrap().unwrap();
+                let path = writer.writer.lock_state().temp_path.clone().unwrap();
+                cx.scoped_fs().write(path, changed.to_vec()).await.unwrap();
+                let report = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest)).await.unwrap();
+                assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(_))));
+                assert_eq!(report.journal.get_stats().sequence, 0);
+                assert!(matches!(writer.get_stats(&cx).await.unwrap().unwrap().verification_state, VerificationState::Failed { .. }));
+                assert!(matches!(writer.commit(&cx).await, Ok(Outcome::Err(SparseWriterError::NotVerified))));
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn limits_terminal_history_and_conflicting_identity_refuse_before_staging() {
+        for case in 0..6 {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+                let mut request = request(journal(directory.path()), manifest);
+                match case {
+                    0 => request.limits.max_bytes = 3,
+                    1 => request.limits.max_chunk_bytes = 0,
+                    2 => request.transfer_id.clear(),
+                    3 => { request.journal.append(JournalRecord::Cancellation {
+                        transfer_id: request.transfer_id.clone(), reason: "stop".to_owned(), timestamp: 1,
+                        auth_tag: AuthenticationTag::zero(),
+                    }).unwrap(); }
+                    4 => { request.journal.append(JournalRecord::Offer {
+                        transfer_id: request.transfer_id.clone(), object_id: writer.writer.lock_state().object_id.clone(),
+                        manifest_root: MerkleRoot::new([99; 32]), total_size: 4, timestamp: 1,
+                        auth_tag: AuthenticationTag::zero(),
+                    }).unwrap(); }
+                    5 => { request.journal.append(JournalRecord::Accept {
+                        transfer_id: request.transfer_id.clone(), peer_id: "no-offer".to_owned(), timestamp: 1,
+                        auth_tag: AuthenticationTag::zero(),
+                    }).unwrap(); }
+                    _ => unreachable!(),
+                }
+                let sequence = request.journal.get_stats().sequence;
+                let report = writer.checkpoint_to_journal(&cx, request).await.unwrap();
+                assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(_))));
+                assert_eq!(report.journal.get_stats().sequence, sequence);
+                assert!(writer.writer.lock_state().temp_file.is_none());
+                assert!(!directory.path().join("destination").exists());
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn dropped_checkpoint_wait_keeps_journal_and_writer_owned_until_region_drain() {
+        for workers in [1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(workers);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+                writer.write_chunk(&cx, 0, b"data".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let child = region.cx();
+                let (started, mut start) = oneshot::channel();
+                let (release, wait) = mpsc::channel();
+                let mut checkpointing = Box::pin(writer.checkpoint_with(&child,
+                    request(journal(directory.path()), manifest), move |file, path| {
+                        started.send_blocking(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                        sync_staging(file, path)
+                    }));
+                poll_fn(|task| { assert!(checkpointing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                start.recv(&cx).await.unwrap();
+                drop(checkpointing);
+                assert_eq!(writer.admission.available_permits(), 0);
+                let mut closing = Box::pin(region.close());
+                poll_fn(|task| { assert!(closing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
+                release.send(()).unwrap();
+                closing.await.unwrap();
+                assert_eq!(writer.admission.available_permits(), 1);
+                let reopened = journal(directory.path());
+                assert_eq!(reopened.get_resume_summary("checkpoint").unwrap().durable_bytes, 4);
+                assert!(!directory.path().join("destination").exists());
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn precancelled_checkpoint_is_send_and_cannot_create_a_generation_or_staging() {
+        fn assert_send<T: Send>(_: &T) {}
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = runtime(1);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let (writer, manifest) = writer(&cx, directory.path(), b"data").await;
+            let unpolled = writer.checkpoint_to_journal(&cx, request(journal(directory.path()), manifest.clone()));
+            assert_send(&unpolled);
+            drop(unpolled);
+            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let child = region.cx();
+            child.cancel_with(CancelKind::User, Some("before checkpoint"));
+            assert!(matches!(writer.checkpoint_to_journal(&child, request(journal(directory.path()), manifest)).await,
+                Err(ScopedFsError::Checkpoint(_))));
+            assert!(writer.writer.lock_state().temp_file.is_none());
+            assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
+            region.close().await.unwrap();
+        });
+        drained(&runtime);
+    }
+}
+}
