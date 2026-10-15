@@ -84,6 +84,21 @@ crates.io and GitHub; `v0.5.0` release evidence is recorded in `asupersync-v5fn1
 
 ## [Unreleased]
 
+### Breaking (asupersync-zstd 0.7.0) — `EncodeParams` and `DecodeLimits` are `#[non_exhaustive]`
+
+Both structs are now `#[non_exhaustive]`, so later settings (dictionaries,
+long-distance matching, window sizes) can be added without another break.
+Outside the crate, a struct literal or a `..base` update no longer
+compiles. Build them with the new const builders:
+- `EncodeParams::new(level).with_checksum(false)`;
+- `DecodeLimits::new(max_output).with_max_window(n)`, chained as needed
+  with `.with_require_content_size(true)` and
+  `.with_allow_skippable_frames(false)`.
+
+The fields stay public and readable. asupersync's own API exposes neither
+type, so this changes nothing for asupersync users. The crate docs now say
+the crate is experimental. (`br-asupersync-t1fblr`.)
+
 ### ATP zstd: the native QUIC source stream, `CompressionMode::Auto` and parallel compression (feature `zstd`)
 
 ATP-over-QUIC compresses too. `transport_quic::send_path_with_options` takes a

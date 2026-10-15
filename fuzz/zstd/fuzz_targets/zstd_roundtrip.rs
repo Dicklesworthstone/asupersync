@@ -25,14 +25,12 @@ fuzz_target!(|data: &[u8]| {
     if input.len() > MAX_INPUT {
         return;
     }
-    let params = EncodeParams {
-        level: if selector & 1 == 0 {
-            Level::Store
-        } else {
-            Level::Fast
-        },
-        checksum: selector & 2 != 0,
+    let level = if selector & 1 == 0 {
+        Level::Store
+    } else {
+        Level::Fast
     };
+    let params = EncodeParams::new(level).with_checksum(selector & 2 != 0);
     let frame = encode_all(input, &params);
     assert_eq!(
         frame,
@@ -40,10 +38,7 @@ fuzz_target!(|data: &[u8]| {
         "encoding is not deterministic"
     );
 
-    let exact = DecodeLimits {
-        require_content_size: true,
-        ..DecodeLimits::new(input.len())
-    };
+    let exact = DecodeLimits::new(input.len()).with_require_content_size(true);
     let decoded = decode_all(&frame, &exact)
         .unwrap_or_else(|error| panic!("{params:?} frame of {} bytes: {error:?}", input.len()));
     assert_eq!(decoded, input, "{params:?} round trip changed the data");

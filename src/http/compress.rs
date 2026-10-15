@@ -2949,10 +2949,7 @@ mod tests {
         let compressed = compress_body(ContentCoding::Zstd, &body, usize::MAX)
             .unwrap()
             .unwrap();
-        let limits = asupersync_zstd::DecodeLimits {
-            max_window: 1 << 20,
-            ..asupersync_zstd::DecodeLimits::new(body.len())
-        };
+        let limits = asupersync_zstd::DecodeLimits::new(body.len()).with_max_window(1 << 20);
         assert_eq!(
             asupersync_zstd::decode_all(&compressed, &limits).unwrap(),
             body

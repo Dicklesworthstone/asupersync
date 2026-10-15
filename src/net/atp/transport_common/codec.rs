@@ -540,10 +540,8 @@ pub fn compress_chunk(accept: &CodecAccept, raw: &[u8]) -> Option<(ChunkCodec, V
     let WireCodec::Zstd = accept.codec;
     // The chunk is covered by the transfer's SHA-256, so the frame skips
     // zstd's own content checksum.
-    let params = asupersync_zstd::EncodeParams {
-        checksum: false,
-        ..asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast)
-    };
+    let params =
+        asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast).with_checksum(false);
     let compressed = asupersync_zstd::encode_all(raw, &params);
     (compressed.len() + CHUNK_CODEC_OVERHEAD <= raw.len())
         .then(|| (ChunkCodec::new(WireCodec::Zstd, raw_len), compressed))
@@ -574,14 +572,14 @@ pub fn decompress_chunk(
     }
     let raw_len =
         usize::try_from(chunk.raw_len).map_err(|_| ChunkCodecError::TooLarge { raw_len, limit })?;
-    let limits = asupersync_zstd::DecodeLimits {
-        max_window: 1_usize
-            .checked_shl(u32::from(accept.max_window_log))
-            .unwrap_or(0),
-        require_content_size: true,
-        allow_skippable_frames: false,
-        ..asupersync_zstd::DecodeLimits::new(raw_len)
-    };
+    let limits = asupersync_zstd::DecodeLimits::new(raw_len)
+        .with_max_window(
+            1_usize
+                .checked_shl(u32::from(accept.max_window_log))
+                .unwrap_or(0),
+        )
+        .with_require_content_size(true)
+        .with_allow_skippable_frames(false);
     // Decoding appends to the cleared scratch buffer, so a receiver reuses
     // one allocation for every chunk, with no zero fill and no copy.
     out.clear();

@@ -1,5 +1,9 @@
 //! Memory-safe Zstandard (RFC 8878) codec for asupersync.
 //!
+//! Experimental: the API may change in any 0.x release. [`EncodeParams`] and
+//! [`DecodeLimits`] are `#[non_exhaustive]`, so later settings can be added;
+//! build them with `new` and the `with_*` methods.
+//!
 //! Work in progress, tracked by `br-asupersync-t1fblr`. The decoder is
 //! complete for frames without dictionaries. The encoder stores
 //! ([`Level::Store`]) or compresses with a greedy hash match finder,
