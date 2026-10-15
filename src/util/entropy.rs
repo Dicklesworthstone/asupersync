@@ -22,15 +22,25 @@ pub trait EntropySource: std::fmt::Debug + Send + Sync + 'static {
     fn next_u64(&self) -> u64;
 
     /// Fork this entropy source deterministically for a child task.
+    ///
+    /// The runtime forks a task's source when the task is created or
+    /// admitted, in spawn order and while it holds its internal state lock,
+    /// so that the seeds tasks receive do not depend on the schedule. An
+    /// implementation must therefore not call back into the runtime (spawn,
+    /// block on a runtime-driven future, or take a lock a task may hold).
+    /// A panic is contained: the fork is retried on the task's first use of
+    /// entropy, where the panic reaches that task.
     fn fork(&self, task_id: TaskId) -> Arc<dyn EntropySource>;
 
     /// Stable identifier for tracing and diagnostics.
     fn source_id(&self) -> &'static str;
 }
 
-/// A deferred entropy fork that delays calling `parent.fork(task)` until first use,
-/// preventing user-supplied `EntropySource::fork` implementations from running under
-/// internal runtime state locks.
+/// A deferred entropy fork that delays calling `parent.fork(task)` until first use.
+///
+/// The runtime forks eagerly, in spawn order. It falls back to a `DeferredFork`
+/// only when a user `EntropySource::fork` panicked under its lock, so the retried
+/// fork's panic reaches the task instead.
 #[derive(Debug)]
 pub struct DeferredFork {
     parent: Arc<dyn EntropySource>,
