@@ -126,3 +126,52 @@ pub struct JournalCheckpointReport {
     /// Checkpoint result. Failure does not imply that no records reached storage.
     pub outcome: crate::types::Outcome<JournalCheckpoint, sparse_writer::SparseWriterError>,
 }
+
+/// Inputs for fresh verification, checkpointing and journaled publication.
+///
+/// The writer must be complete and use a durability-enabled fsync policy.
+/// The checkpoint request supplies its sole journal owner, trusted manifest,
+/// explicit receipt bounds and timestamp. A previous checkpoint is optional.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCommitRequest {
+    /// Existing checkpoint inputs; missing progress records are filled first.
+    pub checkpoint: JournalCheckpointRequest,
+    /// Independently trusted authority for chunk-only manifest-addressed files.
+    /// Never derive this expected value from untrusted received metadata.
+    pub expected_chunk_commitment: Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
+}
+
+/// This invocation's publication observation, independent of journal persistence.
+///
+/// None of these states asserts that an external path is currently unchanged.
+/// Another process can mutate it, and a failed publisher can have visible effects.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum JournalPublication {
+    /// This invocation never called the publisher. An intent record may still
+    /// exist after an uncertain journal append or synchronization failure.
+    NotAttempted,
+    /// The publisher was called but did not return success. Reconcile retained
+    /// files and intent; never infer that the final path is absent or retry blindly.
+    Unconfirmed,
+    /// The canonical publisher returned this path successfully. A later journal
+    /// error does not undo this fact, nor does it prove that a peer received Proof.
+    Confirmed(std::path::PathBuf),
+}
+
+/// Actual publication and terminal journal results with the original journal owner.
+///
+/// An Ok outcome requires both publication and a synchronized CommitComplete.
+/// A Confirmed publication with an error means the file was published but its
+/// completion record was not confirmed. A gateway error or abandoned report can
+/// lose both observations; reopen retained evidence rather than inferring rollback.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCommitReport {
+    /// Original journal, including its fenced state after real storage uncertainty.
+    pub journal: AppendJournal,
+    /// This call's actual publisher observation, retained across completion errors.
+    pub publication: JournalPublication,
+    /// Full operation result. Success includes the journal's final sync barrier.
+    pub outcome: crate::types::Outcome<std::path::PathBuf, sparse_writer::SparseWriterError>,
+}

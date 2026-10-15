@@ -927,4 +927,601 @@ mod tests {
         drained(&runtime);
     }
 }
+
+// Terminal journal records bracket the SAME verified publisher used elsewhere.
+mod finalization {
+    use super::{checkpoint_writer, journal_error, sync_staging};
+    use crate::atp::journal::sparse_writer::{
+        ScopedSparseWriter, SparseWriter, SparseWriterError, VerificationState, WriterLifecycle,
+    };
+    use crate::atp::journal::{
+        AppendJournal, FsyncPolicy, JournalCommitReport, JournalCommitRequest,
+        JournalPublication, JournalRecord,
+    };
+    use crate::cx::Cx;
+    use crate::cx::cap::{CapSetRuntimeMask, HasIo, HasSpawn};
+    use crate::fs::scoped::ScopedFsError;
+    use crate::security::AuthenticationTag;
+    use crate::types::Outcome;
+    use std::fs::File;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    macro_rules! writer_value {
+        ($expression:expr) => {
+            match $expression {
+                Outcome::Ok(value) => value,
+                Outcome::Err(error) => return Outcome::Err(error),
+                Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+                Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+            }
+        };
+    }
+
+    impl ScopedSparseWriter {
+        /// Verify, checkpoint, persist commit intent, publish and record completion.
+        ///
+        /// One admission permit and one region-owned filesystem job cover every
+        /// stage. This reuses the canonical verifier, checkpoint producer, journal
+        /// storage and publisher. No clone can mutate the file between stages.
+        /// Wrong content or a wrong supplied pin cannot create an intent record.
+        /// The journal is synchronized before publication and after completion,
+        /// even when its automatic force_sync option is false.
+        ///
+        /// Requires a durability-enabled writer policy (not FsyncPolicy::Never)
+        /// and a losslessly UTF-8 destination for the existing journal format.
+        /// Other APIs keep their policies. Successful checkpointing alone does
+        /// not authorize publication: fresh full-file verification is mandatory.
+        /// The expected chunk commitment must be independently trusted.
+        ///
+        /// After intent persistence is attempted, any error or panic seals the
+        /// writer against mutation, cancellation or an unjournaled retry. A
+        /// failed intent synchronization might follow a complete intent record.
+        /// A failed publisher remains unresolved; no completion is recorded.
+        /// If publication succeeds but completion persistence fails, the report
+        /// retains Confirmed(path) alongside that error. Do not publish again.
+        ///
+        /// Success requires a synchronized CommitComplete. Repeated calls refuse
+        /// rather than reverify consumed staging or rewrite history. Existing
+        /// commit() can observe the writer's already-successful local path, but
+        /// it does not repair a missing journal completion. Recovery continues
+        /// to reject unresolved intents and completed transfers for resumption.
+        ///
+        /// Dropped waits and late cancellation drain the admitted job; they can
+        /// still be followed by publication. Ordinary domain results return the
+        /// journal owner. A panic/gateway failure or abandoned result requires
+        /// reopening retained evidence. Keep exclusive journal-directory and
+        /// application catalog ownership. Host path races, external modification,
+        /// non-Unix directory durability and whole-history memory remain outside
+        /// these guarantees. No daemon or wire protocol is switched automatically.
+        pub async fn verify_and_commit_to_journal<Caps>(
+            &self,
+            cx: &Cx<Caps>,
+            request: JournalCommitRequest,
+        ) -> Result<JournalCommitReport, ScopedFsError>
+        where
+            Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+        {
+            self.commit_to_journal_with(cx, request, persist_terminal, |writer| {
+                writer.commit_with_fsync(File::sync_all)
+            }).await
+        }
+
+        // Private seams observe/fail terminal persistence and the existing
+        // publisher. Tests retain real verification, checkpointing and admission.
+        async fn commit_to_journal_with<Caps, S, P>(
+            &self,
+            cx: &Cx<Caps>,
+            mut request: JournalCommitRequest,
+            persist: S,
+            publish: P,
+        ) -> Result<JournalCommitReport, ScopedFsError>
+        where
+            Caps: HasIo + HasSpawn + CapSetRuntimeMask + Send + Sync + 'static,
+            S: FnMut(&mut AppendJournal, JournalRecord) -> Outcome<(), SparseWriterError>
+                + Send + 'static,
+            P: FnOnce(&SparseWriter) -> Outcome<PathBuf, SparseWriterError> + Send + 'static,
+        {
+            let permit = self.reserve(cx).await?;
+            let writer = Arc::clone(&self.writer);
+            cx.scoped_fs().run_io(move |_| {
+                let _permit = permit;
+                let mut publication = JournalPublication::NotAttempted;
+                let outcome = commit_writer(
+                    &writer, &mut request, &mut publication, persist, publish,
+                );
+                Ok(JournalCommitReport { journal: request.checkpoint.journal, publication, outcome })
+            }).await
+        }
+    }
+
+    // Before intent, failed authorization must not leave an earlier Verified
+    // state for plain commit. After intent starts, even unwinding must preserve
+    // the existing sealed uncertainty state. Never reopen a terminal writer.
+    struct FinalizationFence<'a> {
+        writer: &'a SparseWriter,
+        intent_started: bool,
+    }
+
+    impl Drop for FinalizationFence<'_> {
+        fn drop(&mut self) {
+            let mut state = self.writer.lock_state();
+            if state.lifecycle == WriterLifecycle::Accepting {
+                if matches!(state.verification_state, VerificationState::Verified { .. }) {
+                    state.verification_state = VerificationState::Pending;
+                }
+                if self.intent_started {
+                    state.lifecycle = WriterLifecycle::Committing;
+                }
+            }
+        }
+    }
+
+    fn persist_terminal(
+        journal: &mut AppendJournal,
+        record: JournalRecord,
+    ) -> Outcome<(), SparseWriterError> {
+        journal_value!(journal.append(record));
+        journal_value!(journal.flush());
+        Outcome::Ok(())
+    }
+
+    fn commit_writer<S, P>(
+        writer: &SparseWriter,
+        request: &mut JournalCommitRequest,
+        publication: &mut JournalPublication,
+        mut persist: S,
+        publish: P,
+    ) -> Outcome<PathBuf, SparseWriterError>
+    where
+        S: FnMut(&mut AppendJournal, JournalRecord) -> Outcome<(), SparseWriterError>,
+        P: FnOnce(&SparseWriter) -> Outcome<PathBuf, SparseWriterError>,
+    {
+        if let Err(error) = SparseWriter::require_accepting(&writer.lock_state()) {
+            return Outcome::Err(error);
+        }
+        let mut fence = FinalizationFence { writer, intent_started: false };
+        if writer.config.fsync_policy == FsyncPolicy::Never {
+            return Outcome::Err(SparseWriterError::VerificationFailed(
+                "journaled publication requires a durability-enabled writer policy".to_owned(),
+            ));
+        }
+        let final_path = writer.lock_state().final_path.clone();
+        let Some(final_text) = final_path.to_str().map(str::to_owned) else {
+            return Outcome::Err(SparseWriterError::VerificationFailed(
+                "journaled publication requires a losslessly UTF-8 destination".to_owned(),
+            ));
+        };
+        let checkpoint = &mut request.checkpoint;
+        writer_value!(writer.verify_inner(
+            &checkpoint.manifest, request.expected_chunk_commitment.as_ref(),
+        ));
+        let saved = writer_value!(checkpoint_writer(
+            writer, &mut checkpoint.journal, &checkpoint.transfer_id,
+            &checkpoint.manifest, checkpoint.limits, checkpoint.timestamp, sync_staging,
+        ));
+        let Some(length) = saved.summary.total_size else {
+            return Outcome::Err(SparseWriterError::IncompleteData);
+        };
+        if saved.summary.durable_bytes != length || saved.summary.contiguous_prefix_bytes != length {
+            return Outcome::Err(SparseWriterError::IncompleteData);
+        }
+        let intent = JournalRecord::CommitIntent {
+            transfer_id: checkpoint.transfer_id.clone(),
+            final_manifest_root: checkpoint.manifest.merkle_root.clone(),
+            timestamp: checkpoint.timestamp, auth_tag: AuthenticationTag::zero(),
+        };
+        // There is no safe in-place retry after an uncertain intent append.
+        fence.intent_started = true;
+        writer_value!(persist(&mut checkpoint.journal, intent));
+        *publication = JournalPublication::Unconfirmed;
+        let path = writer_value!(publish(writer));
+        *publication = JournalPublication::Confirmed(path.clone());
+        if path != final_path {
+            return Outcome::Err(SparseWriterError::CommitFailed(
+                "publisher returned a different destination; retain its actual result".to_owned(),
+            ));
+        }
+        writer_value!(persist(&mut checkpoint.journal, JournalRecord::CommitComplete {
+            transfer_id: checkpoint.transfer_id.clone(), final_path: final_text,
+            committed_size: length, timestamp: checkpoint.timestamp,
+            auth_tag: AuthenticationTag::zero(),
+        }));
+        Outcome::Ok(path)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::atp::journal::{
+            CommitPolicy, JournalCheckpointRequest, JournalConfig, JournalRestoreLimits,
+            JournalRestoreRequest, SparseWriterConfig, TransferResumeStatus, WriteOptions,
+        };
+        use crate::atp::manifest::Manifest;
+        use crate::atp::manifest_chunk_commitment::ManifestChunkCommitment;
+        use crate::atp::object::{MetadataPolicy, Object, ObjectGraph};
+        use crate::channel::oneshot;
+        use crate::cx::ChildRegionSpec;
+        use crate::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
+        use crate::security::AuthKey;
+        use crate::types::CancelKind;
+        use std::future::{Future, poll_fn};
+        use std::io;
+        use std::path::Path;
+        use std::sync::mpsc;
+        use std::task::Poll;
+        use std::time::Duration;
+
+        fn runtime(workers: usize) -> Runtime {
+            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            builder.blocking_threads(1, 2).build().unwrap()
+        }
+
+        fn drained(runtime: &Runtime) {
+            let report = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+            assert_eq!(report.live_tasks, 0);
+            assert_eq!(report.pending_spawns, 0);
+            assert_eq!(report.pending_obligations, 0);
+        }
+
+        fn config(base: &Path) -> JournalConfig {
+            JournalConfig {
+                base_dir: base.join("journal"), force_sync: false,
+                max_journal_size: u64::MAX, max_generations: 0,
+                recent_entries_limit: 1, ..JournalConfig::default()
+            }
+        }
+
+        fn reopen(base: &Path) -> AppendJournal {
+            AppendJournal::new(config(base), AuthKey::from_seed(42)).unwrap()
+        }
+
+        fn request(journal: AppendJournal, manifest: Arc<Manifest>) -> JournalCommitRequest {
+            JournalCommitRequest {
+                checkpoint: JournalCheckpointRequest {
+                    journal, transfer_id: "publication".to_owned(), manifest,
+                    limits: JournalRestoreLimits { max_bytes: 64, max_chunks: 16, max_chunk_bytes: 8 },
+                    timestamp: 23,
+                },
+                expected_chunk_commitment: None,
+            }
+        }
+
+        async fn prepared(
+            cx: &Cx, base: &Path, data: &[u8], policy: CommitPolicy,
+        ) -> (ScopedSparseWriter, Arc<Manifest>) {
+            let object = Object::file(data.to_vec());
+            let id = object.id.clone();
+            let mut graph = ObjectGraph::new();
+            graph.add_root(object).unwrap();
+            let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+            let writer = ScopedSparseWriter::new(cx, id, base.join("destination"), SparseWriterConfig {
+                enable_preallocation: false, fsync_policy: FsyncPolicy::BeforeCommit,
+                commit_policy: policy, ..SparseWriterConfig::default()
+            }).await.unwrap().unwrap();
+            writer.set_expected_size(cx, data.len() as u64).await.unwrap().unwrap();
+            for (index, chunk) in data.chunks(4).enumerate() {
+                writer.write_chunk(cx, (index * 4) as u64, chunk.to_vec(), WriteOptions::default())
+                    .await.unwrap().unwrap();
+            }
+            (writer, manifest)
+        }
+
+        #[test]
+        fn journaled_publication_reopens_as_completed_after_retention() {
+            for workers in [1, 2] {
+                for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                    for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
+                        let directory = tempfile::tempdir().unwrap();
+                        let runtime = runtime(workers);
+                        runtime.block_on(async {
+                            let cx = Cx::current().unwrap();
+                            let path = directory.path().join("destination");
+                            let (writer, manifest) = prepared(&cx, directory.path(), data, policy).await;
+                            let mut input = request(reopen(directory.path()), manifest.clone());
+                            input.expected_chunk_commitment = Some(ManifestChunkCommitment::from_manifest(&manifest).unwrap());
+                            let mut report = writer.verify_and_commit_to_journal(&cx, input).await.unwrap();
+                            assert_eq!(report.publication, JournalPublication::Confirmed(path.clone()));
+                            assert_eq!(report.outcome.unwrap(), path);
+                            assert_eq!(std::fs::read(&path).unwrap(), data);
+                            let expected = TransferResumeStatus::Committed {
+                                final_path: path.to_str().unwrap().to_owned(), committed_size: data.len() as u64,
+                            };
+                            assert_eq!(report.journal.get_resume_summary("publication").unwrap().status, expected);
+                            report.journal.compact().unwrap();
+                            drop(report.journal);
+                            let journal = reopen(directory.path());
+                            assert_eq!(journal.get_resume_summary("publication").unwrap().status, expected);
+                            let sequence = journal.get_stats().sequence;
+                            let again = writer.verify_and_commit_to_journal(&cx, request(journal, manifest)).await.unwrap();
+                            assert_eq!(again.publication, JournalPublication::NotAttempted);
+                            assert!(matches!(again.outcome, Outcome::Err(SparseWriterError::WriteFailed(_))));
+                            assert_eq!(again.journal.get_stats().sequence, sequence);
+                            assert_eq!(writer.commit(&cx).await.unwrap().unwrap(), path);
+                            assert_eq!(writer.admission.available_permits(), 1);
+                        });
+                        drained(&runtime);
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn terminal_records_bracket_real_publication_and_keep_other_transfers() {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let path = directory.path().join("destination");
+                let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::CopyAndVerify).await;
+                cx.scoped_fs().write(path.clone(), b"old".to_vec()).await.unwrap();
+                let mut journal = reopen(directory.path());
+                journal.append(JournalRecord::Cancellation {
+                    transfer_id: "other".to_owned(), reason: "unrelated".to_owned(),
+                    timestamp: 1, auth_tag: AuthenticationTag::zero(),
+                }).unwrap();
+                let observed = path.clone();
+                let mut calls = 0;
+                let report = writer.commit_to_journal_with(&cx, request(journal, manifest), move |journal, record| {
+                    let summary = journal.get_resume_summary("publication").unwrap();
+                    match &record {
+                        JournalRecord::CommitIntent { .. } => {
+                            assert_eq!(calls, 0);
+                            assert_eq!(summary.status, TransferResumeStatus::Resumable);
+                            assert_eq!(summary.durable_bytes, 4);
+                            assert_eq!(std::fs::read(&observed).unwrap(), b"old");
+                        }
+                        JournalRecord::CommitComplete { .. } => {
+                            assert_eq!(calls, 1);
+                            assert_eq!(summary.status, TransferResumeStatus::CommitIntentPending);
+                            assert_eq!(std::fs::read(&observed).unwrap(), b"data");
+                        }
+                        _ => panic!("unexpected terminal record"),
+                    }
+                    calls += 1;
+                    persist_terminal(journal, record)
+                }, |core| core.commit_with_fsync(File::sync_all)).await.unwrap();
+                assert_eq!(report.outcome.unwrap(), path);
+                assert!(matches!(report.journal.get_resume_summary("other").unwrap().status,
+                    TransferResumeStatus::Cancelled { reason } if reason == "unrelated"));
+            });
+            drained(&runtime);
+        }
+
+        #[test]
+        fn uncertain_terminal_receipts_never_erase_the_actual_publication() {
+            for completion in [false, true] {
+                for append_first in [false, true] {
+                    let directory = tempfile::tempdir().unwrap();
+                    let runtime = runtime(1);
+                    runtime.block_on(async {
+                        let cx = Cx::current().unwrap();
+                        let path = directory.path().join("destination");
+                        let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                        let report = writer.commit_to_journal_with(&cx, request(reopen(directory.path()), manifest),
+                            move |journal, record| {
+                                let is_completion = matches!(record, JournalRecord::CommitComplete { .. });
+                                if is_completion == completion {
+                                    if append_first { writer_value!(persist_terminal(journal, record)); }
+                                    // Deliberate missing-receipt injection around a real append,
+                                    // not a claim that the OS or AppendJournal returned this error.
+                                    return Outcome::Err(SparseWriterError::WriteFailed("terminal receipt unavailable".to_owned()));
+                                }
+                                persist_terminal(journal, record)
+                            }, |core| core.commit_with_fsync(File::sync_all)).await.unwrap();
+                        assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::WriteFailed(message))
+                            if message == "terminal receipt unavailable"));
+                        if completion {
+                            assert_eq!(report.publication, JournalPublication::Confirmed(path.clone()));
+                            assert_eq!(std::fs::read(&path).unwrap(), b"data");
+                            assert_eq!(writer.commit(&cx).await.unwrap().unwrap(), path);
+                        } else {
+                            assert_eq!(report.publication, JournalPublication::NotAttempted);
+                            assert!(!path.exists());
+                            assert_eq!(writer.writer.lock_state().lifecycle, WriterLifecycle::Committing);
+                            assert!(matches!(writer.commit(&cx).await, Ok(Outcome::Err(SparseWriterError::CommitFailed(_)))));
+                            assert!(matches!(writer.cancel(&cx).await, Ok(Outcome::Err(SparseWriterError::CommitFailed(_)))));
+                        }
+                        drop(report.journal);
+                        let status = reopen(directory.path()).get_resume_summary("publication").unwrap().status;
+                        if completion && append_first {
+                            assert!(matches!(status, TransferResumeStatus::Committed { committed_size: 4, .. }));
+                        } else if completion || append_first {
+                            assert_eq!(status, TransferResumeStatus::CommitIntentPending);
+                        } else {
+                            assert_eq!(status, TransferResumeStatus::Resumable);
+                        }
+                    });
+                    drained(&runtime);
+                }
+            }
+        }
+
+        #[test]
+        fn publication_failure_or_panic_keeps_intent_without_completion() {
+            for panics in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                    let result = writer.commit_to_journal_with(&cx, request(reopen(directory.path()), manifest),
+                        persist_terminal, move |core| core.commit_with_fsync(|_| {
+                            assert!(!panics, "journaled publication barrier panic");
+                            Err(io::Error::other("journaled publication barrier failed"))
+                        })).await;
+                    if panics {
+                        assert!(matches!(result, Err(ScopedFsError::Join(crate::runtime::JoinError::Panicked(_)))));
+                    } else {
+                        let report = result.unwrap();
+                        assert_eq!(report.publication, JournalPublication::Unconfirmed);
+                        assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::SyncFailed(message))
+                            if message == "journaled publication barrier failed"));
+                        drop(report.journal);
+                    }
+                    assert_eq!(reopen(directory.path()).get_resume_summary("publication").unwrap().status,
+                        TransferResumeStatus::CommitIntentPending);
+                    assert_eq!(writer.writer.lock_state().lifecycle, WriterLifecycle::Committing);
+                    assert!(!directory.path().join("destination").exists());
+                    assert_eq!(writer.admission.available_permits(), 1);
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn failed_authority_or_history_cannot_leave_old_verification_publishable() {
+            for case in 0..4 {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(1);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                    writer.verify(&cx, manifest.clone()).await.unwrap().unwrap();
+                    let mut input = request(reopen(directory.path()), manifest);
+                    match case {
+                        0 => input.expected_chunk_commitment = Some(ManifestChunkCommitment::new([0; 32])),
+                        1 => {
+                            let path = writer.writer.lock_state().temp_path.clone().unwrap();
+                            cx.scoped_fs().write(path, b"bad!".to_vec()).await.unwrap();
+                        }
+                        2 => input.checkpoint.limits.max_bytes = 3,
+                        3 => { input.checkpoint.journal.append(JournalRecord::Cancellation {
+                            transfer_id: "publication".to_owned(), reason: "stopped".to_owned(),
+                            timestamp: 1, auth_tag: AuthenticationTag::zero(),
+                        }).unwrap(); }
+                        _ => unreachable!(),
+                    }
+                    let sequence = input.checkpoint.journal.get_stats().sequence;
+                    let report = writer.verify_and_commit_to_journal(&cx, input).await.unwrap();
+                    assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(_))));
+                    assert_eq!(report.publication, JournalPublication::NotAttempted);
+                    assert_eq!(report.journal.get_stats().sequence, sequence);
+                    assert!(matches!(writer.commit(&cx).await, Ok(Outcome::Err(SparseWriterError::NotVerified))));
+                    assert!(!directory.path().join("destination").exists());
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn restored_writer_finishes_the_original_journal_without_resending_prefix() {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(2);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let object = Object::file(b"abcdefgh".to_vec());
+                let id = object.id.clone();
+                let mut graph = ObjectGraph::new();
+                graph.add_root(object).unwrap();
+                let manifest = Arc::new(Manifest::from_graph(&graph, MetadataPolicy::portable()).unwrap());
+                let writer = ScopedSparseWriter::new(&cx, id, directory.path().join("destination"),
+                    SparseWriterConfig { enable_preallocation: false, ..SparseWriterConfig::default() })
+                    .await.unwrap().unwrap();
+                writer.set_expected_size(&cx, 8).await.unwrap().unwrap();
+                writer.write_chunk(&cx, 0, b"abcd".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                let saved = writer.checkpoint_to_journal(&cx, request(reopen(directory.path()), manifest.clone()).checkpoint)
+                    .await.unwrap();
+                let source = saved.outcome.unwrap().source_path;
+                drop(saved.journal);
+                drop(writer);
+                let path = directory.path().join("restored");
+                let restored = ScopedSparseWriter::restore_from_storage(&cx, JournalRestoreRequest {
+                    journal_config: config(directory.path()), auth_key: AuthKey::from_seed(42),
+                    transfer_id: "publication".to_owned(), source_path: source.clone(), final_path: path.clone(),
+                    writer_config: SparseWriterConfig { enable_preallocation: false, ..SparseWriterConfig::default() },
+                    limits: JournalRestoreLimits { max_bytes: 64, max_chunks: 16, max_chunk_bytes: 8 },
+                }).await.unwrap().unwrap();
+                assert_eq!(restored.checked_receive_offset(&cx).await.unwrap().unwrap(), 4);
+                restored.write_chunk(&cx, 4, b"efgh".to_vec(), WriteOptions::default()).await.unwrap().unwrap();
+                let report = restored.verify_and_commit_to_journal(&cx, request(reopen(directory.path()), manifest)).await.unwrap();
+                assert_eq!(report.outcome.unwrap(), path);
+                assert_eq!(std::fs::read(path).unwrap(), b"abcdefgh");
+                assert_eq!(std::fs::read(source).unwrap(), b"abcd");
+                let entries = report.journal.get_transfer_entries("publication").unwrap();
+                assert_eq!(entries.iter().filter(|e| matches!(e.record, JournalRecord::ChunkWritten { .. })).count(), 2);
+                assert!(matches!(report.journal.get_resume_summary("publication").unwrap().status,
+                    TransferResumeStatus::Committed { committed_size: 8, .. }));
+            });
+            drained(&runtime);
+        }
+
+        #[test]
+        fn abandoned_commit_drains_intent_publication_and_completion_with_one_gate() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let path = directory.path().join("destination");
+                    let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                    let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                    let child = region.cx();
+                    let (started, mut start) = oneshot::channel();
+                    let (release, wait) = mpsc::channel();
+                    let mut committing = Box::pin(writer.commit_to_journal_with(&child,
+                        request(reopen(directory.path()), manifest), persist_terminal, move |core| {
+                            started.send_blocking(()).unwrap();
+                            wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                            core.commit_with_fsync(File::sync_all)
+                        }));
+                    poll_fn(|task| { assert!(committing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                    start.recv(&cx).await.unwrap();
+                    let mut competing = Box::pin(writer.set_expected_size(&cx, 8));
+                    poll_fn(|task| { assert!(competing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                    assert_eq!(writer.admission.telemetry_snapshot(0).waiter_count, 1);
+                    assert_eq!(crate::time::timeout(cx.now(), Duration::from_secs(3),
+                        cx.scoped_fs().run_io(|_| Ok(73))).await.unwrap().unwrap(), 73);
+                    drop(committing);
+                    let mut closing = Box::pin(region.close());
+                    poll_fn(|task| { assert!(closing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                    assert_eq!(writer.admission.available_permits(), 0);
+                    assert!(!path.exists());
+                    release.send(()).unwrap();
+                    closing.await.unwrap();
+                    assert!(matches!(competing.await, Ok(Outcome::Err(SparseWriterError::WriteFailed(_)))));
+                    assert_eq!(std::fs::read(path).unwrap(), b"data");
+                    assert!(matches!(reopen(directory.path()).get_resume_summary("publication").unwrap().status,
+                        TransferResumeStatus::Committed { committed_size: 4, .. }));
+                    assert_eq!(writer.admission.available_permits(), 1);
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn unpolled_precancelled_and_nondurable_commit_never_append_intent() {
+            fn assert_send<T: Send>(_: &T) {}
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                let pending = writer.verify_and_commit_to_journal(&cx, request(reopen(directory.path()), manifest.clone()));
+                assert_send(&pending);
+                drop(pending);
+                let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+                let child = region.cx();
+                child.cancel_with(CancelKind::User, Some("before journal commit"));
+                assert!(matches!(writer.verify_and_commit_to_journal(&child,
+                    request(reopen(directory.path()), manifest.clone())).await, Err(ScopedFsError::Checkpoint(_))));
+                region.close().await.unwrap();
+                let id = writer.writer.lock_state().object_id.clone();
+                let nondurable = ScopedSparseWriter::new(&cx, id, directory.path().join("nondurable"), SparseWriterConfig {
+                    enable_preallocation: false, fsync_policy: FsyncPolicy::Never, ..SparseWriterConfig::default()
+                }).await.unwrap().unwrap();
+                let report = nondurable.verify_and_commit_to_journal(&cx, request(reopen(directory.path()), manifest)).await.unwrap();
+                assert!(matches!(report.outcome, Outcome::Err(SparseWriterError::VerificationFailed(message))
+                    if message.contains("durability-enabled")));
+                assert_eq!(report.publication, JournalPublication::NotAttempted);
+                assert_eq!(report.journal.get_stats().sequence, 0);
+                assert!(nondurable.writer.lock_state().temp_file.is_none());
+                assert!(!directory.path().join("destination").exists());
+            });
+            drained(&runtime);
+        }
+    }
+}
 }
