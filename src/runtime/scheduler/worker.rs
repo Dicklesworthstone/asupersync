@@ -1013,6 +1013,8 @@ impl Wake for WorkStealingWaker {
 struct ParkerInner {
     notified: AtomicBool,
     waiting: AtomicUsize,
+    #[cfg(test)]
+    wait_committed: AtomicBool,
     mutex: Mutex<()>,
     cvar: Condvar,
 }
@@ -1040,6 +1042,8 @@ impl Parker {
             inner: Arc::new(ParkerInner {
                 notified: AtomicBool::new(false),
                 waiting: AtomicUsize::new(0),
+                #[cfg(test)]
+                wait_committed: AtomicBool::new(false),
                 mutex: Mutex::new(()),
                 cvar: Condvar::new(),
             }),
@@ -1049,47 +1053,43 @@ impl Parker {
     /// Parks the current thread until notified.
     #[inline]
     pub fn park(&self) {
-        if self
-            .inner
-            .notified
-            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-            .is_ok()
-        {
-            return;
-        }
+        self.park_unless(|| false);
+    }
 
-        crate::runtime::metrics::record_worker_park();
-        self.inner.waiting.fetch_add(1, Ordering::Release);
-        // br-asupersync-re7cz3: Dekker-style store-load barrier. The
-        // cross-atomic pair below — park's `waiting` store + `notified`
-        // load, vs unpark's `notified` store + `waiting` load — needs a
-        // total order to avoid both sides observing each other's pre-store
-        // state (lost wakeup). SeqCst fences on both sides participate in
-        // a single sequential consistency total order: AT LEAST ONE side
-        // observes the other's published store. Concretely: either unpark
-        // sees waiting >= 1 and signals the condvar, OR park's CAS check
-        // below sees notified == true and returns without sleeping.
-        std::sync::atomic::fence(Ordering::SeqCst);
-        let mut guard = self.lock_unpoisoned();
-        while self
-            .inner
-            .notified
-            .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            guard = self
-                .inner
-                .cvar
-                .wait(guard)
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        self.inner.waiting.fetch_sub(1, Ordering::Release);
-        drop(guard);
+    /// Parks with the usual permit semantics unless `ready` is true after
+    /// waiter publication. The predicate runs once, under the Parker mutex:
+    /// it must be a short readiness check that does not re-enter this Parker.
+    #[inline]
+    pub(crate) fn park_unless(&self, ready: impl FnOnce() -> bool) {
+        self.park_inner(None, ready);
     }
 
     /// Parks the current thread with a timeout.
     #[inline]
     pub fn park_timeout(&self, duration: Duration) {
+        self.park_timeout_unless(duration, || false);
+    }
+
+    /// Timed counterpart of `park_unless`. A follower's local deadline must
+    /// not let it miss a handoff while it is preparing a timed wait.
+    #[inline]
+    pub(crate) fn park_timeout_unless(&self, duration: Duration, ready: impl FnOnce() -> bool) {
+        self.park_inner(Some(duration), ready);
+    }
+
+    #[inline]
+    fn park_inner(&self, duration: Option<Duration>, ready: impl FnOnce() -> bool) {
+        // Declared after the mutex guard below, so even a panicking predicate
+        // withdraws its waiter before that mutex is released (ppdgkg).
+        struct WaitingCount<'a>(&'a ParkerInner);
+        impl Drop for WaitingCount<'_> {
+            fn drop(&mut self) {
+                #[cfg(test)]
+                self.0.wait_committed.store(false, Ordering::Release);
+                self.0.waiting.fetch_sub(1, Ordering::Release);
+            }
+        }
+
         if self
             .inner
             .notified
@@ -1099,7 +1099,7 @@ impl Parker {
             return;
         }
 
-        if duration.is_zero() {
+        if duration.is_some_and(|duration| duration.is_zero()) {
             // Preserve best-effort permit consumption if an unpark races
             // immediately after the initial fast-path check.
             let _ = self.inner.notified.compare_exchange(
@@ -1113,21 +1113,46 @@ impl Parker {
 
         crate::runtime::metrics::record_worker_park();
         self.inner.waiting.fetch_add(1, Ordering::Release);
-        // br-asupersync-re7cz3: see fence comment in park(). Same
-        // Dekker-style pairing required here so park_timeout doesn't
-        // race with unpark and miss the wake-up.
+        // br-asupersync-re7cz3: pair waiter publication with unpark's permit
+        // publication. Also pair with promote_follower's post-release fence:
+        // either the leader sees this waiter or ready() sees its released
+        // poll flag. Acquire/Release on distinct atomics alone is not enough.
         std::sync::atomic::fence(Ordering::SeqCst);
-        let (guard, _timeout) = self
-            .inner
-            .cvar
-            .wait_timeout_while(self.lock_unpoisoned(), duration, |()| {
-                self.inner
-                    .notified
-                    .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
-                    .is_err()
-            })
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.inner.waiting.fetch_sub(1, Ordering::Release);
+        let mut guard = self.lock_unpoisoned();
+        let waiting = WaitingCount(&self.inner);
+        if ready() {
+            return;
+        }
+        #[cfg(test)]
+        self.inner.wait_committed.store(true, Ordering::Release);
+
+        if let Some(duration) = duration {
+            let (returned_guard, _timeout) = self
+                .inner
+                .cvar
+                .wait_timeout_while(guard, duration, |()| {
+                    self.inner
+                        .notified
+                        .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+                        .is_err()
+                })
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard = returned_guard;
+        } else {
+            while self
+                .inner
+                .notified
+                .compare_exchange(true, false, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                guard = self
+                    .inner
+                    .cvar
+                    .wait(guard)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+        }
+        drop(waiting);
         drop(guard);
     }
 
@@ -1208,6 +1233,14 @@ impl Parker {
         true
     }
 
+    /// The waiter finished its readiness check. With no pending permit this
+    /// witnesses the condvar handoff boundary, not just waiter publication.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn wait_committed_for_test(&self) -> bool {
+        self.inner.wait_committed.load(Ordering::Acquire)
+    }
+
     #[cfg(test)]
     #[must_use]
     pub(crate) fn notification_pending_for_test(&self) -> bool {
@@ -1226,6 +1259,10 @@ impl Default for Parker {
         Self::new()
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "parker_handoff_tests.rs"]
+mod parker_handoff_tests;
 
 #[cfg(test)]
 mod tests {
