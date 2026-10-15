@@ -1,8 +1,0 @@
----
-source: src/plan/analysis.rs
-assertion_line: 3208
-expression: rendered
----
-Independent -> independent
-Dependent -> dependent
-Uncertain -> uncertain

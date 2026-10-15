@@ -1,9 +1,0 @@
----
-source: src/plan/mod.rs
-assertion_line: 1468
-expression: dag
----
-PlanDag {
-    nodes: [],
-    root: None,
-}

@@ -1,7 +1,0 @@
----
-source: tests/plan_analysis_display_goldens.rs
-expression: rendered
----
-Independent -> independent
-Dependent -> dependent
-Uncertain -> uncertain

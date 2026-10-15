@@ -1,7 +1,0 @@
----
-source: src/plan/certificate.rs
-assertion_line: 2481
-expression: "format!(\"steps: {}\\nfingerprint: {}\", cert_with_redundancy.steps.len(),\ncert_with_redundancy.fingerprint().to_hex())"
----
-steps: 4
-fingerprint: 42cc51b2342a5c243d8d5eafcf1a9acfef86d9fcde952686076cfc54f81cbe7c

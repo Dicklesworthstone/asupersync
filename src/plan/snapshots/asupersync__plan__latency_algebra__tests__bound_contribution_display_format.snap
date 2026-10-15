@@ -1,6 +1,0 @@
----
-source: src/plan/latency_algebra.rs
-assertion_line: 2296
-expression: "format!(\"{contribution}\")"
----
-node[42]: 0.123457s — pipeline stage with high latency

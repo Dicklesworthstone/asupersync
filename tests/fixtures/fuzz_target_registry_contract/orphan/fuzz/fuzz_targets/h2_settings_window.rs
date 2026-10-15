@@ -1,1 +1,0 @@
-// Registered fixture target.

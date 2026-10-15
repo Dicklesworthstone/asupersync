@@ -3822,6 +3822,7 @@ pub async fn send_path_with_options(
         });
     }
     let delta_request: DeltaObjectRequest = parse_json(&request_frame)?;
+    sender_validation::validate_request(&manifest, &delta_request)?;
 
     // Bulk data, entry by entry — second streaming pass. For a delta request,
     // only receiver-missing chunks are re-read and framed. Otherwise this is the
@@ -3892,14 +3893,7 @@ pub async fn send_path_with_options(
     )
     .await;
 
-    if !receipt.committed {
-        return Err(TransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
+    sender_validation::validate_receipt(&manifest, bytes_sent, &receipt)?;
 
     Ok(SendReport {
         transfer_id,
@@ -3912,6 +3906,8 @@ pub async fn send_path_with_options(
         peer,
     })
 }
+
+mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
     let mut hasher = Sha256::new();

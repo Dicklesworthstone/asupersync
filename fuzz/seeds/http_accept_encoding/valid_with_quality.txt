@@ -1,1 +1,0 @@
-gzip;q=1.0, deflate;q=0.5, *;q=0

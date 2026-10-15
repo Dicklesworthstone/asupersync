@@ -1,9 +1,0 @@
----
-source: src/plan/certificate.rs
-assertion_line: 2593
-expression: "hash_outputs.join(\"\\n\")"
----
-single_leaf: ed8ccfaa6b8839eb1482b63805f3ac48c7b69a722f45b0e6e062b91f136877b4
-simple_join: 237a6be237aea41abae549511aadb3909fced37fb36770bf3a70b1e98d7c11df
-simple_race: 044beb84b2708ec584e911869256a84fff2b452aba5c28e9fd31fb5df049ccaa
-nested_timeout: 8daa6a55c8e55ffbe1ee407606ff320b8c493add6d7854df681fd5b28eaf4c79

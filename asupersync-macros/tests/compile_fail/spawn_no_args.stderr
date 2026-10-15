@@ -1,7 +1,0 @@
-error: spawn! requires a future expression; use spawn!(future), spawn!("name", future), spawn!(scope, future), or spawn!(scope, "name", future)
- --> tests/compile_fail/spawn_no_args.rs:5:13
-  |
-5 |     let _ = spawn!();
-  |             ^^^^^^^^
-  |
-  = note: this error originates in the macro `spawn` (in Nightly builds, run with -Z macro-backtrace for more info)

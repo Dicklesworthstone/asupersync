@@ -1,3 +1,0 @@
-[RCH] local (no healthy remote worker available): cargo test --test proof_runner_contract -- --nocapture
-running 22 tests
-test result: ok. 22 passed; 0 failed

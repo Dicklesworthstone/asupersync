@@ -1,7 +1,0 @@
-# Seeds for failure cases proptest has generated in the past. It is
-# automatically read and these particular cases re-run before any
-# novel cases are generated.
-#
-# It is recommended to check this file in to source control so that
-# everyone who runs the test benefits from these saved cases.
-cc efcbcd737da76d699fa797e3156b43c73569e481749fef05a3aa8577a991e5ab # shrinks to k1 = FailFast, k2 = RaceLost

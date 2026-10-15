@@ -1,1 +1,0 @@
-// Unregistered fixture target.

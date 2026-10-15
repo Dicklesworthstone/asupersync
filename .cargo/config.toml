@@ -1,3 +1,0 @@
-# Parallel rustc front-end (nightly). Added by build-settings sweep.
-[build]
-rustflags = ["-Z", "threads=4"]

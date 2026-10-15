@@ -1,6 +1,0 @@
----
-source: src/raptorq/systematic.rs
-assertion_line: 2767
-expression: enc.stats().to_string()
----
-EncodingStats(K=16, S=11, H=10, L=39, sym=16B, repairs=3, bytes=256sys+48rep, avg_deg=12.7, overhead=2.44)

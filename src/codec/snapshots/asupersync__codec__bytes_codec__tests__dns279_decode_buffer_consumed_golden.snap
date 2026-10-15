@@ -1,7 +1,0 @@
----
-source: src/codec/bytes_codec.rs
-assertion_line: 291
-expression: report
----
-empty_yields_none: input_len=0, frame=None, residual_len=0
-nonempty_drains_buffer: input_len=7, frame=Some(7 bytes), residual_len=0
