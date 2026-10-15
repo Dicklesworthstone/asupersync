@@ -285,7 +285,11 @@ async fn keep_peer_alive_while<T>(
                 // Keep trying at every tick: a transient failure must not
                 // silence the receiver for the rest of the step. The last
                 // failure is still reported once the step has finished.
-                if let Err(failure) = emit_keep_alive(cx, link, control).await {
+                // The emission is boxed behind `dyn Future + Send` (one
+                // allocation per tick) so the Send proof of every caller
+                // stops here instead of nesting through the flush
+                // (br-asupersync-c2unfu).
+                if let Err(failure) = erase_send(emit_keep_alive(cx, link, control)).await {
                     quic_rqtrace!("receiver: keep_alive_failed error={failure:?}");
                     keep_alive_failure = Some(failure);
                 }
@@ -3925,7 +3929,19 @@ impl QuicLink {
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
+    ///
+    /// The work is boxed behind `dyn Future + Send` (one allocation per
+    /// flush), so a caller's Send proof stops here instead of nesting through
+    /// the packet build and send. The same holds for `pump_inbound_for` and
+    /// `retransmit_stream_frames`: proving a session Send through them
+    /// overflowed rustc's default recursion depth in builds of bin atp
+    /// (br-asupersync-c2unfu).
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
+        erase_send(self.flush_inner(cx)).await
+    }
+
+    /// The body of [`Self::flush`].
+    async fn flush_inner(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
         struct PlainOneRttPacket {
             packet_number: u64,
             header: [u8; ONE_RTT_HEADER_LEN],
@@ -5080,7 +5096,18 @@ impl QuicLink {
         self.pending_fountain_feedback_count() > 0
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn retransmit_stream_frames(
+        &mut self,
+        cx: &Cx,
+        frames: &[SentControlStreamFrame],
+        reason: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.retransmit_stream_frames_inner(cx, frames, reason)).await
+    }
+
+    /// The body of [`Self::retransmit_stream_frames`].
+    async fn retransmit_stream_frames_inner(
         &mut self,
         cx: &Cx,
         frames: &[SentControlStreamFrame],
@@ -5520,7 +5547,19 @@ impl QuicLink {
         Ok(())
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn pump_inbound_for_with_drain_budget(
+        &mut self,
+        cx: &Cx,
+        timeout: Duration,
+        max_drain_batches: usize,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.pump_inbound_for_with_drain_budget_inner(cx, timeout, max_drain_batches))
+            .await
+    }
+
+    /// The body of [`Self::pump_inbound_for_with_drain_budget`].
+    async fn pump_inbound_for_with_drain_budget_inner(
         &mut self,
         cx: &Cx,
         timeout: Duration,
@@ -8315,7 +8354,16 @@ async fn wait_source_stream_send_admission(
         }
         if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
             pending_stall = classify_source_stream_admission(true, true, true);
-            drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+            // Boxed (one allocation per admission stall) so the sender's
+            // Send proof stops here instead of nesting through the flush and
+            // its retransmits (br-asupersync-c2unfu).
+            erase_send(drive_native_source_stream_flush(
+                cx,
+                link,
+                config.idle_timeout,
+                false,
+            ))
+            .await?;
             check_source_stream_control(cx, link, control, early).await?;
             continue;
         }
@@ -9087,7 +9135,9 @@ async fn run_sender_session(
             // A control frame read while the stream was still queueing, other
             // than a refusal, which ends the send at once.
             let mut early_control: Option<Frame> = None;
-            let bytes_streamed = send_native_source_stream_entries_pumped(
+            // Boxed (one allocation per transfer), as the receiver's
+            // source-stream receive is (br-asupersync-c2unfu).
+            let bytes_streamed = erase_send(send_native_source_stream_entries_pumped(
                 cx,
                 link,
                 &mut control,
@@ -9097,7 +9147,7 @@ async fn run_sender_session(
                 config,
                 chunk_codec.as_ref(),
                 options,
-            )
+            ))
             .await?;
             if bytes_streamed != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
@@ -10988,9 +11038,10 @@ async fn receive_native_source_stream_entries_pumped(
     chunk_codec: Option<&CodecAccept>,
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
     if let Some(accept) = chunk_codec {
-        return receive_compressed_source_stream_entries(
+        // Boxed, as its caller is (br-asupersync-c2unfu).
+        return erase_send(receive_compressed_source_stream_entries(
             cx, link, stream, manifest, staged, config, accept,
-        )
+        ))
         .await;
     }
     let mut received = 0u64;
@@ -11727,8 +11778,11 @@ async fn run_receiver_session(
                     source_stream.0
                 )));
             }
+            // Boxed (one allocation per transfer) so the session's Send proof
+            // does not nest through the source-stream receive and its flushes
+            // (br-asupersync-c2unfu).
             let (bytes_received, symbols_accepted, decode_stats) =
-                receive_native_source_stream_entries_pumped(
+                erase_send(receive_native_source_stream_entries_pumped(
                     cx,
                     link,
                     source_stream,
@@ -11736,7 +11790,7 @@ async fn run_receiver_session(
                     &mut staged,
                     config,
                     chunk_codec.as_ref(),
-                )
+                ))
                 .await?;
             quic_rqtrace!(
                 "receiver: native_source_stream received bytes={} stream={} symbols_accepted={} decode_count={}",
@@ -11745,7 +11799,9 @@ async fn run_receiver_session(
                 symbols_accepted,
                 decode_stats.decode_count
             );
-            let (mut receipt, committed_paths) = commit_staged_entries(
+            // Boxed (one allocation per transfer), as at the symbol-round
+            // commit below (br-asupersync-c2unfu).
+            let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
                 cx,
                 link,
                 &mut control,
@@ -11754,7 +11810,7 @@ async fn run_receiver_session(
                 &mut staged,
                 config,
                 options,
-            )
+            ))
             .await?;
             receipt.symbols_accepted = symbols_accepted;
             receipt.feedback_rounds = 0;
@@ -12254,7 +12310,12 @@ async fn run_receiver_session(
         intake_stats.trace_summary(cx, manifest.transfer_id.as_str());
         send_native_keep_alive(cx, &mut link.conn, &mut control)?;
         link.flush(cx).await?;
-        let (mut receipt, committed_paths) = commit_staged_entries(
+        // The commit is boxed behind `dyn Future + Send` (one allocation per
+        // transfer): proving run_receiver_session Send through the commit,
+        // keep-alive and flush chain overflowed rustc's default recursion
+        // depth in a build of bin atp (recursion_depth_exceeding_limit,
+        // br-asupersync-c2unfu; the same cut as br-asupersync-lf8muy).
+        let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
             cx,
             link,
             &mut control,
@@ -12263,7 +12324,7 @@ async fn run_receiver_session(
             &mut staged,
             config,
             options,
-        )
+        ))
         .await?;
         receipt.symbols_accepted = symbols_accepted;
         receipt.feedback_rounds = feedback_rounds;
