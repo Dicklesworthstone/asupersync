@@ -91,3 +91,85 @@ production. Four additional authored tests cover path-based startup and shared
 finalization on both schedulers, refusals before source opening, missing storage,
 capability/cancellation refusal and lazy Send ownership. These tests are also
 uncompiled and unexecuted in this environment.
+
+## Automatic checkpoints for a known-manifest live receiver
+
+`native_auth::live::commit::ManifestFileSink::new_journaled` connects the existing
+live TLS receiver to the checkpoint producer and journaled finalizer. The ordinary
+`ManifestFileSink::new` remains unjournaled. Neither constructor changes the wire,
+TLS authorization, legacy flush-only receiver behavior, or CLI configuration.
+
+Provision an `AppendJournal` with the trusted key and exclusive directory ownership,
+then pass it in `ManifestFileJournalConfig` with a previously unused transfer ID and
+an application timestamp. Construct the sink with a durability-enabled writer policy
+and a lossless UTF-8 destination. Manifest byte and receipt ceilings also bound the
+checkpoint/restore inputs; write buffers remain capped at 64 KiB.
+
+```rust
+let mut sink = ManifestFileSink::new_journaled(
+    &cx,
+    expected_file,
+    ManifestFileJournalConfig { journal, transfer_id, timestamp },
+).await?;
+let initial = sink.journal_checkpoint().expect("initial checkpoint").clone();
+// Persist initial.source_path, the transfer ID, trusted key reference and expected
+// manifest in an application-owned recovery catalog before exposing the listener.
+let report = listener.receive_committing(&cx, &mut sink).await;
+let retirement = sink.drain_pending(&cx).await;
+let publication = sink.journal_publication().cloned();
+let retained_journal = sink.release_journal()?;
+// Inspect report.outcome, retirement and publication separately. Never turn a
+// failed peer exchange or completion record into permission to publish again.
+```
+
+The constructor persists an initial empty checkpoint before returning. Its staging
+path is therefore available for cataloging before reception, including for an empty
+file. Each subsequent `flush` rehashes/synchronizes actual staging and persists its
+missing progress records through `checkpoint_to_journal`; the live receiver cannot
+ACK that epoch before the flush completes. Repeated unchanged flushes add no records.
+A write receipt or synchronized prefix alone is not final content authorization.
+
+Final commit validates the live receipt and calls `verify_and_commit_to_journal`:
+fresh manifest authentication, durable checkpoint, synchronized CommitIntent,
+canonical publication, then synchronized CommitComplete. A missing completion result
+withholds final Proof even when the publisher actually succeeded. `published_path`
+and `journal_publication` retain a Confirmed publisher observation independently of
+that persistence error. `ManifestFileJournalError` also retains that observation in
+the I/O error source chain when an owned receiver drops its sink before returning
+its report. None is not proof of rollback. Backend errors stay in the
+existing I/O error chain; failed operations are not retried through an unjournaled
+fallback. Ordinary domain failures restore journal ownership inside the sink.
+
+A dropped borrowing wait retains its pending journal job. `drain_pending` drives
+only that retained operation, using its captured context; it never starts a fresh
+flush or commit. `release_journal` requires a quiescent, available owner and permanently
+seals the sink against all further writes, flushes and commits. An outer gateway
+error or abandoned result may lose the owner; reopen retained storage after region
+drain. Late cancellation does not preempt publication. Journaled `cancel` deliberately
+refuses staging deletion: no durable cancellation-record/cleanup protocol is added.
+Drop/ownership handoff retain files for explicit recovery, not implicit rollback.
+
+The initial path mapping is sufficient to select the payload when reopening the
+latest journal; progress comes from authenticated current records, not that initial
+zero-byte summary. `restore_from_storage` rechecks actual bytes and produces a normal
+writer for separately authorized suffix reception. This does NOT recover the live
+connection's nonce, epoch chain, retry budget, or final peer-Proof exchange. Do not
+present these payload records as a complete `atp-live-resume` session checkpoint.
+Automatic daemon adoption, trusted catalog persistence, and unresolved-commit
+reconciliation remain application responsibilities.
+
+Every checkpoint currently rereads all retained payload and inspects journal history.
+Many small flushes can therefore incur quadratic local I/O; this is not a throughput
+optimization or a total-memory bound. Existing publication policy, external mutation,
+path-race, non-Unix directory-sync, and storage-device durability limits still apply.
+Journal files contain sensitive metadata and must remain in trusted storage.
+
+Nine additional Rust tests are authored for prefix/terminal record ordering on both
+native scheduler flavors and all publication policies, physical prefix restoration,
+preflight/cancellation refusal, dropped checkpoint waits, handoff fencing, real journal
+storage failure, independent publication reporting, and real TCP/mTLS backpressure.
+The completion-error observation test deliberately faults the adapter report after
+real publication; it is not a power-loss or failed-storage simulation. Rust, Cargo,
+rustfmt and RCH are unavailable in the authoring environment, so these tests have not
+been compiled or executed. Source preservation and delimiter checks are not native
+runtime, downstream compatibility, performance, or release-readiness evidence.
