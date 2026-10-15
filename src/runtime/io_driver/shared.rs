@@ -9,7 +9,8 @@
 //! flag). A scheduler follower assumes its own timer wheel is driven by that
 //! leader, which is false for another runtime. A shared physical poll gate
 //! serializes backend polls; another group's turn waits only within its own
-//! timeout instead of returning the local-follower `None` result.
+//! timeout instead of returning the local-follower `None` result. Its own
+//! wake can interrupt that gate wait without waiting for the other runtime.
 
 // This split implementation shares its parent module's private driver and
 // reactor machinery as one unit (as otel/queued.rs and transport_rq/bonded.rs
@@ -18,6 +19,10 @@
 use super::*;
 use parking_lot::Condvar;
 use std::sync::OnceLock;
+
+#[path = "poll_gate.rs"]
+mod poll_gate;
+use poll_gate::PollGate;
 
 static REACTORS: OnceLock<Mutex<Vec<Arc<ReactorSlot>>>> = OnceLock::new();
 
@@ -41,7 +46,7 @@ pub(super) struct DriverOwner {
     inner: Arc<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
     capabilities: IoReactorCapabilitySnapshot,
-    poll_gate: Arc<Mutex<()>>,
+    poll_gate: Arc<PollGate>,
     events_capacity: usize,
     slot: Arc<ReactorSlot>,
 }
@@ -85,7 +90,7 @@ pub(super) fn handle(reactor: Arc<dyn Reactor>, capacity: Option<usize>) -> IoDr
                         inner: Arc::new(Mutex::new(driver)),
                         reactor: reactor.clone(),
                         capabilities,
-                        poll_gate: Arc::new(Mutex::new(())),
+                        poll_gate: Arc::new(PollGate::default()),
                         events_capacity,
                         slot: Arc::clone(&slot),
                     });
@@ -126,7 +131,7 @@ pub(super) fn handle(reactor: Arc<dyn Reactor>, capacity: Option<usize>) -> IoDr
 struct ParticipantReactor {
     backend: Arc<dyn Reactor>,
     driver: Weak<Mutex<IoDriver>>,
-    poll_gate: Arc<Mutex<()>>,
+    poll_gate: Arc<PollGate>,
     events_capacity: usize,
     // A peer can consume the physical eventfd/pipe wake while this participant
     // waits for the poll gate. Retain the logical wake until our own turn.
@@ -152,24 +157,10 @@ impl Reactor for ParticipantReactor {
 
     fn poll(&self, events: &mut Events, timeout: Option<Duration>) -> io::Result<usize> {
         events.clear();
-        let (poll_guard, timeout) = if let Some(guard) = self.poll_gate.try_lock() {
-            (guard, timeout)
-        } else {
-            // Browser turns must never block. Native contenders spend only
-            // their own timeout, not the current poller's possibly longer one.
-            #[cfg(target_arch = "wasm32")]
+        let Some((poll_guard, timeout)) = self.poll_gate.acquire(&self.woken, timeout) else {
+            // This participant's own wake/budget ended its wait. Report a
+            // completed empty turn, not the scheduler's local-follower result.
             return Ok(0);
-            #[cfg(not(target_arch = "wasm32"))]
-            match timeout {
-                Some(timeout) => {
-                    let start = std::time::Instant::now();
-                    let Some(guard) = self.poll_gate.try_lock_for(timeout) else {
-                        return Ok(0);
-                    };
-                    (guard, Some(timeout.saturating_sub(start.elapsed())))
-                }
-                None => (self.poll_gate.lock(), None),
-            }
         };
 
         // A preceding poll can release its ring before its driver extraction
@@ -198,6 +189,8 @@ impl Reactor for ParticipantReactor {
 
     fn wake(&self) -> io::Result<()> {
         self.woken.store(true, Ordering::Release);
+        // Notify the gate before user/backend code, including a failed wake.
+        self.poll_gate.interrupt_waiters();
         self.backend.wake()
     }
 
