@@ -149,3 +149,134 @@ impl<R> ScopedReceive<R> {
         Poll::Ready(result)
     }
 }
+
+/// Exact-length reception with automatic durable checkpoints and journaled commit.
+///
+/// The existing journaled finalizer supplies the trusted manifest, optional pin,
+/// sole journal owner, restoration limits and caller-selected timestamp. Receive
+/// byte/receipt limits are additionally narrowed by those restoration limits.
+/// The timestamp is reused; ordering uses journal sequences, not wall-clock time.
+pub struct JournalReceiveRequest {
+    /// Authority, journal ownership and limits used by every checkpoint and commit.
+    pub commit: super::JournalCommitRequest,
+    /// Source chunking and total receive limits, including a retained prefix.
+    pub options: ScopedReceiveOptions,
+    /// Nonzero newly written byte interval between checkpoints. Checkpoints occur
+    /// at chunk boundaries, so the interval may be exceeded by less than a chunk.
+    /// The initial prefix and final complete body are always checkpointed.
+    pub checkpoint_bytes: u64,
+    /// None requires a fresh writer; Some requires the same checked contiguous
+    /// prefix as `resume_exact_at`. The source must already start at that offset.
+    /// No seek, skip, reconnect, or offset negotiation is performed implicitly.
+    pub resume_offset: Option<u64>,
+}
+
+/// Actual receive result and independently retained journal/publication evidence.
+///
+/// A failed read/write/checkpoint does not roll back earlier staging or records.
+/// A successful outcome requires verified publication AND synchronized completion.
+pub struct JournalReceiveReport {
+    /// Original owner returned even after ordinary source or domain failure.
+    /// None means a gateway failure lost the submitted owner, including admission
+    /// refusal: reopen storage rather than guessing which records reached disk.
+    pub journal: Option<super::AppendJournal>,
+    /// None means finalization's gateway did not return its observation. It must
+    /// never be interpreted as NotAttempted. A Confirmed publication survives a
+    /// completion-record error, independently of the receive outcome below.
+    pub publication: Option<super::JournalPublication>,
+    /// Source/gateway failures and the canonical writer's Outcome remain distinct.
+    pub outcome: ScopedReceiveResult<PathBuf>,
+}
+
+pub(super) type JournalCheckpointSlot =
+    Arc<parking_lot::Mutex<Option<Arc<super::JournalCheckpoint>>>>;
+pub(super) type JournalReceiveWork<R> = Pin<
+    Box<dyn Future<Output = (Option<R>, JournalReceiveReport)> + Send>,
+>;
+
+/// Receive owner that retains journal work across dropped borrowing waits.
+///
+/// This uses the same source/chunk/write driver as ScopedReceive. One writer
+/// admission slot spans initial checkpoint, source reads, periodic checkpoints,
+/// and finalization. Each checkpoint finishes before the next source poll.
+/// Running work keeps the journal and permit through region drain, including
+/// when this session is dropped. Dropping the session is not rollback or cleanup.
+///
+/// Keep driving the session or drop it before awaiting another writer clone.
+/// The snapshot accessor below never takes the writer/journal locks; its short
+/// metadata lock is never held across disk work or destruction of old snapshots.
+/// Persist the initial snapshot's source path in the application's trusted
+/// recovery catalog: this type does not install a persistent path catalog.
+#[must_use = "journaled receive sessions do nothing until their wait is polled"]
+pub struct ScopedJournalReceive<R> {
+    pub(super) work: Option<JournalReceiveWork<R>>,
+    pub(super) source: Option<R>,
+    pub(super) accepted: Arc<AtomicU64>,
+    pub(super) checkpoint: JournalCheckpointSlot,
+    pub(super) poisoned: bool,
+}
+
+impl<R> std::fmt::Debug for ScopedJournalReceive<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedJournalReceive")
+            .field("accepted_bytes", &self.accepted_bytes())
+            .field("finished", &self.work.is_none())
+            .field("poisoned", &self.poisoned)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<R> ScopedJournalReceive<R> {
+    /// Actual successful writes observed by the receive driver, including bytes
+    /// whose subsequent checkpoint failed. Not a durable or publication receipt.
+    #[must_use]
+    pub fn accepted_bytes(&self) -> u64 {
+        self.accepted.load(Ordering::Relaxed)
+    }
+
+    /// Latest fully synchronized local checkpoint from this invocation.
+    ///
+    /// None includes preflight refusal and an unconfirmed first checkpoint.
+    /// A retained snapshot remains historical: later writes, explicit cleanup
+    /// or publication can change the source path. It never grants permission to
+    /// resume after a commit intent. Always reopen/authenticate current history.
+    /// This clones only an Arc, not the receipt table. Retaining many snapshots
+    /// is a caller-controlled memory cost outside the payload-buffer limit.
+    #[must_use]
+    pub fn last_checkpoint(&self) -> Option<Arc<super::JournalCheckpoint>> {
+        self.checkpoint.lock().clone()
+    }
+
+    /// Return the source once, only after verified, journal-confirmed publication.
+    /// Following protocol bytes remain unread. Failure never returns a source
+    /// with an ambiguous body cursor for accidental reuse.
+    pub fn take_source(&mut self) -> Option<R> {
+        self.source.take()
+    }
+
+    /// Drive the same operation and consume its report once.
+    /// Dropping this wait alone does not cancel its retained source or disk job.
+    /// Consumed/poisoned session errors are outside the report; ordinary transfer
+    /// failures return a report so journal ownership and evidence are not lost.
+    pub async fn wait(&mut self) -> Result<JournalReceiveReport, ScopedReceiveError> {
+        poll_fn(|task| {
+            if self.poisoned {
+                return Poll::Ready(Err(ScopedReceiveError::Poisoned));
+            }
+            let Some(work) = self.work.as_mut() else {
+                return Poll::Ready(Err(ScopedReceiveError::Completed));
+            };
+            self.poisoned = true;
+            let result = work.as_mut().poll(task);
+            self.poisoned = false;
+            let Poll::Ready((source, report)) = result else {
+                return Poll::Pending;
+            };
+            let retired = self.work.take();
+            self.source = source;
+            // Publish terminal ownership before dropping arbitrary captures.
+            drop(retired);
+            Poll::Ready(Ok(report))
+        }).await
+    }
+}

@@ -14,6 +14,23 @@ struct RestorePlan {
     chunks: Vec<TransferResumeChunk>,
 }
 
+// Synchronous composition points for the receive driver's already-owned job.
+// They never reserve another permit or submit a nested blocking operation.
+pub(super) fn checkpoint_receive(
+    writer: &SparseWriter,
+    request: &mut crate::atp::journal::JournalCheckpointRequest,
+) -> Outcome<crate::atp::journal::JournalCheckpoint, SparseWriterError> {
+    checkpoint::receive_checkpoint(writer, request)
+}
+
+pub(super) fn finalize_receive(
+    writer: &SparseWriter,
+    request: &mut crate::atp::journal::JournalCommitRequest,
+    publication: &mut crate::atp::journal::JournalPublication,
+) -> Outcome<PathBuf, SparseWriterError> {
+    checkpoint::receive_finalization(writer, request, publication)
+}
+
 impl ScopedSparseWriter {
     /// Reopen journal and payload paths inside the same owned restore job.
     ///
@@ -423,6 +440,29 @@ fn invalid(message: impl Into<String>) -> SparseWriterError {
 
 fn journal_error(error: JournalError) -> SparseWriterError {
     SparseWriterError::WriteFailed(format!("checkpoint journal: {error}"))
+}
+
+pub(super) fn receive_checkpoint(
+    writer: &SparseWriter,
+    request: &mut JournalCheckpointRequest,
+) -> Outcome<JournalCheckpoint, SparseWriterError> {
+    checkpoint_writer(
+        writer,
+        &mut request.journal,
+        &request.transfer_id,
+        &request.manifest,
+        request.limits,
+        request.timestamp,
+        sync_staging,
+    )
+}
+
+pub(super) fn receive_finalization(
+    writer: &SparseWriter,
+    request: &mut crate::atp::journal::JournalCommitRequest,
+    publication: &mut crate::atp::journal::JournalPublication,
+) -> Outcome<std::path::PathBuf, SparseWriterError> {
+    finalization::receive_commit(writer, request, publication)
 }
 
 fn sync_staging(file: &File, path: &Path) -> io::Result<()> {
@@ -946,6 +986,16 @@ mod finalization {
     use std::fs::File;
     use std::path::PathBuf;
     use std::sync::Arc;
+
+    pub(super) fn receive_commit(
+        writer: &SparseWriter,
+        request: &mut JournalCommitRequest,
+        publication: &mut JournalPublication,
+    ) -> Outcome<PathBuf, SparseWriterError> {
+        commit_writer(writer, request, publication, persist_terminal, |writer| {
+            writer.commit_with_fsync(File::sync_all)
+        })
+    }
 
     macro_rules! writer_value {
         ($expression:expr) => {
