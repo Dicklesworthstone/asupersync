@@ -1415,7 +1415,7 @@ mod manifest_sink {
                 let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
                 let child = region.cx();
                 child.cancel_with(crate::types::CancelKind::User, Some("before journaled sink"));
-                assert!(ManifestFileSink::new_journaled(&child, config, journal_input(directory.path())).await.is_err());
+                assert!(ManifestFileSink::new_journaled(child, config, journal_input(directory.path())).await.is_err());
                 assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
                 assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
                 region.close().await.unwrap();

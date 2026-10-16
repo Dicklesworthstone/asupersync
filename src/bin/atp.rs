@@ -1005,6 +1005,7 @@ fn rq_receive_options(
         .with_sparse_files(sparse_files)
 }
 
+#[cfg(test)]
 fn rq_config(
     max_bytes: u64,
     symbol_size: u16,
@@ -3085,6 +3086,7 @@ async fn derive_bond_transfer_descriptor(
 /// environment, so the id is a truncated SHA-256 fingerprint of the raw key
 /// bytes — never the key itself (descriptors and assignments may be logged or
 /// serialized for coordination).
+#[cfg(test)]
 fn bond_auth_key_id(
     explicit_key_hex: Option<&str>,
     allow_unauthenticated_lab: bool,
