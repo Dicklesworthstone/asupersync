@@ -13869,5 +13869,5 @@ fn write_cli_error(err: &CliError, format: OutputFormat, color: ColorChoice) -> 
 }
 
 #[cfg(test)]
-#[path = "asupersync_inline_tests.rs"]
+#[path = "inline_tests/asupersync_inline_tests.rs"]
 mod tests;
