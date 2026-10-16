@@ -1685,11 +1685,6 @@ fn production_path() {
         ("bin/io_cap_budget_profile.rs", 1, "joined"),
         ("cx/scoped_cpu.rs", 1, "thread::scope joins"),
         ("database/mysql.rs", 1, "KILL-on-drop thread reaped"),
-        (
-            "net/quic_native/handshake_driver.rs",
-            1,
-            "test peer thread, joined: its `pub(crate) mod tests` reads as non-test here",
-        ),
         ("net/udp.rs", 1, "fallback I/O pump runs for the process"),
         (
             "observability/debt_runtime_integration.rs",
