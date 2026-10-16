@@ -10,21 +10,23 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-10-14, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.6.0` is published to
-crates.io and GitHub; `v0.5.0` release evidence is recorded in `asupersync-v5fn1e`.
+Scope window: current work through 2026-10-16, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.6.0` release evidence is
+recorded in its release bead; `v0.5.0` release evidence is recorded in
+`asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 Release** (2026-10-14): durable ATP sender/receiver journaling and
+- **v0.6.0 Release** (2026-10-16): durable ATP sender/receiver journaling and
   resume across process loss, targeted resume-client revocation without peer
   restart, QUIC protected close and post-close accounting shutdown, bounded
   clock capture and replay, protected macaroon delegation, a `spawn_blocking`
-  fallback that never detaches its thread (GitHub #80), and an HTTP/1 fix that
-  answers a rejected request head with `400`/`413`/`431` instead of a silent
-  close. Ten crates, including the first `asupersync-zstd`, with signed Linux
-  (amd64 and arm64), macOS and Windows assets, published through DSR without
-  GitHub Actions. Breaking changes are listed in the v0.6.0 section.
+  fallback that never detaches its thread (GitHub #80), opt-in zstd
+  compression for ATP over TCP and QUIC, and an HTTP/1 fix that answers a
+  rejected request head with `400`/`413`/`431` instead of a silent close. Ten
+  crates, including the first `asupersync-zstd`, with signed Linux (amd64 and
+  arm64), macOS and Windows assets, built through DSR without GitHub Actions.
+  Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
@@ -84,76 +86,9 @@ crates.io and GitHub; `v0.5.0` release evidence is recorded in `asupersync-v5fn1
 
 ## [Unreleased]
 
-### Breaking (asupersync-zstd 0.7.0) — `EncodeParams` and `DecodeLimits` are `#[non_exhaustive]`
+## [v0.6.0] - 2026-10-16
 
-Both structs are now `#[non_exhaustive]`, so later settings (dictionaries,
-long-distance matching, window sizes) can be added without another break.
-Outside the crate, a struct literal or a `..base` update no longer
-compiles. Build them with the new const builders:
-- `EncodeParams::new(level).with_checksum(false)`;
-- `DecodeLimits::new(max_output).with_max_window(n)`, chained as needed
-  with `.with_require_content_size(true)` and
-  `.with_allow_skippable_frames(false)`.
-
-The fields stay public and readable. asupersync's own API exposes neither
-type, so this changes nothing for asupersync users. The crate docs now say
-the crate is experimental. (`br-asupersync-t1fblr`.)
-
-### ATP zstd: the native QUIC source stream, `CompressionMode::Auto` and parallel compression (feature `zstd`)
-
-ATP-over-QUIC compresses too. `transport_quic::send_path_with_options` takes a
-`QuicSendOptions` built with `with_compression(CompressionMode::Zstd)`. When
-the receiver accepts the offer, the reliable source stream switches to a
-framed mode: one `ObjectData` frame per chunk, compressed when that makes it
-smaller. The receiver checks each frame's entry, offset and length before it
-writes anything. Receivers and senders that predate this see the raw stream
-as before. RaptorQ datagram lanes are not compressed.
-(`br-asupersync-t1fblr.29`.)
-
-`CompressionMode::Auto`, on TCP and QUIC, offers zstd as `Zstd` does, but
-does not spend effort where it cannot pay:
-- An entry whose name or first bytes mark an already-compressed format
-  (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is sent raw.
-- A chunk that saves less than a twentieth of its size makes the next 1, 2,
-  4, ... up to 64 chunks of that entry go raw before the next try.
-- The decisions are deterministic.
-
-A goodput rule that weighs link speed against compression speed is still to
-come. (`br-asupersync-t1fblr.24`.)
-
-Senders compress chunks in parallel on the runtime's blocking pool, up to
-`compression_parallelism` at once, and send them in order. The default is 4,
-and both `SendOptions` and `QuicSendOptions` have the setting. Chunks of
-consecutive files share one pipeline, so a tree of small files compresses in
-parallel too. The setting never changes what `CompressionMode::Zstd` sends.
-Delta chunks on TCP are still compressed one at a time.
-(`br-asupersync-t1fblr.25`.)
-
-### Performance — the ATP TCP sender batches its first pass
-
-The TCP sender's first pass (metadata, hardlink detection, content hashing)
-now runs in blocking tasks of many entries. Before, it made about five
-blocking-pool handoffs per file. Each hashing task reads at most 8 MiB, so a
-cancelled send stops reading within one task. On a 2104-file source tree
-over loopback, the sender's CPU time fell by about a third and its context
-switches by about half. One ordering change: a tree that both exceeds
-`max_transfer_bytes` and contains an invalid symlink now always fails on the
-symlink, where it used to fail on whichever came first.
-(`br-asupersync-dfdwyt`.)
-
-### Fixed — no `recursion_depth_exceeding_limit` from the ATP QUIC sessions
-
-Proving the native QUIC send and receive sessions `Send` nested deep enough
-to trip `recursion_depth_exceeding_limit`. That future-incompatibility
-warning is an error in later rustc releases, and it fired in builds of the
-`atp` binary. The QUIC link now boxes its flush, inbound pump and retransmit
-futures, and the source-stream send, receive and commit steps, one
-allocation per call. The proof stays shallow in any crate that spawns these
-sessions. (`br-asupersync-c2unfu`.)
-
-## [v0.6.0] - 2026-10-14
-
-About 2,900 commits since v0.5.0. The theme is **durability**: ATP transfers now
+About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
 survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
 accounting afterwards, and the clock can be captured and replayed within bounded
 windows.
@@ -252,22 +187,43 @@ cancel-dispatch timings unchanged. The `next_task_hotpath` and
 `cancel_drain_bench` benchmarks include the teardown in their timings, because
 their routines consume their input.
 
+### Performance — the ATP TCP sender batches its first pass
+
+The TCP sender's first pass (metadata, hardlink detection, content hashing)
+now runs in blocking tasks of many entries. Before, it made about five
+blocking-pool handoffs per file. Each hashing task reads at most 8 MiB, so a
+cancelled send stops reading within one task. On a 2104-file source tree
+over loopback, the sender's CPU time fell by about a third and its context
+switches by about half. One ordering change: a tree that both exceeds
+`max_transfer_bytes` and contains an invalid symlink now always fails on the
+symlink, where it used to fail on whichever came first.
+(`br-asupersync-dfdwyt`.)
+
 ### Known issues
 
 - **Legacy third-party macaroon caveats** can be stripped by their third party;
   see Security above (asupersync-s45073 H2). Use the protected delegation APIs
   for new grants.
+- **Macaroon hardening items still open** (asupersync-s45073, all rated LOW):
+  - `add_caveat` has no caveat limit, but `from_binary` rejects more than 64
+    caveats, so a token with 65 serializes and then cannot be parsed back (L2);
+  - first-party and third-party caveat bytes enter the HMAC chain without a
+    type tag. This is hardening only; no exploit is known (L3);
+  - the spawn check uses an empty `VerificationContext`, so every attenuated
+    spawn token is denied. This fails closed (L5);
+  - `SecurityConfig` derives `Debug`, which prints `auth_key_seed` (L6).
 - **The `zstd` feature is experimental, opt-in and off by default.**
-  `asupersync-zstd` 0.6.0 is the first published release of the in-house codec,
-  and its encoder strategies are still being built (asupersync-t1fblr).
+  `asupersync-zstd` 0.6.0 is the codec's first crates.io release, and its
+  encoder strategies are still being built (asupersync-t1fblr).
 - **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
   fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
   decisions:
   - CONNECT confirmation is opt-in, through `NatsClient::connect_with_policy`;
   - the per-consumer 50 ms pull limiter is unchanged.
 - **`cargo fmt --check`** reports formatting drift on `main` that was not there at
-  v0.5.0 (GitHub #76). It is a known deviation; the code was not reformatted for
-  this release.
+  v0.5.0 (GitHub #76). It now also covers the 941 inline test modules that
+  moved out of their source files (c5012547e) and kept their indentation. It is
+  a known deviation; the code was not reformatted for this release.
 
 ### Migration note — `Outcome<T, E>` and conditionally derived `Debug`
 
@@ -480,11 +436,52 @@ Against an older receiver, a sender stays raw, and an older sender never
 offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
 (`br-asupersync-t1fblr.14`, `.16`.)
 
-The `asupersync-zstd` crate is not published yet. It decodes every RFC 8878
-frame without dictionaries, and encodes stored or `Level::Fast` frames, which
-compress slightly better than libzstd level 1. It has streaming encoder and
-decoder types, resumable async transfers, and differential tests against
-libzstd 1.5.7.
+`asupersync-zstd` 0.6.0 is the codec's first crates.io release, and it is
+experimental. It decodes every RFC 8878 frame without dictionaries, and
+encodes stored or `Level::Fast` frames, which compress slightly better than
+libzstd level 1. It has streaming encoder and decoder types, resumable async
+transfers, and differential tests against libzstd 1.5.7.
+
+Its `EncodeParams` and `DecodeLimits` are `#[non_exhaustive]`, so later
+settings (dictionaries, long-distance matching, window sizes) can be added
+without a break. Outside the crate, build them with the const builders:
+- `EncodeParams::new(level).with_checksum(false)`;
+- `DecodeLimits::new(max_output).with_max_window(n)`, chained as needed
+  with `.with_require_content_size(true)` and
+  `.with_allow_skippable_frames(false)`.
+
+The fields are public and readable. asupersync's own API exposes neither
+type. (`br-asupersync-t1fblr`.)
+
+### ATP zstd over QUIC, `CompressionMode::Auto` and parallel compression (feature `zstd`)
+
+ATP-over-QUIC compresses too. `transport_quic::send_path_with_options` takes a
+`QuicSendOptions` built with `with_compression(CompressionMode::Zstd)`. When
+the receiver accepts the offer, the reliable source stream switches to a
+framed mode: one `ObjectData` frame per chunk, compressed when that makes it
+smaller. The receiver checks each frame's entry, offset and length before it
+writes anything. Receivers and senders that predate this see the raw stream
+as before. RaptorQ datagram lanes are not compressed.
+(`br-asupersync-t1fblr.29`.)
+
+`CompressionMode::Auto`, on TCP and QUIC, offers zstd as `Zstd` does, but
+does not spend effort where it cannot pay:
+- An entry whose name or first bytes mark an already-compressed format
+  (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is sent raw.
+- A chunk that saves less than a twentieth of its size makes the next 1, 2,
+  4, ... up to 64 chunks of that entry go raw before the next try.
+- The decisions are deterministic.
+
+A goodput rule that weighs link speed against compression speed is still to
+come. (`br-asupersync-t1fblr.24`.)
+
+Senders compress chunks in parallel on the runtime's blocking pool, up to
+`compression_parallelism` at once, and send them in order. The default is 4,
+and both `SendOptions` and `QuicSendOptions` have the setting. Chunks of
+consecutive files share one pipeline, so a tree of small files compresses in
+parallel too. The setting never changes what `CompressionMode::Zstd` sends.
+Delta chunks on TCP are still compressed one at a time.
+(`br-asupersync-t1fblr.25`.)
 
 ### HTTP `zstd` content coding (feature `zstd`)
 
@@ -874,6 +871,16 @@ re-exported from `asupersync::combinator` (`asupersync-e9gn8y`).
   actually cancelled. The Redis module docs now describe the two-context
   cancellation rule (a cancelled task cannot run cleanup commands by passing a
   fresh `Cx`).
+
+### Fixed: no `recursion_depth_exceeding_limit` from the ATP QUIC sessions
+
+Proving the native QUIC send and receive sessions `Send` nested deep enough
+to trip `recursion_depth_exceeding_limit`. That future-incompatibility
+warning is an error in later rustc releases, and it fired in builds of the
+`atp` binary. The QUIC link now boxes its flush, inbound pump and retransmit
+futures, and the source-stream send, receive and commit steps, one
+allocation per call. The proof stays shallow in any crate that spawns these
+sessions. (`br-asupersync-c2unfu`.)
 
 ### Fixed: `Cx::current()` inside a spawned task lacked the spawner's handles
 
@@ -4443,7 +4450,10 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.10...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.6.0...HEAD
+[v0.6.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.5.0...v0.6.0
+[v0.5.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.11...v0.5.0
+[v0.4.11]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.10...v0.4.11
 [v0.4.10]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.9...v0.4.10
 [v0.4.9]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...v0.4.9
 [v0.4.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...v0.4.8
