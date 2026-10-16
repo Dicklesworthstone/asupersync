@@ -4,6 +4,9 @@
 //! No path naming the published destination is opened for writing. Failures
 //! retain the original staging inode and the private copy for investigation;
 //! this helper never retries an uncertain publication or deletes evidence.
+//! Copy integrity is bound to the previously verified chunk ledger, not merely
+//! to the current source inode. This is not protection against a hostile writer
+//! replacing or mutating the private copy after its final verification.
 
 use super::{File, Path, PathBuf, Read, Seek, SeekFrom, SparseWriter, SparseWriterError, Write};
 use crate::atp::journal::{CommitPolicy, FsyncPolicy};
@@ -93,6 +96,7 @@ impl SparseWriter {
                     ));
                 }
                 Self::verify_copy_handles(&mut source, &mut destination, length)?;
+                self.verify_copy_against_verified_chunks(&mut destination, length)?;
                 // Match fs::copy's file-permission behavior, but only after all
                 // payload writes and verification. Creation itself stays private.
                 destination.set_permissions(source_metadata.permissions()).map_err(commit_io)?;
@@ -135,6 +139,59 @@ impl SparseWriter {
         // Bound even a source that grows during copying. The independent length
         // and hash checks below reject truncation, extension, or mismatched data.
         io::copy(&mut source.take(length), destination)
+    }
+
+    fn verify_copy_against_verified_chunks(
+        &self,
+        destination: &mut File,
+        length: u64,
+    ) -> Result<(), SparseWriterError> {
+        // Source/copy equality is not authorization: an external write can
+        // change the staging inode after verify_inner authenticated it, and
+        // copying those changed bytes makes both live hashes agree. The sealed
+        // writer's per-write hashes were checked against the trusted manifest
+        // during verification. Bind every copied byte to that earlier evidence.
+        // The caller holds operation for the entire commit; release the state
+        // lock before file I/O and retain only one chunk descriptor at a time.
+        let mut offset = 0_u64;
+        while offset < length {
+            let (size, expected_hash) = {
+                let state = self.lock_state();
+                let chunk = state.written_chunks.get(&offset).ok_or_else(|| {
+                    SparseWriterError::CommitFailed(format!(
+                        "copy verification failed: missing verified chunk at offset {offset}"
+                    ))
+                })?;
+                if chunk.offset != offset || chunk.size == 0 {
+                    return Err(SparseWriterError::CommitFailed(format!(
+                        "copy verification failed: invalid verified chunk at offset {offset}"
+                    )));
+                }
+                (chunk.size, chunk.hash)
+            };
+            let end = offset
+                .checked_add(size)
+                .filter(|end| *end <= length)
+                .ok_or_else(|| {
+                    SparseWriterError::CommitFailed(format!(
+                        "copy verification failed: verified chunk exceeds file at offset {offset}"
+                    ))
+                })?;
+            let actual_hash = Self::hash_file_range(destination, offset, size)
+                .map_err(|error| SparseWriterError::CommitFailed(error.to_string()))?;
+            if actual_hash != expected_hash {
+                return Err(SparseWriterError::CommitFailed(format!(
+                    "copy verification failed: previously verified chunk changed at offset {offset}"
+                )));
+            }
+            offset = end;
+        }
+        if destination.metadata().map_err(commit_io)?.len() != length {
+            return Err(SparseWriterError::CommitFailed(
+                "copy verification failed: file length changed".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     fn verify_copy_handles(
