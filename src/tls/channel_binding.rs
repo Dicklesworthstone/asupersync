@@ -3,6 +3,8 @@
 use super::{Certificate, TlsError};
 use sha2::{Digest, Sha224, Sha256, Sha384, Sha512, Sha512_224, Sha512_256};
 
+mod pss;
+
 // Bound work before handing untrusted certificate bytes to the existing parser.
 const MAX_CHANNEL_BINDING_CERTIFICATE_BYTES: usize = 1_048_576;
 
@@ -13,6 +15,8 @@ impl Certificate {
     /// TLS handshake transcript. The certificate's signature hash selects the
     /// digest; MD5 and SHA-1 signatures use SHA-256 instead. RSA PKCS#1, ECDSA,
     /// and DSA signatures using the supported SHA-2 hashes are recognized.
+    /// RSASSA-PSS is supported when its message hash and MGF1 hash agree:
+    /// SHA-1 (upgraded to SHA-256), SHA-224, SHA-256, SHA-384, or SHA-512.
     /// The result is raw digest bytes, without a binding-type prefix or base64.
     ///
     /// Both endpoints must use the *server's leaf certificate actually selected
@@ -26,8 +30,10 @@ impl Certificate {
     /// # Errors
     ///
     /// Returns [`TlsError::Certificate`] for malformed, oversized, trailing, or
-    /// inconsistent certificate encodings. Returns [`TlsError::Configuration`]
-    /// for unsupported signature algorithms, including RSASSA-PSS and EdDSA.
+    /// inconsistent certificate encodings, including malformed PSS parameters.
+    /// Returns [`TlsError::Configuration`] for unsupported signature hashes,
+    /// mask generators, or EdDSA. PSS with different message and MGF1 hashes is
+    /// also rejected: RFC 5929 leaves multi-hash signatures undefined.
     /// An unknown algorithm never silently falls back to SHA-256. The method
     /// does not verify the certificate signature, name, chain, or validity time.
     pub fn tls_server_end_point_channel_binding(&self) -> Result<Vec<u8>, TlsError> {
@@ -54,9 +60,13 @@ pub(super) fn server_end_point(der: &[u8]) -> Result<Vec<u8>, TlsError> {
             "certificate signature algorithm identifiers disagree".into(),
         ));
     }
-    let algorithm = BindingHash::from_signature_oid(
-        &certificate.signature_algorithm.algorithm.to_id_string(),
-    )?;
+    let signature = &certificate.signature_algorithm;
+    let oid = signature.algorithm.to_id_string();
+    let algorithm = if oid == "1.2.840.113549.1.1.10" {
+        pss::binding_hash(signature.parameters.as_ref())?
+    } else {
+        BindingHash::from_signature_oid(&oid)?
+    };
     Ok(algorithm.digest(der))
 }
 

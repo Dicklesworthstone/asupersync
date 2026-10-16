@@ -297,3 +297,6 @@ fn resumed_tls13_keeps_certificate_binding_but_rejects_early_access() {
     assert_eq!(resumed.tls_server_end_point_channel_binding().unwrap(), binding);
     assert_ne!(resumed.tls_exporter_channel_binding().unwrap(), exporter);
 }
+
+#[path = "pss_handshake_tests.rs"]
+mod pss_handshake_tests;
