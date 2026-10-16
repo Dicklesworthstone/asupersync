@@ -17,9 +17,22 @@ use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::ArenaIndex;
 
 const README: &str = include_str!("../README.md");
-const REGION_TABLE_SOURCE: &str = include_str!("../src/runtime/region_table.rs");
-const OBLIGATION_TABLE_SOURCE: &str = include_str!("../src/runtime/obligation_table.rs");
-const LAB_RUNTIME_SOURCE: &str = include_str!("../src/lab/runtime.rs");
+// Each source plus its out-of-line `#[cfg(test)] mod tests`, where the pinned regression tests live.
+const REGION_TABLE_SOURCE: &str = concat!(
+    include_str!("../src/runtime/region_table.rs"),
+    "\n",
+    include_str!("../src/runtime/region_table_inline_tests.rs")
+);
+const OBLIGATION_TABLE_SOURCE: &str = concat!(
+    include_str!("../src/runtime/obligation_table.rs"),
+    "\n",
+    include_str!("../src/runtime/obligation_table_inline_tests.rs")
+);
+const LAB_RUNTIME_SOURCE: &str = concat!(
+    include_str!("../src/lab/runtime.rs"),
+    "\n",
+    include_str!("../src/lab/runtime_inline_tests.rs")
+);
 const LAB_CONFIG_SOURCE: &str = include_str!("../src/lab/config.rs");
 
 fn assert_contains(haystack: &str, needle: &str, label: &str) {

@@ -227,6 +227,29 @@ fn declared_non_crate_owners(registry: &Value) -> BTreeMap<String, String> {
 /// source owner, but no named source file actually references any of those
 /// crates. This is the check that catches a row naming a `mod.rs` facade, or
 /// the wrong one of two same-named files.
+/// A source owner's text as one file held it before c5012547e: the file plus the unit-test
+/// modules it declares out of line (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`).
+fn read_source_with_inline_tests(source: &str) -> std::io::Result<String> {
+    let path = repo_root().join(source);
+    let mut text = std::fs::read_to_string(&path)?;
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let modules: Vec<String> = text
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        text.push('\n');
+        text.push_str(&std::fs::read_to_string(dir.join(module))?);
+    }
+    Ok(text)
+}
+
 fn source_owner_attribution_fails(
     row: &Value,
     packages: &BTreeSet<String>,
@@ -248,7 +271,7 @@ fn source_owner_attribution_fails(
         return false;
     }
     !sources.iter().any(|source| {
-        std::fs::read_to_string(repo_root().join(source)).is_ok_and(|text| {
+        read_source_with_inline_tests(source).is_ok_and(|text| {
             crates
                 .iter()
                 .any(|krate| references_crate(&text, krate.as_str()))

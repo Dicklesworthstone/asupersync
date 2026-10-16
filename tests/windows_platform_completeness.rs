@@ -16,6 +16,35 @@ fn load_source(relative: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read {}", path.display()))
 }
 
+/// `load_source(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn load_source_with_inline_tests(path: &str) -> String {
+    let mut source = load_source(path);
+    let dir = project_root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 #[test]
 fn track_i_named_pipe_surface_is_gated_and_exported() {
     let net_mod = load_source("src/net/mod.rs");
@@ -116,7 +145,7 @@ fn track_i_process_surface_contains_windows_output_path() {
 #[test]
 fn track_i_signal_surface_contains_windows_subset_mapping() {
     let signal_mod = load_source("src/signal/mod.rs");
-    let signal_src = load_source("src/signal/signal.rs");
+    let signal_src = load_source_with_inline_tests("src/signal/signal.rs");
     let kind_src = load_source("src/signal/kind.rs");
 
     for token in [

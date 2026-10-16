@@ -746,9 +746,11 @@ fn visible_signatures_and_condvar_sites_remain_present() {
         );
     }
 
+    // resolve.rs's Condvar is test-only: it sits in the unit-test module, which is out of line.
     let resolve = read_repo_file("src/net/resolve.rs");
-    assert!(resolve.contains("#[cfg(test)]\nmod tests"));
-    assert!(resolve.contains("use parking_lot::{Condvar, Mutex};"));
+    assert!(resolve.contains("#[cfg(test)]\n#[path = \"resolve_inline_tests.rs\"]\nmod tests;"));
+    let resolve_tests = read_repo_file("src/net/resolve_inline_tests.rs");
+    assert!(resolve_tests.contains("use parking_lot::{Condvar, Mutex};"));
 }
 
 #[test]

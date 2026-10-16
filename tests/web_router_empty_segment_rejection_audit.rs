@@ -58,6 +58,12 @@ fn read_router_source() -> String {
     std::fs::read_to_string(&path).expect("read router.rs")
 }
 
+/// router.rs's out-of-line `#[cfg(test)] mod tests`, where the in-crate router tests live.
+fn read_router_tests_source() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/web/router_inline_tests.rs");
+    std::fs::read_to_string(&path).expect("read router_inline_tests.rs")
+}
+
 #[test]
 fn matches_fn_rejects_paths_containing_double_slash() {
     // Pin: the matcher contains the early-return guard for
@@ -104,7 +110,7 @@ fn strip_prefix_already_rejects_empty_segments_at_boundary() {
     // strip_prefix while leaving matches strict (or vice-versa),
     // the inconsistency would re-emerge. This test reads the
     // existing in-crate test to verify it's still in place.
-    let source = read_router_source();
+    let source = read_router_tests_source();
     let test_marker = "fn strip_prefix_rejects_empty_segment_at_mount_boundary() {";
     let start = source
         .find(test_marker)

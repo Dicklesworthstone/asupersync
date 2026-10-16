@@ -202,9 +202,11 @@ fn no_internal_server_error_substitution_in_handler_err_path() {
     // for the user-handler-error path. Test-only extractor failures do
     // not belong to the production dispatch surface.
     let source = read("src/web/handler.rs");
-    let (source, _) = source
+    // Production code only: everything before an inline test module, or the whole file now
+    // that the unit tests live in the out-of-line handler_inline_tests.rs.
+    let source = source
         .split_once("#[cfg(test)]\nmod tests {")
-        .expect("separate the production handler from its test fixtures");
+        .map_or(source.as_str(), |(production, _)| production);
 
     // Find every `INTERNAL_SERVER_ERROR` occurrence and verify
     // it is in a runtime / block_on context, not a handler-Err

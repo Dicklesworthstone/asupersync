@@ -73,6 +73,34 @@ fn load_source(relative: &str) -> String {
         .unwrap_or_else(|_| panic!("source file must exist: {relative}"))
 }
 
+/// `load_source(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn load_source_with_inline_tests(path: &str) -> String {
+    let mut source = load_source(path);
+    let dir = repo_path(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 #[test]
 fn matrix_document_exists_and_is_substantial() {
     let doc = load_matrix_doc();
@@ -1358,7 +1386,7 @@ fn t39_inline_modules_contain_tests() {
         ("src/signal/graceful.rs", 14),
     ];
     for (module, min) in &modules_with_min_tests {
-        let src = load_source(module);
+        let src = load_source_with_inline_tests(module);
         let count = src.matches("#[test]").count();
         assert!(
             count >= *min,

@@ -764,11 +764,24 @@ fn nested_source_orphans() -> BTreeSet<String> {
         }
     }
     let reached = reachable_sources(&roots, &sources);
-    sources
+    let orphans: BTreeSet<String> = sources
         .keys()
         .filter(|path| path.matches('/').count() > 1 && !reached.contains(*path))
         .cloned()
-        .collect()
+        .collect();
+    // An orphan's out-of-line `#[cfg(test)]` module (`<stem>_inline_tests.rs`, declared by the
+    // orphan with `#[path]`) is part of that orphan, as its in-file `mod tests` was: count it once.
+    let orphan_test_modules: BTreeSet<String> = orphans
+        .iter()
+        .flat_map(|path| {
+            let dir = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+            quoted_after(&sources[path], "#[path = \"")
+                .into_iter()
+                .filter(|target| target.ends_with("_inline_tests.rs"))
+                .map(move |target| join_relative(dir, &target))
+        })
+        .collect();
+    orphans.difference(&orphan_test_modules).cloned().collect()
 }
 
 #[test]

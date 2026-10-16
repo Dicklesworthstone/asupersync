@@ -133,6 +133,35 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+/// `read(rel)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "<stem>[_<name>]_inline_tests.rs"] mod <name>;`), so a pin on an
+/// in-tree unit test keeps finding it after the test body moved next to its module.
+fn read_with_inline_tests(rel: &str) -> String {
+    let mut source = read(rel);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(rel)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
     let start = source
         .find(start_marker)
@@ -382,7 +411,7 @@ fn sleep_inline_tests_exercise_virtual_time() {
     // Pin: at least some inline tests use
     // CURRENT_TIME thread-local + time_getter to drive
     // virtual time and assert Pending→Ready transitions.
-    let source = read("src/time/sleep.rs");
+    let source = read_with_inline_tests("src/time/sleep.rs");
 
     assert!(
         source.contains("static CURRENT_TIME") && source.contains("CURRENT_TIME.store"),

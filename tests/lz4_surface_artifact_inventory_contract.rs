@@ -41,6 +41,35 @@ fn read_repo_file(path: &str) -> String {
         .unwrap_or_else(|error| panic!("{path} must be UTF-8: {error}"))
 }
 
+/// `read_repo_file(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn read_repo_file_with_inline_tests(path: &str) -> String {
+    let mut source = read_repo_file(path);
+    let dir = repo_root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn parse_repo_json(path: &str) -> Value {
     serde_json::from_str(&read_repo_file(path))
         .unwrap_or_else(|error| panic!("{path} must be valid JSON: {error}"))
@@ -228,19 +257,19 @@ fn production_lz4_api_census_matches_source() {
         ])
     );
 
-    let trace = read_repo_file("src/trace/file.rs");
+    let trace = read_repo_file_with_inline_tests("src/trace/file.rs");
     assert_eq!(count(&trace, "lz4_flex::compress_prepend_size"), 3);
     assert_eq!(count(&trace, "lz4_flex::decompress_size_prepended"), 1);
     assert_eq!(count(&trace, "lz4_flex::block::DecompressError"), 0);
 
-    let manifest = read_repo_file("src/atp/manifest.rs");
+    let manifest = read_repo_file_with_inline_tests("src/atp/manifest.rs");
     assert_eq!(count(&manifest, "lz4_flex::compress_prepend_size"), 1);
 
-    let service = read_repo_file("src/net/atp/compress/mod.rs");
+    let service = read_repo_file_with_inline_tests("src/net/atp/compress/mod.rs");
     assert_eq!(count(&service, "lz4_flex::compress_prepend_size"), 2);
     assert_eq!(count(&service, "lz4_flex::decompress_size_prepended"), 1);
 
-    let adapter = read_repo_file("src/net/atp/compress/algorithms.rs");
+    let adapter = read_repo_file_with_inline_tests("src/net/atp/compress/algorithms.rs");
     assert_eq!(count(&adapter, "lz4_flex::compress_prepend_size"), 1);
     assert_eq!(count(&adapter, "lz4_flex::decompress_size_prepended"), 1);
 }

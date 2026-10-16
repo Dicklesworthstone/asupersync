@@ -122,6 +122,35 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+/// `read(rel)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "<stem>[_<name>]_inline_tests.rs"] mod <name>;`), so a pin on an
+/// in-tree unit test keeps finding it after the test body moved next to its module.
+fn read_with_inline_tests(rel: &str) -> String {
+    let mut source = read(rel);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(rel)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 #[test]
 fn current_handle_signature_returns_option() {
     // Pin: Runtime::current_handle returns Option<RuntimeHandle>,
@@ -262,7 +291,7 @@ fn current_handle_inline_tests_pin_all_six_branches() {
     // Pin: all 6 inline tests must remain. Each guards a
     // specific branch of the Option contract. Deleting any
     // one lets a regression in that branch slip.
-    let source = read("src/runtime/builder.rs");
+    let source = read_with_inline_tests("src/runtime/builder.rs");
 
     let required_tests = [
         "fn current_handle_available_inside_block_on()",
@@ -288,7 +317,7 @@ fn current_handle_none_outside_block_on_test_pins_no_panic() {
     // Pin: the inline test that proves None (not panic)
     // outside block_on. If this test is replaced with a
     // panic-expectation, the design has flipped.
-    let source = read("src/runtime/builder.rs");
+    let source = read_with_inline_tests("src/runtime/builder.rs");
 
     let fn_marker = "fn current_handle_none_outside_block_on()";
     let pos = source.find(fn_marker).expect("none_outside test");
@@ -318,7 +347,7 @@ fn current_handle_teardown_test_pins_graceful_none_during_destructors() {
     // Pin: the teardown test must remain — it's the
     // load-bearing test that proves try_with+unwrap_or
     // works during TLS destructor chains.
-    let source = read("src/runtime/builder.rs");
+    let source = read_with_inline_tests("src/runtime/builder.rs");
 
     assert!(
         source.contains("fn current_handle_returns_none_during_thread_local_teardown()"),

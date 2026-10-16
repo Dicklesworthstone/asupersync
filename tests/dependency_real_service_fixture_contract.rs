@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 
 const MATRIX_PATH: &str = "artifacts/dependency_real_service_fixture_matrix_v1.json";
 const SOURCE_PATH: &str = "src/test_logging.rs";
+/// The out-of-line `#[cfg(test)] mod tests` of `SOURCE_PATH`, where its lifecycle tests live.
+const SOURCE_TESTS_PATH: &str = "src/test_logging_inline_tests.rs";
 const RUNNER_PATH: &str = "scripts/run_dependency_sovereignty_e2e.sh";
 const DOC_PATH: &str = "docs/dependency_real_service_fixtures.md";
 
@@ -218,6 +220,8 @@ fn real_service_fixture_matrix_is_complete_and_fail_closed() {
 fn lifecycle_harness_runner_and_docs_are_wired() {
     let matrix = load_matrix();
     let source = fs::read_to_string(SOURCE_PATH).expect("read fixture lifecycle source");
+    let source_tests =
+        fs::read_to_string(SOURCE_TESTS_PATH).expect("read fixture lifecycle unit tests");
     for token in [
         "pub struct PinnedProcessIdentity",
         "pub struct ProcessFixtureService",
@@ -238,7 +242,7 @@ fn lifecycle_harness_runner_and_docs_are_wired() {
         .filter_map(Value::as_str)
     {
         assert!(
-            source.contains(&format!("fn {test_name}(")),
+            source_tests.contains(&format!("fn {test_name}(")),
             "fixture source missing lifecycle test {test_name}"
         );
     }

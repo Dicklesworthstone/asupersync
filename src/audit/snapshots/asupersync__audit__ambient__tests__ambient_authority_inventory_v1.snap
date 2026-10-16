@@ -127,7 +127,6 @@ expression: inventory
 1	Io	net/dns/resolver.rs	TcpStream::
 2	Io	net/happy_eyeballs.rs	TcpStream::
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create
-2	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket
 1	Io	net/stun.rs	std::net::UdpSocket
 2	Io	net/tcp/listener.rs	TcpListener::
 2	Io	net/tcp/listener.rs	TcpStream::
@@ -167,7 +166,6 @@ expression: inventory
 4	Output	net/atp/transport_rq/mod.rs	eprintln!(
 1	Output	net/quic_native/connection.rs	eprintln!(
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(
-1	Output	net/quic_native/handshake_driver.rs	eprintln!(
 1	Spawn	database/mysql.rs	std::thread::Builder
 1	Spawn	grpc/health_rpc/tests/native.rs	std::thread::spawn
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn
@@ -176,7 +174,6 @@ expression: inventory
 2	Spawn	grpc/native_upload/tests.rs	std::thread::spawn
 2	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn
 1	Spawn	grpc/server/server_streaming/tests.rs	std::thread::spawn
-1	Spawn	net/quic_native/handshake_driver.rs	std::thread::spawn
 1	Spawn	net/udp.rs	std::thread::Builder
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn
 2	Spawn	process.rs	std::thread::Builder
@@ -500,8 +497,6 @@ expression: inventory
 1	Io	net/happy_eyeballs.rs	TcpStream::	let attempt = Box::pin(TcpStream::connect(addr));
 1	Io	net/happy_eyeballs.rs	TcpStream::	return TcpStream::connect(*only).await;
 3	Io	net/quic_native/forensic_log.rs	std::fs::File::create	let file = std::fs::File::create(path)?;
-1	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket	let peer_socket = std::net::UdpSocket::bind().unwrap();
-1	Io	net/quic_native/handshake_driver.rs	std::net::UdpSocket	let stray = std::net::UdpSocket::bind().unwrap();
 1	Io	net/stun.rs	std::net::UdpSocket	let socket = std::net::UdpSocket::bind(local_addr)
 1	Io	net/tcp/listener.rs	TcpListener::	TcpListener::poll_accept(self, cx)
 1	Io	net/tcp/listener.rs	TcpListener::	match net::TcpListener::bind(addr) {
@@ -549,7 +544,6 @@ expression: inventory
 2	Output	net/atp/transport_rq/mod.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/connection.rs	eprintln!(	eprintln!(, format!($($arg)*));
 1	Output	net/quic_native/endpoint_api.rs	eprintln!(	eprintln!(, format!($($arg)*));
-1	Output	net/quic_native/handshake_driver.rs	eprintln!(	eprintln!(
 1	Spawn	database/mysql.rs	std::thread::Builder	let _ = std::thread::Builder::new()
 1	Spawn	grpc/health_rpc/tests/native.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 1	Spawn	grpc/native_stream/connect/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
@@ -560,7 +554,6 @@ expression: inventory
 1	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 1	Spawn	grpc/server/duplex/tests.rs	std::thread::spawn	let worker = std::thread::spawn(move || {
 1	Spawn	grpc/server/server_streaming/tests.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
-1	Spawn	net/quic_native/handshake_driver.rs	std::thread::spawn	let peer = std::thread::spawn(move || {
 1	Spawn	net/udp.rs	std::thread::Builder	match std::thread::Builder::new()
 1	Spawn	observability/debt_runtime_integration.rs	thread::spawn	let handle = thread::spawn(move || {
 1	Spawn	process.rs	std::thread::Builder	if std::thread::Builder::new()

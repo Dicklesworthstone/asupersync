@@ -34,17 +34,41 @@ const SQ_SRC: &str = concat!(
     "\n",
     include_str!("../src/database/sqlite_tests.rs")
 );
-const POOL_SRC: &str = include_str!("../src/database/pool.rs");
-const TXN_SRC: &str = include_str!("../src/database/transaction.rs");
+const POOL_SRC: &str = concat!(
+    include_str!("../src/database/pool.rs"),
+    "\n",
+    include_str!("../src/database/pool_inline_tests.rs")
+);
+const TXN_SRC: &str = concat!(
+    include_str!("../src/database/transaction.rs"),
+    "\n",
+    include_str!("../src/database/transaction_inline_tests.rs")
+);
 const REDIS_SRC: &str = concat!(
     include_str!("../src/messaging/redis.rs"),
     "\n",
     include_str!("../src/messaging/redis_tests.rs")
 );
-const NATS_SRC: &str = include_str!("../src/messaging/nats.rs");
-const JS_SRC: &str = include_str!("../src/messaging/jetstream.rs");
-const KAFKA_SRC: &str = include_str!("../src/messaging/kafka.rs");
-const KAFKA_CONSUMER_SRC: &str = include_str!("../src/messaging/kafka_consumer.rs");
+const NATS_SRC: &str = concat!(
+    include_str!("../src/messaging/nats.rs"),
+    "\n",
+    include_str!("../src/messaging/nats_inline_tests.rs")
+);
+const JS_SRC: &str = concat!(
+    include_str!("../src/messaging/jetstream.rs"),
+    "\n",
+    include_str!("../src/messaging/jetstream_inline_tests.rs")
+);
+const KAFKA_SRC: &str = concat!(
+    include_str!("../src/messaging/kafka.rs"),
+    "\n",
+    include_str!("../src/messaging/kafka_inline_tests.rs")
+);
+const KAFKA_CONSUMER_SRC: &str = concat!(
+    include_str!("../src/messaging/kafka_consumer.rs"),
+    "\n",
+    include_str!("../src/messaging/kafka_consumer_inline_tests.rs")
+);
 
 // ─── Test file sources (integration + contract tests) ────────────────────────
 
