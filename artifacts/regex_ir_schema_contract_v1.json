@@ -5,9 +5,9 @@
   "capability_id": "CAP-REGEX-PRIVACY",
   "captured_at_utc": "2026-07-26T00:04:00Z",
   "source_review": {
-    "reviewed_date_utc": "2026-09-09",
-    "change_revision": "da992970cbb0590014a36236682c138cd83b41a4",
-    "scope": "All four previous source pins match the parent of this revision. The only subsequent change adds serde derives with deny_unknown_fields to private limit structs. Program representation, validation, accounting formulas and default ceilings are unchanged; Program does not gain deserialization.",
+    "reviewed_date_utc": "2026-10-16",
+    "change_revision": "c5012547e54c2c0f404792e1e91a8c0293c68878",
+    "scope": "All four previous source pins match the parent of this revision; they recorded the da992970 review (serde derives with deny_unknown_fields on private limit structs). This revision moves each source's inline #[cfg(test)] unit-test module into a sibling *_inline_tests.rs file declared with #[path]; re-inlining that file reproduces the parent bytes exactly. Program representation, validation, accounting formulas and default ceilings are unchanged; Program does not gain deserialization.",
     "historical_proof_preserved": true,
     "no_claim_boundary": "The refreshed hashes and byte counts do not rebind historical job receipts or establish configured-loading, persistence, matcher, performance or dependency-cutover proof."
   },
@@ -41,26 +41,26 @@
   "sources": [
     {
       "path": "src/observability/regex_ir.rs",
-      "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
-      "bytes": 45117,
+      "sha256": "ec137a887970a852c3daa81dd2c74b4750bc8c9633dea143359b3d69030d528a",
+      "bytes": 28090,
       "role": "private versioned IR schema, accounting, diagnostics and validator"
     },
     {
       "path": "src/observability/regex_syntax.rs",
-      "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
-      "bytes": 119221,
+      "sha256": "ee22a523950b3ef5ca0d6041d5495f48726fc7890be67564bf406678caa4a54f",
+      "bytes": 78157,
       "role": "accepted AST and source-span authority"
     },
     {
       "path": "src/observability/regex_semantics.rs",
-      "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
-      "bytes": 44083,
+      "sha256": "b64b587e03c30c05d0f2f6fcc35c2e8c464979ef115372a295d686d028315d15",
+      "bytes": 35934,
       "role": "canonical Unicode and byte class authority"
     },
     {
       "path": "src/observability/regex_boundaries.rs",
-      "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
-      "bytes": 49608,
+      "sha256": "de0eaabed58658b848378eb357b814ff07f1d41377be6542aed7f67c9d9feb60",
+      "bytes": 36241,
       "role": "fold and zero-width assertion authority"
     }
   ],

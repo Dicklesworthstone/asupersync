@@ -280,8 +280,8 @@
   "source_pins": [
     {
       "path": "src/tls/der_min.rs",
-      "sha256": "77565b078a33e2c185a3743908d5d31f9d75ee838f4ce780ad1da28fb137b958",
-      "line_count": 2090
+      "sha256": "df548d90c42996c106f55cb6492a1a11730d2487c051c035c47635b4aa800dc3",
+      "line_count": 1228
     },
     {
       "path": "fuzz/Cargo.toml",
