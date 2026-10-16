@@ -198,6 +198,7 @@ const EMPTY_BACKOFF_PARK_THRESHOLD: u32 = SPIN_LIMIT + YIELD_LIMIT;
 const STALE_DUE_DEADLINE_PARK_NANOS: u64 = 1;
 const SHORT_WAIT_LE_5MS_NANOS: u64 = 5_000_000;
 const IDLE_IO_POLL_MAX_TIMEOUT: Duration = Duration::from_millis(250);
+const IO_POLL_ERROR_RETRY_NANOS: u64 = 1_000_000;
 #[cfg(any(test, feature = "test-internals"))]
 const DEFAULT_SCHEDULER_EVIDENCE_MAX_INFLIGHT_MULTIPLIER: usize = 4;
 
@@ -348,6 +349,8 @@ enum IoPhaseOutcome {
     Progress,
     /// Another worker is currently the reactor leader.
     Follower,
+    /// This worker's poll failed; no other leader is implied.
+    PollError,
     /// No I/O progress from this worker (leader quick miss or no I/O driver).
     NoProgress,
 }
@@ -369,7 +372,8 @@ static IDLE_TURN_KEPT_WAKES: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnWake {
     /// This thread is the woken task's runtime's idle reactor leader. It
-    /// dispatches right after the turn, so no other worker needs waking.
+    /// keeps the task wake, then promotes a reactor follower before polling
+    /// the selected task. The handoff does not re-arm the reactor.
     RunHere,
     /// The idle leader already kept one wake this turn. Unpark a helper, but
     /// skip the reactor wake: the leader is the reactor and is not blocked.
@@ -543,6 +547,17 @@ fn select_backoff_deadline(
             .flatten()
             .min()
     }
+}
+
+/// Do not let a stale due entry turn a persistent reactor error into a spin.
+/// Future deadlines earlier than the retry cap still retain their wake time.
+#[inline]
+fn poll_error_retry_nanos(next_deadline: Option<Time>, now: Time) -> u64 {
+    next_deadline
+        .filter(|deadline| *deadline > now)
+        .map_or(IO_POLL_ERROR_RETRY_NANOS, |deadline| {
+            deadline.duration_since(now).min(IO_POLL_ERROR_RETRY_NANOS)
+        })
 }
 
 #[inline]
@@ -1082,6 +1097,33 @@ impl WorkerCoordinator {
             io_driver,
             wake_notifier: WakeNotifier::new(),
         }
+    }
+
+    /// Hand reactor responsibility to one idle peer before executing a task.
+    /// No busy-worker fallback permit, reactor wake, or host callback: unlike
+    /// a queue wake, a handoff exists only to give a parked peer a poll turn.
+    #[inline]
+    fn promote_follower(&self) -> bool {
+        let count = self.parkers.len();
+        if count < 2 {
+            return false;
+        }
+
+        // Paired with Parker's waiter-publication fence. The old poll flag
+        // was released before this scan; a late follower either participates
+        // in the scan or observes that release in park[_timeout]_unless.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        let start = self.next_wake.fetch_add(1, Ordering::Relaxed);
+        let mut slot = self.mask.map_or_else(|| start % count, |mask| start & mask);
+        for _ in 0..count {
+            if self.parkers[slot].unpark_if_waiting() {
+                return true;
+            }
+            // Normalize before incrementing, also covering cursor wrap for
+            // non-power-of-two worker counts.
+            slot = if slot + 1 == count { 0 } else { slot + 1 };
+        }
+        false
     }
 
     #[inline]
@@ -5514,11 +5556,12 @@ impl ThreeLaneWorker {
                 }
             }
             Ok(None) | Err(_) if kept_a_wake => IoPhaseOutcome::Progress,
-            Ok(None) | Err(_) => {
+            Ok(None) => {
                 // Another thread is already polling (we are a follower).
                 // Do not busy loop. Proceed to backoff/park logic.
                 IoPhaseOutcome::Follower
             }
+            Err(_) => IoPhaseOutcome::PollError,
         }
     }
 
@@ -5610,6 +5653,9 @@ impl ThreeLaneWorker {
         self.rescue_stranded_local_tasks();
         self.scheduler_ticks.resolve(&self.state);
         let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
+        // Also carried by a promoted follower while the reactor is free:
+        // its next dispatch can select owner-local work before re-election.
+        let mut left_reactor = false;
 
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -5627,6 +5673,12 @@ impl ThreeLaneWorker {
             }
             if let Some(task) = self.next_task() {
                 self.reset_empty_backoff();
+                if std::mem::take(&mut left_reactor) {
+                    // The selected task can spend arbitrarily long in poll.
+                    // Keeping its first wake locally must not strand I/O or
+                    // shared timers behind that task (GH #83).
+                    self.coordinator.promote_follower();
+                }
                 self.execute(task);
                 self.publish_preemption_fairness_certificate_if_due();
                 self.poll_busy_io_if_due();
@@ -5642,6 +5694,10 @@ impl ThreeLaneWorker {
             // PHASE 5: Drive I/O (Leader/Follower pattern).
             self.busy_turns_since_io = 0;
             let io_phase = self.drive_io_phase(return_when_idle);
+            // Include a successful zero-timeout miss: runnable work can race
+            // the idle probe. Only a follower knows another poller owns I/O.
+            left_reactor = self.io_driver.is_some()
+                && !matches!(io_phase, IoPhaseOutcome::Follower);
             if matches!(io_phase, IoPhaseOutcome::Progress) {
                 // We polled I/O, so we might have woken tasks. Continue loop.
                 continue;
@@ -5737,9 +5793,8 @@ impl ThreeLaneWorker {
                             self.reset_empty_backoff();
                             break 'dispatch;
                         }
-                        // Park with timeout based on next timer deadline.
-                        // If we are the IO leader, we shouldn't even be here (we'd block in epoll).
-                        // If we are a follower, we just park until a deadline or woken.
+                        // Followers keep only their owner-local deadline;
+                        // the current reactor leader drives shared deadlines.
                         let timer_deadline = self
                             .timer_driver
                             .as_ref()
@@ -5758,6 +5813,87 @@ impl ThreeLaneWorker {
                             local_deadline,
                             global_deadline,
                         );
+
+                        if matches!(io_phase, IoPhaseOutcome::NoProgress)
+                            && self.io_driver.is_some()
+                        {
+                            // Work that forced a quick poll can disappear
+                            // while it runs. Re-elect instead of parking with
+                            // no poller, but retain the exhausted-backoff
+                            // kernel wait for a due/stale deadline signal.
+                            let now = self.current_scheduler_time();
+                            if next_deadline.is_some_and(|deadline| deadline <= now) {
+                                record_backoff_timeout_park(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                    STALE_DUE_DEADLINE_PARK_NANOS,
+                                );
+                                self.parker.park_timeout(Duration::from_nanos(
+                                    STALE_DUE_DEADLINE_PARK_NANOS,
+                                ));
+                                // Keep the spent spin/yield budget until work
+                                // actually dispatches or this signal clears.
+                            } else {
+                                self.reset_empty_backoff();
+                            }
+                            break;
+                        }
+
+                        if matches!(io_phase, IoPhaseOutcome::Follower) {
+                            let io = self.io_driver.as_ref().expect("follower has an I/O driver");
+                            if let Some(deadline) = next_deadline {
+                                let now = self.current_scheduler_time();
+                                let nanos = if deadline > now {
+                                    deadline.duration_since(now)
+                                } else {
+                                    STALE_DUE_DEADLINE_PARK_NANOS
+                                };
+                                record_backoff_timeout_park(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                    nanos,
+                                );
+                                self.parker.park_timeout_unless(
+                                    Duration::from_nanos(nanos),
+                                    || !io.is_polling(),
+                                );
+                            } else {
+                                record_backoff_indefinite_park(
+                                    &mut self.preemption_metrics,
+                                    io_phase,
+                                );
+                                self.parker.park_unless(|| !io.is_polling());
+                            }
+                            // The next selection may find owner-local work
+                            // before this follower gets to reactor election.
+                            // Carry the handoff forward so that work cannot
+                            // strand another idle peer behind its task poll.
+                            // An existing poller already owns responsibility;
+                            // it will hand off when it leaves its own turn.
+                            left_reactor = !io.is_polling();
+                            // A handoff may carry no runnable task at all.
+                            // Re-enter timer processing and reactor election,
+                            // not the inner queue-only backoff loop.
+                            self.reset_empty_backoff();
+                            break;
+                        }
+
+                        if matches!(io_phase, IoPhaseOutcome::PollError) {
+                            // A persistent poll failure must neither park
+                            // forever as a follower nor spin on is_polling.
+                            // Honor a nearer future deadline; a stale due
+                            // entry still gets a finite error cooldown.
+                            let now = self.current_scheduler_time();
+                            let nanos = poll_error_retry_nanos(next_deadline, now);
+                            record_backoff_timeout_park(
+                                &mut self.preemption_metrics,
+                                io_phase,
+                                nanos,
+                            );
+                            self.parker.park_timeout(Duration::from_nanos(nanos));
+                            self.reset_empty_backoff();
+                            break;
+                        }
 
                         if let Some(next_deadline) = next_deadline {
                             // Re-fetch now to ensure we don't sleep if deadline passed during logic
@@ -5845,6 +5981,9 @@ impl ThreeLaneWorker {
             // We've given other work a chance during the backoff period.
             self.cancel_streak = 0;
             self.ready_dispatch_streak = 0;
+        }
+        if left_reactor {
+            self.coordinator.promote_follower();
         }
         // The loop can stop between an execution and the next dispatch. A
         // task still in this worker's LIFO slot then goes to the global lane,
@@ -7840,7 +7979,13 @@ impl ThreeLaneWorker {
             }
             // Never wait for I/O or its polling leader while runnable work
             // remains. Driver locks are released before readiness wakes tasks.
-            let _ = io.try_turn_with(Some(Duration::ZERO), |_, _| {});
+            if !matches!(io.try_turn_with(Some(Duration::ZERO), |_, _| {}), Ok(None)) {
+                // A peer can enter follower parking during this brief turn,
+                // even when it returns no events. Pass the released reactor
+                // on before the next task poll; no idle-loop flag exists on
+                // the single-step root-pump path (GH #83).
+                self.coordinator.promote_follower();
+            }
         }
     }
 
@@ -9756,6 +9901,10 @@ impl Wake for ThreeLaneLocalCancelWaker {
         self.schedule();
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "reactor_handoff_tests.rs"]
+mod reactor_handoff_tests;
 
 #[cfg(test)]
 #[path = "three_lane_tests.rs"]

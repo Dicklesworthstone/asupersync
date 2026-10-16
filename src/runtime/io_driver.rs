@@ -692,6 +692,16 @@ impl std::fmt::Debug for IoDriverHandle {
 }
 
 impl IoDriverHandle {
+    /// Whether this handle's poll election currently has an owner.
+    ///
+    /// This is a readiness hint, not a reservation. Followers sample it only
+    /// after publishing their Parker waiter; the paired handoff fence makes
+    /// either that sample or the leader's waiter scan observe the other side.
+    #[inline]
+    pub(crate) fn is_polling(&self) -> bool {
+        self.is_polling.load(Ordering::Acquire)
+    }
+
     /// Creates a handle, reusing the dispatcher of this reactor allocation
     /// when another handle already exists. A fresh dispatcher uses the default
     /// events capacity; sharing never resizes an active poll buffer.
