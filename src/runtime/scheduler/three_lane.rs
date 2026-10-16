@@ -437,7 +437,8 @@ static LIFO_SLOT_WAKES: AtomicUsize = AtomicUsize::new(0);
 
 /// Where a ready wake goes when the waking thread is executing a task.
 enum LifoWake {
-    /// Not applicable: another thread, another runtime, or a self-wake.
+    /// Not applicable: another thread, another runtime, a self-wake, or an
+    /// idle worker that can run the task now.
     NotLocal,
     /// Placed in the empty slot.
     Placed,
@@ -446,7 +447,7 @@ enum LifoWake {
 }
 
 /// Puts `task` in this thread's LIFO slot when the thread is executing a
-/// different task of the same runtime.
+/// different task of the same runtime and no worker is idle.
 fn claim_lifo_wake(coordinator: &Arc<WorkerCoordinator>, task: TaskId, priority: u8) -> LifoWake {
     let key = Arc::as_ptr(coordinator).addr();
     let executing_other = EXECUTING.with(|executing| {
@@ -455,6 +456,13 @@ fn claim_lifo_wake(coordinator: &Arc<WorkerCoordinator>, task: TaskId, priority:
     if !executing_other {
         // A self-wake (yield_now) keeps the global lane, so a task looping
         // on it cannot starve other work through the slot.
+        return LifoWake::NotLocal;
+    }
+    // Only this worker sees the slot, and only after the current poll, which
+    // may run for a long time after the wake. An idle worker runs the task now.
+    // With every worker busy the slot's task still waits for this poll; a
+    // stealable slot would let the first worker to finish take it.
+    if coordinator.has_idle_worker() {
         return LifoWake::NotLocal;
     }
     #[cfg(test)]
@@ -483,6 +491,33 @@ impl ExecutingTask {
 impl Drop for ExecutingTask {
     fn drop(&mut self) {
         EXECUTING.with(|executing| executing.set(self.previous));
+    }
+}
+
+/// Counts a dispatch loop in [`WorkerCoordinator::idle_workers`] from the
+/// moment it finds nothing to run until it runs a task or returns.
+struct IdleWorker {
+    coordinator: Arc<WorkerCoordinator>,
+    counted: bool,
+}
+
+impl IdleWorker {
+    fn set(&mut self, idle: bool) {
+        if idle == self.counted {
+            return;
+        }
+        self.counted = idle;
+        if idle {
+            self.coordinator.idle_workers.fetch_add(1, Ordering::AcqRel);
+        } else {
+            self.coordinator.idle_workers.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+impl Drop for IdleWorker {
+    fn drop(&mut self) {
+        self.set(false);
     }
 }
 
@@ -1065,6 +1100,9 @@ pub(crate) struct WorkerCoordinator {
     /// I/O driver handle for waking the reactor.
     io_driver: Option<IoDriverHandle>,
     wake_notifier: WakeNotifier,
+    /// Workers whose dispatch loop found nothing to run and has not run a
+    /// task since: spinning, parked, or driving the reactor.
+    idle_workers: CachePadded<AtomicUsize>,
 }
 
 impl WorkerCoordinator {
@@ -1081,7 +1119,14 @@ impl WorkerCoordinator {
             mask,
             io_driver,
             wake_notifier: WakeNotifier::new(),
+            idle_workers: CachePadded::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Whether some worker has nothing to run and can take a task now.
+    #[inline]
+    fn has_idle_worker(&self) -> bool {
+        self.idle_workers.load(Ordering::Acquire) > 0
     }
 
     #[inline]
@@ -5610,6 +5655,10 @@ impl ThreeLaneWorker {
         self.rescue_stranded_local_tasks();
         self.scheduler_ticks.resolve(&self.state);
         let lifo_was_enabled = std::mem::replace(&mut self.lifo_enabled, true);
+        let mut idle = IdleWorker {
+            coordinator: Arc::clone(&self.coordinator),
+            counted: false,
+        };
 
         'dispatch: loop {
             if self.shutdown.load(Ordering::Relaxed) {
@@ -5626,12 +5675,14 @@ impl ThreeLaneWorker {
                 break;
             }
             if let Some(task) = self.next_task() {
+                idle.set(false);
                 self.reset_empty_backoff();
                 self.execute(task);
                 self.publish_preemption_fairness_certificate_if_due();
                 self.poll_busy_io_if_due();
                 continue;
             }
+            idle.set(true);
 
             self.publish_preemption_fairness_certificate_before_idle();
 
@@ -9515,8 +9566,9 @@ impl ThreeLaneWaker {
             } else {
                 match claim_lifo_wake(&self.coordinator, self.task_id, priority) {
                     LifoWake::NotLocal => self.global.inject_ready(self.task_id, priority),
-                    // The task this worker is executing woke it: the worker
-                    // runs it next, with no global push and no unpark
+                    // The task this worker is executing woke it while every
+                    // worker is busy: this worker runs it next, with no global
+                    // push and no unpark
                     // (br-asupersync-issue65-criticisms-kpmoy5.1.11).
                     LifoWake::Placed => {
                         self.record_enqueue();
@@ -9826,16 +9878,17 @@ mod lifo_slot_tests {
     use crate::runtime::RuntimeBuilder;
     use std::sync::atomic::AtomicBool;
 
-    /// br-asupersync-issue65-criticisms-kpmoy5.1.11: a task woken by the task
-    /// a worker is executing goes to that worker's LIFO slot, and a ping-pong
-    /// over capacity-1 channels still delivers every message.
+    /// br-asupersync-issue65-criticisms-kpmoy5.1.11: with no idle worker, a
+    /// task woken by the task a worker is executing goes to that worker's LIFO
+    /// slot, and a ping-pong over capacity-1 channels still delivers every
+    /// message.
     #[test]
     fn a_task_woken_by_the_executing_task_goes_to_the_lifo_slot() {
         let before = LIFO_SLOT_WAKES.load(Ordering::Relaxed);
         let rt = RuntimeBuilder::new()
-            .worker_threads(4)
+            .worker_threads(1)
             .build()
-            .expect("four-worker runtime");
+            .expect("one-worker runtime");
         let total = rt.block_on(rt.handle().spawn(async move {
             let cx = crate::Cx::current().expect("a spawned task has a Cx");
             let (ping_tx, mut ping_rx) = mpsc::channel::<u32>(1);
@@ -9861,6 +9914,44 @@ mod lifo_slot_tests {
         assert_eq!(total, (1..=1000u32).sum::<u32>(), "every message answered");
         let placed = LIFO_SLOT_WAKES.load(Ordering::Relaxed) - before;
         assert!(placed > 0, "no wake went to a LIFO slot");
+    }
+
+    /// On two workers, task B waits on a channel. Task A sends to it, then
+    /// spins in the same poll. Only A's worker sees its LIFO slot, so the idle
+    /// worker must run B while A spins.
+    #[test]
+    fn a_peer_woken_by_a_long_poll_runs_during_that_poll() {
+        const SPIN: Duration = Duration::from_millis(300);
+        const WAKE_BOUND: Duration = Duration::from_millis(40);
+        let rt = RuntimeBuilder::new()
+            .worker_threads(2)
+            .build()
+            .expect("two-worker runtime");
+        let (tx, mut rx) = mpsc::channel::<std::time::Instant>(1);
+        let (woke, wakes) = std::sync::mpsc::channel::<Duration>();
+        let _b = rt.handle().spawn(async move {
+            let cx = crate::Cx::current().expect("a spawned task has a Cx");
+            let sent = rx.recv(&cx).await.expect("a sends");
+            let _ = woke.send(sent.elapsed());
+        });
+        // B parks on the channel and both workers go idle.
+        std::thread::sleep(Duration::from_millis(100));
+
+        let _a = rt.handle().spawn(async move {
+            tx.try_send(std::time::Instant::now()).expect("wake b");
+            let spun = std::time::Instant::now();
+            while spun.elapsed() < SPIN {
+                std::hint::spin_loop();
+            }
+        });
+
+        let latency = wakes
+            .recv_timeout(Duration::from_secs(10))
+            .expect("b wakes");
+        assert!(
+            latency < WAKE_BOUND,
+            "b ran {latency:?} after a woke it, behind a's {SPIN:?} poll"
+        );
     }
 
     /// Two tasks that wake each other forever on a one-worker runtime keep
