@@ -57,6 +57,8 @@ use crate::cx::Cx;
 use crate::types::Time;
 
 mod acceptor;
+#[cfg(feature = "tls")]
+mod channel_binding;
 mod connector;
 #[cfg(feature = "tls")]
 pub(crate) mod der_min;
