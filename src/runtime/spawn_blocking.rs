@@ -31,6 +31,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Waker};
 use std::thread;
 
+mod fallback_admission;
+use fallback_admission::FallbackAdmission;
+
 /// A blocking operation whose runtime task retains ownership until the pool
 /// has finished the closure and destroyed its captures.
 ///
@@ -389,15 +392,19 @@ fn poll_claim_fallback_slot(
     if try_claim_fallback_slot(count, cap) {
         return Poll::Ready(());
     }
+    // RawWaker clone/drop callbacks may reenter this queue. Prepare outside
+    // the mutex and also retire a duplicate outside it.
+    let mut incoming = Some(context.waker().clone());
     {
         let mut waiters = waiters.lock();
         if !waiters
             .iter()
             .any(|waiter| waiter.will_wake(context.waker()))
         {
-            waiters.push_back(context.waker().clone());
+            waiters.push_back(incoming.take().expect("prepared fallback waker"));
         }
     }
+    drop(incoming);
     // A slot released between the first claim and the registration woke the
     // waiters before this one joined them: claim again.
     if try_claim_fallback_slot(count, cap) {
@@ -807,14 +814,13 @@ where
     join_finished_fallback_threads();
     // Wait until we are under the fallback thread limit to prevent unbounded
     // thread creation when no blocking pool is available.
-    std::future::poll_fn(|context| {
-        poll_claim_fallback_slot(
-            &FALLBACK_THREAD_COUNT,
-            MAX_FALLBACK_THREADS,
-            &FALLBACK_WAITERS,
-            context,
-        )
-    })
+    // The admission owns its queue registration: cancellation while the cap
+    // is full must not leave a global waker keeping the abandoned task alive.
+    FallbackAdmission::new(
+        &FALLBACK_THREAD_COUNT,
+        MAX_FALLBACK_THREADS,
+        &FALLBACK_WAITERS,
+    )
     .await;
 
     let (tx, rx) = BlockingOneshot::new();
