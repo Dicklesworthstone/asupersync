@@ -6069,7 +6069,9 @@ impl RuntimeInner {
             runtime_state.set_unavailable_io_reactor_capability_snapshot(snapshot);
         }
         if let Some(driver) = io_driver {
-            runtime_state.set_io_driver(driver);
+            // A foreign runtime cannot drive our timer wheel: share the
+            // dispatcher but allocate a distinct polling participant.
+            runtime_state.set_io_driver(driver.for_runtime());
         }
         if let Some(driver) = timer_driver {
             runtime_state.set_timer_driver(driver);

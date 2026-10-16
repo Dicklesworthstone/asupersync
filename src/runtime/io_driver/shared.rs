@@ -111,6 +111,19 @@ pub(super) fn handle(reactor: Arc<dyn Reactor>, capacity: Option<usize>) -> IoDr
         }
     };
 
+    participant(owner)
+}
+
+impl IoDriverHandle {
+    /// Give each runtime its own poll election and retained wake state while
+    /// sharing the existing dispatcher, registrations and physical poll gate.
+    /// Ordinary clones within that runtime still share the same election.
+    pub(crate) fn for_runtime(&self) -> Self {
+        participant(Arc::clone(&self._shared_owner))
+    }
+}
+
+fn participant(owner: Arc<DriverOwner>) -> IoDriverHandle {
     IoDriverHandle {
         inner: Arc::clone(&owner.inner),
         reactor: Arc::new(ParticipantReactor {
