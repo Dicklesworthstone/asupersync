@@ -1551,6 +1551,59 @@
     }
 
     #[test]
+    fn next_occupied_offset_matches_a_slot_by_slot_scan() {
+        // br-asupersync-dfdwyt: raw_next_deadline finds each level's occupied
+        // slots with next_occupied_offset, a bitmap word at a time, where it
+        // tested every slot's bit. For every cursor and every starting offset,
+        // up to one past the cursor's own slot, it must find the slot the
+        // per-slot scan finds, across word boundaries and the 255 -> 0 wrap.
+        init_test("next_occupied_offset_matches_a_slot_by_slot_scan");
+        let mut seed = 0x2545_F491_4F6C_DD1D_u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut bitmaps = vec![[0u64; BITMAP_WORDS], [u64::MAX; BITMAP_WORDS]];
+        for slot in [0, 1, 62, 63, 64, 65, 127, 128, 191, 192, 254, 255] {
+            let mut single = [0u64; BITMAP_WORDS];
+            single[slot / 64] = 1u64 << (slot % 64);
+            bitmaps.push(single);
+        }
+        // Random occupancy from one slot in 2 down to one in 32.
+        for round in 0..30 {
+            bitmaps.push(std::array::from_fn(|_| {
+                (0..round % 5).fold(next(), |bits, _| bits & next())
+            }));
+        }
+        for occupied in &bitmaps {
+            for cursor in 0..SLOTS_PER_LEVEL {
+                let mut level = WheelLevel::new(LEVEL0_RESOLUTION_NS, cursor);
+                level.occupied = *occupied;
+                // expected[from]: the first occupied offset at or after `from`.
+                let mut expected = [None; SLOTS_PER_LEVEL + 2];
+                for offset in (1..=SLOTS_PER_LEVEL).rev() {
+                    let slot = (cursor + offset) % SLOTS_PER_LEVEL;
+                    expected[offset] = if level.is_occupied(slot) {
+                        Some(offset)
+                    } else {
+                        expected[offset + 1]
+                    };
+                }
+                for (from, &want) in expected.iter().enumerate().skip(1) {
+                    assert_eq!(
+                        level.next_occupied_offset(from),
+                        want,
+                        "cursor {cursor} from {from} bitmap {occupied:x?}"
+                    );
+                }
+            }
+        }
+        crate::test_complete!("next_occupied_offset_matches_a_slot_by_slot_scan");
+    }
+
+    #[test]
     fn drain_ready_in_place_no_extra_alloc() {
         init_test("drain_ready_in_place_no_extra_alloc");
         let mut wheel = TimerWheel::new();
