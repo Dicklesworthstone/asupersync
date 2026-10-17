@@ -1774,3 +1774,44 @@
             "independent_modules_ignore_cross_module_counters_but_keep_continuity"
         );
     }
+
+/// The violation buffer keeps the newest `max_violations` entries in order.
+/// It trims from the front of a ring buffer: a Vec trimmed with
+/// drain(0..excess) shifted every retained entry on each new violation once
+/// full (GitHub #82).
+#[test]
+fn violation_buffer_keeps_the_newest_entries_in_order() {
+    init_test("violation_buffer_keeps_the_newest_entries_in_order");
+    let tracker = EpochConsistencyTracker::new();
+    let publication = tracker.telemetry_publication.lock();
+    let total = tracker.max_violations as u64 + 5;
+    for actual in 0..total {
+        tracker.record_violation(
+            &publication,
+            EpochConsistencyViolation::MissingTransition {
+                module: ModuleId::TaskTable,
+                expected_epoch: EpochId::GENESIS,
+                actual_epoch: EpochId::new(actual),
+                detected_at: Time::ZERO,
+            },
+        );
+    }
+    drop(publication);
+    let retained: Vec<u64> = tracker
+        .all_violations()
+        .iter()
+        .map(|violation| match violation {
+            EpochConsistencyViolation::MissingTransition { actual_epoch, .. } => actual_epoch.0,
+            other => panic!("unexpected violation {other:?}"),
+        })
+        .collect();
+    let expected: Vec<u64> = (5..total).collect();
+    assert_eq!(retained, expected);
+    assert_eq!(tracker.violation_count(), tracker.max_violations);
+    match tracker.latest_violation() {
+        Some(EpochConsistencyViolation::MissingTransition { actual_epoch, .. }) => {
+            assert_eq!(actual_epoch.0, total - 1);
+        }
+        other => panic!("unexpected latest violation {other:?}"),
+    }
+}

@@ -905,7 +905,7 @@ pub struct EpochConsistencyTracker {
     /// Global epoch transition counter.
     global_transition_count: AtomicU64,
     /// Detected violations (bounded to prevent memory growth).
-    violations: RwLock<Vec<EpochConsistencyViolation>>,
+    violations: RwLock<VecDeque<EpochConsistencyViolation>>,
     /// Maximum number of violations to retain.
     max_violations: usize,
     /// Serializes telemetry-producing tracker operations with delivery
@@ -979,7 +979,7 @@ impl EpochConsistencyTracker {
             time_getter,
             module_records: RwLock::new(DetHashMap::default()),
             global_transition_count: AtomicU64::new(0),
-            violations: RwLock::new(Vec::new()),
+            violations: RwLock::new(VecDeque::new()),
             max_violations: 1000, // Bounded to prevent memory growth
             telemetry_publication: Mutex::new(()),
             telemetry: Arc::new(EpochTelemetryOutbox::new(telemetry_capacity)),
@@ -1475,7 +1475,7 @@ impl EpochConsistencyTracker {
     ) {
         {
             let violations = self.violations.read();
-            if let Some(last) = violations.last() {
+            if let Some(last) = violations.back() {
                 match (last, &violation) {
                     (
                         EpochConsistencyViolation::ModuleDesync {
@@ -1521,7 +1521,7 @@ impl EpochConsistencyTracker {
         let violation_id = self.global_transition_count.load(Ordering::Relaxed);
 
         let mut violations = self.violations.write();
-        violations.push(violation.clone());
+        violations.push_back(violation.clone());
         self.enqueue_telemetry(
             publication,
             EpochTelemetryReceipt::Violation {
@@ -1535,7 +1535,7 @@ impl EpochConsistencyTracker {
         // Trim violations if we've exceeded the limit
         if violations.len() > self.max_violations {
             let excess = violations.len() - self.max_violations;
-            violations.drain(0..excess);
+            violations.drain(..excess);
             self.enqueue_telemetry(
                 publication,
                 EpochTelemetryReceipt::ViolationBufferTrimmed {
@@ -1550,7 +1550,7 @@ impl EpochConsistencyTracker {
     #[inline]
     #[must_use]
     pub fn all_violations(&self) -> Vec<EpochConsistencyViolation> {
-        self.violations.read().clone()
+        self.violations.read().iter().cloned().collect()
     }
 
     /// Returns the most recently recorded historical violation, if any.
@@ -1560,7 +1560,7 @@ impl EpochConsistencyTracker {
     #[inline]
     #[must_use]
     pub fn latest_violation(&self) -> Option<EpochConsistencyViolation> {
-        self.violations.read().last().cloned()
+        self.violations.read().back().cloned()
     }
 
     /// Returns the number of violations detected.
