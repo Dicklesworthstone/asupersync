@@ -47,7 +47,7 @@ expression: inventory
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions
 1	Io	atp/journal/sparse_writer.rs	File::open(
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(
-1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(
+2	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(
 1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(
 1	Io	atp/mailbox/relay.rs	TcpStream::
 1	Io	atp/mailbox/storage.rs	std::fs::read(
@@ -294,7 +294,7 @@ expression: inventory
 4	Time	runtime/epoch_gc.rs	Instant::now()
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()
 1	Time	runtime/epoch_tracking.rs	Instant::now()
-1	Time	runtime/io_driver/shared.rs	std::time::Instant::now()
+1	Time	runtime/io_driver/poll_gate.rs	std::time::Instant::now()
 2	Time	runtime/panic_isolation.rs	Instant::now()
 2	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()
 6	Time	runtime/resource_monitor.rs	Instant::now()
@@ -381,6 +381,7 @@ expression: inventory
 1	Io	atp/journal/platform_caps.rs	std::fs::OpenOptions	match std::fs::OpenOptions::new()
 1	Io	atp/journal/sparse_writer.rs	File::open(	File::open(parent)
 1	Io	atp/journal/sparse_writer/copy_commit.rs	File::open(	File::open(path)
+1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(	File::open(parent)?.sync_all()?;
 1	Io	atp/journal/sparse_writer/scoped/restore.rs	File::open(	let source = match File::open(&request.source_path) {
 1	Io	atp/journal/sparse_writer/scoped/restore/tests.rs	std::fs::write(	std::fs::write(&source, data).unwrap();
 1	Io	atp/mailbox/relay.rs	TcpStream::	let mut stream = TcpStream::connect_timeout(&endpoint, timeout).map_err(|err| {
@@ -904,7 +905,7 @@ expression: inventory
 1	Time	runtime/epoch_gc.rs	Instant::now()	let start_time = Instant::now();
 1	Time	runtime/epoch_tracker.rs	std::time::Instant::now()	let processing_start = std::time::Instant::now();
 1	Time	runtime/epoch_tracking.rs	Instant::now()	instant_to_nanos(Instant::now())
-1	Time	runtime/io_driver/shared.rs	std::time::Instant::now()	let start = std::time::Instant::now();
+1	Time	runtime/io_driver/poll_gate.rs	std::time::Instant::now()	started = Some(std::time::Instant::now());
 2	Time	runtime/panic_isolation.rs	Instant::now()	timestamp: Instant::now(),
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	let now = SystemTime::now();
 1	Time	runtime/resource_cleanup_verifier.rs	SystemTime::now()	self.last_updated = SystemTime::now();

@@ -582,7 +582,17 @@ fn test_function() {
     // its scoped/restore/tests.rs (a plain tests.rs, scanned as production)
     // writes its fixture with std::fs::write. No scanner exemption or
     // detection pattern changed.
-    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 813;
+    // 813 -> 810 (recorded 2026-10-17). 75326e23e took handshake_driver.rs's
+    // four test-peer sites (two std::net::UdpSocket, one eprintln!, one
+    // std::thread::spawn) out of the snapshot when c5012547e moved them to
+    // the exempt handshake_driver_inline_tests.rs, but kept the count at 813;
+    // it should have become 809. Then c82a58115 added one: scoped/restore.rs's
+    // sync_staging fsyncs the staging file's parent directory through
+    // File::open(parent). The shared poll gate's monotonic wait-budget clock
+    // moved from runtime/io_driver/shared.rs to io_driver/poll_gate.rs
+    // (e262b3d87, d2010484b) with the same std::time::Instant::now(). No
+    // scanner exemption or detection pattern changed.
+    const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 810;
 
     fn src_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
