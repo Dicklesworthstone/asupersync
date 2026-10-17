@@ -57,9 +57,14 @@ use crate::net::atp::transport_common::codec::{
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
-    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
+    commit_symlink_transactionally, path_is_link_or_reparse, path_is_link_or_reparse_sync,
+    validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
+    write_sparse_zero_runs,
 };
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::apply_entry_metadata_sync;
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::metadata::install_staged_regular_file_sync;
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -67,10 +72,11 @@ use crate::net::atp::transport_common::metadata::{
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode,
-    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError,
-    MirrorPolicy, SourceEntry, StagedEntryReceive, StreamingError, apply_entry_metadata,
-    capture_directory_metadata_manifest, flat_merkle_root_from_digests, hash_file_streaming,
-    hex_encode, metadata_commitment, mirror_dest, read_entry_metadata,
+    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet,
+    MetadataApplyReport, MirrorError, MirrorPolicy, SourceEntry, StagedEntryReceive,
+    StreamingError, apply_entry_metadata, capture_directory_metadata_manifest,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode, metadata_commitment,
+    mirror_dest, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -2864,6 +2870,21 @@ async fn commit_verified_staging(
         } else {
             base.clone()
         };
+        // A plain regular file commits in one blocking call (dfdwyt).
+        #[cfg(not(windows))]
+        if is_plain_regular_entry(entry.metadata.as_ref()) {
+            commit_regular_entry(
+                cx,
+                &base,
+                &out_path,
+                staging_path,
+                entry.metadata.as_ref(),
+                &mut parent_syncs,
+            )
+            .await?;
+            committed_paths.push(out_path);
+            continue;
+        }
         reject_entry_destination_link_prefixes(
             &base,
             &out_path,
@@ -3220,7 +3241,17 @@ fn trace_tcp_metadata_skips(cx: &Cx, out_path: &Path, skipped: &[(&'static str, 
 }
 
 async fn apply_entry_metadata_best_effort(cx: &Cx, out_path: &Path, meta: &EntryMetadata) {
-    match apply_entry_metadata(out_path, meta).await {
+    trace_entry_metadata_result(cx, out_path, apply_entry_metadata(out_path, meta).await);
+}
+
+/// Traces what applying an entry's metadata skipped, or why it failed; a
+/// failure never fails the commit.
+fn trace_entry_metadata_result(
+    cx: &Cx,
+    out_path: &Path,
+    applied: Result<MetadataApplyReport, StreamingError>,
+) {
+    match applied {
         Ok(report) => trace_tcp_metadata_skips(cx, out_path, &report.skipped),
         Err(err) => {
             let skipped = [("apply", err.to_string())];
@@ -4015,6 +4046,11 @@ impl StagingFileGuard {
         self.armed = false;
         crate::fs::File::from_std(file)
     }
+
+    /// Keeps the staging file, which the caller has already closed.
+    fn keep(mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for StagingFileGuard {
@@ -4030,6 +4066,28 @@ async fn create_owned_staging_file(path: &Path) -> Result<crate::fs::File, Trans
     let path = path.to_owned();
     let guard = crate::runtime::spawn_blocking_io(move || StagingFileGuard::create(path)).await?;
     Ok(guard.into_async_file())
+}
+
+/// Creates the staging file at `path` holding `contents` in one blocking
+/// call: the same create as [`create_owned_staging_file`], then the write and
+/// the close, which were a blocking-pool handoff each (br-asupersync-dfdwyt).
+/// A failed write removes the file, and so does dropping this future before
+/// the call returns.
+async fn write_whole_staging_file(path: &Path, contents: &[u8]) -> Result<(), TransportError> {
+    use std::io::Write as _;
+
+    let path = path.to_owned();
+    let contents = contents.to_vec();
+    let guard = crate::runtime::spawn_blocking_io(move || {
+        let mut guard = StagingFileGuard::create(path)?;
+        if let Some(mut file) = guard.file.take() {
+            file.write_all(&contents)?;
+        }
+        Ok(guard)
+    })
+    .await?;
+    guard.keep();
+    Ok(())
 }
 
 async fn receive_delta_chunks_and_commit<S>(
@@ -4514,7 +4572,10 @@ where
         .enumerate()
         .map(|(i, _)| StagedEntryReceive::new(staging_dir.join(i.to_string())))
         .collect();
-    let mut active: Option<(usize, crate::fs::File)> = None;
+    // The entry being received and its open staging file. The file is `None`
+    // for an entry that arrived whole in one frame and is already written
+    // and closed.
+    let mut active: Option<(usize, Option<crate::fs::File>)> = None;
     let mut received: u64 = 0;
     // Holds one decompressed chunk at a time (at most MAX_COMPRESSED_CHUNK_RAW).
     let mut raw_scratch = Vec::new();
@@ -4551,10 +4612,11 @@ where
                     // begins (the sender streams entries in index order).
                     let switch = matches!(&active, Some((cur, _)) if *cur != idx);
                     if switch {
-                        if let Some((_, mut file)) = active.take() {
+                        if let Some((_, Some(mut file))) = active.take() {
                             file.flush().await?;
                         }
                     }
+                    let mut whole_file = false;
                     if active.is_none() {
                         let st = &mut states[idx];
                         if st.created {
@@ -4567,13 +4629,21 @@ where
                                 "ObjectData entry {index} starts at offset {offset}, expected 0"
                             )));
                         }
-                        let file = create_owned_staging_file(&st.staging_path).await?;
-                        // Pre-size a sparse file to the full length so holes
-                        // (seeked-over zero runs) and a trailing hole are
-                        // preserved without growing allocation.
-                        if config.sparse_files {
-                            file.set_len(entry.size).await?;
-                        }
+                        // A file whose whole content is this frame is created,
+                        // written and closed in one blocking call below.
+                        whole_file = !config.sparse_files && chunk.len() as u64 == entry.size;
+                        let file = if whole_file {
+                            None
+                        } else {
+                            let file = create_owned_staging_file(&st.staging_path).await?;
+                            // Pre-size a sparse file to the full length so holes
+                            // (seeked-over zero runs) and a trailing hole are
+                            // preserved without growing allocation.
+                            if config.sparse_files {
+                                file.set_len(entry.size).await?;
+                            }
+                            Some(file)
+                        };
                         st.mark_created();
                         active = Some((idx, file));
                     }
@@ -4606,10 +4676,23 @@ where
                             "internal: no active staging file for entry {index}"
                         )));
                     };
-                    if config.sparse_files {
-                        write_sparse_zero_runs(file, chunk).await?;
-                    } else {
-                        file.write_all(chunk).await?;
+                    match file {
+                        _ if whole_file => {
+                            write_whole_staging_file(&states[idx].staging_path, chunk).await?;
+                        }
+                        Some(file) if config.sparse_files => {
+                            write_sparse_zero_runs(file, chunk).await?;
+                        }
+                        Some(file) => file.write_all(chunk).await?,
+                        // An entry that arrived whole already holds all its
+                        // bytes; the size check above admits only an empty
+                        // chunk, and any other would be lost, so refuse it.
+                        None if chunk.is_empty() => {}
+                        None => {
+                            return Err(TransportError::Frame(format!(
+                                "internal: entry {index} was already staged whole"
+                            )));
+                        }
                     }
                     let st = &mut states[idx];
                     st.update_with_chunk(chunk);
@@ -4630,7 +4713,7 @@ where
                 }
             }
         }
-        if let Some((_, mut file)) = active.take() {
+        if let Some((_, Some(mut file))) = active.take() {
             file.flush().await?;
         }
         Ok(())
@@ -4696,6 +4779,21 @@ where
                 } else {
                     base.clone()
                 };
+                // A plain regular file commits in one blocking call (dfdwyt).
+                #[cfg(not(windows))]
+                if is_plain_regular_entry(entry.metadata.as_ref()) {
+                    commit_regular_entry(
+                        cx,
+                        &base,
+                        &out_path,
+                        staging_path,
+                        entry.metadata.as_ref(),
+                        &mut parent_syncs,
+                    )
+                    .await?;
+                    committed_paths.push(out_path);
+                    continue;
+                }
                 reject_entry_destination_link_prefixes(
                     &base,
                     &out_path,
@@ -5012,6 +5110,33 @@ async fn reject_destination_link_prefix_cached(
     verified: &mut BTreeSet<PathBuf>,
     include_leaf: bool,
 ) -> Result<(), TransportError> {
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, verified, include_leaf)?;
+    // The whole chain is checked in one blocking call, in the same order as
+    // before. One call per component cost about 20 blocking-pool handoffs per
+    // received file (br-asupersync-dfdwyt). The components before an unsafe
+    // one are still checked first.
+    if !pending.is_empty() {
+        crate::runtime::spawn_blocking(move || check_link_prefixes_sync(&pending)).await?;
+    }
+    unsafe_component.map_or(Ok(()), Err)
+}
+
+fn check_link_prefixes_sync(paths: &[PathBuf]) -> Result<(), TransportError> {
+    paths
+        .iter()
+        .try_for_each(|path| reject_existing_link_or_reparse_sync(path))
+}
+
+/// The paths `reject_destination_link_prefix_cached` checks, in order, each
+/// added to `verified`, plus the error for a component that is not a plain
+/// name, which is raised only after those checks pass.
+fn collect_link_prefix_checks(
+    base: &Path,
+    out_path: &Path,
+    verified: &mut BTreeSet<PathBuf>,
+    include_leaf: bool,
+) -> Result<(Vec<PathBuf>, Option<TransportError>), TransportError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         TransportError::Source(format!(
             "destination path {} is outside safe base {}",
@@ -5025,39 +5150,109 @@ async fn reject_destination_link_prefix_cached(
     // would then follow the substituted ancestor and see an apparently normal
     // tree. Per-entry guards use a fresh cache, so this revalidates the complete
     // outer chain immediately before each mutation.
+    let mut pending = Vec::new();
     for ancestor in base
         .ancestors()
         .skip(1)
         .filter(|path| !path.as_os_str().is_empty())
     {
         if verified.insert(ancestor.to_path_buf()) {
-            reject_existing_link_or_reparse(ancestor).await?;
+            pending.push(ancestor.to_path_buf());
         }
     }
 
     let components = rel.components().collect::<Vec<_>>();
     let mut current = base.to_path_buf();
     if (include_leaf || !components.is_empty()) && verified.insert(current.clone()) {
-        reject_existing_link_or_reparse(&current).await?;
+        pending.push(current.clone());
     }
     let component_count = components.len();
+    let mut unsafe_component = None;
     for (index, component) in components.into_iter().enumerate() {
         let Component::Normal(component) = component else {
-            return Err(TransportError::Source(format!(
+            unsafe_component = Some(TransportError::Source(format!(
                 "unsafe destination component in {}",
                 out_path.display()
             )));
+            break;
         };
         current.push(component);
         if (include_leaf || index + 1 < component_count) && verified.insert(current.clone()) {
-            reject_existing_link_or_reparse(&current).await?;
+            pending.push(current.clone());
         }
+    }
+    Ok((pending, unsafe_component))
+}
+
+/// [`reject_entry_destination_link_prefixes`] for a plain regular file (no
+/// hardlink, not a symlink leaf), for a caller already on a blocking thread:
+/// a fresh cache and the same checks in the same order.
+#[cfg(not(windows))]
+fn reject_regular_destination_link_prefixes_sync(
+    base: &Path,
+    out_path: &Path,
+) -> Result<(), TransportError> {
+    let mut verified = BTreeSet::new();
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, &mut verified, true)?;
+    check_link_prefixes_sync(&pending)?;
+    unsafe_component.map_or(Ok(()), Err)
+}
+
+/// One regular file's commit as a single blocking call (br-asupersync-dfdwyt):
+/// the destination's link-prefix walk, creating its parent, the walk again,
+/// the staged install, then the captured metadata. That is the order the
+/// general commit path runs them in, where each step was a blocking-pool
+/// handoff of its own: eight per received file, nine when it replaces an
+/// existing one. A metadata failure is traced and does not fail the commit,
+/// as before.
+#[cfg(not(windows))]
+async fn commit_regular_entry(
+    cx: &Cx,
+    base: &Path,
+    out_path: &Path,
+    staging_path: &Path,
+    metadata: Option<&EntryMetadata>,
+    parent_syncs: &mut DeferredParentSyncs,
+) -> Result<(), TransportError> {
+    let base_path = base.to_path_buf();
+    let out = out_path.to_path_buf();
+    let staged = staging_path.to_path_buf();
+    let metadata = metadata.cloned();
+    let applied = crate::runtime::spawn_blocking(move || {
+        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
+        install_staged_regular_file_sync(&staged, &out)?;
+        Ok::<_, TransportError>(metadata.map(|meta| apply_entry_metadata_sync(&out, &meta)))
+    })
+    .await?;
+    parent_syncs.record(out_path);
+    if let Some(applied) = applied {
+        trace_entry_metadata_result(cx, out_path, applied);
     }
     Ok(())
 }
 
+/// Whether `metadata` describes a plain regular file, the entries
+/// [`commit_regular_entry`] commits: not special, not a directory or a
+/// symlink, and not a hardlink to an earlier entry.
+#[cfg(not(windows))]
+fn is_plain_regular_entry(metadata: Option<&EntryMetadata>) -> bool {
+    metadata.is_none_or(|metadata| {
+        matches!(metadata.file_kind, FileKind::Regular) && metadata.hardlink_target.is_none()
+    })
+}
+
 async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {
-    match path_is_link_or_reparse(path).await {
+    let path = path.to_path_buf();
+    crate::runtime::spawn_blocking(move || reject_existing_link_or_reparse_sync(&path)).await
+}
+
+fn reject_existing_link_or_reparse_sync(path: &Path) -> Result<(), TransportError> {
+    match path_is_link_or_reparse_sync(path) {
         Ok(true) => Err(TransportError::Source(format!(
             "destination path crosses existing symlink or reparse point: {}",
             path.display()

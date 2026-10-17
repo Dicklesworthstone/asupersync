@@ -999,6 +999,45 @@ fn a_zstd_change_checks_its_fuzz_workspace() {
     assert_eq!(cases[2], json!([]), "{probed:#}");
 }
 
+/// A change to the zstd codec checks it for wasm32, which check-wasm32 never builds: the
+/// browser crate does not depend on the codec (br-asupersync-t1fblr.36). A change to
+/// the fuzz targets alone does not.
+#[test]
+fn a_zstd_codec_change_checks_it_for_wasm32() {
+    let probed = evaluate(&json!({
+        "plan": {"commits": [commit(1, "dev@example.com", "x")], "lanes": []},
+        "lane_logs": {},
+        "probes": {"zstd_wasm_lanes": [
+            {"paths": ["src/lib.rs", "asupersync-zstd/src/frame.rs"], "jobs": 1},
+            {"paths": ["fuzz/zstd/fuzz_targets/zstd_roundtrip.rs", "src/lib.rs"], "jobs": 1},
+        ]},
+    }));
+    let cases = probed["probe_results"]["zstd_wasm_lanes"]
+        .as_array()
+        .expect("zstd_wasm_lanes probe");
+    assert_eq!(
+        cases[0],
+        json!([{
+            "id": "check-wasm32-zstd",
+            "kind": "build",
+            "argv": [
+                "cargo",
+                "check",
+                "-j",
+                "1",
+                "-p",
+                "asupersync-zstd",
+                "--target",
+                "wasm32-unknown-unknown",
+                "--keep-going",
+                "--message-format=short"
+            ],
+        }]),
+        "{probed:#}"
+    );
+    assert_eq!(cases[1], json!([]), "{probed:#}");
+}
+
 /// A run posts its receipt only on beads cited by commits no earlier run receipted. While
 /// a batch stayed open each run posted again on every bead it cited: 77 beads per run,
 /// 1395 receipt comments on 396 beads by 10-13.

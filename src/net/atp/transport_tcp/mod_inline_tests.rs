@@ -1834,6 +1834,127 @@
         assert!(!outside.join("payload/file.bin").exists());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn regular_entry_commit_rejects_replaced_destination_directory_ancestor() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        // Canonical, so only the planted link can trip the guard.
+        let root = temp.path().canonicalize().expect("canonical temp dir");
+        let outside = root.join("outside");
+        let pivot = root.join("pivot");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        std::os::unix::fs::symlink(&outside, &pivot).expect("create directory symlink");
+        let staged = root.join("staged.part");
+        std::fs::write(&staged, b"payload").expect("write staged file");
+
+        let base = pivot.join("payload");
+        let out_path = base.join("dir/file.bin");
+        let mut parent_syncs = DeferredParentSyncs::default();
+        let error = futures_lite::future::block_on(commit_regular_entry(
+            &Cx::for_testing(),
+            &base,
+            &out_path,
+            &staged,
+            None,
+            &mut parent_syncs,
+        ))
+        .expect_err("outer destination symlink must fail closed");
+        assert!(matches!(
+            error,
+            TransportError::Source(message) if message.contains("symlink or reparse point")
+        ));
+        // Refused before its parent is created through the link.
+        assert!(!outside.join("payload").exists());
+        assert!(staged.exists(), "a refused commit keeps the staged file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_entry_commit_installs_the_staged_file_with_its_metadata() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        // Canonical, so no symlinked ancestor of the temp dir trips the guard.
+        let root = temp.path().canonicalize().expect("canonical temp dir");
+        let base = root.join("dest");
+        let out_path = base.join("a/b/file.bin");
+        let staged = root.join("staged.part");
+        std::fs::write(&staged, b"payload").expect("write staged file");
+        let metadata = EntryMetadata {
+            unix_mode: Some(0o640),
+            mtime_unix_secs: Some(1_000_000_000),
+            ..EntryMetadata::default()
+        };
+        let mut parent_syncs = DeferredParentSyncs::default();
+        futures_lite::future::block_on(commit_regular_entry(
+            &Cx::for_testing(),
+            &base,
+            &out_path,
+            &staged,
+            Some(&metadata),
+            &mut parent_syncs,
+        ))
+        .expect("commit a plain regular file");
+
+        assert_eq!(
+            std::fs::read(&out_path).expect("read committed file"),
+            b"payload"
+        );
+        assert!(!staged.exists(), "the staged file is renamed into place");
+        let committed = std::fs::metadata(&out_path).expect("committed file metadata");
+        assert_eq!(committed.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(
+            committed.modified().expect("committed mtime"),
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000)
+        );
+        futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
+    }
+
+    #[test]
+    fn a_whole_staging_file_is_written_by_one_call_and_never_replaces_a_file() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("0");
+        futures_lite::future::block_on(write_whole_staging_file(&path, b"payload"))
+            .expect("stage a whole file");
+        assert_eq!(
+            std::fs::read(&path).expect("read the staged file"),
+            b"payload"
+        );
+
+        let error = futures_lite::future::block_on(write_whole_staging_file(&path, b"other"))
+            .expect_err("a staging file is always created new");
+        assert!(
+            matches!(&error, TransportError::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read the staged file"),
+            b"payload"
+        );
+    }
+
+    /// A file that fits one data frame is staged by one blocking call and a
+    /// longer one through its open staging file. Both commit the source's
+    /// bytes, on either side of the one-frame boundary.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn files_on_both_sides_of_the_one_frame_boundary_commit_identical_bytes() {
+        for (name, len) in [
+            ("small", 1000),
+            ("one-frame", DEFAULT_CHUNK_SIZE),
+            ("two-frames", DEFAULT_CHUNK_SIZE + 1),
+        ] {
+            let payload = compressible_payload(7, len);
+            let run = transfer_with_options(
+                &canonical_test_root(&format!("atp-tcp-whole-{name}")),
+                &payload,
+                SendOptions::new(),
+                None,
+            );
+            assert_delivered(&run, &payload, name);
+        }
+    }
+
     fn directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
         DirectoryMetadataEntry {
             rel_path: rel_path.to_string(),

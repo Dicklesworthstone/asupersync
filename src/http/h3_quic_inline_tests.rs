@@ -16,6 +16,11 @@
         connection.begin_handshake(cx).unwrap();
         connection.mark_handshake_keys_available(cx).unwrap();
         connection.mark_app_keys_available(cx).unwrap();
+        if !server {
+            // A client refuses to confirm until a verifying handshake recorded the
+            // server identity (br-asupersync-7pwwwe); these tests stand in for one.
+            connection.record_verified_server_identity();
+        }
         connection.confirm_handshake(cx).unwrap();
         let mut session = if server { NativeH3Session::server() } else { NativeH3Session::client() };
         if streaming {
