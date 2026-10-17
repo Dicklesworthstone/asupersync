@@ -467,3 +467,67 @@ fn a_bounded_mask_defers_cancellation_at_retry_admission() {
     assert_eq!(budget.available(), 0);
     assert!(context.checkpoint().is_err(), "the mask did not erase cancellation");
 }
+
+#[test]
+fn a_loop_dropped_while_yielding_returns_its_admitted_token() {
+    let tokens = MAX_READY_ATTEMPTS_PER_POLL + 2;
+    let budget = RetryBudget::new(RetryTokenBucket::new(tokens, 0.0, Time::ZERO));
+    let mut operation = Box::pin(
+        retry(
+            RetryPolicy::immediate(MAX_READY_ATTEMPTS_PER_POLL * 3),
+            AlwaysRetry,
+            || ready(Outcome::<(), &str>::Err("unavailable")),
+        )
+        .with_budget(budget.clone()),
+    );
+    let (_, waker) = counting_waker();
+    assert!(
+        operation
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    // The retry admitted just before the yield holds its token but never ran.
+    assert_eq!(budget.available(), 2);
+    drop(operation);
+    assert_eq!(budget.available(), 3);
+}
+
+#[test]
+fn cancellation_during_backoff_returns_the_admitted_token() {
+    let context = Cx::for_testing();
+    let _current = Cx::set_current(Some(context.clone()));
+    let budget = RetryBudget::new(RetryTokenBucket::new(3, 0.0, Time::ZERO));
+    let calls = AtomicU32::new(0);
+    let mut operation = Box::pin(
+        retry(
+            RetryPolicy::fixed_delay(Duration::from_secs(3600), 3),
+            AlwaysRetry,
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                ready(Outcome::<(), &str>::Err("unavailable"))
+            },
+        )
+        .with_budget(budget.clone()),
+    );
+    let (_, waker) = counting_waker();
+    let mut task = Context::from_waker(&waker);
+    assert!(operation.as_mut().poll(&mut task).is_pending());
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        budget.available(),
+        2,
+        "the retry was admitted before its backoff"
+    );
+    context.cancel_fast(CancelKind::User);
+    assert!(matches!(
+        operation.as_mut().poll(&mut task),
+        Poll::Ready(RetryResult::Cancelled(_))
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        budget.available(),
+        3,
+        "the unstarted retry's token is returned"
+    );
+}

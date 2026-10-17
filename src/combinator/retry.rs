@@ -486,6 +486,11 @@ impl RetryTokenBucket {
         self.last_refill = now;
     }
 
+    /// Returns one token taken for a retry that never started, up to capacity.
+    fn refund_one(&mut self) {
+        self.tokens = (self.tokens + 1.0).min(f64::from(self.capacity));
+    }
+
     /// Returns the current number of available tokens.
     #[must_use]
     pub fn available_tokens(&self) -> u32 {
@@ -566,6 +571,10 @@ impl Default for RateLimitedRetryPolicy {
 /// Clones share the same bucket. The bucket refills on the clock the loops
 /// read: the runtime's timer when there is one, the wall clock otherwise. Build
 /// its [`RetryTokenBucket`] with a `now` from that clock.
+///
+/// A token is spent when the retry it was taken for starts. A loop cancelled
+/// or dropped before then (during the backoff sleep, or while yielding after a
+/// batch of ready attempts) returns the token.
 #[derive(Debug, Clone)]
 pub struct RetryBudget {
     bucket: Arc<Mutex<RetryTokenBucket>>,
@@ -589,6 +598,29 @@ impl RetryBudget {
     #[must_use]
     pub fn available(&self) -> u32 {
         self.bucket.lock().available_tokens()
+    }
+
+    fn refund(&self) {
+        self.bucket.lock().refund_one();
+    }
+}
+
+/// A budget token taken for a retry that has not started. Dropping it unspent
+/// returns the token, so cancellation or a dropped loop does not shrink the
+/// budget other callers share.
+struct AdmittedRetryToken(Option<RetryBudget>);
+
+impl AdmittedRetryToken {
+    fn spend(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for AdmittedRetryToken {
+    fn drop(&mut self) {
+        if let Some(budget) = self.0.take() {
+            budget.refund();
+        }
     }
 }
 
@@ -859,6 +891,7 @@ pub struct Retry<F, Fut, P, Pred> {
     predicate: Pred,
     state: RetryState,
     budget: Option<RetryBudget>,
+    admitted: Option<AdmittedRetryToken>,
     #[pin]
     inner: RetryInner<Fut>,
 }
@@ -875,6 +908,7 @@ where
             predicate,
             state: RetryState::new(policy_val),
             budget: None,
+            admitted: None,
             inner: RetryInner::Idle,
         }
     }

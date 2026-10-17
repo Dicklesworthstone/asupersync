@@ -17,6 +17,19 @@ fn retry_cancel_reason() -> Option<CancelReason> {
     })
 }
 
+/// Takes a budget token for the next retry and holds it until that retry
+/// starts. Without a budget every retry is admitted.
+fn admit_retry(budget: Option<&RetryBudget>, admitted: &mut Option<AdmittedRetryToken>) -> bool {
+    let Some(budget) = budget else {
+        return true;
+    };
+    if !budget.try_acquire(retry_clock_now()) {
+        return false;
+    }
+    *admitted = Some(AdmittedRetryToken(Some(budget.clone())));
+    true
+}
+
 /// # Scheduling and cancellation
 ///
 /// At most 64 immediately-ready attempts are processed per poll. When another
@@ -27,8 +40,10 @@ fn retry_cancel_reason() -> Option<CancelReason> {
 ///
 /// After a failed attempt drains, unmasked cancellation takes precedence over
 /// its error. Cancellation is checked before and after the retry predicate,
-/// before consuming a shared retry-budget token. An in-flight attempt is never
-/// force-dropped, and a successful or panicked outcome is still returned as-is.
+/// before consuming a shared retry-budget token. A token taken for a retry that
+/// never starts (cancelled or dropped during its backoff or yield) is returned.
+/// An in-flight attempt is never force-dropped, and a successful or panicked
+/// outcome is still returned as-is.
 impl<F, Fut, P, Pred, T, E> Future for Retry<F, Fut, P, Pred>
 where
     F: FnMut() -> Fut,
@@ -56,6 +71,7 @@ where
                 }
                 RetryInnerProj::Idle => {
                     if let Some(r) = cancel_reason {
+                        drop(this.admitted.take());
                         this.inner.set(RetryInner::Completed);
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
@@ -67,6 +83,9 @@ where
                     if let Some(delay) = this.state.next_attempt(rng.as_mut()) {
                         if delay == Duration::ZERO {
                             // Start immediately
+                            if let Some(token) = this.admitted.take() {
+                                token.spend();
+                            }
                             let fut = (this.factory)();
                             this.inner.set(RetryInner::Polling(fut));
                         } else {
@@ -88,6 +107,7 @@ where
                 }
                 RetryInnerProj::Sleeping(sleep) => {
                     if let Some(r) = cancel_reason {
+                        drop(this.admitted.take());
                         this.inner.set(RetryInner::Completed);
                         return Poll::Ready(RetryResult::Cancelled(r));
                     }
@@ -96,10 +116,14 @@ where
                             // A Sleep also completes early when its task is
                             // cancelled; that must not start another attempt.
                             if let Some(r) = retry_cancel_reason() {
+                                drop(this.admitted.take());
                                 this.inner.set(RetryInner::Completed);
                                 return Poll::Ready(RetryResult::Cancelled(r));
                             }
                             // Sleep done, start factory
+                            if let Some(token) = this.admitted.take() {
+                                token.spend();
+                            }
                             let fut = (this.factory)();
                             this.inner.set(RetryInner::Polling(fut));
                         }
@@ -135,9 +159,7 @@ where
                                         return Poll::Ready(RetryResult::Cancelled(reason));
                                     }
                                     if should_retry
-                                        && this.budget.as_ref().is_none_or(|budget| {
-                                            budget.try_acquire(retry_clock_now())
-                                        })
+                                        && admit_retry(this.budget.as_ref(), this.admitted)
                                     {
                                         // Retry
                                         this.inner.set(RetryInner::Idle);
