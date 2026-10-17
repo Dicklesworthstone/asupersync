@@ -200,8 +200,10 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
         }
         // Expected source cancellation during retirement is not an independent
         // owner failure and cannot hide failed cleanup. A cancellation that
-        // initiated stop remains authoritative over a weaker cleanup error.
-        if (cleanup && (!outcome || severity(cleanup) >= severity(outcome))) outcome = cleanup;
+        // initiated stop remains authoritative over a weaker cleanup error. An
+        // equally severe source terminal is the same cleanup's specific cause.
+        if (cleanup && (!outcome || severity(cleanup) > severity(outcome)
+            || severity(cleanup) === severity(outcome) && outcome !== terminal)) outcome = cleanup;
         if (!outcome && (cleanupFailed || unexpected)) outcome = recordFailure("fetch record stream failed");
       } catch {
         const cleanup = recordFailure("fetch record cleanup failed");

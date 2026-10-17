@@ -277,7 +277,8 @@ export function quorumFetchResponses(
           ? internal("fetch retirement returned a non-void success") : receipt;
       }, () => internal("fetch retirement rejected")) : Promise.resolve(ok(undefined));
       const joinedRetirement = retirement.then(receipt => {
-        if (receipt.outcome !== "ok") noteCleanup(index, receipt);
+        if (receipt.outcome !== "ok") stop(receipt);
+        return receipt;
       });
       let refused = false;
       try { await Reflect.apply(CANCEL!, member.reader, ["fetch selection member retired"]); }
@@ -288,7 +289,10 @@ export function quorumFetchResponses(
         : refused ? terminal.outcome === "cancelled" ? terminal
           : internal("fetch cancellation or terminal publication refused") : undefined;
       if (failure) noteCleanup(index, failure);
-      await joinedRetirement;
+      // Recorded after the terminal: an equally severe operation failure keeps
+      // its own, more specific cause.
+      const retired = await joinedRetirement;
+      if (retired.outcome !== "ok") noteCleanup(index, retired);
       resolve();
     })();
     return member.draining;

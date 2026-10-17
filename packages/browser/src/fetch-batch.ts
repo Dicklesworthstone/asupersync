@@ -560,12 +560,13 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       }
       // Start independent retirement alongside native body cancellation. Its
       // failure fences peers immediately; its settlement still joins all work.
+      // The member's cleanup cause is chosen below, once its terminal is known.
       const retiring = member.retire ? Promise.resolve().then(member.retire).then(value => {
         const receipt = checked<void>(value);
         return receipt.outcome === "ok" && receipt.value !== undefined
           ? failure("invalid fetch batch retirement receipt", "internal_failure") : receipt;
       }, () => failure("fetch batch retirement rejected", "internal_failure")).then(receipt => {
-        if (receipt.outcome !== "ok") noteCleanup(member.index, receipt);
+        if (receipt.outcome !== "ok") stop(receipt);
         return receipt;
       }) : Promise.resolve(ok(undefined));
       let refusal: Failure | undefined;
@@ -589,7 +590,8 @@ function runFetchBatch<T>(scope: FetchBatchScope, requests: FetchBatchRequests,
       // With a separate retirement receipt, expected operation cancellation is
       // not evidence of failed cleanup. Genuine owner cancellation was already
       // observed by stop; do not manufacture a stronger cause during retirement.
-      if (retired.outcome !== "ok" && (outcome.outcome === "ok" || severity(retired) >= severity(outcome))) outcome = retired;
+      // An equally severe operation failure keeps its own, more specific cause.
+      if (retired.outcome !== "ok" && (outcome.outcome === "ok" || severity(retired) > severity(outcome))) outcome = retired;
       if (outcome.outcome !== "ok") noteCleanup(member.index, outcome);
       member.ended = true;
       if (member.bodyController) {

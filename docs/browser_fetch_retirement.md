@@ -113,6 +113,11 @@ selection owns. Invalid, non-void-success, thrown, or rejected retirement receip
 fail closed; arbitrary rejection causes and formatting hooks are not trusted.
 An explicit non-success retirement receipt participates in the same monotone
 `panicked > cancelled > err` aggregation as the existing cleanup outcomes.
+Within one member, an equally severe operation receipt keeps its own cause: a
+refused task publication reports the refusal, not the retirement receipt's
+generic "terminal publication failed". The retirement receipt replaces it only
+when stronger. Selection, race/join, batches and record streams all apply this,
+and a failed retirement still fences admission as soon as it is observed.
 
 This strengthens failure reporting, not transport tolerance. An `ok` retirement
 receipt does NOT suppress an `err`, `cancelled`, or `panicked` operation receipt.

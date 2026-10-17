@@ -186,6 +186,13 @@ for (const rejection of [false, true]) test(`retirement ${rejection ? "reject" :
   const f = await fixture(t), a = provider(t), b = provider(t, { retire() { if (rejection) return Promise.reject(thrown); throw thrown; } });
   assert.equal((await f.group([a.handle, b.handle]).result).outcome, "err"); assert.equal(touched, 0);
 });
+test("retirement-only failures keep input-order ties despite opposite completion order", async t => {
+  const f = await fixture(t), late = f.gate(), early = f.gate(), a = provider(t);
+  const b = provider(t, { retire: () => late.promise }), c = provider(t, { retire: () => early.promise });
+  const g = f.group([a.handle, b.handle, c.handle]); await pending(g.result);
+  early.resolve(err("retire c")); await pending(g.result); late.resolve(err("retire b"));
+  const result = await g.result; assert.equal(result.outcome, "err"); assert.equal(result.failure.message, "retire b");
+});
 test("retirement panic message is snapshotted exactly once", async t => {
   let reads = 0; const f = await fixture(t), a = provider(t), b = provider(t, { retire: () => Promise.resolve({ outcome: "panicked",
     get message() { reads++; return reads === 1 ? "first" : 7; } }) });

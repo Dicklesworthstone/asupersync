@@ -279,7 +279,8 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
           ? internal("fetch retirement returned a non-void success") : receipt;
       }, () => internal("fetch retirement rejected")) : Promise.resolve(ok(undefined));
       const joinedRetirement = retirement.then(receipt => {
-        if (receipt.outcome !== "ok") noteCleanup(index, receipt);
+        if (receipt.outcome !== "ok") stop(receipt);
+        return receipt;
       });
       let rejected = false;
       try { await Reflect.apply(CANCEL!, member.reader, ["fetch group member retired"]); }
@@ -292,7 +293,10 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
         ? terminal.outcome !== "ok" ? terminal : internal("fetch group cancellation or terminal publication refused")
         : terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal : ok(undefined);
       if (outcome.outcome !== "ok") noteCleanup(index, outcome);
-      await joinedRetirement;
+      // Recorded after the terminal: an equally severe operation failure keeps
+      // its own, more specific cause.
+      const retired = await joinedRetirement;
+      if (retired.outcome !== "ok") noteCleanup(index, retired);
       resolve(cleanupErrors.get(index) ?? ok(undefined));
     })();
     return member.draining;

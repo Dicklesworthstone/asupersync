@@ -93,6 +93,16 @@ for (const first of [false, true]) {
     assert.equal(bad.counts.cancel, 1); assert.equal(good.counts.pull, 0); assert.equal((await new Response(selected.body).arrayBuffer()).byteLength, 1);
     assert.equal((await loser.retire()).outcome, "ok");
   });
+  test(`actual loser publication refusal keeps its own cause over its retirement receipt (${first})`, async t => {
+    const good = streamBody(), bad = streamBody();
+    const f = await fixture(t, { fetch: url => new Response(url.endsWith("/bad") ? bad.stream : good.stream),
+      join: (task, terminal) => task.toJSON().slot === 2 ? err("publication refused") : terminal });
+    const winner = f.start("/good"), loser = f.start("/bad"); await Promise.all([winner.response(), loser.response()]);
+    const result = await f.select([winner, loser], 1, first).result;
+    assert.equal(result.outcome, "err"); assert.equal(result.failure.message, "publication refused");
+    assert.equal((await loser.closed).failure.message, "publication refused");
+    assert.match((await loser.retire()).failure.message, /terminal publication/);
+  });
 }
 test("independent retirement and native cancellation both start and both gate success", async t => {
   const f = await fixture(t), native = f.gate(), retirement = f.gate();
@@ -101,6 +111,13 @@ test("independent retirement and native cancellation both start and both gate su
   assert.equal(b.counts.native, 1); assert.equal(b.counts.retire, 1); assert.equal(a.counts.retire, 0);
   native.resolve(); await pending(group.result); retirement.resolve(ok(undefined)); assert.equal((await group.result).outcome, "ok");
   assert.equal(a.counts.read, 0);
+});
+test("retirement-only failures keep input-order ties despite opposite completion order", async t => {
+  const f = await fixture(t), late = f.gate(), early = f.gate(), a = fake(t);
+  const b = fake(t, { retire: () => late.promise }), c = fake(t, { retire: () => early.promise });
+  const group = f.select([a.handle, b.handle, c.handle]); await pending(group.result);
+  early.resolve(err("retire c")); await pending(group.result); late.resolve(err("retire b"));
+  const result = await group.result; assert.equal(result.outcome, "err"); assert.equal(result.failure.message, "retire b");
 });
 test("retirement failure promptly retires a proposed winner while another loser remains gated", async t => {
   const f = await fixture(t), slow = f.gate(), a = fake(t), b = fake(t, { retire: () => Promise.resolve(err("retirement failure")) }), c = fake(t, { native: slow.promise });
