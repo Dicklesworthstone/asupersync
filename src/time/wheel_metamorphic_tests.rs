@@ -9,7 +9,9 @@
 
 use proptest::prelude::*;
 use std::collections::HashMap;
-use std::task::Waker;
+use std::sync::Arc;
+use std::sync::atomic::{self, AtomicBool};
+use std::task::{Wake, Waker};
 use std::time::Duration;
 
 use super::*;
@@ -107,6 +109,19 @@ struct TrackedTimer {
     handle: Option<TimerHandle>,
     cancelled: bool,
     fired: bool,
+    woken: Arc<FiredFlag>,
+}
+
+/// The waker registered for one tracked timer: set when the wheel hands the
+/// waker back from `collect_expired`, so the model learns which timers fired
+/// from the wheel itself.
+#[derive(Debug, Default)]
+struct FiredFlag(AtomicBool);
+
+impl Wake for FiredFlag {
+    fn wake(self: Arc<Self>) {
+        self.0.store(true, atomic::Ordering::SeqCst);
+    }
 }
 
 /// Snapshot of wheel state for invariant checking.
@@ -163,9 +178,9 @@ fn apply_operation(
     match operation {
         WheelOperation::InsertTimer { timer } => {
             let deadline = wheel.current_time() + Duration::from_millis(timer.deadline_offset_ms);
-            let waker = dummy_waker();
+            let woken = Arc::new(FiredFlag::default());
 
-            let handle = wheel.register(deadline, waker);
+            let handle = wheel.register(deadline, Waker::from(Arc::clone(&woken)));
             timer_handle_map.insert(timer.id, handle);
             tracked_timers.push(TrackedTimer {
                 id: timer.id,
@@ -174,6 +189,7 @@ fn apply_operation(
                 handle: Some(handle),
                 cancelled: false,
                 fired: false,
+                woken,
             });
         }
         WheelOperation::CancelTimer { timer_id } => {
@@ -186,12 +202,16 @@ fn apply_operation(
         }
         WheelOperation::AdvanceTime { advance_ms } => {
             let new_time = wheel.current_time() + Duration::from_millis(*advance_ms);
-            let _ready_wakers = wheel.collect_expired(new_time);
+            for waker in wheel.collect_expired(new_time) {
+                waker.wake();
+            }
 
-            // Mark timers as fired if they were in the ready batch
-            // Note: This is simplified since we can't easily correlate wakers back to timer IDs
+            // A timer fired when the wheel returned its waker. A due deadline is
+            // not enough: a coalesced timer fires at the end of its window
+            // (ca1bc7485), and until then it is still live in the wheel.
             for timer in tracked_timers.iter_mut() {
-                if !timer.fired && !timer.cancelled && timer.deadline <= new_time {
+                if !timer.fired && !timer.cancelled && timer.woken.0.load(atomic::Ordering::SeqCst)
+                {
                     timer.fired = true;
                 }
             }
@@ -622,5 +642,46 @@ mod composition_tests {
                 }
             }
         });
+    }
+
+    /// The case proptest shrank mr_composite_wheel_invariants to when it went
+    /// red on main (watchdog batch at 896bf1898). A coalesced timer due at
+    /// 271 ms sits in the window (270 ms, 275 ms], so at its deadline it is
+    /// still live and ready, and it fires at the window's end.
+    #[test]
+    fn coalesced_timer_due_mid_window_fires_at_the_window_end() {
+        let config = TestWheelConfig {
+            max_wheel_duration_hours: 1,
+            max_timer_duration_hours: 25,
+            coalescing_enabled: true,
+            coalesce_window_ms: 5,
+            min_group_size: 1,
+        };
+        let mut wheel = TimerWheel::with_config(
+            Time::ZERO,
+            config.to_wheel_config(),
+            config.to_coalescing_config(),
+        );
+        let mut tracked = Vec::new();
+        let mut handles = HashMap::new();
+        let insert = WheelOperation::InsertTimer {
+            timer: TestTimer {
+                id: 0,
+                deadline_offset_ms: 271,
+                priority: 0,
+            },
+        };
+        apply_operation(&mut wheel, &insert, &mut tracked, &mut handles);
+
+        let advance = |advance_ms| WheelOperation::AdvanceTime { advance_ms };
+        apply_operation(&mut wheel, &advance(271), &mut tracked, &mut handles);
+        let snapshot = WheelSnapshot::capture(&wheel, &tracked);
+        assert!(!tracked[0].fired, "held until the window's end");
+        assert_eq!((snapshot.active_count, snapshot.ready_count), (1, 1));
+
+        apply_operation(&mut wheel, &advance(4), &mut tracked, &mut handles);
+        let snapshot = WheelSnapshot::capture(&wheel, &tracked);
+        assert!(tracked[0].fired, "fired at 275 ms");
+        assert_eq!((snapshot.active_count, snapshot.ready_count), (0, 0));
     }
 }
