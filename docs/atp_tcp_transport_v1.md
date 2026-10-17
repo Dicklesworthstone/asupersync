@@ -69,6 +69,13 @@ never read (`src/net/atp/transport_common/codec.rs`, br-asupersync-t1fblr.16).
 - With no offer, no accept, or an older peer on either side, the wire stays
   exactly as described above.
 
+From the command line, `atp send --transport tcp --compress zstd` makes the
+offer, in an `atp` built with `--features atp-cli,zstd`. `--compress auto`
+offers the same codec but sends raw the files that are already compressed.
+An `atp recv` from such a build accepts without a flag. `atp send` refuses
+`--compress` on `--transport rq` and in a build without the codec, rather
+than sending raw without saying so (br-asupersync-t1fblr.18).
+
 ## Integrity (fail-closed)
 
 The receiver buffers each declared entry in memory, validates the completed

@@ -86,6 +86,25 @@ recorded in its release bead; `v0.5.0` release evidence is recorded in
 
 ## [Unreleased]
 
+### `atp send --compress` and async zstd streams (feature `zstd`)
+
+`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
+`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
+with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
+such a build accepts without a flag, and an older or codec-less receiver gets
+the raw wire as before. `atp send` refuses `--compress`, before connecting,
+on `--transport rq` and in a build without the codec, rather than sending raw
+without saying so; under `--transport auto` it skips the rq candidate.
+`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
+it uses. (`br-asupersync-t1fblr.18`.)
+
+`asupersync::compression::zstd` compresses any runtime stream:
+`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
+default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
+explicit `DecodeLimits`. A dropped read or write future loses nothing as long
+as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
+other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
+
 ## [v0.6.0] - 2026-10-16
 
 About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
@@ -463,6 +482,13 @@ smaller. The receiver checks each frame's entry, offset and length before it
 writes anything. Receivers and senders that predate this see the raw stream
 as before. RaptorQ datagram lanes are not compressed.
 (`br-asupersync-t1fblr.29`.)
+
+The native SDK sends with the same options:
+`AtpSdk::native_transfers_with_send_options(config, QuicSendOptions)` makes a
+client whose `send_path`, `spawn_send_path`, uploads and checkpointed sends
+all offer the configured compression. `native_transfers` keeps the defaults,
+and `SessionConfig::enable_compression` still changes nothing.
+(`br-asupersync-t1fblr.18`.)
 
 `CompressionMode::Auto`, on TCP and QUIC, offers zstd as `Zstd` does, but
 does not spend effort where it cannot pay:
