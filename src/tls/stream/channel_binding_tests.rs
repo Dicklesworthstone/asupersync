@@ -866,8 +866,6 @@ fn public_handshakes(
     Result<TlsStream<MemoryIo>, TlsError>,
     Result<TlsStream<MemoryIo>, TlsError>,
 ) {
-    use std::future::Future;
-
     let mut client = std::pin::pin!(client);
     let mut server = std::pin::pin!(server);
     let mut cx = Context::from_waker(Waker::noop());

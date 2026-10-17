@@ -733,18 +733,18 @@ impl TaskCompletionEffects {
 
     /// Extracts waiter ids while deliberately suppressing observer delivery.
     ///
-    /// This is reserved for panic-unwind cleanup guards or failed-start paths
-    /// that cannot release a caller-owned outer lock: those contexts must never
-    /// invoke user metrics providers or tracing subscribers. Suppression emits
-    /// no direct completion metric or completion debug/unknown trace and does
-    /// not increment the observer-panic counter because dispatch was never
-    /// attempted. The undispatched observer payload, including any final
-    /// metrics-provider handle, and detached cancellation-Waker targets are
+    /// This is reserved for failed-start paths and lab bookkeeping that cannot
+    /// release a caller-owned outer lock. Suppression emits no direct
+    /// completion metric or completion debug/unknown trace and does not
+    /// increment the observer-panic counter because dispatch was never
+    /// attempted. Lifecycle observations are still delivered inline, each
+    /// panic-contained, as they were before observers were deferred. The rest
+    /// of the observer payload, including any final metrics-provider handle and
+    /// monitor/link effects, and detached cancellation-Waker targets are
     /// deliberately leaked on this exceptional path because the caller may
     /// still own an outer runtime-state lock. Ordinary delivery uses
-    /// [`Self::into_parts`]; unwind paths that can later retire detached
-    /// cancellation Wakers use
-    /// [`Self::into_waiters_and_retirements_without_observers`].
+    /// [`Self::into_parts`]; unwind paths, which release the lock before they
+    /// retire, use [`Self::into_waiters_and_retirements_without_observers`].
     pub(crate) fn into_waiters_without_observers(self) -> SmallVec<[TaskId; 4]> {
         let Self {
             waiters,
@@ -760,43 +760,101 @@ impl TaskCompletionEffects {
     }
 
     /// Splits callback-free waiters from cancellation-Waker retirement for an
-    /// unwind path that still owns an outer runtime-state lock: lifecycle
-    /// observations are delivered inline, the rest of the payload leaks.
+    /// unwind path that still owns an outer runtime-state lock. The lifecycle
+    /// observations, the monitor/link effects and the final metrics-provider
+    /// handle ride the retirements: [`TaskCompletionRetirements::retire`]
+    /// delivers them after that lock is released. The task-completion metric
+    /// and trace stay suppressed.
     pub(crate) fn into_waiters_and_retirements_without_observers(
         self,
     ) -> (SmallVec<[TaskId; 4]>, TaskCompletionRetirements) {
         let Self {
             waiters,
             observer,
-            retired_cancel_wakers,
+            mut retired_cancel_wakers,
         } = self;
-        deliver_suppressed_lifecycle(observer);
+        retired_cancel_wakers.carry_suppressed(observer);
         (waiters, retired_cancel_wakers)
     }
 }
 
-/// Cancellation-Waker payloads detached during task completion.
+/// Cancellation-Waker payloads detached during task completion, plus the
+/// effects of a completion whose observer an unwind path suppressed.
 ///
 /// Call [`Self::retire`] only after releasing every outer runtime-state lock.
 #[must_use = "cancellation Wakers must be retired after releasing runtime-state locks"]
 pub(crate) struct TaskCompletionRetirements {
     targets: Option<SmallVec<[Arc<CancelWaker>; 4]>>,
+    /// Boxed: only unwind completions carry it (br-asupersync-909482).
+    suppressed: Option<Box<SuppressedCompletionEffects>>,
+}
+
+/// What a suppressed completion still owes once the lock is released: its
+/// region/obligation lifecycle observations, the DOWN notifications, exit
+/// signals and linked cancellations of its monitors and links, and the final
+/// metrics-provider handle, which may run a destructor.
+struct SuppressedCompletionEffects {
+    metrics: Option<Arc<dyn MetricsProvider>>,
+    lifecycle: Vec<LifecycleObserverEffect>,
+    watch_effects: Option<crate::monitor::WatchEffects>,
 }
 
 impl TaskCompletionRetirements {
     fn empty() -> Self {
         Self {
             targets: Some(SmallVec::new()),
+            suppressed: None,
         }
     }
 
     fn new(targets: SmallVec<[Arc<CancelWaker>; 4]>) -> Self {
         Self {
             targets: Some(targets),
+            suppressed: None,
+        }
+    }
+
+    /// Takes what a suppressed observer still owes. Runs under the caller's
+    /// runtime-state lock, so it only moves handles: no callback, Waker or
+    /// provider destructor runs here.
+    fn carry_suppressed(&mut self, mut observer: TaskCompletionObserver) {
+        let metrics = match observer.payload.take() {
+            Some(TaskCompletionObserverPayload::Completed { metrics, .. }) => Some(metrics),
+            Some(TaskCompletionObserverPayload::UnknownTask { .. }) | None => None,
+        };
+        let lifecycle = std::mem::take(&mut observer.lifecycle);
+        let watch_effects = observer.watch_effects.take();
+        drop(observer);
+        if metrics.is_some() || watch_effects.is_some() {
+            debug_assert!(self.suppressed.is_none());
+            self.suppressed = Some(Box::new(SuppressedCompletionEffects {
+                metrics,
+                lifecycle,
+                watch_effects,
+            }));
         }
     }
 
     pub(crate) fn retire(mut self) {
+        if let Some(suppressed) = self.suppressed.take() {
+            let SuppressedCompletionEffects {
+                metrics,
+                lifecycle,
+                watch_effects,
+            } = *suppressed;
+            // Each observation and the provider's retirement get their own
+            // unwind boundary, as in TaskCompletionObserver::dispatch. The
+            // observer-panic counter is not charged: dispatch was suppressed.
+            if let Some(metrics) = metrics {
+                for effect in lifecycle {
+                    contain_metrics_hook(|| effect.dispatch(&*metrics));
+                }
+                contain_metrics_hook(|| drop(metrics));
+            }
+            if let Some(effects) = watch_effects {
+                effects.dispatch();
+            }
+        }
         let mut targets = self.targets.take().unwrap_or_default();
         while let Some(target) = targets.pop() {
             if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -813,6 +871,11 @@ impl TaskCompletionRetirements {
 
 impl Drop for TaskCompletionRetirements {
     fn drop(&mut self) {
+        // Undelivered suppressed effects hold a provider handle and watch
+        // slots whose Wakers may run arbitrary destructors: leak them too.
+        if let Some(suppressed) = self.suppressed.take() {
+            std::mem::forget(suppressed);
+        }
         let Some(targets) = self.targets.take() else {
             return;
         };
@@ -8495,31 +8558,16 @@ impl RuntimeState {
         // still lives embedded (unified arm) — identical logical-time
         // observations either way.
         //
-        // Monitors and links (kpmoy5.6.1) are resolved first, while the
-        // outcome is still borrowed: the effects ride the completion observer
-        // and are delivered after the lock is released. No watch means one
-        // emptiness check.
-        let watch_effects = if self.task_watches.is_empty() {
-            None
-        } else {
-            let now = self
-                .timer_driver
+        // Monitors and links (kpmoy5.6.1) are resolved right after the leak
+        // audit, while the outcome is still borrowed (resolve_task_watches).
+        // Their timestamp is read here, before any shard lock: the clock may
+        // be user code.
+        let watch_now = (!self.task_watches.is_empty()).then(|| {
+            self.timer_driver
                 .as_ref()
-                .map_or(self.now, TimerDriverHandle::now);
-            let gateway = self.spawn_gateway.clone();
-            let effects =
-                self.task_watches
-                    .on_task_completed(task_id, close_outcome.as_ref(), now, gateway);
-            if let Some(effects) = effects.as_ref() {
-                self.down_history.extend(effects.down_deliveries());
-                if let Some(limit) = self.down_history_limit {
-                    while self.down_history.len() > limit {
-                        self.down_history.pop_front();
-                    }
-                }
-            }
-            effects
-        };
+                .map_or(self.now, TimerDriverHandle::now)
+        });
+        let watch_effects;
         let mut lifecycle = std::mem::take(&mut observer.lifecycle);
         match self.shard_tables.clone() {
             Some(shards) => {
@@ -8542,6 +8590,9 @@ impl RuntimeState {
                         owner,
                         completion,
                     );
+                    watch_effects = watch_now.and_then(|now| {
+                        self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
+                    });
                     self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                     self.abort_orphaned_obligations_for_holder(
                         &mut regions,
@@ -8577,6 +8628,9 @@ impl RuntimeState {
                     owner,
                     completion,
                 );
+                watch_effects = watch_now.and_then(|now| {
+                    self.resolve_task_watches(task_id, close_outcome.as_ref(), now)
+                });
                 self.retire_completed_finalizer_barrier(task_id, owner, close_outcome.as_ref());
                 self.abort_orphaned_obligations_for_holder(
                     &mut regions,
@@ -8606,6 +8660,35 @@ impl RuntimeState {
             observer,
             retired_cancel_wakers,
         }
+    }
+
+    /// Resolves what a finished task's monitors and links owe (kpmoy5.6.1):
+    /// the effects ride the completion observer and are delivered after the
+    /// lock is released. Called after the leak audit: under the Panic leak
+    /// policy the audit unwinds, and the unwind guard's re-completion must
+    /// still find the watches, or their DOWN is lost while the lab history
+    /// records it (br-asupersync-909482). It takes no lock and reads no clock
+    /// (`now` is sampled by the caller), so the sharded walk may call it under
+    /// the shard-C guard.
+    fn resolve_task_watches(
+        &mut self,
+        task_id: TaskId,
+        outcome: Option<&Outcome<(), Error>>,
+        now: Time,
+    ) -> Option<crate::monitor::WatchEffects> {
+        let gateway = self.spawn_gateway.clone();
+        let effects = self
+            .task_watches
+            .on_task_completed(task_id, outcome, now, gateway);
+        if let Some(effects) = effects.as_ref() {
+            self.down_history.extend(effects.down_deliveries());
+            if let Some(limit) = self.down_history_limit {
+                while self.down_history.len() > limit {
+                    self.down_history.pop_front();
+                }
+            }
+        }
+        effects
     }
 
     /// Completion phase (Shard C): audits obligations still held by a task
@@ -12154,448 +12237,20 @@ pub struct HeldObligationSnapshot {
 }
 
 #[cfg(test)]
-pub(crate) mod completion_observer_test_support {
-    use super::*;
-    use crate::sync::ContendedMutex;
-    use std::sync::{Mutex, Weak};
-
-    /// Observes the actual completion lock and authoritative cleanup state.
-    /// A failed try-lock is recorded instead of blocking the old implementation
-    /// forever, so the same native test is a deterministic old-code failure.
-    pub struct LifecycleCompletionMetrics {
-        target: Mutex<Option<(Weak<ContendedMutex<RuntimeState>>, RegionId, TaskId)>>,
-        events: Mutex<Vec<&'static str>>,
-        reentries: AtomicUsize,
-        retired: AtomicUsize,
-        panic_on_lifecycle: bool,
-    }
-
-    impl LifecycleCompletionMetrics {
-        pub fn new(panic_on_lifecycle: bool) -> Arc<Self> {
-            Arc::new(Self {
-                target: Mutex::new(None),
-                events: Mutex::new(Vec::new()),
-                reentries: AtomicUsize::new(0),
-                retired: AtomicUsize::new(0),
-                panic_on_lifecycle,
-            })
-        }
-
-        pub fn arm(
-            &self,
-            state: &Arc<ContendedMutex<RuntimeState>>,
-            region: RegionId,
-            task: TaskId,
-        ) {
-            *self.target.lock().unwrap() = Some((Arc::downgrade(state), region, task));
-        }
-
-        fn observe(&self, event: &'static str, region: Option<RegionId>, task: Option<TaskId>) {
-            let Some((state, target_region, target_task)) = self.target.lock().unwrap().clone()
-            else {
-                return;
-            };
-            if region.is_some_and(|region| region != target_region)
-                || task.is_some_and(|task| task != target_task)
-            {
-                return;
-            }
-            self.events.lock().unwrap().push(event);
-            if let Some(state) = state.upgrade()
-                && let Ok(runtime) = state.try_lock()
-            {
-                self.reentries.fetch_add(1, Ordering::SeqCst);
-                if runtime.region(target_region).is_none()
-                    && runtime.pending_obligation_count() == 0
-                    && runtime.task(target_task).is_none()
-                {
-                    self.retired.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-            assert!(
-                !(self.panic_on_lifecycle && event != "completed"),
-                "lifecycle observer sentinel: {event}"
-            );
-        }
-
-        pub fn assert_completed(&self, discharged: &'static str) {
-            assert_eq!(
-                *self.events.lock().unwrap(),
-                [discharged, "closed", "completed"]
-            );
-            assert_eq!(
-                self.reentries.load(Ordering::SeqCst),
-                3,
-                "every callback reentered runtime state"
-            );
-            assert_eq!(
-                self.retired.load(Ordering::SeqCst),
-                3,
-                "callbacks observed complete task/obligation/region retirement"
-            );
-        }
-    }
-
-    impl MetricsProvider for LifecycleCompletionMetrics {
-        fn task_spawned(&self, _: RegionId, _: TaskId) {}
-        fn task_completed(&self, task: TaskId, _: OutcomeKind, _: Duration) {
-            self.observe("completed", None, Some(task));
-        }
-        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
-        fn region_closed(&self, region: RegionId, _: Duration) {
-            self.observe("closed", Some(region), None);
-        }
-        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
-        fn drain_completed(&self, _: RegionId, _: Duration) {}
-        fn deadline_set(&self, _: RegionId, _: Duration) {}
-        fn deadline_exceeded(&self, _: RegionId) {}
-        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
-        fn deadline_violation(&self, _: &str, _: Duration) {}
-        fn deadline_remaining(&self, _: &str, _: Duration) {}
-        fn checkpoint_interval(&self, _: &str, _: Duration) {}
-        fn task_stuck_detected(&self, _: &str) {}
-        fn obligation_created(&self, _: RegionId) {}
-        fn obligation_discharged(&self, region: RegionId) {
-            self.observe("discharged", Some(region), None);
-        }
-        fn obligation_leaked(&self, region: RegionId) {
-            self.observe("leaked", Some(region), None);
-        }
-        fn scheduler_tick(&self, _: usize, _: Duration) {}
-    }
-
-    struct PanickingDropPayload(Arc<AtomicUsize>);
-
-    impl Drop for PanickingDropPayload {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::Relaxed);
-            panic!("adversarial panic-payload destructor");
-        }
-    }
-
-    /// Deterministic adversarial provider shared by completion-path tests.
-    pub struct PanickingCompletionMetrics {
-        state: Mutex<Option<Weak<ContendedMutex<RuntimeState>>>>,
-        completion_attempts: AtomicUsize,
-        reentry_successes: AtomicUsize,
-        completed_state_observed: AtomicUsize,
-        completion_panics_remaining: AtomicUsize,
-        panic_payload_drop_counter: Option<Arc<AtomicUsize>>,
-        provider_drop_attempts: Option<Arc<AtomicUsize>>,
-        provider_drop_while_state_locked: Option<Arc<AtomicUsize>>,
-        panic_on_provider_drop: bool,
-    }
-
-    impl PanickingCompletionMetrics {
-        fn with_completion_panics(completion_panics_remaining: usize) -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new(None),
-                completion_attempts: AtomicUsize::new(0),
-                reentry_successes: AtomicUsize::new(0),
-                completed_state_observed: AtomicUsize::new(0),
-                completion_panics_remaining: AtomicUsize::new(completion_panics_remaining),
-                panic_payload_drop_counter: None,
-                provider_drop_attempts: None,
-                provider_drop_while_state_locked: None,
-                panic_on_provider_drop: false,
-            })
-        }
-
-        pub(crate) fn panic_once() -> Arc<Self> {
-            Self::with_completion_panics(1)
-        }
-
-        pub(crate) fn panic_persistently() -> Arc<Self> {
-            Self::with_completion_panics(usize::MAX)
-        }
-
-        pub(crate) fn panic_with_panicking_drop_payload(
-            drop_counter: Arc<AtomicUsize>,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new(None),
-                completion_attempts: AtomicUsize::new(0),
-                reentry_successes: AtomicUsize::new(0),
-                completed_state_observed: AtomicUsize::new(0),
-                completion_panics_remaining: AtomicUsize::new(1),
-                panic_payload_drop_counter: Some(drop_counter),
-                provider_drop_attempts: None,
-                provider_drop_while_state_locked: None,
-                panic_on_provider_drop: false,
-            })
-        }
-
-        pub(crate) fn provider_drop_probe(
-            drop_attempts: Arc<AtomicUsize>,
-            drop_while_state_locked: Arc<AtomicUsize>,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new(None),
-                completion_attempts: AtomicUsize::new(0),
-                reentry_successes: AtomicUsize::new(0),
-                completed_state_observed: AtomicUsize::new(0),
-                completion_panics_remaining: AtomicUsize::new(0),
-                panic_payload_drop_counter: None,
-                provider_drop_attempts: Some(drop_attempts),
-                provider_drop_while_state_locked: Some(drop_while_state_locked),
-                panic_on_provider_drop: false,
-            })
-        }
-
-        pub(crate) fn panic_callback_and_provider_drop(
-            drop_attempts: Arc<AtomicUsize>,
-        ) -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new(None),
-                completion_attempts: AtomicUsize::new(0),
-                reentry_successes: AtomicUsize::new(0),
-                completed_state_observed: AtomicUsize::new(0),
-                completion_panics_remaining: AtomicUsize::new(1),
-                panic_payload_drop_counter: None,
-                provider_drop_attempts: Some(drop_attempts),
-                provider_drop_while_state_locked: None,
-                panic_on_provider_drop: true,
-            })
-        }
-
-        pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
-            *self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
-        }
-
-        pub(crate) fn completion_attempts(&self) -> usize {
-            self.completion_attempts.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn reentry_successes(&self) -> usize {
-            self.reentry_successes.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn completed_state_observed(&self) -> usize {
-            self.completed_state_observed.load(Ordering::Relaxed)
-        }
-
-        // See the note on `advance_transaction_generation` in
-        // `database::sqlite`: `fetch_update` is deprecated on the pinned
-        // nightly and absent from the stable subset, so the stable-compatible
-        // spelling stays with an explicit allow.
-        #[allow(deprecated)]
-        fn should_panic_on_completion(&self) -> bool {
-            self.completion_panics_remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                    if remaining == 0 {
-                        None
-                    } else if remaining == usize::MAX {
-                        Some(usize::MAX)
-                    } else {
-                        Some(remaining - 1)
-                    }
-                })
-                .is_ok()
-        }
-    }
-
-    impl MetricsProvider for PanickingCompletionMetrics {
-        fn task_spawned(&self, _: RegionId, _: TaskId) {}
-
-        fn task_completed(&self, task_id: TaskId, _: OutcomeKind, _: Duration) {
-            self.completion_attempts.fetch_add(1, Ordering::Relaxed);
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .and_then(Weak::upgrade);
-            if let Some(state) = state
-                && let Ok(runtime) = state.try_lock()
-            {
-                self.reentry_successes.fetch_add(1, Ordering::Relaxed);
-                if runtime.task(task_id).is_none() {
-                    self.completed_state_observed
-                        .fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            if self.should_panic_on_completion() {
-                if let Some(drop_counter) = &self.panic_payload_drop_counter {
-                    std::panic::panic_any(PanickingDropPayload(Arc::clone(drop_counter)));
-                }
-                panic!("adversarial task-completion metrics callback");
-            }
-        }
-
-        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
-
-        fn region_closed(&self, _: RegionId, _: Duration) {}
-
-        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
-
-        fn drain_completed(&self, _: RegionId, _: Duration) {}
-
-        fn deadline_set(&self, _: RegionId, _: Duration) {}
-
-        fn deadline_exceeded(&self, _: RegionId) {}
-
-        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
-
-        fn deadline_violation(&self, _: &str, _: Duration) {}
-
-        fn deadline_remaining(&self, _: &str, _: Duration) {}
-
-        fn checkpoint_interval(&self, _: &str, _: Duration) {}
-
-        fn task_stuck_detected(&self, _: &str) {}
-
-        fn obligation_created(&self, _: RegionId) {}
-
-        fn obligation_discharged(&self, _: RegionId) {}
-
-        fn obligation_leaked(&self, _: RegionId) {}
-
-        fn scheduler_tick(&self, _: usize, _: Duration) {}
-    }
-
-    impl Drop for PanickingCompletionMetrics {
-        fn drop(&mut self) {
-            let Some(drop_attempts) = &self.provider_drop_attempts else {
-                return;
-            };
-            drop_attempts.fetch_add(1, Ordering::Relaxed);
-
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .and_then(Weak::upgrade);
-            if state.is_some_and(|state| state.try_lock().is_err())
-                && let Some(locked_drops) = &self.provider_drop_while_state_locked
-            {
-                locked_drops.fetch_add(1, Ordering::Relaxed);
-            }
-            assert!(
-                !self.panic_on_provider_drop,
-                "adversarial metrics-provider destructor"
-            );
-        }
-    }
-}
+#[path = "state_completion_observer_test_support_inline_tests.rs"]
+pub(crate) mod completion_observer_test_support;
 
 #[cfg(test)]
-pub(crate) mod spawn_observer_test_support {
-    use super::*;
-    use crate::sync::ContendedMutex;
-    use std::sync::{Mutex, Weak};
+#[path = "state_spawn_observer_test_support_inline_tests.rs"]
+pub(crate) mod spawn_observer_test_support;
 
-    /// Reentrant, persistently panicking provider for spawn-publication tests.
-    pub struct PanickingSpawnMetrics {
-        state: Mutex<Option<Weak<ContendedMutex<RuntimeState>>>>,
-        spawn_attempts: AtomicUsize,
-        reentry_successes: AtomicUsize,
-        task_records_observed: AtomicUsize,
-        stored_futures_observed: AtomicUsize,
-        runnable_publications_observed: AtomicUsize,
-    }
-
-    impl PanickingSpawnMetrics {
-        pub(crate) fn new() -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new(None),
-                spawn_attempts: AtomicUsize::new(0),
-                reentry_successes: AtomicUsize::new(0),
-                task_records_observed: AtomicUsize::new(0),
-                stored_futures_observed: AtomicUsize::new(0),
-                runnable_publications_observed: AtomicUsize::new(0),
-            })
-        }
-
-        pub(crate) fn attach_state(&self, state: &Arc<ContendedMutex<RuntimeState>>) {
-            *self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
-        }
-
-        pub(crate) fn spawn_attempts(&self) -> usize {
-            self.spawn_attempts.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn reentry_successes(&self) -> usize {
-            self.reentry_successes.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn task_records_observed(&self) -> usize {
-            self.task_records_observed.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn stored_futures_observed(&self) -> usize {
-            self.stored_futures_observed.load(Ordering::Relaxed)
-        }
-
-        pub(crate) fn runnable_publications_observed(&self) -> usize {
-            self.runnable_publications_observed.load(Ordering::Relaxed)
-        }
-    }
-
-    impl MetricsProvider for PanickingSpawnMetrics {
-        fn task_spawned(&self, _: RegionId, task_id: TaskId) {
-            self.spawn_attempts.fetch_add(1, Ordering::Relaxed);
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .as_ref()
-                .and_then(Weak::upgrade);
-            if let Some(state) = state
-                && let Ok(mut runtime) = state.try_lock()
-            {
-                self.reentry_successes.fetch_add(1, Ordering::Relaxed);
-                if let Some(task) = runtime.task(task_id) {
-                    self.task_records_observed.fetch_add(1, Ordering::Relaxed);
-                    if task
-                        .cx_inner
-                        .as_ref()
-                        .is_some_and(|inner| inner.read().runnable_publication.is_published())
-                    {
-                        self.runnable_publications_observed
-                            .fetch_add(1, Ordering::Relaxed);
-                    }
-                }
-                if runtime.get_stored_future(task_id).is_some() {
-                    self.stored_futures_observed.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            panic!("adversarial task-spawn metrics callback");
-        }
-
-        fn task_completed(&self, _: TaskId, _: OutcomeKind, _: Duration) {}
-        fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
-        fn region_closed(&self, _: RegionId, _: Duration) {}
-        fn cancellation_requested(&self, _: RegionId, _: CancelKind) {}
-        fn drain_completed(&self, _: RegionId, _: Duration) {}
-        fn deadline_set(&self, _: RegionId, _: Duration) {}
-        fn deadline_exceeded(&self, _: RegionId) {}
-        fn deadline_warning(&self, _: &str, _: &'static str, _: Duration) {}
-        fn deadline_violation(&self, _: &str, _: Duration) {}
-        fn deadline_remaining(&self, _: &str, _: Duration) {}
-        fn checkpoint_interval(&self, _: &str, _: Duration) {}
-        fn task_stuck_detected(&self, _: &str) {}
-        fn obligation_created(&self, _: RegionId) {}
-        fn obligation_discharged(&self, _: RegionId) {}
-        fn obligation_leaked(&self, _: RegionId) {}
-        fn scheduler_tick(&self, _: usize, _: Duration) {}
-    }
-}
-
-/// Runs a metrics hook that the runtime calls under its own lock, so a
-/// panicking provider cannot unwind through runtime bookkeeping. The payload
-/// is user data whose drop could panic again; it is leaked, as elsewhere here.
 /// Delivers the lifecycle observations (region close and drain, obligation
 /// metrics, leak and protocol logs, debt work) that a completion with suppressed
 /// observers carries, inline and each panic-contained, as they were delivered
 /// before they were deferred past the unlock (r29-e8 review of 6d9daa46c). The
 /// rest of the token then drops, leaking its payload as its `Drop` documents.
+/// Only for a suppression with no later unlock point; unwind paths carry these
+/// in their [`TaskCompletionRetirements`] instead.
 fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
     if let Some(TaskCompletionObserverPayload::Completed { metrics, .. }) =
         observer.payload.as_ref()
@@ -12607,6 +12262,9 @@ fn deliver_suppressed_lifecycle(mut observer: TaskCompletionObserver) {
     drop(observer);
 }
 
+/// Runs a metrics hook that the runtime calls under its own lock, so a
+/// panicking provider cannot unwind through runtime bookkeeping. The payload
+/// is user data whose drop could panic again; it is leaked, as elsewhere here.
 fn contain_metrics_hook(hook: impl FnOnce()) {
     if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
         std::mem::forget(payload);
@@ -12622,261 +12280,9 @@ mod state_metamorphic;
 mod tests;
 
 #[cfg(test)]
-mod obligation_transfer_epoch_tests {
-    use super::*;
-
-    #[test]
-    fn checked_transfer_projection_advances_both_epochs_once() {
-        for cross_region in [false, true] {
-            for eager_terminal in [false, true] {
-                let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x28_E0));
-                let source_region = lab.state.create_root_region(Budget::INFINITE);
-                let destination_region = if cross_region {
-                    lab.state
-                        .create_child_region(source_region, Budget::INFINITE)
-                        .unwrap()
-                } else {
-                    source_region
-                };
-                let (source, _source_join) = lab
-                    .state
-                    .create_task(
-                        source_region,
-                        Budget::INFINITE,
-                        std::future::pending::<()>(),
-                    )
-                    .unwrap();
-                let (destination, _destination_join) = lab
-                    .state
-                    .create_task(
-                        destination_region,
-                        Budget::INFINITE,
-                        std::future::pending::<()>(),
-                    )
-                    .unwrap();
-                let source_cx = lab.state.task(source).unwrap().cx.clone().unwrap();
-                let destination_cx = lab.state.task(destination).unwrap().cx.clone().unwrap();
-                let token = source_cx
-                    .try_register_obligation_checked(ObligationKind::Lease, source)
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(lab.state.drain_obligation_posts(1), 1);
-                let id = lab.state.obligations.sorted_pending_ids_for_holder(source)[0];
-                let before = (
-                    lab.state.region_table_epoch,
-                    lab.state.obligation_table_epoch,
-                );
-                let token = token.try_transfer(&destination_cx).unwrap();
-                assert_eq!(
-                    (
-                        lab.state.region_table_epoch,
-                        lab.state.obligation_table_epoch
-                    ),
-                    before
-                );
-                if eager_terminal {
-                    lab.state.commit_obligation(id).unwrap();
-                    assert!(!token.commit());
-                    assert_eq!(lab.state.region_table_epoch, before.0.next());
-                    assert_eq!(lab.state.obligation_table_epoch, before.1.next().next());
-                } else {
-                    assert_eq!(lab.state.drain_obligation_posts(1), 1);
-                    assert_eq!(lab.state.region_table_epoch, before.0.next());
-                    assert_eq!(lab.state.obligation_table_epoch, before.1.next());
-                    assert_eq!(lab.state.obligation(id).unwrap().holder, destination);
-                    assert!(token.commit());
-                    assert_eq!(lab.state.drain_obligation_posts(1), 1);
-                }
-                let after = (
-                    lab.state.region_table_epoch,
-                    lab.state.obligation_table_epoch,
-                );
-                assert_eq!(
-                    lab.state.drain_obligation_posts(64),
-                    usize::from(eager_terminal)
-                );
-                assert_eq!(
-                    (
-                        lab.state.region_table_epoch,
-                        lab.state.obligation_table_epoch
-                    ),
-                    after,
-                    "late handoff receipt cannot advance either epoch again"
-                );
-                assert_eq!(lab.state.pending_obligation_count(), 0);
-                assert_eq!(
-                    lab.state
-                        .obligation_gateway()
-                        .unwrap()
-                        .mailbox()
-                        .stats()
-                        .refused,
-                    0
-                );
-                eprintln!(
-                    "handoff epochs cross_region={cross_region} eager_terminal={eager_terminal} before={before:?} after={after:?} id={id:?}"
-                );
-            }
-        }
-    }
-
-    /// The region, task and obligation tables each advance their own epoch
-    /// counter once per mutation, so the counters are not comparable across
-    /// tables. One task committing several obligations must not record
-    /// cross-module "violations" (br-asupersync-0jroxu).
-    #[test]
-    fn independent_table_epochs_record_no_cross_module_violations() {
-        let mut lab = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(0x0_3E0));
-        let region = lab.state.create_root_region(Budget::INFINITE);
-        let (task, _join) = lab
-            .state
-            .create_task(region, Budget::INFINITE, std::future::pending::<()>())
-            .unwrap();
-        let cx = lab.state.task(task).unwrap().cx.clone().unwrap();
-        for _ in 0..8 {
-            let token = cx
-                .try_register_obligation_checked(ObligationKind::Lease, task)
-                .unwrap()
-                .unwrap();
-            assert_eq!(lab.state.drain_obligation_posts(1), 1);
-            let id = lab.state.obligations.sorted_pending_ids_for_holder(task)[0];
-            lab.state.commit_obligation(id).unwrap();
-            assert!(!token.commit());
-        }
-        assert!(
-            lab.state
-                .obligation_table_epoch
-                .is_after(lab.state.task_table_epoch),
-            "the workload must drive the obligation counter past the task counter"
-        );
-        assert_eq!(lab.state.epoch_tracker.violation_count(), 0);
-    }
-}
+#[path = "state_obligation_transfer_epoch_tests_inline_tests.rs"]
+mod obligation_transfer_epoch_tests;
 
 #[cfg(test)]
-mod oracle_history_retention_tests {
-    use super::*;
-
-    /// A two-participant race whose first participant has finished; `finish`
-    /// completes the second participant and the race.
-    fn race(recorder: &LoserDrainHistoryRecorder, first_task: u32, finish: bool) -> u64 {
-        let participants = vec![
-            TaskId::new_for_test(first_task, 1),
-            TaskId::new_for_test(first_task + 1, 1),
-        ];
-        let race_id = recorder.record_race_start(
-            RegionId::new_for_test(0, 1),
-            participants.clone(),
-            Time::ZERO,
-        );
-        recorder.record_task_complete(participants[0], Time::ZERO);
-        if finish {
-            recorder.record_task_complete(participants[1], Time::ZERO);
-            recorder.record_race_complete(race_id, participants[0], Time::ZERO);
-        }
-        race_id
-    }
-
-    fn started(events: &[LoserDrainHistoryEvent]) -> Vec<u64> {
-        events
-            .iter()
-            .filter_map(|event| match event {
-                LoserDrainHistoryEvent::RaceStarted { race_id, .. } => Some(*race_id),
-                _ => None,
-            })
-            .collect()
-    }
-
-    #[test]
-    fn bounded_loser_drain_history_keeps_in_flight_and_recent_completed_races() {
-        let recorder = LoserDrainHistoryRecorder::default();
-        recorder.retain_completed_races(2);
-        let in_flight = race(&recorder, 100, false);
-        for round in 0..5 {
-            race(&recorder, round * 2, true);
-        }
-        let events = recorder.snapshot();
-        // Five completed races exceed twice the limit, so the three oldest
-        // are forgotten; the in-flight race keeps its partial evidence.
-        assert_eq!(started(&events), vec![in_flight, 4, 5]);
-        let completed_tasks: Vec<TaskId> = events
-            .iter()
-            .filter_map(|event| match event {
-                LoserDrainHistoryEvent::TaskCompleted { task, .. } => Some(*task),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(
-            completed_tasks,
-            [100, 6, 7, 8, 9].map(|index| TaskId::new_for_test(index, 1))
-        );
-        let completed_races: Vec<u64> = events
-            .iter()
-            .filter_map(|event| match event {
-                LoserDrainHistoryEvent::RaceCompleted { race_id, .. } => Some(*race_id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(completed_races, vec![4, 5]);
-    }
-
-    #[test]
-    fn unbounded_loser_drain_history_keeps_every_race_for_oracle_replay() {
-        let recorder = LoserDrainHistoryRecorder::default();
-        for round in 0..5 {
-            race(&recorder, round * 2, true);
-        }
-        assert_eq!(started(&recorder.snapshot()), vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn bounded_finalizer_history_keeps_open_regions_and_recent_closed_regions() {
-        let mut state = RuntimeState::new();
-        state.bound_oracle_histories(1);
-        let open = RegionId::new_for_test(50, 1);
-        state
-            .finalizer_history
-            .push(FinalizerHistoryEvent::Registered {
-                id: 900,
-                region: open,
-                time: Time::ZERO,
-            });
-        for index in 0..3_u32 {
-            let region = RegionId::new_for_test(index, 1);
-            let id = u64::from(index);
-            state
-                .finalizer_history
-                .push(FinalizerHistoryEvent::Registered {
-                    id,
-                    region,
-                    time: Time::ZERO,
-                });
-            state.finalizer_history.push(FinalizerHistoryEvent::Ran {
-                id,
-                time: Time::ZERO,
-            });
-            state.record_finalizer_close_for_test(region);
-        }
-        // Three closed regions exceed twice the limit, so the two oldest are
-        // forgotten with their finalizers; the open region is untouched.
-        let kept: Vec<(u8, u64, Option<RegionId>)> = state
-            .finalizer_history()
-            .iter()
-            .map(|event| match event {
-                FinalizerHistoryEvent::Registered { id, region, .. } => (0, *id, Some(*region)),
-                FinalizerHistoryEvent::Ran { id, .. } => (1, *id, None),
-                FinalizerHistoryEvent::RegionClosed { region, .. } => (2, 0, Some(*region)),
-            })
-            .collect();
-        let last = RegionId::new_for_test(2, 1);
-        assert_eq!(
-            kept,
-            vec![
-                (0, 900, Some(open)),
-                (0, 2, Some(last)),
-                (1, 2, None),
-                (2, 0, Some(last))
-            ]
-        );
-    }
-}
+#[path = "state_oracle_history_retention_tests_inline_tests.rs"]
+mod oracle_history_retention_tests;

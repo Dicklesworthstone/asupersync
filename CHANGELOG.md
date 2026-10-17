@@ -10,20 +10,23 @@ Asupersync is a spec-first, cancel-correct, capability-secure async runtime for 
 - Commit links point to representative commits, not exhaustive lists.
 - Organized by landed capabilities within each version, not by diff order.
 
-Scope window: current work through 2026-09-12, reconstructed from git history,
-beads, benchmark ledgers, and live repo artifacts. `v0.5.0` is published to
-crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
+Scope window: current work through 2026-10-16, reconstructed from git history,
+beads, benchmark ledgers, and live repo artifacts. `v0.6.0` release evidence is
+recorded in its release bead; `v0.5.0` release evidence is recorded in
+`asupersync-v5fn1e`.
 
 ## Version Timeline
 
-- **v0.6.0 (unreleased)**: the workspace version was bumped on `main` in
-  `85f7a8e59` (2026-09-18), but v0.6.0 has not been tagged, released on GitHub or
-  published to crates.io; the latest published version is v0.5.0. Planned
-  content: durable ATP sender/receiver journaling and resume across process
-  loss, targeted resume-client revocation without peer restart, QUIC protected
-  close and post-close accounting shutdown, bounded clock capture and replay,
-  and an HTTP/1 fix that answers a rejected request head with
-  `400`/`413`/`431` instead of a silent close.
+- **v0.6.0 Release** (2026-10-16): durable ATP sender/receiver journaling and
+  resume across process loss, targeted resume-client revocation without peer
+  restart, QUIC protected close and post-close accounting shutdown, bounded
+  clock capture and replay, protected macaroon delegation, a `spawn_blocking`
+  fallback that never detaches its thread (GitHub #80), opt-in zstd
+  compression for ATP over TCP and QUIC, and an HTTP/1 fix that answers a
+  rejected request head with `400`/`413`/`431` instead of a silent close. Ten
+  crates, including the first `asupersync-zstd`, with signed Linux (amd64 and
+  arm64), macOS and Windows assets, built through DSR without GitHub Actions.
+  Breaking changes are listed in the v0.6.0 section.
 - **v0.5.0 Release**: the approved capability-preserving context installation
   boundary, browser local-task isolation and shutdown, reentrant worker
   retirement, QUIC connection reclamation, and buffered I/O recovery.
@@ -83,11 +86,163 @@ crates.io and GitHub; release evidence is recorded in `asupersync-v5fn1e`.
 
 ## [Unreleased]
 
-## [v0.6.0] - Unreleased (version bumped on `main` 2026-09-18; not yet published)
+### `atp send --compress` and async zstd streams (feature `zstd`)
 
-250 commits since v0.5.0. The theme is **durability**: ATP transfers now survive
-a process dying mid-send or mid-receive, QUIC closes cleanly and stops accounting
-afterwards, and the clock can be captured and replayed within bounded windows.
+`atp send` can ask for compression: `--compress zstd` (`on` is an alias) or
+`--compress auto`, on `--transport tcp`, `quic` or `auto`, in an `atp` built
+with `--features atp-cli,zstd`. The default stays `off`. An `atp recv` from
+such a build accepts without a flag, and an older or codec-less receiver gets
+the raw wire as before. `atp send` refuses `--compress`, before connecting,
+on `--transport rq` and in a build without the codec, rather than sending raw
+without saying so; under `--transport auto` it skips the rq candidate.
+`transport_quic::send_path_with_options_and_limiter_report` is the QUIC send
+it uses. (`br-asupersync-t1fblr.18`.)
+
+`asupersync::compression::zstd` compresses any runtime stream:
+`ZstdEncoder<W: AsyncWrite>` writes standard Zstandard frames (1 MiB by
+default, with checksums), and `ZstdDecoder<R: AsyncRead>` reads them within
+explicit `DecodeLimits`. A dropped read or write future loses nothing as long
+as the adapter is kept. A truncated stream fails with `UnexpectedEof`, and any
+other decoding failure with `InvalidData`. (`br-asupersync-t1fblr.31`.)
+
+## [v0.6.0] - 2026-10-16
+
+About 3,000 commits since v0.5.0. The theme is **durability**: ATP transfers now
+survive a process dying mid-send or mid-receive, QUIC closes cleanly and stops
+accounting afterwards, and the clock can be captured and replayed within bounded
+windows.
+
+### Security — third-party macaroon caveats (asupersync-s45073)
+
+- **Legacy third-party caveats can be stripped by the third party.**
+  - `MacaroonToken::add_third_party_caveat` encrypts the caveat key as
+    `vid = sig XOR caveat_key`. Whoever holds the caveat key, which is the third
+    party by design, can recover the chain signature before that caveat.
+  - With it they can mint a shorter token that still verifies, with that caveat
+    and every later caveat removed (an expiry, for example).
+  - This is unchanged in 0.6.0, so tokens already issued keep working.
+- **Migrate to protected delegation**, new in 0.6.0 (b3c086217, 3f025b5dc).
+  - Issue third-party caveats with `MacaroonToken::add_protected_third_party_caveat`,
+    and verify with `verify_with_protected_discharges_for_identifier`.
+  - That profile seals the caveat key with XChaCha20-Poly1305 under
+    identifier-bound AAD, and its verifier never falls back to the legacy
+    envelope.
+  - Use new issuer keys and identifiers, reissue outstanding grants, and rotate
+    the discharge keys. Rotating discharge keys does not revoke a prefix
+    signature that a legacy envelope has already revealed.
+- **Fixed: `MacaroonKeyRing::verify` no longer accepts an all-zero signature when
+  no retired key is set** (43aca3a0d). The comparison is still constant-time.
+- **Documented: `RuntimeBuilder::with_spawn_authorization_key` is checked only by
+  `RuntimeState::create_task_with_auth`.** `Cx::spawn`, `Scope::spawn*` and
+  runtime-handle spawns do not consult it.
+
+### Breaking changes — summary and migration
+
+A rustdoc-JSON comparison of the public surface against v0.5.0
+(`scripts/public_api_diff.py`) found no public item, method, field or variant
+removed or renamed. These six changes can break callers:
+
+1. **`net::atp::protocol::QuicFrame`** has three new variants (`NewConnectionId`,
+   `NewToken`, `RetireConnectionId`) and is now `#[non_exhaustive]`. Add a
+   wildcard arm to exhaustive matches. Details below.
+2. **`cx::ChildRegion` / `ChildRegionOpening`** are generic over the opener's
+   capability set, `<Caps = cap::All>`. Code holding `Cx<cap::All>` is
+   unchanged; with a restricted `Cx<Caps>`, name `Caps` or use the default.
+   Details below.
+3. **`http::h2::listener::Http2ListenerStatsSnapshot`** has a new public field,
+   `tls_handshake_rejections_total: u64` (bb0ffc016). The struct has no
+   `Default`, so add the field to struct literals and exhaustive patterns.
+4. **`supervision::ManagedSupervisorReport<E>`** has a new public field,
+   `restart_storm_detected: bool` (6ae74db04). Add it to struct literals and
+   exhaustive patterns; the library normally builds this report itself.
+5. **`signal::SignalMaskGuard` is now `!Send` and `!Sync`** (6fafb0065), because
+   dropping it on another thread would restore that thread's signal mask. Keep
+   the guard on the thread that created it, and do not hold it across an
+   `.await` in a `Send` future.
+6. **These types are no longer `UnwindSafe`/`RefUnwindSafe`**, because a new
+   field holds a lock, a waker or an `Arc<dyn …>`. Wrap them in
+   `std::panic::AssertUnwindSafe` where you pass them to `catch_unwind`.
+   - `http::h1::HttpClientConfig` and `HttpClientBuilder` (the DNS resolver, ceac580d9);
+   - `net::websocket::ServerWebSocket` (the heartbeat clock, 5cc3a89f1);
+   - `stream::Merge` (per-child wakeups, 03ab6cb58);
+   - `http::h3::NativeH3Session` (request-upload wakers, 7091e0415);
+   - `observability::otel::OtlpHttpExporter` and `OtlpLogsHttpExporter` (the
+     bounded export queue, a7251d323);
+   - `tls::TlsAcceptorBuilder` (the selectable crypto provider and SNI
+     certificates, b288f7b3c, 799d4d529);
+   - with the `kafka` feature off, `messaging::KafkaConsumer` and
+     `TransactionalProducer` (850af98a6, da0f00e65).
+
+The behaviour changes further down (poll quotas, the IO capability, budget
+deadlines and others) do not change signatures, but they can change what a
+program observes.
+
+### Fixed: `spawn_blocking` without a runtime no longer detaches its worker thread (GitHub #80)
+
+- Called with no asupersync runtime (for example from
+  `futures::executor::block_on` on a plain thread), `spawn_blocking` runs the
+  closure on a dedicated thread. 0.5.0 dropped that thread's `JoinHandle` as the
+  thread exited. On glibc before 2.43, detaching an exiting thread can crash in
+  `pthread_detach` (BZ19951).
+- The fallback now joins a finished thread, or parks a running one until a later
+  fallback spawn joins it. No fallback thread is detached (8e87ef3d1).
+- The same treatment covers:
+  - the custom-clock `Sleep` fallback thread (f87732a14);
+  - the process kill-on-drop reaper, the `shutdown_timeout` reaper, the MySQL
+    KILL-on-drop thread, debug-server connections, and blocking-pool threads
+    left over after a timed-out shutdown (7e04f79b3).
+- A census test fails when a new thread spawn site has no recorded answer for
+  its handle (c12042185).
+
+### Performance note — runtime shutdown retires every task
+
+Dropping a `RuntimeState` now retires every live task explicitly (acea99849,
+asupersync-bi2462.91): it requests cancellation, drops the stored future and
+completes the record, each isolated against panics, before opening the join
+barriers. That lets joins parked at shutdown finish. Teardown costs about 200 ns
+per live task, against about 20 ns before it, once per runtime. With that
+teardown excluded, this change leaves the scheduler's `next_task` and
+cancel-dispatch timings unchanged. The `next_task_hotpath` and
+`cancel_drain_bench` benchmarks include the teardown in their timings, because
+their routines consume their input.
+
+### Performance — the ATP TCP sender batches its first pass
+
+The TCP sender's first pass (metadata, hardlink detection, content hashing)
+now runs in blocking tasks of many entries. Before, it made about five
+blocking-pool handoffs per file. Each hashing task reads at most 8 MiB, so a
+cancelled send stops reading within one task. On a 2104-file source tree
+over loopback, the sender's CPU time fell by about a third and its context
+switches by about half. One ordering change: a tree that both exceeds
+`max_transfer_bytes` and contains an invalid symlink now always fails on the
+symlink, where it used to fail on whichever came first.
+(`br-asupersync-dfdwyt`.)
+
+### Known issues
+
+- **Legacy third-party macaroon caveats** can be stripped by their third party;
+  see Security above (asupersync-s45073 H2). Use the protected delegation APIs
+  for new grants.
+- **Macaroon hardening items still open** (asupersync-s45073, all rated LOW):
+  - `add_caveat` has no caveat limit, but `from_binary` rejects more than 64
+    caveats, so a token with 65 serializes and then cannot be parsed back (L2);
+  - first-party and third-party caveat bytes enter the HMAC chain without a
+    type tag. This is hardening only; no exploit is known (L3);
+  - the spawn check uses an empty `VerificationContext`, so every attenuated
+    spawn token is denied. This fails closed (L5);
+  - `SecurityConfig` derives `Debug`, which prints `auth_key_seed` (L6).
+- **The `zstd` feature is experimental, opt-in and off by default.**
+  `asupersync-zstd` 0.6.0 is the codec's first crates.io release, and its
+  encoder strategies are still being built (asupersync-t1fblr).
+- **JetStream and NATS:** every HIGH finding of the 10-03 messaging audit is
+  fixed (asupersync-messaging-client-audit-k6pxks). Two items wait on owner
+  decisions:
+  - CONNECT confirmation is opt-in, through `NatsClient::connect_with_policy`;
+  - the per-consumer 50 ms pull limiter is unchanged.
+- **`cargo fmt --check`** reports formatting drift on `main` that was not there at
+  v0.5.0 (GitHub #76). It now also covers the 941 inline test modules that
+  moved out of their source files (c5012547e) and kept their indentation. It is
+  a known deviation; the code was not reformatted for this release.
 
 ### Migration note — `Outcome<T, E>` and conditionally derived `Debug`
 
@@ -300,11 +455,59 @@ Against an older receiver, a sender stays raw, and an older sender never
 offers. Default builds and `send_path`/`send_path_filtered` are unchanged.
 (`br-asupersync-t1fblr.14`, `.16`.)
 
-The `asupersync-zstd` crate is not published yet. It decodes every RFC 8878
-frame without dictionaries, and encodes stored or `Level::Fast` frames, which
-compress slightly better than libzstd level 1. It has streaming encoder and
-decoder types, resumable async transfers, and differential tests against
-libzstd 1.5.7.
+`asupersync-zstd` 0.6.0 is the codec's first crates.io release, and it is
+experimental. It decodes every RFC 8878 frame without dictionaries, and
+encodes stored or `Level::Fast` frames, which compress slightly better than
+libzstd level 1. It has streaming encoder and decoder types, resumable async
+transfers, and differential tests against libzstd 1.5.7.
+
+Its `EncodeParams` and `DecodeLimits` are `#[non_exhaustive]`, so later
+settings (dictionaries, long-distance matching, window sizes) can be added
+without a break. Outside the crate, build them with the const builders:
+- `EncodeParams::new(level).with_checksum(false)`;
+- `DecodeLimits::new(max_output).with_max_window(n)`, chained as needed
+  with `.with_require_content_size(true)` and
+  `.with_allow_skippable_frames(false)`.
+
+The fields are public and readable. asupersync's own API exposes neither
+type. (`br-asupersync-t1fblr`.)
+
+### ATP zstd over QUIC, `CompressionMode::Auto` and parallel compression (feature `zstd`)
+
+ATP-over-QUIC compresses too. `transport_quic::send_path_with_options` takes a
+`QuicSendOptions` built with `with_compression(CompressionMode::Zstd)`. When
+the receiver accepts the offer, the reliable source stream switches to a
+framed mode: one `ObjectData` frame per chunk, compressed when that makes it
+smaller. The receiver checks each frame's entry, offset and length before it
+writes anything. Receivers and senders that predate this see the raw stream
+as before. RaptorQ datagram lanes are not compressed.
+(`br-asupersync-t1fblr.29`.)
+
+The native SDK sends with the same options:
+`AtpSdk::native_transfers_with_send_options(config, QuicSendOptions)` makes a
+client whose `send_path`, `spawn_send_path`, uploads and checkpointed sends
+all offer the configured compression. `native_transfers` keeps the defaults,
+and `SessionConfig::enable_compression` still changes nothing.
+(`br-asupersync-t1fblr.18`.)
+
+`CompressionMode::Auto`, on TCP and QUIC, offers zstd as `Zstd` does, but
+does not spend effort where it cannot pay:
+- An entry whose name or first bytes mark an already-compressed format
+  (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is sent raw.
+- A chunk that saves less than a twentieth of its size makes the next 1, 2,
+  4, ... up to 64 chunks of that entry go raw before the next try.
+- The decisions are deterministic.
+
+A goodput rule that weighs link speed against compression speed is still to
+come. (`br-asupersync-t1fblr.24`.)
+
+Senders compress chunks in parallel on the runtime's blocking pool, up to
+`compression_parallelism` at once, and send them in order. The default is 4,
+and both `SendOptions` and `QuicSendOptions` have the setting. Chunks of
+consecutive files share one pipeline, so a tree of small files compresses in
+parallel too. The setting never changes what `CompressionMode::Zstd` sends.
+Delta chunks on TCP are still compressed one at a time.
+(`br-asupersync-t1fblr.25`.)
 
 ### HTTP `zstd` content coding (feature `zstd`)
 
@@ -694,6 +897,16 @@ re-exported from `asupersync::combinator` (`asupersync-e9gn8y`).
   actually cancelled. The Redis module docs now describe the two-context
   cancellation rule (a cancelled task cannot run cleanup commands by passing a
   fresh `Cx`).
+
+### Fixed: no `recursion_depth_exceeding_limit` from the ATP QUIC sessions
+
+Proving the native QUIC send and receive sessions `Send` nested deep enough
+to trip `recursion_depth_exceeding_limit`. That future-incompatibility
+warning is an error in later rustc releases, and it fired in builds of the
+`atp` binary. The QUIC link now boxes its flush, inbound pump and retransmit
+futures, and the source-stream send, receive and commit steps, one
+allocation per call. The proof stays shallow in any crate that spawns these
+sessions. (`br-asupersync-c2unfu`.)
 
 ### Fixed: `Cx::current()` inside a spawned task lacked the spawner's handles
 
@@ -4263,7 +4476,10 @@ The initial tagged milestone establishing the core async runtime with structured
 
 ---
 
-[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.10...HEAD
+[Unreleased]: https://github.com/Dicklesworthstone/asupersync/compare/v0.6.0...HEAD
+[v0.6.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.5.0...v0.6.0
+[v0.5.0]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.11...v0.5.0
+[v0.4.11]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.10...v0.4.11
 [v0.4.10]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.9...v0.4.10
 [v0.4.9]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.8...v0.4.9
 [v0.4.8]: https://github.com/Dicklesworthstone/asupersync/compare/v0.4.7...v0.4.8

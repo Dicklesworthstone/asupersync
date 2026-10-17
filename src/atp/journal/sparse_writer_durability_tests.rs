@@ -53,9 +53,9 @@ fn empty_objects_verify_and_commit_across_publication_and_sync_policies() {
                 let (cx, writer, manifest, destination) = prepared_writer(
                     b"",
                     SparseWriterConfig {
-                        commit_policy,
-                        fsync_policy,
                         enable_preallocation,
+                        fsync_policy,
+                        commit_policy,
                         ..SparseWriterConfig::default()
                     },
                 );

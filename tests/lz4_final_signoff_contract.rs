@@ -38,6 +38,34 @@ fn read_repo_file(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("{relative} must be UTF-8: {error}"))
 }
 
+/// `read_repo_file(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn read_repo_file_with_inline_tests(path: &str) -> String {
+    let mut source = read_repo_file(path);
+    let dir = repo_path(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn json(relative: &str) -> Value {
     serde_json::from_slice(&read_repo_bytes(relative))
         .unwrap_or_else(|error| panic!("parse {relative}: {error}"))
@@ -431,40 +459,40 @@ fn graph_oracle_format_gap_and_rollback_boundaries_are_explicit() {
     assert_eq!(graph["dependency_exit_allowed"], false);
     assert_eq!(graph["atp_production_call_sites"], 5);
 
-    let trace = read_repo_file(TRACE_SOURCE_PATH);
+    let trace = read_repo_file_with_inline_tests(TRACE_SOURCE_PATH);
     assert_eq!(count(&trace, "lz4_flex::compress_prepend_size"), 3);
     assert_eq!(count(&trace, "lz4_flex::decompress_size_prepended"), 1);
     assert_eq!(
         count(
-            &read_repo_file("src/net/atp/compress/mod.rs"),
+            &read_repo_file_with_inline_tests("src/net/atp/compress/mod.rs"),
             "lz4_flex::compress_prepend_size"
         ),
         2
     );
     assert_eq!(
         count(
-            &read_repo_file("src/net/atp/compress/mod.rs"),
+            &read_repo_file_with_inline_tests("src/net/atp/compress/mod.rs"),
             "lz4_flex::decompress_size_prepended"
         ),
         1
     );
     assert_eq!(
         count(
-            &read_repo_file("src/net/atp/compress/algorithms.rs"),
+            &read_repo_file_with_inline_tests("src/net/atp/compress/algorithms.rs"),
             "lz4_flex::compress_prepend_size"
         ),
         1
     );
     assert_eq!(
         count(
-            &read_repo_file("src/net/atp/compress/algorithms.rs"),
+            &read_repo_file_with_inline_tests("src/net/atp/compress/algorithms.rs"),
             "lz4_flex::decompress_size_prepended"
         ),
         1
     );
     assert_eq!(
         count(
-            &read_repo_file("src/atp/manifest.rs"),
+            &read_repo_file_with_inline_tests("src/atp/manifest.rs"),
             "lz4_flex::compress_prepend_size"
         ),
         1

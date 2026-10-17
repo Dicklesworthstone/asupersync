@@ -1,0 +1,1068 @@
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
+
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
+    #[test]
+    fn abandoned_readiness_cleanup_can_reenter_all_buffer_locks() {
+        use super::super::readiness_tests::{ReleaseCallback, ReleaseProbe};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let mut buffer = Buffer::new(ReleaseProbe(Arc::clone(&callback)), 1);
+        let shared = Arc::downgrade(&buffer.shared);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            assert!(shared.inner_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut pending = buffer.call(1);
+        let waker = noop_waker();
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(pending);
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn nested_load_shed_cleanup_runs_after_the_buffer_service_unlocks() {
+        use super::super::LoadShed;
+        use super::super::readiness_tests::{ReleaseCallback, ReleaseProbe};
+
+        let callback: ReleaseCallback = Arc::new(Mutex::new(None));
+        let mut buffer = Buffer::new(LoadShed::new(ReleaseProbe(Arc::clone(&callback))), 1);
+        let shared = Arc::downgrade(&buffer.shared);
+        let released = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&released);
+        *callback.lock() = Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        let mut response = buffer.call(1);
+        let waker = noop_waker();
+        assert!(matches!(
+            Pin::new(&mut response).poll(&mut Context::from_waker(&waker)),
+            Poll::Ready(Err(BufferError::Inner(super::super::LoadShedError::Overloaded(_))))
+        ));
+        assert_eq!(released.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn cancelled_outer_ready_preserves_a_clone_with_the_same_waker() {
+        use super::super::ServiceExt;
+
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut first = holder.clone();
+        let mut surviving = holder.clone();
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut cx = Context::from_waker(&waker);
+        assert!(matches!(holder.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+
+        let mut first_wait = first.ready();
+        let mut surviving_wait = surviving.ready();
+        assert!(Pin::new(&mut first_wait).poll(&mut cx).is_pending());
+        assert!(Pin::new(&mut surviving_wait).poll(&mut cx).is_pending());
+        assert_eq!(holder.shared.ready_wakers.lock().len(), 1);
+        assert_eq!(holder.shared.ready_wakers.lock()[0].owners.len(), 2);
+        drop(first_wait);
+        assert_eq!(holder.shared.ready_wakers.lock()[0].owners.len(), 1);
+        assert!(!woken.load(Ordering::Relaxed));
+
+        drop(holder.release_readiness());
+        assert!(woken.load(Ordering::Relaxed));
+        assert!(matches!(
+            Pin::new(&mut surviving_wait).poll(&mut cx),
+            Poll::Ready(Ok(()))
+        ));
+        drop(surviving_wait);
+
+        let mut last_wait = first.ready();
+        assert!(Pin::new(&mut last_wait).poll(&mut cx).is_pending());
+        drop(last_wait);
+        assert!(holder.shared.ready_wakers.lock().is_empty());
+        assert!(!holder.is_empty(), "the surviving reservation remains live");
+        drop(surviving);
+        assert!(holder.is_empty());
+    }
+
+    struct ReadinessDropWake(super::super::readiness_tests::ReleaseCallback);
+
+    #[allow(clippy::manual_noop_waker)]
+    impl std::task::Wake for ReadinessDropWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for ReadinessDropWake {
+        fn drop(&mut self) {
+            let callback = self.0.lock().take();
+            if let Some(callback) = callback {
+                callback();
+            }
+        }
+    }
+
+    #[test]
+    fn cancelled_outer_ready_drops_its_waker_after_unlocking() {
+        use super::super::ServiceExt;
+        use super::super::readiness_tests::ReleaseCallback;
+
+        let mut holder = Buffer::new(EchoService, 1);
+        let mut abandoned = holder.clone();
+        assert!(matches!(
+            holder.poll_ready(&mut Context::from_waker(&noop_waker())),
+            Poll::Ready(Ok(()))
+        ));
+        let shared = Arc::downgrade(&holder.shared);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let callback: ReleaseCallback = Arc::new(Mutex::new(Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.slots.try_lock().is_some());
+            assert!(shared.ready_wakers.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }))));
+        let waker = Waker::from(Arc::new(ReadinessDropWake(callback)));
+        let mut pending = abandoned.ready();
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(waker);
+        assert_eq!(dropped.load(Ordering::SeqCst), 0);
+        drop(pending);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(holder.shared.ready_wakers.lock().is_empty());
+        assert!(!holder.is_empty());
+    }
+
+    #[test]
+    fn panicking_inner_detacher_still_retires_a_queued_semaphore_after_unlocking() {
+        use super::super::ConcurrencyLimit;
+        use super::super::readiness_tests::ReleaseCallback;
+        use crate::sync::{OwnedSemaphorePermit, Semaphore};
+
+        struct PanickingDetacher;
+
+        impl Service<u8> for PanickingDetacher {
+            type Response = u8;
+            type Error = &'static str;
+            type Future = std::future::Ready<Result<u8, Self::Error>>;
+
+            fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+                Poll::Ready(Ok(()))
+            }
+
+            fn call(&mut self, request: u8) -> Self::Future {
+                std::future::ready(Ok(request))
+            }
+
+            fn release_readiness(&mut self) -> super::super::ReadinessRelease {
+                panic!("inner detachment panic");
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).unwrap();
+        let mut buffer = Buffer::new(
+            ConcurrencyLimit::new(PanickingDetacher, Arc::clone(&semaphore)),
+            1,
+        );
+        let shared = Arc::downgrade(&buffer.shared);
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&dropped);
+        let callback: ReleaseCallback = Arc::new(Mutex::new(Some(Box::new(move || {
+            let shared = shared.upgrade().unwrap();
+            assert!(shared.inner.try_lock().is_some());
+            assert!(shared.slots.try_lock().is_some());
+            observed.fetch_add(1, Ordering::SeqCst);
+        }))));
+        let waker = Waker::from(Arc::new(ReadinessDropWake(callback)));
+        let mut pending = buffer.call(1);
+        assert!(Pin::new(&mut pending)
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending());
+        drop(waker);
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(pending)))
+            .expect_err("inner detachment panic must propagate");
+        assert_eq!(panic.downcast_ref::<&str>(), Some(&"inner detachment panic"));
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(buffer.is_empty());
+        drop(held);
+        assert!(OwnedSemaphorePermit::try_acquire_arc(&semaphore, 1).is_ok());
+    }
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct TestWake(Arc<std::sync::atomic::AtomicBool>);
+
+    impl std::task::Wake for TestWake {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    // ================================================================
+    // Test services
+    // ================================================================
+
+    struct EchoService;
+
+    impl Service<i32> for EchoService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            std::future::ready(Ok(req * 2))
+        }
+    }
+
+    struct DoubleService;
+
+    impl Service<String> for DoubleService {
+        type Response = String;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<String, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, req: String) -> Self::Future {
+            std::future::ready(Ok(format!("{req}{req}")))
+        }
+    }
+
+    struct CountingService {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl CountingService {
+        fn new() -> (Self, Arc<AtomicUsize>) {
+            let count = Arc::new(AtomicUsize::new(0));
+            (
+                Self {
+                    count: count.clone(),
+                },
+                count,
+            )
+        }
+    }
+
+    impl Service<()> for CountingService {
+        type Response = usize;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<usize, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: ()) -> Self::Future {
+            let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+            std::future::ready(Ok(n))
+        }
+    }
+
+    struct FailService;
+
+    impl Service<i32> for FailService {
+        type Response = i32;
+        type Error = &'static str;
+        type Future = std::future::Ready<Result<i32, &'static str>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            std::future::ready(Err("service error"))
+        }
+    }
+
+    struct NeverReadyService;
+
+    impl Service<i32> for NeverReadyService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Pending<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Pending
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            std::future::pending()
+        }
+    }
+
+    #[derive(Default)]
+    struct SingleFlightState {
+        busy: bool,
+        complete_current: bool,
+        readiness_waker: Option<Waker>,
+    }
+
+    struct SingleFlightService {
+        state: Arc<Mutex<SingleFlightState>>,
+    }
+
+    impl SingleFlightService {
+        fn new() -> (Self, Arc<Mutex<SingleFlightState>>) {
+            let state = Arc::new(Mutex::new(SingleFlightState::default()));
+            (
+                Self {
+                    state: Arc::clone(&state),
+                },
+                state,
+            )
+        }
+    }
+
+    struct SingleFlightFuture {
+        state: Arc<Mutex<SingleFlightState>>,
+        response: i32,
+    }
+
+    impl Future for SingleFlightFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let response = self.response;
+            let waker = {
+                let mut state = self.state.lock();
+                if !state.complete_current {
+                    return Poll::Pending;
+                }
+                state.complete_current = false;
+                state.busy = false;
+                state.readiness_waker.take()
+            };
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+            Poll::Ready(Ok(response))
+        }
+    }
+
+    impl Service<i32> for SingleFlightService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = SingleFlightFuture;
+
+        fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            let busy = {
+                let mut state = self.state.lock();
+                if state.busy {
+                    state.readiness_waker = Some(cx.waker().clone());
+                    true
+                } else {
+                    false
+                }
+            };
+
+            if busy {
+                Poll::Pending
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        fn call(&mut self, req: i32) -> Self::Future {
+            self.state.lock().busy = true;
+            SingleFlightFuture {
+                state: Arc::clone(&self.state),
+                response: req * 2,
+            }
+        }
+    }
+
+    struct PanicOnCallService;
+
+    impl Service<i32> for PanicOnCallService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = std::future::Ready<Result<i32, std::convert::Infallible>>;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            panic!("panic in call")
+        }
+    }
+
+    struct PanicOnPollFuture;
+
+    impl Future for PanicOnPollFuture {
+        type Output = Result<i32, std::convert::Infallible>;
+
+        fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!("panic in future poll")
+        }
+    }
+
+    struct PanicOnPollService;
+
+    impl Service<i32> for PanicOnPollService {
+        type Response = i32;
+        type Error = std::convert::Infallible;
+        type Future = PanicOnPollFuture;
+
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, _req: i32) -> Self::Future {
+            PanicOnPollFuture
+        }
+    }
+
+    // ================================================================
+    // BufferLayer
+    // ================================================================
+
+    #[test]
+    fn layer_creates_buffer() {
+        init_test("layer_creates_buffer");
+        let layer = BufferLayer::new(8);
+        let svc: Buffer<EchoService> = layer.layer(EchoService);
+        assert_eq!(svc.capacity(), 8);
+        assert!(svc.is_empty());
+        crate::test_complete!("layer_creates_buffer");
+    }
+
+    #[test]
+    fn layer_default() {
+        init_test("layer_default");
+        let layer = BufferLayer::default();
+        let svc: Buffer<EchoService> = layer.layer(EchoService);
+        assert_eq!(svc.capacity(), DEFAULT_CAPACITY);
+        crate::test_complete!("layer_default");
+    }
+
+    #[test]
+    fn layer_debug_clone() {
+        let layer = BufferLayer::new(4);
+        let dbg = format!("{layer:?}");
+        assert!(dbg.contains("BufferLayer"));
+        assert!(dbg.contains('4'));
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be > 0")]
+    fn layer_zero_capacity_panics() {
+        let _ = BufferLayer::new(0);
+    }
+
+    // ================================================================
+    // Buffer service basics
+    // ================================================================
+
+    #[test]
+    fn buffer_new() {
+        init_test("buffer_new");
+        let svc = Buffer::new(EchoService, 4);
+        assert_eq!(svc.capacity(), 4);
+        assert!(svc.is_empty());
+        assert!(!svc.is_full());
+        assert!(!svc.is_closed());
+        crate::test_complete!("buffer_new");
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity must be > 0")]
+    fn buffer_zero_capacity_panics() {
+        let _ = Buffer::new(EchoService, 0);
+    }
+
+    #[test]
+    fn buffer_debug() {
+        let svc = Buffer::new(EchoService, 8);
+        let dbg = format!("{svc:?}");
+        assert!(dbg.contains("Buffer"));
+        assert!(dbg.contains("capacity"));
+        assert!(dbg.contains('8'));
+    }
+
+    #[test]
+    fn buffer_clone() {
+        let svc = Buffer::new(EchoService, 4);
+        let cloned = svc.clone();
+        assert_eq!(cloned.capacity(), 4);
+        // Clones share the same buffer.
+        assert!(Arc::ptr_eq(&svc.shared, &cloned.shared));
+    }
+
+    // ================================================================
+    // Service impl
+    // ================================================================
+
+    #[test]
+    fn poll_ready_when_empty() {
+        init_test("poll_ready_when_empty");
+        let mut svc = Buffer::new(EchoService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let result = svc.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(()))));
+        crate::test_complete!("poll_ready_when_empty");
+    }
+
+    #[test]
+    fn call_echo_service() {
+        init_test("call_echo_service");
+        let mut svc = Buffer::new(EchoService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(21);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(42))));
+        crate::test_complete!("call_echo_service");
+    }
+
+    #[test]
+    fn call_string_service() {
+        init_test("call_string_service");
+        let mut svc = Buffer::new(DoubleService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call("hello".to_string());
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Ok(ref s)) if s == "hellohello"));
+        crate::test_complete!("call_string_service");
+    }
+
+    #[test]
+    fn call_propagates_inner_error() {
+        init_test("call_propagates_inner_error");
+        let mut svc = Buffer::new(FailService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(1);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Inner(_)))));
+        crate::test_complete!("call_propagates_inner_error");
+    }
+
+    #[test]
+    fn counting_service_through_buffer() {
+        init_test("counting_service_through_buffer");
+        let (counting, count) = CountingService::new();
+        let mut svc = Buffer::new(counting, 8);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for expected in 1..=5 {
+            let _ = svc.poll_ready(&mut cx);
+            let mut future = svc.call(());
+            let result = Pin::new(&mut future).poll(&mut cx);
+            assert!(matches!(result, Poll::Ready(Ok(n)) if n == expected));
+        }
+        assert_eq!(count.load(Ordering::SeqCst), 5);
+        crate::test_complete!("counting_service_through_buffer");
+    }
+
+    // ================================================================
+    // Close / closed
+    // ================================================================
+
+    #[test]
+    fn close_rejects_new_requests() {
+        init_test("close_rejects_new_requests");
+        let mut svc = Buffer::new(EchoService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        svc.close();
+        assert!(svc.is_closed());
+
+        let result = svc.poll_ready(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+
+        let mut future = svc.call(1);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(result, Poll::Ready(Err(BufferError::Closed))));
+        crate::test_complete!("close_rejects_new_requests");
+    }
+
+    #[test]
+    fn close_wakes_parked_poll_ready_waiters() {
+        init_test("close_wakes_parked_poll_ready_waiters");
+        let mut svc = Buffer::new(EchoService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        // Fill the buffer to capacity
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let _future = svc.call(1);
+
+        // Park a waiter on a full buffer
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let woken_clone = Arc::clone(&woken);
+        let test_waker = Waker::from(Arc::new(TestWake(woken_clone)));
+        let mut test_cx = Context::from_waker(&test_waker);
+        assert!(matches!(svc.poll_ready(&mut test_cx), Poll::Pending));
+
+        // Close should wake the parked waiter
+        svc.close();
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "close() must wake parked poll_ready waiters"
+        );
+        crate::test_complete!("close_wakes_parked_poll_ready_waiters");
+    }
+
+    #[test]
+    fn close_on_clone_affects_all_clones() {
+        init_test("close_on_clone_affects_all_clones");
+        let svc1 = Buffer::new(EchoService, 4);
+        let svc2 = svc1.clone();
+        svc1.close();
+        assert!(svc2.is_closed());
+        crate::test_complete!("close_on_clone_affects_all_clones");
+    }
+
+    // ================================================================
+    // Inner service readiness
+    // ================================================================
+
+    #[test]
+    fn never_ready_inner_returns_pending_on_call() {
+        init_test("never_ready_inner_returns_pending_on_call");
+        let mut svc = Buffer::new(NeverReadyService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let _ = svc.poll_ready(&mut cx);
+        let mut future = svc.call(1);
+        let result = Pin::new(&mut future).poll(&mut cx);
+        // Inner service is not ready, response not yet available.
+        assert!(result.is_pending());
+        crate::test_complete!("never_ready_inner_returns_pending_on_call");
+    }
+
+    #[test]
+    fn active_completion_wakes_all_inner_readiness_waiters() {
+        init_test("active_completion_wakes_all_inner_readiness_waiters");
+        let (single_flight, state) = SingleFlightService::new();
+        let mut svc = Buffer::new(single_flight, 3);
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut first = svc.call(10);
+        assert!(Pin::new(&mut first).poll(&mut noop_cx).is_pending());
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut second = svc.call(20);
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+
+        assert!(matches!(svc.poll_ready(&mut noop_cx), Poll::Ready(Ok(()))));
+        let mut third = svc.call(30);
+        let third_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let third_waker = Waker::from(Arc::new(TestWake(Arc::clone(&third_woken))));
+        let mut third_cx = Context::from_waker(&third_waker);
+        assert!(Pin::new(&mut third).poll(&mut third_cx).is_pending());
+
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut first).poll(&mut noop_cx),
+            Poll::Ready(Ok(20))
+        ));
+        assert!(
+            second_woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completion must wake earlier inner readiness waiters, not just the last service waker"
+        );
+        assert!(
+            third_woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completion should still wake the service-provided readiness waiter"
+        );
+
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut second).poll(&mut second_cx),
+            Poll::Ready(Ok(40))
+        ));
+
+        assert!(Pin::new(&mut third).poll(&mut third_cx).is_pending());
+        state.lock().complete_current = true;
+        assert!(matches!(
+            Pin::new(&mut third).poll(&mut third_cx),
+            Poll::Ready(Ok(60))
+        ));
+        crate::test_complete!("active_completion_wakes_all_inner_readiness_waiters");
+    }
+
+    // ================================================================
+    // BufferError
+    // ================================================================
+
+    #[test]
+    fn buffer_error_display() {
+        init_test("buffer_error_display");
+        let full: BufferError<&str> = BufferError::Full;
+        assert!(format!("{full}").contains("buffer full"));
+
+        let closed: BufferError<&str> = BufferError::Closed;
+        assert!(format!("{closed}").contains("buffer closed"));
+
+        let inner: BufferError<&str> = BufferError::Inner("oops");
+        assert!(format!("{inner}").contains("inner service error"));
+        crate::test_complete!("buffer_error_display");
+    }
+
+    #[test]
+    fn buffer_error_debug() {
+        let full: BufferError<&str> = BufferError::Full;
+        let dbg = format!("{full:?}");
+        assert!(dbg.contains("Full"));
+
+        let closed: BufferError<&str> = BufferError::Closed;
+        let dbg = format!("{closed:?}");
+        assert!(dbg.contains("Closed"));
+
+        let inner: BufferError<&str> = BufferError::Inner("err");
+        let dbg = format!("{inner:?}");
+        assert!(dbg.contains("Inner"));
+    }
+
+    #[test]
+    fn buffer_error_source() {
+        use std::error::Error;
+        let full: BufferError<std::io::Error> = BufferError::Full;
+        assert!(full.source().is_none());
+
+        let closed: BufferError<std::io::Error> = BufferError::Closed;
+        assert!(closed.source().is_none());
+
+        let inner = BufferError::Inner(std::io::Error::other("test"));
+        assert!(inner.source().is_some());
+    }
+
+    // ================================================================
+    // BufferFuture
+    // ================================================================
+
+    #[test]
+    fn buffer_future_debug() {
+        let err = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
+        let dbg = format!("{err:?}");
+        assert!(dbg.contains("BufferFuture"));
+        assert!(dbg.contains("Error"));
+    }
+
+    #[test]
+    fn buffer_future_error_debug() {
+        let future = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
+        let dbg = format!("{future:?}");
+        assert!(dbg.contains("Error"));
+    }
+
+    #[test]
+    fn buffer_future_returns_error_when_polled_after_completion() {
+        let future = BufferFuture::<
+            std::future::Ready<Result<i32, std::convert::Infallible>>,
+            std::convert::Infallible,
+            EchoService,
+            i32,
+        >::error(BufferError::Full);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut future = future;
+        let _ = Pin::new(&mut future).poll(&mut cx);
+        let poll2 = Pin::new(&mut future).poll(&mut cx);
+        assert!(matches!(
+            poll2,
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+    }
+
+    #[test]
+    fn buffer_future_call_panic_releases_slot_and_fails_closed() {
+        init_test("buffer_future_call_panic_releases_slot_and_fails_closed");
+        let mut svc = Buffer::new(PanicOnCallService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(1);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(svc.pending(), 0);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("buffer_future_call_panic_releases_slot_and_fails_closed");
+    }
+
+    #[test]
+    fn buffer_future_active_panic_releases_slot_and_fails_closed() {
+        init_test("buffer_future_active_panic_releases_slot_and_fails_closed");
+        let mut svc = Buffer::new(PanicOnPollService, 1);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        let mut future = svc.call(1);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = Pin::new(&mut future).poll(&mut cx);
+        }));
+        assert!(panic.is_err());
+        assert_eq!(svc.pending(), 0);
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Err(BufferError::PolledAfterCompletion))
+        ));
+        crate::test_complete!("buffer_future_active_panic_releases_slot_and_fails_closed");
+    }
+
+    // ================================================================
+    // Multiple requests
+    // ================================================================
+
+    #[test]
+    fn multiple_sequential_requests() {
+        init_test("multiple_sequential_requests");
+        let mut svc = Buffer::new(EchoService, 4);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for i in 0..10 {
+            let _ = svc.poll_ready(&mut cx);
+            let mut future = svc.call(i);
+            let result = Pin::new(&mut future).poll(&mut cx);
+            assert!(matches!(result, Poll::Ready(Ok(v)) if v == i * 2));
+        }
+        crate::test_complete!("multiple_sequential_requests");
+    }
+
+    // ================================================================
+    // Capacity management
+    // ================================================================
+
+    #[test]
+    fn pending_count_tracks_requests() {
+        init_test("pending_count_tracks_requests");
+        let svc = Buffer::new(EchoService, 4);
+        assert_eq!(svc.pending(), 0);
+        assert!(svc.is_empty());
+        crate::test_complete!("pending_count_tracks_requests");
+    }
+
+    #[test]
+    fn poll_ready_deduplicates_waker_when_full() {
+        init_test("poll_ready_deduplicates_waker_when_full");
+        let mut svc = Buffer::new(EchoService, 1);
+        svc.shared.slots.lock().pending = 1;
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
+
+        assert!(svc.poll_ready(&mut cx).is_pending());
+        assert_eq!(svc.shared.ready_wakers.lock().len(), 1);
+        crate::test_complete!("poll_ready_deduplicates_waker_when_full");
+    }
+
+    #[test]
+    fn poll_ready_deduplicates_alternating_waiters_when_full() {
+        init_test("poll_ready_deduplicates_alternating_waiters_when_full");
+        let mut svc = Buffer::new(EchoService, 1);
+        svc.shared.slots.lock().pending = 1;
+
+        let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_waker = Waker::from(Arc::new(TestWake(Arc::clone(&first_woken))));
+        let mut first_cx = Context::from_waker(&first_waker);
+
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(svc.poll_ready(&mut first_cx).is_pending());
+        assert!(svc.poll_ready(&mut second_cx).is_pending());
+        assert!(svc.poll_ready(&mut first_cx).is_pending());
+        assert!(svc.poll_ready(&mut second_cx).is_pending());
+
+        assert_eq!(
+            svc.shared.ready_wakers.lock().len(),
+            2,
+            "alternating parked waiters should not accumulate duplicate readiness wakers"
+        );
+        crate::test_complete!("poll_ready_deduplicates_alternating_waiters_when_full");
+    }
+
+    #[test]
+    fn poll_ready_reserves_capacity_across_clones() {
+        init_test("poll_ready_reserves_capacity_across_clones");
+        let mut ready_holder = Buffer::new(EchoService, 1);
+        let mut waiter = ready_holder.clone();
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(
+            ready_holder.poll_ready(&mut noop_cx),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(ready_holder.pending(), 0);
+        assert!(!ready_holder.is_empty());
+
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+        assert!(matches!(waiter.poll_ready(&mut waiter_cx), Poll::Pending));
+
+        let mut future = ready_holder.call(21);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut noop_cx),
+            Poll::Ready(Ok(42))
+        ));
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "completing the reserved request must wake blocked clones"
+        );
+        assert!(matches!(
+            waiter.poll_ready(&mut waiter_cx),
+            Poll::Ready(Ok(()))
+        ));
+        crate::test_complete!("poll_ready_reserves_capacity_across_clones");
+    }
+
+    #[test]
+    fn dropping_reserved_handle_releases_capacity() {
+        init_test("dropping_reserved_handle_releases_capacity");
+        let mut reserved = Buffer::new(EchoService, 1);
+        let mut waiter = reserved.clone();
+        let noop = noop_waker();
+        let mut noop_cx = Context::from_waker(&noop);
+
+        assert!(matches!(
+            reserved.poll_ready(&mut noop_cx),
+            Poll::Ready(Ok(()))
+        ));
+
+        let woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waiter_waker = Waker::from(Arc::new(TestWake(Arc::clone(&woken))));
+        let mut waiter_cx = Context::from_waker(&waiter_waker);
+        assert!(matches!(waiter.poll_ready(&mut waiter_cx), Poll::Pending));
+
+        drop(reserved);
+        assert!(
+            woken.load(std::sync::atomic::Ordering::Relaxed),
+            "dropping an unused readiness window must wake blocked callers"
+        );
+        assert!(matches!(
+            waiter.poll_ready(&mut waiter_cx),
+            Poll::Ready(Ok(()))
+        ));
+        crate::test_complete!("dropping_reserved_handle_releases_capacity");
+    }
+
+    #[test]
+    fn close_preserves_already_reserved_call_window() {
+        init_test("close_preserves_already_reserved_call_window");
+        let mut svc = Buffer::new(EchoService, 1);
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+
+        assert!(matches!(svc.poll_ready(&mut cx), Poll::Ready(Ok(()))));
+        svc.close();
+
+        let mut future = svc.call(5);
+        assert!(matches!(
+            Pin::new(&mut future).poll(&mut cx),
+            Poll::Ready(Ok(10))
+        ));
+        crate::test_complete!("close_preserves_already_reserved_call_window");
+    }
+
+    #[test]
+    fn waiting_for_ready_deduplicates_alternating_inner_waiters() {
+        init_test("waiting_for_ready_deduplicates_alternating_inner_waiters");
+        let mut svc = Buffer::new(NeverReadyService, 3);
+
+        let mut first = svc.call(10);
+        let mut second = svc.call(20);
+
+        let first_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first_waker = Waker::from(Arc::new(TestWake(Arc::clone(&first_woken))));
+        let mut first_cx = Context::from_waker(&first_waker);
+
+        let second_woken = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_waker = Waker::from(Arc::new(TestWake(Arc::clone(&second_woken))));
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(Pin::new(&mut first).poll(&mut first_cx).is_pending());
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+        assert!(Pin::new(&mut first).poll(&mut first_cx).is_pending());
+        assert!(Pin::new(&mut second).poll(&mut second_cx).is_pending());
+
+        assert_eq!(
+            svc.shared.inner_wakers.lock().len(),
+            2,
+            "alternating inner waiters should not accumulate duplicate readiness wakers"
+        );
+        crate::test_complete!("waiting_for_ready_deduplicates_alternating_inner_waiters");
+    }

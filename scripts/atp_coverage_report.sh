@@ -210,7 +210,7 @@ if [[ $TESTED_COUNT -eq 0 ]]; then
     echo "   - src/atp/object.rs (data model)"
     echo "   - src/atp/manifest.rs (integrity)"
     echo "   - src/atp/verifier.rs (security)"
-    echo "   - src/net/atp/protocol.rs (protocol)"
+    echo "   - src/net/atp/protocol/mod.rs (protocol)"
     echo "   - src/atp/sdk.rs (public API)"
 fi
 

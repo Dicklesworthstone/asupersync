@@ -117,6 +117,35 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+/// `read(rel)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "<stem>[_<name>]_inline_tests.rs"] mod <name>;`), so a pin on an
+/// in-tree unit test keeps finding it after the test body moved next to its module.
+fn read_with_inline_tests(rel: &str) -> String {
+    let mut source = read(rel);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(rel)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 #[test]
 fn tls_slot_is_asupersync_specific_namespace() {
     // Pin: CURRENT_RUNTIME_HANDLE lives inside src/runtime/
@@ -300,7 +329,7 @@ fn cross_runtime_inline_test_or_outside_block_on_test_exists() {
     // Pin: at least one inline test asserts None when
     // called outside any asupersync block_on. This is
     // the structural witness for cross-runtime safety.
-    let source = read("src/runtime/builder.rs");
+    let source = read_with_inline_tests("src/runtime/builder.rs");
 
     assert!(
         source.contains("fn current_handle_none_outside_block_on()"),
@@ -314,7 +343,7 @@ fn cross_runtime_inline_test_or_outside_block_on_test_exists() {
 fn cross_runtime_handle_test_uses_is_none_assertion() {
     // Pin: the test asserts is_none(), not is_err() / not
     // catch_unwind / not should_panic.
-    let source = read("src/runtime/builder.rs");
+    let source = read_with_inline_tests("src/runtime/builder.rs");
 
     let fn_marker = "fn current_handle_none_outside_block_on()";
     let pos = source.find(fn_marker).expect("none_outside test");

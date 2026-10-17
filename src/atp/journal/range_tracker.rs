@@ -208,8 +208,12 @@ impl RangeTracker {
         }
     }
 
-    /// Add a new range to the tracker
-    pub fn add_range(&mut self, range: SparseRange) {
+    /// Add a range, coalescing only its overlapping or adjacent neighbors.
+    ///
+    /// With `n` retained ranges and `k` neighbors absorbed, this performs
+    /// O((k + 1) log(n + 1)) tree work and uses constant auxiliary space.
+    /// In particular, a disjoint write does not scan or rebuild the whole map.
+    pub fn add_range(&mut self, mut range: SparseRange) {
         if range.is_empty() {
             return;
         }
@@ -217,36 +221,39 @@ impl RangeTracker {
         // Update max end offset
         self.max_end_offset = self.max_end_offset.max(range.end);
 
-        // Check for overlaps and merging opportunities
-        let overlapping_ranges = self.find_overlapping_ranges(&range);
-
-        if overlapping_ranges.is_empty() {
-            // No overlaps, just insert the new range
-            self.ranges.insert(range.start, range);
-            self.total_bytes += range.size();
-        } else {
-            // Merge with overlapping ranges
-            let mut merged_range = range;
-
-            // Remove overlapping ranges and expand the merged range
-            for overlapping_range in &overlapping_ranges {
-                self.total_bytes -= overlapping_range.size();
-                merged_range = merged_range.merge(overlapping_range).unwrap();
-                self.ranges.remove(&overlapping_range.start);
-            }
-
-            // Insert the merged range
-            self.ranges.insert(merged_range.start, merged_range);
-            self.total_bytes += merged_range.size();
+        // Coalesced ranges are disjoint: at most one predecessor can touch
+        // the new start. Copy its endpoints before mutating the tree.
+        if let Some(previous) = self.ranges.range(..=range.start).next_back()
+            .map(|(_, previous)| *previous)
+            .filter(|previous| previous.end >= range.start)
+        {
+            self.ranges.remove(&previous.start);
+            self.total_bytes -= previous.size();
+            range.start = previous.start;
+            range.end = range.end.max(previous.end);
         }
 
-        // Try to merge with adjacent ranges
-        self.merge_adjacent_ranges();
+        // Include a successor starting exactly at the end (adjacency), without
+        // computing end + 1, which would overflow for the last u64 interval.
+        while let Some(next) = self.ranges.range(range.start..=range.end).next()
+            .map(|(_, next)| *next)
+        {
+            self.ranges.remove(&next.start);
+            self.total_bytes -= next.size();
+            range.end = range.end.max(next.end);
+        }
+
+        self.ranges.insert(range.start, range);
+        self.total_bytes += range.size();
     }
 
-    /// Check if a range overlaps with any existing ranges
+    /// Check for overlap with one predecessor lookup and no temporary allocation.
     pub fn overlaps(&self, range: &SparseRange) -> bool {
-        !self.find_overlapping_ranges(range).is_empty()
+        if range.is_empty() {
+            return false;
+        }
+        self.ranges.range(..range.end).next_back()
+            .is_some_and(|(_, previous)| previous.end > range.start)
     }
 
     /// Check if all bytes from 0 to the given size are covered
@@ -315,15 +322,14 @@ impl RangeTracker {
 
     /// Check if a specific offset is covered
     pub fn is_offset_covered(&self, offset: u64) -> bool {
-        self.ranges.values().any(|range| range.contains(offset))
+        self.get_covering_range(offset).is_some()
     }
 
     /// Get the range that covers the given offset, if any
     pub fn get_covering_range(&self, offset: u64) -> Option<SparseRange> {
-        self.ranges
-            .values()
-            .find(|range| range.contains(offset))
-            .copied()
+        self.ranges.range(..=offset).next_back()
+            .map(|(_, range)| *range)
+            .filter(|range| range.contains(offset))
     }
 
     /// Remove a range from tracking
@@ -415,43 +421,20 @@ impl RangeTracker {
     // Private helper methods
 
     fn find_overlapping_ranges(&self, range: &SparseRange) -> Vec<SparseRange> {
-        self.ranges
-            .values()
-            .filter(|existing_range| existing_range.overlaps(range))
-            .copied()
-            .collect()
-    }
-
-    fn merge_adjacent_ranges(&mut self) {
-        if self.ranges.len() <= 1 {
-            return;
+        let mut overlaps = Vec::new();
+        if range.is_empty() {
+            return overlaps;
         }
-
-        let mut sorted_ranges = std::mem::take(&mut self.ranges).into_values();
-        let mut new_ranges = std::collections::BTreeMap::new();
-        let mut total_bytes = 0;
-
-        // Safe to unwrap because len > 1
-        let mut current_range = sorted_ranges.next().unwrap();
-
-        for next_range in sorted_ranges {
-            if current_range.can_merge(&next_range) {
-                // Merge these two ranges
-                current_range = current_range.merge(&next_range).unwrap();
-            } else {
-                // Add the settled range
-                total_bytes += current_range.size();
-                new_ranges.insert(current_range.start, current_range);
-                current_range = next_range;
-            }
+        // Only the predecessor can begin before the query and still overlap.
+        // Excluding range.start here prevents duplicating the first range below.
+        if let Some(previous) = self.ranges.range(..range.start).next_back()
+            .map(|(_, previous)| *previous)
+            .filter(|previous| previous.end > range.start)
+        {
+            overlaps.push(previous);
         }
-
-        // Add the final range
-        total_bytes += current_range.size();
-        new_ranges.insert(current_range.start, current_range);
-
-        self.ranges = new_ranges;
-        self.total_bytes = total_bytes;
+        overlaps.extend(self.ranges.range(range.start..range.end).map(|(_, value)| *value));
+        overlaps
     }
 
     fn calculate_covered_bytes(&self, total_size: u64) -> u64 {
@@ -516,284 +499,9 @@ impl fmt::Display for RangeStats {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "range_tracker_inline_tests.rs"]
+mod tests;
 
-    #[test]
-    fn test_sparse_range_operations() {
-        let range1 = SparseRange::new(10, 20);
-        let range2 = SparseRange::new(15, 25);
-        let range3 = SparseRange::new(30, 40);
-
-        assert_eq!(range1.size(), 10);
-        assert!(range1.contains(15));
-        assert!(!range1.contains(25));
-
-        assert!(range1.overlaps(&range2));
-        assert!(!range1.overlaps(&range3));
-
-        let merged = range1.merge(&range2).unwrap();
-        assert_eq!(merged, SparseRange::new(10, 25));
-
-        assert!(range1.can_merge(&range2));
-        assert!(!range1.can_merge(&range3));
-    }
-
-    #[test]
-    fn test_range_tracker_basic() {
-        let mut tracker = RangeTracker::new();
-
-        // Add some ranges
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(20, 30));
-
-        assert_eq!(tracker.total_bytes(), 20);
-        assert_eq!(tracker.range_count(), 2);
-
-        assert!(tracker.is_offset_covered(5));
-        assert!(!tracker.is_offset_covered(15));
-        assert!(tracker.is_offset_covered(25));
-
-        // Check coverage
-        assert_eq!(tracker.coverage_ratio(40), 0.5);
-        assert!(!tracker.is_contiguous_to(40));
-    }
-
-    #[test]
-    fn test_range_merging() {
-        let mut tracker = RangeTracker::new();
-
-        // Add overlapping ranges that should be merged
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(5, 15));
-        tracker.add_range(SparseRange::new(10, 20));
-
-        // Should result in one range from 0 to 20
-        assert_eq!(tracker.range_count(), 1);
-        assert_eq!(tracker.total_bytes(), 20);
-
-        let ranges = tracker.get_ranges();
-        assert_eq!(ranges[0], SparseRange::new(0, 20));
-    }
-
-    #[test]
-    fn test_gap_detection() {
-        let mut tracker = RangeTracker::new();
-
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(20, 30));
-        tracker.add_range(SparseRange::new(40, 50));
-
-        let gaps = tracker.find_gaps(60);
-        assert_eq!(gaps.len(), 3);
-
-        assert_eq!(gaps[0], SparseRange::new(10, 20));
-        assert_eq!(gaps[1], SparseRange::new(30, 40));
-        assert_eq!(gaps[2], SparseRange::new(50, 60));
-    }
-
-    #[test]
-    fn test_contiguous_detection() {
-        let mut tracker = RangeTracker::new();
-
-        // Not contiguous - has gaps
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(20, 30));
-        assert!(!tracker.is_contiguous_to(30));
-
-        // Fill the gap
-        tracker.add_range(SparseRange::new(10, 20));
-        assert!(tracker.is_contiguous_to(30));
-        assert!(tracker.is_contiguous_to(25)); // Partial coverage
-    }
-
-    #[test]
-    fn test_range_removal() {
-        let mut tracker = RangeTracker::new();
-
-        tracker.add_range(SparseRange::new(0, 30));
-        assert_eq!(tracker.total_bytes(), 30);
-
-        // Remove middle part
-        let removed = tracker.remove_range(&SparseRange::new(10, 20));
-        assert!(removed);
-        assert_eq!(tracker.total_bytes(), 20);
-        assert_eq!(tracker.range_count(), 2);
-
-        // Should have ranges [0-10) and [20-30)
-        let ranges = tracker.get_ranges();
-        assert!(ranges.contains(&SparseRange::new(0, 10)));
-        assert!(ranges.contains(&SparseRange::new(20, 30)));
-    }
-
-    #[test]
-    fn test_chunk_range_operations() {
-        let chunk1 = ChunkRange::new(100, 50);
-        let chunk2 = ChunkRange::new(125, 25);
-
-        assert_eq!(chunk1.end_offset(), 150);
-        assert!(chunk1.contains_offset(125));
-        assert!(!chunk1.contains_offset(200));
-
-        assert!(chunk1.overlaps(&chunk2));
-
-        let sparse_range = chunk1.to_sparse_range();
-        assert_eq!(sparse_range, SparseRange::new(100, 150));
-    }
-
-    #[test]
-    fn test_offset_size_overflow_rejected_explicitly() {
-        assert!(SparseRange::try_from_offset_size(u64::MAX, 1).is_none());
-        assert!(ChunkRange::try_new(u64::MAX, 1).is_none());
-
-        let sparse_panic = std::panic::catch_unwind(|| SparseRange::from_offset_size(u64::MAX, 1));
-        assert!(sparse_panic.is_err());
-
-        let chunk_panic = std::panic::catch_unwind(|| ChunkRange::new(u64::MAX, 1));
-        assert!(chunk_panic.is_err());
-
-        let invalid_chunk = ChunkRange {
-            offset: u64::MAX,
-            size: 1,
-        };
-        assert!(invalid_chunk.try_end_offset().is_none());
-        assert!(invalid_chunk.try_to_sparse_range().is_none());
-        assert!(!invalid_chunk.contains_offset(0));
-        assert!(!invalid_chunk.overlaps(&ChunkRange::new(0, 1)));
-    }
-
-    #[test]
-    fn test_range_statistics() {
-        let mut tracker = RangeTracker::new();
-
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(20, 30));
-        tracker.add_range(SparseRange::new(50, 100));
-
-        let stats = tracker.get_stats();
-        assert_eq!(stats.total_ranges, 3);
-        assert_eq!(stats.total_bytes_covered, 70);
-        assert_eq!(stats.gap_count, 2); // gaps within observed extent: 10-20, 30-50
-        assert_eq!(stats.largest_range_size, 50);
-        assert_eq!(stats.smallest_range_size, 10);
-    }
-
-    #[test]
-    fn test_range_edge_cases() {
-        let mut tracker = RangeTracker::new();
-
-        // Empty range should be ignored
-        tracker.add_range(SparseRange::new(10, 10));
-        assert_eq!(tracker.range_count(), 0);
-
-        // Zero-sized coverage
-        assert_eq!(tracker.coverage_ratio(0), 1.0);
-        assert!(tracker.is_contiguous_to(0));
-
-        // Remove non-existent range
-        let removed = tracker.remove_range(&SparseRange::new(100, 200));
-        assert!(!removed);
-    }
-
-    #[test]
-    fn test_sparse_range_split() {
-        let range = SparseRange::new(10, 30);
-
-        let split = range.split_at(20);
-        assert!(split.is_some());
-
-        let (left, right) = split.unwrap();
-        assert_eq!(left, SparseRange::new(10, 20));
-        assert_eq!(right, SparseRange::new(20, 30));
-
-        // Split at boundary should return None
-        assert!(range.split_at(10).is_none());
-        assert!(range.split_at(30).is_none());
-        assert!(range.split_at(5).is_none());
-    }
-
-    #[test]
-    fn test_range_intersection() {
-        let range1 = SparseRange::new(10, 30);
-        let range2 = SparseRange::new(20, 40);
-        let range3 = SparseRange::new(50, 60);
-
-        let intersection = range1.intersection(&range2);
-        assert!(intersection.is_some());
-        assert_eq!(intersection.unwrap(), SparseRange::new(20, 30));
-
-        let no_intersection = range1.intersection(&range3);
-        assert!(no_intersection.is_none());
-    }
-
-    #[test]
-    fn empty_range_removal_preserves_contiguous_coverage() {
-        let whole = SparseRange::new(0, 10);
-        let mut tracker = RangeTracker::new();
-        tracker.add_range(whole);
-        for empty in [
-            SparseRange::new(0, 0),
-            SparseRange::new(5, 5),
-            SparseRange::new(10, 10),
-            SparseRange { start: 7, end: 3 },
-        ] {
-            assert!(!whole.overlaps(&empty));
-            assert!(!empty.overlaps(&whole));
-            assert!(!tracker.overlaps(&empty));
-            assert!(!tracker.remove_range(&empty));
-            assert_eq!(tracker.get_ranges(), vec![whole]);
-            assert_eq!(tracker.total_bytes(), 10);
-            assert!(tracker.is_contiguous_to(10));
-        }
-        assert!(!ChunkRange::new(5, 0).overlaps(&ChunkRange::new(0, 10)));
-        assert!(tracker.remove_range(&SparseRange::new(4, 6)));
-        assert_eq!(tracker.total_bytes(), 8);
-        assert_eq!(tracker.find_gaps(10), vec![SparseRange::new(4, 6)]);
-        assert!(!tracker.is_contiguous_to(10));
-    }
-
-    #[test]
-    fn prefix_queries_ignore_later_ranges_at_u64_boundary() {
-        let mut tracker = RangeTracker::new();
-        tracker.add_range(SparseRange::new(0, 10));
-        tracker.add_range(SparseRange::new(u64::MAX - 1, u64::MAX));
-        assert!(tracker.is_contiguous_to(10));
-        assert!(!tracker.is_contiguous_to(11));
-        assert!(tracker.find_gaps(0).is_empty());
-        assert!(tracker.find_gaps(10).is_empty());
-        assert_eq!(tracker.find_gaps(11), vec![SparseRange::new(10, 11)]);
-        assert_eq!(
-            tracker.find_gaps(u64::MAX),
-            vec![SparseRange::new(10, u64::MAX - 1)]
-        );
-    }
-
-    #[test]
-    fn bounded_range_queries_match_byte_set_oracle() {
-        for mask in 0_u16..256 {
-            let mut tracker = RangeTracker::new();
-            for offset in (0..8).rev() {
-                if mask & (1 << offset) != 0 {
-                    tracker.add_range(SparseRange::new(offset, offset + 1));
-                }
-            }
-            for size in 0..=10 {
-                let missing: Vec<u64> = (0..size)
-                    .filter(|offset| *offset >= 8 || mask & (1 << offset) == 0)
-                    .collect();
-                let gaps = tracker.find_gaps(size);
-                assert!(
-                    gaps.iter()
-                        .all(|gap| gap.start < gap.end && gap.end <= size)
-                );
-                let reported: Vec<u64> = gaps.iter().flat_map(|gap| gap.start..gap.end).collect();
-                assert_eq!(reported, missing, "mask={mask} size={size}");
-                assert_eq!(
-                    tracker.is_contiguous_to(size),
-                    missing.is_empty(),
-                    "mask={mask} size={size}"
-                );
-            }
-        }
-    }
-}
+#[cfg(test)]
+#[path = "range_tracker_neighbor_tests_inline_tests.rs"]
+mod neighbor_tests;

@@ -7,6 +7,9 @@ use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+mod skip_until;
+pub use skip_until::SkipUntilSession;
+
 /// Convenience methods for buffered readers such as
 /// [`BufReader`](crate::io::BufReader).
 ///
@@ -59,7 +62,54 @@ pub trait AsyncBufReadExt: AsyncBufRead {
             delimiter: byte,
             buf,
             read: 0,
+            max_len: None,
         }
+    }
+
+    /// Reads through `byte` without growing `buf.len()` beyond `max_len`.
+    ///
+    /// The bound includes the delimiter and bytes already in `buf`, so dropping
+    /// and restarting a wait does not reset the allowance. Returns only the
+    /// number appended by this wait. EOF without a delimiter is still success.
+    ///
+    /// An initial length above the bound returns `InvalidInput` before polling
+    /// the reader. Excess input returns `InvalidData`: the accepted prefix stays
+    /// in `buf` and the first byte beyond the allowance is left unconsumed. The
+    /// caller must deliberately resume with a larger bound, discard the rest of
+    /// the record, or close the reader; the remainder is not a new record.
+    ///
+    /// This bounds retained bytes, not the vector's capacity, the reader's own
+    /// read-ahead, or total stream length. Existing `read_until` stays unbounded.
+    fn read_until_limited<'a>(
+        &'a mut self,
+        byte: u8,
+        buf: &'a mut Vec<u8>,
+        max_len: usize,
+    ) -> ReadUntil<'a, Self>
+    where
+        Self: Unpin,
+    {
+        ReadUntil {
+            reader: self,
+            delimiter: byte,
+            buf,
+            read: 0,
+            max_len: Some(max_len),
+        }
+    }
+
+    /// Creates an allocation-free bounded discard session for one delimiter.
+    ///
+    /// Retain the session across dropped `run()` waits to preserve its cumulative
+    /// byte allowance. The delimiter counts toward `max_bytes`. A size refusal
+    /// leaves continuation input unread; successful EOF alone is not a delimiter
+    /// boundary. Inspect `delimiter_found()` before reusing a framed connection.
+    /// Unlike `read_until`, this intentionally discards the accepted bytes.
+    fn skip_until_limited(&mut self, byte: u8, max_bytes: usize) -> SkipUntilSession<'_, Self>
+    where
+        Self: Unpin,
+    {
+        SkipUntilSession::new(self, byte, max_bytes)
     }
 
     /// Reads one line into `buf`; see [`read_line`].
@@ -91,6 +141,32 @@ pub trait AsyncBufReadExt: AsyncBufRead {
             delimiter: byte,
             segment: Vec::new(),
             finished: false,
+            max_segment_bytes: None,
+        }
+    }
+
+    /// Splits into segments retaining at most `max_segment_bytes` per segment.
+    ///
+    /// The separator is not part of the bound: zero permits empty segments,
+    /// and an exactly full segment can still be followed by a separator or EOF.
+    /// The first oversized segment yields one `InvalidData` error and fuses the
+    /// stream. No oversized segment is emitted as a successful truncated value.
+    /// Use [`Split::into_parts`] to recover the accepted partial segment and the
+    /// reader positioned at its first unconsumed continuation byte. Recovery or
+    /// draining the rest of that record is the caller's decision.
+    ///
+    /// Keep the `Split` across dropped borrowing waits to retain its partial
+    /// segment. The limit does not bound upstream buffers or allocator capacity.
+    fn split_limited(self, byte: u8, max_segment_bytes: usize) -> Split<Self>
+    where
+        Self: Sized,
+    {
+        Split {
+            reader: self,
+            delimiter: byte,
+            segment: Vec::new(),
+            finished: false,
+            max_segment_bytes: Some(max_segment_bytes),
         }
     }
 }
@@ -125,12 +201,13 @@ impl<'a, R: AsyncBufRead + Unpin + ?Sized> Future for FillBuf<'a, R> {
     }
 }
 
-/// Future for [`AsyncBufReadExt::read_until`].
+/// Future for [`AsyncBufReadExt::read_until`] and its limited variant.
 pub struct ReadUntil<'a, R: ?Sized> {
     reader: &'a mut R,
     delimiter: u8,
     buf: &'a mut Vec<u8>,
     read: usize,
+    max_len: Option<usize>,
 }
 
 impl<R: AsyncBufRead + Unpin + ?Sized> Future for ReadUntil<'_, R> {
@@ -138,6 +215,12 @@ impl<R: AsyncBufRead + Unpin + ?Sized> Future for ReadUntil<'_, R> {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
+        if this.max_len.is_some_and(|max| this.buf.len() > max) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "existing buffer exceeds max_len",
+            )));
+        }
         let mut steps = 0;
         loop {
             // Yield after a bounded number of refills, as ReadLine does, so
@@ -150,14 +233,24 @@ impl<R: AsyncBufRead + Unpin + ?Sized> Future for ReadUntil<'_, R> {
             steps += 1;
             let (used, done) = {
                 let available = std::task::ready!(Pin::new(&mut *this.reader).poll_fill_buf(cx))?;
-                match memchr::memchr(this.delimiter, available) {
+                let offered = this.max_len.map_or(available.len(), |max| {
+                    available.len().min(max - this.buf.len())
+                });
+                if offered == 0 && !available.is_empty() {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "buffered record exceeds max_len",
+                    )));
+                }
+                // Do not scan or allocate beyond the remaining allowance.
+                match memchr::memchr(this.delimiter, &available[..offered]) {
                     Some(index) => {
                         this.buf.extend_from_slice(&available[..=index]);
                         (index + 1, true)
                     }
                     None => {
-                        this.buf.extend_from_slice(available);
-                        (available.len(), available.is_empty())
+                        this.buf.extend_from_slice(&available[..offered]);
+                        (offered, available.is_empty())
                     }
                 }
             };
@@ -170,18 +263,29 @@ impl<R: AsyncBufRead + Unpin + ?Sized> Future for ReadUntil<'_, R> {
     }
 }
 
-/// Stream returned by [`AsyncBufReadExt::split`].
+/// Stream returned by [`AsyncBufReadExt::split`] and its limited variant.
 pub struct Split<R> {
     reader: R,
     delimiter: u8,
     segment: Vec<u8>,
     finished: bool,
+    max_segment_bytes: Option<usize>,
 }
 
 impl<R> Split<R> {
     /// Returns the reader, with any partly read segment discarded.
     pub fn into_inner(self) -> R {
         self.reader
+    }
+
+    /// Recovers the reader and any partially consumed segment without losing it.
+    ///
+    /// The partial bytes precede the unread bytes in the reader. In particular,
+    /// after a size error the reader is still inside that same oversized record.
+    /// This performs no I/O and does not discard or resynchronize the remainder.
+    #[must_use]
+    pub fn into_parts(self) -> (R, Vec<u8>) {
+        (self.reader, self.segment)
     }
 }
 
@@ -201,7 +305,7 @@ impl<R: AsyncBufRead + Unpin> Stream for Split<R> {
                 return Poll::Pending;
             }
             steps += 1;
-            let (used, found) = {
+            let (used, found, oversized) = {
                 let available = match Pin::new(&mut this.reader).poll_fill_buf(cx) {
                     Poll::Pending => return Poll::Pending,
                     Poll::Ready(Err(error)) => return Poll::Ready(Some(Err(error))),
@@ -214,18 +318,32 @@ impl<R: AsyncBufRead + Unpin> Stream for Split<R> {
                     }
                     return Poll::Ready(Some(Ok(std::mem::take(&mut this.segment))));
                 }
-                match memchr::memchr(this.delimiter, available) {
+                let remaining = this.max_segment_bytes.map_or(usize::MAX, |max| {
+                    max.saturating_sub(this.segment.len())
+                });
+                // A delimiter immediately after a full segment still fits;
+                // inspect that one byte, but never append it to the segment.
+                let inspect = available.len().min(remaining.saturating_add(1));
+                match memchr::memchr(this.delimiter, &available[..inspect]) {
                     Some(index) => {
                         this.segment.extend_from_slice(&available[..index]);
-                        (index + 1, true)
+                        (index + 1, true, false)
                     }
                     None => {
-                        this.segment.extend_from_slice(available);
-                        (available.len(), false)
+                        let used = available.len().min(remaining);
+                        this.segment.extend_from_slice(&available[..used]);
+                        (used, false, used < available.len())
                     }
                 }
             };
             AsyncBufRead::consume(Pin::new(&mut this.reader), used);
+            if oversized {
+                this.finished = true;
+                return Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "buffered segment exceeds max_segment_bytes",
+                ))));
+            }
             if found {
                 return Poll::Ready(Some(Ok(std::mem::take(&mut this.segment))));
             }
@@ -241,3 +359,6 @@ impl<R: std::fmt::Debug> std::fmt::Debug for Split<R> {
             .finish_non_exhaustive()
     }
 }
+
+#[cfg(test)]
+mod limited_tests;

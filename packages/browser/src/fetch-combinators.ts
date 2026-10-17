@@ -73,9 +73,11 @@ function checked<T>(value: unknown): Outcome<T> {
             || !["transient", "permanent", "unknown"].includes(recoverability) || typeof message !== "string") break;
         return Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability, message }) });
       }
-      case "panicked":
-        if (typeof outcome.message === "string") return Object.freeze({ outcome: "panicked", message: outcome.message });
+      case "panicked": {
+        const message = outcome.message;
+        if (typeof message === "string") return Object.freeze({ outcome: "panicked", message });
         break;
+      }
       case "cancelled": {
         const { kind, phase, origin_region, origin_task, timestamp_nanos, message, truncated } = outcome.cancellation;
         if (typeof kind !== "string" || !["requested", "cancelling", "finalizing", "completed"].includes(phase)
@@ -107,6 +109,7 @@ interface Member {
   reader: ReadableStreamDefaultReader<Uint8Array>;
   response: () => Promise<Outcome<BrowserFetchResponse>>;
   closed: Promise<Outcome<void>>;
+  retire?: () => Promise<Outcome<void>>;
   terminal?: Outcome<void>;
   head?: Outcome<BrowserFetchResponse>;
   draining?: Promise<Outcome<void>>;
@@ -120,6 +123,11 @@ interface Member {
  * Winner failure or caller cancellation during that drain also drains all work.
  * Failures strengthen as Panicked > Cancelled > Err; successful loser
  * cancellation is cleanup, not an owner cancellation.
+ * When a member supplies retire(), its independent cleanup receipt is joined
+ * alongside native reader cancellation and closed. A failed retirement prevents
+ * ownership transfer even when closed preserves an earlier cancellation. An ok
+ * retirement never suppresses an operation failure. Older handles retain their
+ * native-cancellation/closed boundary; no stronger task-ABI receipt is implied.
  *
  * An optional AbortSignal also cancels and drains every member, including a
  * proposed winner still waiting for loser cleanup. A pre-aborted signal skips
@@ -203,16 +211,17 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
     if (count && (!GET_READER || !LOCKED || !CANCEL || !RELEASE || !READER_CLOSED)) {
       return fail("fetch groups require native ReadableStream readers");
     }
-    const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"] }[] = [];
+    const inputs: { fetch: FetchStreamHandle; response: Member["response"]; closed: Member["closed"]; convert: FetchStreamHandle["toReadableStream"]; retire: FetchStreamHandle["retire"] }[] = [];
     const seen = new Set<FetchStreamHandle>();
     // Read all caller properties before taking a native reader lock.
     for (let index = 0; index < count; index += 1) {
       const fetch = fetches[index];
       if (!fetch || seen.has(fetch)) return fail("fetch group members must be distinct owned fetch handles");
       seen.add(fetch);
-      const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream;
+      const response = fetch.response, closed = fetch.closed, convert = fetch.toReadableStream, retire = fetch.retire;
       if (typeof response !== "function" || typeof convert !== "function" || !closed) return fail("invalid fetch group member");
-      inputs.push({ fetch, response, closed, convert });
+      if (retire !== undefined && typeof retire !== "function") return fail("invalid fetch retirement method");
+      inputs.push({ fetch, response, closed, convert, retire });
     }
     const bodies = new Set<ReadableStream<Uint8Array>>();
     for (const input of inputs) {
@@ -225,7 +234,9 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
       // Releasing an unfinished lock rejects this promise, including on rollback.
       void Promise.resolve(Reflect.apply(READER_CLOSED!, reader, [])).catch(() => {});
       members.push({ fetch: input.fetch, body, reader, response: () => Reflect.apply(input.response, input.fetch, []),
-        closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch group member completion rejected")) });
+        closed: Promise.resolve(input.closed).then((value) => checked<void>(value), () => internal("fetch group member completion rejected")),
+        retire: input.retire ? () => Reflect.apply(input.retire!, input.fetch, ["fetch group member retired"]) : undefined,
+      });
     }
   } catch {
     for (const member of members) { try { Reflect.apply(RELEASE!, member.reader, []); } catch { /* Already released. */ } }
@@ -258,6 +269,19 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
     let resolve!: (outcome: Outcome<void>) => void;
     member.draining = new Promise<Outcome<void>>((done) => { resolve = done; });
     void (async () => {
+      // Reader cancellation can settle with the operation's original Outcome
+      // even when its owner reports failed cleanup. Start both independent
+      // barriers, and react to a retirement failure without waiting for other
+      // members' host cleanup. The installed drain protects reentrant calls.
+      const retirement = member.retire ? Promise.resolve().then(member.retire).then(value => {
+        const receipt = checked<void>(value);
+        return receipt.outcome === "ok" && receipt.value !== undefined
+          ? internal("fetch retirement returned a non-void success") : receipt;
+      }, () => internal("fetch retirement rejected")) : Promise.resolve(ok(undefined));
+      const joinedRetirement = retirement.then(receipt => {
+        if (receipt.outcome !== "ok") stop(receipt);
+        return receipt;
+      });
       let rejected = false;
       try { await Reflect.apply(CANCEL!, member.reader, ["fetch group member retired"]); }
       catch { rejected = true; }
@@ -268,18 +292,29 @@ function responseGroup(fetches: readonly FetchStreamHandle[], join: boolean, opt
       const outcome = rejected
         ? terminal.outcome !== "ok" ? terminal : internal("fetch group cancellation or terminal publication refused")
         : terminal.outcome === "err" || terminal.outcome === "panicked" ? terminal : ok(undefined);
-      if (outcome.outcome !== "ok") {
-        cleanupErrors.set(index, outcome);
-        // Do not keep the selected body alive behind another slow loser.
-        stop(outcome);
-      }
-      resolve(outcome);
+      if (outcome.outcome !== "ok") noteCleanup(index, outcome);
+      // Recorded after the terminal: an equally severe operation failure keeps
+      // its own, more specific cause.
+      const retired = await joinedRetirement;
+      if (retired.outcome !== "ok") noteCleanup(index, retired);
+      resolve(cleanupErrors.get(index) ?? ok(undefined));
     })();
     return member.draining;
   }
+  function noteCleanup(index: number, outcome: Failure): void {
+    const previous = cleanupErrors.get(index);
+    if (!previous || severity(outcome) > severity(previous)) cleanupErrors.set(index, outcome);
+    // A later ordinary terminal error must not overwrite a retirement panic.
+    // Do not keep the selected body alive behind another slow loser.
+    stop(outcome);
+  }
   function stop(outcome: Failure) {
     if (finished) return;
-    if (!stopped || severity(outcome) > severity(stopped)) stopped = outcome;
+    if (stopped) {
+      if (severity(outcome) > severity(stopped)) stopped = outcome;
+      return;
+    }
+    stopped = outcome;
     decide();
     for (let index = 0; index < members.length; index += 1) void drain(index);
   }

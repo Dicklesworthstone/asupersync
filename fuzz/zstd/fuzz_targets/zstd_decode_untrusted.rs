@@ -34,13 +34,11 @@ fuzz_target!(|data: &[u8]| {
     let max_output =
         (usize::from(header[1]) | (usize::from(header[2]) << 8) | (usize::from(header[3]) << 16))
             % (MAX_OUTPUT + 1);
-    let limits = DecodeLimits {
-        max_output,
+    let limits = DecodeLimits::new(max_output)
         // 1 KiB through the default 8 MiB.
-        max_window: 1 << (10 + header[4] % 14),
-        require_content_size: header[0] & 1 != 0,
-        allow_skippable_frames: header[0] & 2 != 0,
-    };
+        .with_max_window(1 << (10 + header[4] % 14))
+        .with_require_content_size(header[0] & 1 != 0)
+        .with_allow_skippable_frames(header[0] & 2 != 0);
     let input_chunk = 1 + usize::from(header[5]);
     let output_chunk = 1 + usize::from(header[6]);
 

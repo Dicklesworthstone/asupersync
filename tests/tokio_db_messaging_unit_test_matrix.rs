@@ -559,7 +559,11 @@ fn total_test_file_tests_above_threshold() {
 
 #[test]
 fn inline_tests_database_pool() {
-    let src = include_str!("../src/database/pool.rs");
+    let src = concat!(
+        include_str!("../src/database/pool.rs"),
+        "\n",
+        include_str!("../src/database/pool_inline_tests.rs")
+    );
     let count = count_test_fns(src);
     assert!(
         count >= 10,
@@ -599,7 +603,11 @@ fn inline_tests_database_sqlite() {
 
 #[test]
 fn inline_tests_messaging_kafka() {
-    let src = include_str!("../src/messaging/kafka.rs");
+    let src = concat!(
+        include_str!("../src/messaging/kafka.rs"),
+        "\n",
+        include_str!("../src/messaging/kafka_inline_tests.rs")
+    );
     let count = count_test_fns(src);
     assert!(
         count >= 5,
@@ -609,7 +617,11 @@ fn inline_tests_messaging_kafka() {
 
 #[test]
 fn inline_tests_messaging_kafka_consumer() {
-    let src = include_str!("../src/messaging/kafka_consumer.rs");
+    let src = concat!(
+        include_str!("../src/messaging/kafka_consumer.rs"),
+        "\n",
+        include_str!("../src/messaging/kafka_consumer_inline_tests.rs")
+    );
     let count = count_test_fns(src);
     assert!(
         count >= 3,
@@ -619,7 +631,11 @@ fn inline_tests_messaging_kafka_consumer() {
 
 #[test]
 fn inline_tests_messaging_nats() {
-    let src = include_str!("../src/messaging/nats.rs");
+    let src = concat!(
+        include_str!("../src/messaging/nats.rs"),
+        "\n",
+        include_str!("../src/messaging/nats_inline_tests.rs")
+    );
     let count = count_test_fns(src);
     assert!(
         count >= 10,
@@ -629,7 +645,11 @@ fn inline_tests_messaging_nats() {
 
 #[test]
 fn inline_tests_messaging_jetstream() {
-    let src = include_str!("../src/messaging/jetstream.rs");
+    let src = concat!(
+        include_str!("../src/messaging/jetstream.rs"),
+        "\n",
+        include_str!("../src/messaging/jetstream_inline_tests.rs")
+    );
     let count = count_test_fns(src);
     assert!(
         count >= 5,

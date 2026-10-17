@@ -103,6 +103,19 @@ export interface FetchStreamHandle {
    */
   toReadableStream(): Outcome<ReadableStream<Uint8Array>>;
   cancel(reason?: string): Promise<Outcome<void>>;
+  /**
+   * One-way retirement, including while the body stream is locked. Requests
+   * cancellation if needed and joins launch, reads, upload and response cleanup.
+   * Unlike cancel()/closed, success describes cleanup and local admission release,
+   * not HTTP/application success. Inspect closed separately for the operation.
+   * Cleanup, cancellation-admission and terminal-publication failures refuse this
+   * receipt. Repeated calls share one promise; an invalid reason changes nothing.
+   *
+   * Optional for compatibility with earlier/third-party handles. The SDK manager
+   * supplies it. It does not strengthen the task ABI's identical-error-echo
+   * ambiguity: actual owner close remains the independent ledger barrier.
+   */
+  retire?(reason?: string): Promise<Outcome<void>>;
 }
 
 type Failure = Exclude<Outcome<never>, { outcome: "ok" }>;
@@ -465,9 +478,11 @@ class OwnedFetchUpload {
   private stopping = false;
   private ended = false;
   private sent = 0;
+  private readerTerminal!: Promise<{ error: unknown } | undefined>;
 
   constructor(source: ReadableStream<Uint8Array>, private readonly maxBytes: number,
-    private readonly failed: (error: unknown) => void) {
+    private readonly failed: (error: unknown) => void,
+    private readonly cleanupFailed: () => void) {
     // Native intrinsics ignore shadowed instance methods and accept streams
     // from another same-origin realm. If acquisition fails, no source is owned.
     this.reader = Reflect.apply(UPLOAD_READER!, source, []) as ReadableStreamDefaultReader<Uint8Array>;
@@ -482,6 +497,7 @@ class OwnedFetchUpload {
         cancel: (reason) => this.cancel(reason),
       }, { highWaterMark: 0 });
       const closed = Reflect.apply(UPLOAD_CLOSED!, this.reader, []) as Promise<void>;
+      this.readerTerminal = closed.then(() => undefined, error => ({ error }));
       void closed.catch((error) => { if (!this.stopping && !this.ended) this.failed(error); });
     } catch (error) {
       // The zero-watermark wrapper has not requested any source bytes yet.
@@ -546,11 +562,17 @@ class OwnedFetchUpload {
       await Promise.all([
         attempt(async () => {
           try { await Reflect.apply(UPLOAD_CANCEL!, this.reader, [reason]); }
-          catch (error) { this.failed(error); }
+          catch (error) {
+            // Cancelling an already errored native reader rejects with its
+            // stored source error, without invoking any cleanup callback.
+            const terminal = await this.readerTerminal;
+            if (!terminal || terminal.error !== error) this.cleanupFailed();
+            this.failed(error);
+          }
         }),
         pending,
       ]);
-      try { this.release(); } catch (error) { this.failed(error); }
+      try { this.release(); } catch (error) { this.cleanupFailed(); this.failed(error); }
       this.drained.resolve();
     })();
     return this.drained.promise;
@@ -592,6 +614,8 @@ export function createBrowserFetchManager(dependencies: {
     terminalFailure: Failure | null = null;
     creditHeld = true;
     cancelling: Promise<Outcome<void>> | null = null;
+    retirement: Promise<Outcome<void>> | null = null;
+    cleanupFailure: Failure | null = null;
     cancelMustStopOnRefusal = false;
     clearDeadline: (() => void) | null = null;
     clearSignal: (() => void) | null = null;
@@ -607,7 +631,47 @@ export function createBrowserFetchManager(dependencies: {
     handle(): FetchStreamHandle {
       return Object.freeze({ closed: this.closed.promise, response: () => this.head.promise,
         read: () => this.read(), toReadableStream: () => this.toReadableStream(),
-        cancel: (reason?: string) => this.cancel(reason) });
+        cancel: (reason?: string) => this.cancel(reason),
+        retire: (reason?: string) => this.retireAndJoin(reason) });
+    }
+
+    noteCleanup(text: string): void {
+      // Keep diagnostics local: cleanup exceptions can carry arbitrary payloads.
+      this.cleanupFailure ??= failure(text, "internal_failure");
+    }
+
+    async cleanup(operation: () => unknown, text: string): Promise<void> {
+      try { await operation(); } catch { this.noteCleanup(text); }
+    }
+
+    async cancelReader(reader: ReadableStreamDefaultReader<Uint8Array>, reason: unknown): Promise<void> {
+      let terminal: Promise<{ error: unknown } | undefined>;
+      try { terminal = Promise.resolve(reader.closed).then(() => undefined, error => ({ error })); }
+      catch { this.noteCleanup("fetch reader terminal observation failed"); terminal = Promise.resolve(undefined); }
+      try { await reader.cancel(reason); }
+      catch (error) {
+        const ended = await terminal;
+        if (!ended || ended.error !== error) this.noteCleanup("fetch response cancellation failed");
+      }
+    }
+
+    retireAndJoin(reason = "fetch retired by caller"): Promise<Outcome<void>> {
+      if (typeof reason !== "string") return Promise.resolve(failure("fetch retirement reason must be a string"));
+      if (this.retirement) return this.retirement;
+      const done = deferred<Outcome<void>>();
+      this.retirement = done.promise; // Install before task/host callbacks re-enter.
+      void (async () => {
+        await this.requestCancel("fetch_cancel", reason, true);
+        await this.closed.promise;
+        await this.launched.promise;
+        await this.reading?.promise;
+        if (this.creditHeld) this.noteCleanup("fetch retirement retained its owned task");
+        done.resolve(this.cleanupFailure ?? Object.freeze(Outcomes.ok(undefined)));
+      })().catch(() => {
+        this.noteCleanup("fetch retirement failed");
+        done.resolve(this.cleanupFailure!);
+      });
+      return done.promise;
     }
 
     toReadableStream(): Outcome<ReadableStream<Uint8Array>> {
@@ -706,6 +770,7 @@ export function createBrowserFetchManager(dependencies: {
       if (outcome.outcome === "err") Object.freeze(outcome.failure);
       Object.freeze(outcome);
       if (outcome.outcome !== "ok") this.terminalFailure = outcome;
+      if (publicationFailed) this.noteCleanup("fetch terminal publication failed");
       if (!publicationFailed) this.retire();
       this.closed.resolve(outcome);
     }
@@ -733,11 +798,12 @@ export function createBrowserFetchManager(dependencies: {
       const reading = this.reading;
       void (async () => {
         await Promise.all([
-          attempt(() => this.upload?.cancel(outcome)),
-          attempt(() => this.controller?.abort()), attempt(() => reader?.cancel(outcome)),
+          this.cleanup(() => this.upload?.cancel(outcome), "fetch upload cleanup failed"),
+          this.cleanup(() => this.controller?.abort(), "fetch host abort failed"),
+          reader ? this.cancelReader(reader, outcome) : undefined,
           this.launched.promise, reading?.promise,
         ]);
-        if (reader) { try { reader.releaseLock(); } catch { /* Already released. */ } }
+        if (reader) { try { reader.releaseLock(); } catch { this.noteCleanup("fetch reader release failed"); } }
         this.reader = null;
         this.upload = null;
         this.finish(outcome);
@@ -745,7 +811,7 @@ export function createBrowserFetchManager(dependencies: {
     }
 
     async disposeResponse(response: Response): Promise<void> {
-      await attempt(() => response.body?.cancel(this.stopped));
+      await this.cleanup(() => response.body?.cancel(this.stopped), "fetch late response disposal failed");
     }
 
     disarmSignal(): void {
@@ -799,7 +865,7 @@ export function createBrowserFetchManager(dependencies: {
 
     armDeadline(host: Record<string, unknown> | undefined): void {
       const duration = this.request.timeoutMs;
-      if (duration === undefined || this.stopped) return;
+      if (duration === undefined || this.stopped || this.completed) return;
       const schedule = host?.setTimeout;
       if (this.stopped) return;
       const clear = host?.clearTimeout;
@@ -856,7 +922,7 @@ export function createBrowserFetchManager(dependencies: {
         if (this.request.upload) {
           // Register ownership before signal/timer/host callbacks can cancel.
           this.upload = new OwnedFetchUpload(this.request.upload, this.request.maxUploadBytes,
-            (error) => this.stop(asFailure(error)));
+            (error) => this.stop(asFailure(error)), () => this.noteCleanup("fetch upload cleanup failed"));
           this.request.upload = undefined;
         }
         this.armSignal();
@@ -869,7 +935,7 @@ export function createBrowserFetchManager(dependencies: {
         if (this.stopped) return;
         if (typeof Controller !== "function") throw new TypeError("AbortController is unavailable");
         this.controller = new (Controller as typeof AbortController)();
-        if (this.stopped) { await attempt(() => this.controller?.abort()); return; }
+        if (this.stopped) { await this.cleanup(() => this.controller?.abort(), "fetch host abort failed"); return; }
         const fetch = host?.fetch;
         if (this.stopped) return;
         if (typeof fetch !== "function") throw new TypeError("browser fetch is unavailable");
@@ -928,8 +994,8 @@ export function createBrowserFetchManager(dependencies: {
           if (this.stopped) { await this.disposeResponse(response); return; }
           this.reader = Reflect.apply(getReader, body, []) as ReadableStreamDefaultReader<Uint8Array>;
           if (this.stopped) {
-            await attempt(() => this.reader?.cancel(this.stopped));
-            try { this.reader?.releaseLock(); } catch { /* Already released. */ }
+            await this.cancelReader(this.reader, this.stopped);
+            try { this.reader?.releaseLock(); } catch { this.noteCleanup("fetch reader release failed"); }
             this.reader = null;
             return;
           }
@@ -976,7 +1042,8 @@ export function createBrowserFetchManager(dependencies: {
           if (this.stopped) return this.stopped;
           // Keep the reader owned if its release callback requests cancel, so
           // stop() can await that cleanup before retiring the request.
-          Reflect.apply(release, reader, []);
+          try { Reflect.apply(release, reader, []); }
+          catch (error) { this.noteCleanup("fetch reader release failed"); throw error; }
           if (this.stopped) return this.stopped;
           this.reader = null;
           this.finish(Outcomes.ok(undefined));
@@ -1009,6 +1076,7 @@ export function createBrowserFetchManager(dependencies: {
       // Implicit cancellations have no caller to handle refusal. Latch this
       // before coalescing: an implicit request can reenter an explicit ABI
       // request, and its refusal must still stop host I/O synchronously.
+      // this consumer can never resume to take responsibility for it.
       this.cancelMustStopOnRefusal ||= stopOnRefusal;
       if (this.cancelling) return this.cancelling;
       const attempt = deferred<Outcome<void>>();
@@ -1020,7 +1088,10 @@ export function createBrowserFetchManager(dependencies: {
       this.cancelMustStopOnRefusal = false;
       if (admitted.outcome !== "ok") {
         this.cancelling = null;
-        if (mustStop) this.stop(admitted);
+        if (mustStop) {
+          this.noteCleanup("fetch task cancellation refused");
+          this.stop(admitted);
+        }
         attempt.resolve(admitted);
       } else {
         this.stop(cancelled(kind, reason, this.task));
@@ -1077,16 +1148,25 @@ export function createBrowserFetchManager(dependencies: {
       }
     },
     async drainScopes(scopeKeys: Set<string>, reason: string): Promise<Outcome<void>> {
+      // Own this active snapshot, not the outcomes of historically retired
+      // handles. Those handles keep their independent retirement receipts.
       const operations = Array.from(active.values()).filter((operation) => scopeKeys.has(operation.scopeKey));
       const receipts = await Promise.all(operations.map(async (operation) => {
         const receipt = await operation.requestCancel(reason, reason);
         // Domain errors and admitted cancellation can both finish cleanup.
         // A refused cancellation or terminal publication still owns its slot.
-        return operation.creditHeld
-          ? receipt.outcome === "ok"
+        // Preserve that refusal: do not turn a retryable explicit scope drain
+        // into retirement's implicit, one-way stop-on-refusal operation.
+        if (operation.creditHeld) {
+          return receipt.outcome === "ok"
             ? failure("fetch cleanup retained its owned task", "internal_failure")
-            : receipt
-          : Outcomes.ok(undefined);
+            : receipt;
+        }
+        // Released credit is not proof that host cleanup succeeded. Join the
+        // same memoized cleanup receipt as handle.retire(), including launch
+        // and admitted reads, without rewriting the original scope-close kind
+        // or treating an ordinary request failure as failed cleanup.
+        return operation.retireAndJoin(reason);
       }));
       return receipts.find((receipt) => receipt.outcome !== "ok") ?? Outcomes.ok(undefined);
     },

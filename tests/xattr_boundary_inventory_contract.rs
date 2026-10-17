@@ -44,6 +44,35 @@ fn read_repo_file(path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+/// `read_repo_file(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn read_repo_file_with_inline_tests(path: &str) -> String {
+    let mut source = read_repo_file(path);
+    let dir = repo_root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn read_repo_bytes(path: &str) -> Vec<u8> {
     std::fs::read(repo_root().join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
@@ -494,9 +523,9 @@ fn marginal_graph_proves_xattr_is_not_the_last_rustix_parent() {
 
 #[test]
 fn source_topology_matches_the_exact_call_and_policy_inventory() {
-    let metadata = read_repo_file(METADATA_SOURCE_PATH);
-    // Count production call sites only: the in-file `#[cfg(test)]` module
-    // legitimately exercises xattr APIs in test fixtures (for example the
+    let metadata = read_repo_file_with_inline_tests(METADATA_SOURCE_PATH);
+    // Count production call sites only: the `#[cfg(test)]` module (appended from its out-of-line
+    // file) legitimately exercises xattr APIs in test fixtures (for example the
     // FIFO symlink-swap assertion at the end of the file), and the artifact
     // census tracks those under test scope rather than as production calls.
     let (production, metadata_tests) = metadata

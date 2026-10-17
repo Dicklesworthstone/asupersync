@@ -174,6 +174,41 @@ fn is_file_level_test_only(src: &str) -> bool {
     })
 }
 
+/// An out-of-line `#[cfg(test)]` module: a `*_inline_tests.rs` file that a sibling source
+/// declares with `#[path = "<file>"]` inside an attribute block carrying `cfg(test)`. Its whole
+/// body is test code, exactly like the in-file `#[cfg(test)] mod tests { ... }` it replaced.
+fn is_out_of_line_cfg_test_module(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !name.ends_with("_inline_tests.rs") {
+        return false;
+    }
+    let declaration = format!("#[path = \"{name}\"]");
+    let Some(Ok(entries)) = path.parent().map(std::fs::read_dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let Ok(source) = std::fs::read_to_string(entry.path()) else {
+            return false;
+        };
+        let lines: Vec<&str> = source.lines().map(str::trim).collect();
+        lines.iter().enumerate().any(|(index, line)| {
+            *line == declaration
+                && lines[..index]
+                    .iter()
+                    .rev()
+                    .take_while(|line| {
+                        !line.is_empty()
+                            && !line.ends_with(';')
+                            && !line.ends_with('{')
+                            && !line.ends_with('}')
+                    })
+                    .any(|line| line.contains("cfg(test)") || line.contains("cfg(all(test"))
+        })
+    })
+}
+
 #[test]
 fn no_production_src_call_to_allow_anonymous() {
     // Pin (tick #157): the auditable grep boundary. Every
@@ -208,7 +243,7 @@ fn no_production_src_call_to_allow_anonymous() {
             Ok(c) => c,
             Err(_) => continue,
         };
-        if is_file_level_test_only(&content) {
+        if is_file_level_test_only(&content) || is_out_of_line_cfg_test_module(&path) {
             continue;
         }
         if !content.contains(".allow_anonymous()") {

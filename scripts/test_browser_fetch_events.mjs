@@ -267,8 +267,14 @@ test("handle cancellation unblocks a locked idle consumer and is idempotent", { 
 test("external fetch cancellation reaches an idle event stream after cleanup", { timeout: 3000 }, async (t) => {
   const f = await fixture(t, { body: new ReadableStream() }), fetch = f.start().value, events = sse(f, fetch);
   const cancellation = await fetch.cancel("owner stop");
-  assert.equal(await events.closed, cancellation);
-  await assert.rejects(events.readable.getReader().read(), (error) => error.cause === cancellation);
+  // The record stream snapshots provider envelopes (in the module's realm):
+  // equal fields, not the same object.
+  const plain = (value) => JSON.parse(JSON.stringify(value));
+  const closed = await events.closed;
+  assert.deepEqual(plain(closed), plain(cancellation)); assert.ok(Object.isFrozen(closed) && Object.isFrozen(closed.cancellation));
+  await assert.rejects(events.readable.getReader().read(), (error) => {
+    assert.deepEqual(plain(error.cause), plain(cancellation)); return true;
+  });
 });
 
 test("scope drain cancels a parked parser without spawning another task", { timeout: 3000 }, async (t) => {

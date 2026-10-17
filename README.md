@@ -2115,10 +2115,9 @@ dependency-cutover, file-deletion, or local-Cargo-fallback authority.
 ```toml
 [dependencies]
 # crates.io
-asupersync = "0.5.0"
+asupersync = "0.6.0"
 
-# or git (main carries the unreleased 0.6.0 line; a `version = "0.5.0"`
-# requirement would not match it)
+# or git (main carries unreleased work after 0.6.0)
 # asupersync = { git = "https://github.com/Dicklesworthstone/asupersync", branch = "main" }
 ```
 

@@ -67,7 +67,8 @@ fn read_sse_source() -> String {
 
 fn read_sse_production_source() -> String {
     let source = read_sse_source();
-    let test_module = "\n#[cfg(test)]\nmod tests {";
+    // The unit tests live out of line in sse_inline_tests.rs, declared behind #[cfg(test)].
+    let test_module = "\n#[cfg(test)]\n#[path = \"sse_inline_tests.rs\"]\nmod tests;";
     let end = source
         .find(test_module)
         .expect("sse.rs must keep inline tests behind #[cfg(test)]");

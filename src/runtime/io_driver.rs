@@ -621,8 +621,8 @@ impl IoDriver {
 ///
 /// This wrapper provides interior mutability for registering and updating
 /// wakers from async I/O types while keeping the driver single-threaded.
-/// Independently constructed handles of the same reactor `Arc` share one
-/// token namespace, dispatcher and poll-leader flag, just like cloned handles.
+/// Independently constructed handles of the same reactor `Arc` share one token
+/// namespace and dispatcher; only clones share a poll-leader flag.
 /// Statistics and event callbacks describe that shared physical dispatcher.
 /// Distinct reactor allocations remain independent. Raw reactor polling or a
 /// separately constructed [`IoDriver`] must not compete with this dispatcher.
@@ -692,6 +692,16 @@ impl std::fmt::Debug for IoDriverHandle {
 }
 
 impl IoDriverHandle {
+    /// Whether this handle's poll election currently has an owner.
+    ///
+    /// This is a readiness hint, not a reservation. Followers sample it only
+    /// after publishing their Parker waiter; the paired handoff fence makes
+    /// either that sample or the leader's waiter scan observe the other side.
+    #[inline]
+    pub(crate) fn is_polling(&self) -> bool {
+        self.is_polling.load(Ordering::Acquire)
+    }
+
     /// Creates a handle, reusing the dispatcher of this reactor allocation
     /// when another handle already exists. A fresh dispatcher uses the default
     /// events capacity; sharing never resizes an active poll buffer.
@@ -3849,49 +3859,8 @@ mod tests {
 pub mod io_driver_conformance_tests;
 
 #[cfg(test)]
-mod io_driver_conformance_integration {
-    use super::io_driver_conformance_tests::*;
-
-    #[test]
-    fn run_io_driver_conformance_suite() {
-        let harness = IoDriverConformanceHarness::new();
-        let report = harness.run_all_tests();
-
-        // Generate detailed compliance report
-        let _compliance_matrix = report.generate_compliance_matrix();
-        // IoDriver Event Loop Conformance Report generated
-
-        // Verify critical requirements pass
-        let must_failures: Vec<_> = report
-            .results
-            .iter()
-            .filter(|r| r.level == RequirementLevel::Must && !r.passed)
-            .collect();
-
-        assert!(
-            must_failures.is_empty(),
-            "Critical event loop conformance failures: {:#?}",
-            must_failures
-        );
-
-        let must_pass_rate = report.must_pass_rate();
-        let overall_pass_rate = report.pass_rate();
-
-        // MUST requirements and overall pass rate calculated
-
-        // Event loop conformance requires 100% MUST pass rate
-        assert!(
-            must_pass_rate >= 1.0,
-            "Event loop MUST requirements below 100%: {:.1}%",
-            must_pass_rate * 100.0
-        );
-        assert!(
-            overall_pass_rate >= 0.85,
-            "Overall pass rate below 85%: {:.1}%",
-            overall_pass_rate * 100.0
-        );
-    }
-}
+#[path = "io_driver_io_driver_conformance_integration_inline_tests.rs"]
+mod io_driver_conformance_integration;
 
 #[cfg(all(test, unix))]
 #[path = "io_driver/mutation_wake_tests.rs"]

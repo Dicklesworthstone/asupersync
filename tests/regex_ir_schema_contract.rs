@@ -32,10 +32,10 @@ const ARTIFACT_PATH: &str = "artifacts/regex_ir_schema_contract_v1.json";
 const DOC_PATH: &str = "docs/regex_ir_schema_contract.md";
 const SOURCE_PATH: &str = "src/observability/regex_ir.rs";
 const TERMINAL_PATH: &str = "artifacts/regex_semantic_terminal_receipt_v1.json";
-// Reviewed private CompileLimits serde derives in da992970c; this does not
-// change Program or rebind the historical terminal receipt below.
+// Reviewed da992970c (private CompileLimits serde derives) and c5012547e (unit tests
+// moved out of line); neither changes Program or rebinds the receipt below.
 const FROZEN_SOURCE_SHA256: &str =
-    "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4";
+    "ec137a887970a852c3daa81dd2c74b4750bc8c9633dea143359b3d69030d528a";
 const FROZEN_TERMINAL_SHA256: &str =
     "42d00d7c92b2b4a9974c252481432142eae2927b9442ffe08265769e00f7c8a2";
 

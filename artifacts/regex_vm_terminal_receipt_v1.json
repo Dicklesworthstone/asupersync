@@ -29,9 +29,9 @@
     },
     {
       "path": "src/observability/regex_vm.rs",
-      "sha256": "abd07a7aed11731eeedd0f79965d75e78fb2e15bd3a6e3e968ff35711095d06b",
-      "bytes": 252716,
-      "revision": "e80034f774be4cbce0b9e66c79203e333a8c3620"
+      "sha256": "ae3f884dc4377738f96beb2b3e312ad70914dc8030d0c6509ad072294e04224b",
+      "bytes": 170980,
+      "revision": "c5012547e54c2c0f404792e1e91a8c0293c68878"
     },
     {
       "path": "src/observability/mod.rs",

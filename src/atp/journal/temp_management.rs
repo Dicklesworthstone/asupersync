@@ -1,6 +1,7 @@
 //! Temporary File and Path Management for Sparse Writer Operations
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,12 +11,21 @@ const MAX_SAFE_FILENAME_COMPONENT_LEN: usize = 96;
 
 static NEXT_MANAGER_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Internal creation failure, retaining the writer's existing error taxonomy.
+#[derive(Debug)]
+pub(crate) enum TempFileCreationError {
+    Path(TempManagementError),
+    Open(std::io::Error),
+}
+
 /// Manager for temporary file paths and lifecycle
 pub struct TempPathManager {
     /// Base directory for temporary files
     base_dir: PathBuf,
     /// Quarantine directory for failed operations
     quarantine_dir: PathBuf,
+    /// A final filename must never be acquired as private staging, even absent.
+    protected_file_name: Option<OsString>,
     /// Process-unique manager identifier included in generated names
     manager_id: u64,
     /// Counter for unique temp file generation
@@ -41,7 +51,8 @@ pub struct TempManagementConfig {
     pub auto_create_quarantine: bool,
     /// Permissions for temporary files (Unix only)
     pub temp_file_permissions: Option<u32>,
-    /// Permissions for temporary directories (Unix only)
+    /// Creation permissions for new directories (Unix only), filtered by umask.
+    /// Existing destinations and quarantine directories are never chmoded.
     pub temp_dir_permissions: Option<u32>,
 }
 
@@ -185,6 +196,18 @@ impl TempPathManager {
         Self::with_config(base_dir, TempManagementConfig::default())
     }
 
+    /// Prepare the normal manager while excluding this writer's final filename
+    /// from exclusive staging acquisition. Neither existence nor uniqueness
+    /// proves that an absent name is private rather than a public destination.
+    pub(crate) fn for_destination(final_path: &Path) -> Self {
+        let parent = final_path.parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let mut manager = Self::new(parent);
+        manager.protected_file_name = final_path.file_name().map(OsString::from);
+        manager
+    }
+
     /// Create with custom configuration
     pub fn with_config(base_dir: impl AsRef<Path>, config: TempManagementConfig) -> Self {
         let base_dir = base_dir.as_ref().to_path_buf();
@@ -193,6 +216,7 @@ impl TempPathManager {
         let manager = Self {
             base_dir,
             quarantine_dir,
+            protected_file_name: None,
             manager_id: NEXT_MANAGER_ID.fetch_add(1, Ordering::Relaxed),
             counter: AtomicU64::new(1),
             active_temps: HashMap::new(),
@@ -207,16 +231,19 @@ impl TempPathManager {
 
     /// Create a new temporary file path
     pub fn create_temp_path(&mut self, operation_id: &str) -> Result<PathBuf, TempManagementError> {
-        // Check limits
+        let temp_path = self.next_temp_path(operation_id)?;
+        self.track_temp_path(&temp_path, operation_id);
+        Ok(temp_path)
+    }
+
+    fn next_temp_path(&self, operation_id: &str) -> Result<PathBuf, TempManagementError> {
         if self.active_temps.len() >= self.config.max_active_temps {
             return Err(TempManagementError::TooManyTempFiles);
         }
+        Ok(self.base_dir.join(self.generate_temp_filename(operation_id)?))
+    }
 
-        // Generate unique filename
-        let filename = self.generate_temp_filename(operation_id)?;
-        let temp_path = self.base_dir.join(filename);
-
-        // Track the new temp file
+    fn track_temp_path(&mut self, temp_path: &Path, operation_id: &str) {
         let temp_info = TempFileInfo {
             created_at: SystemTime::now(),
             operation_id: operation_id.to_string(),
@@ -226,9 +253,91 @@ impl TempPathManager {
             quarantine_reason: None,
         };
 
-        self.active_temps.insert(temp_path.clone(), temp_info);
+        self.active_temps.insert(temp_path.to_path_buf(), temp_info);
+    }
 
-        Ok(temp_path)
+    /// Acquire a new staging inode and retain the same descriptor for its writer.
+    /// Name collisions never authorize opening, deleting, or tracking another
+    /// file. Creation modes apply before the first payload byte, subject to umask.
+    pub(crate) fn create_temp_file(
+        &mut self,
+        operation_id: &str,
+    ) -> Result<(PathBuf, fs::File), TempFileCreationError> {
+        let permissions = self.config.temp_file_permissions;
+        self.create_temp_file_with(operation_id, |path| Self::open_new_file(path, permissions))
+    }
+
+    fn open_new_file(path: &Path, permissions: Option<u32>) -> std::io::Result<fs::File> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            if let Some(mode) = permissions {
+                options.mode(mode);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = permissions;
+        options.open(path)
+    }
+
+    // The existing opener seam retains its semantics. Production always uses
+    // ordinary name generation and exclusive creation, without user callbacks.
+    fn create_temp_file_with(
+        &mut self,
+        operation_id: &str,
+        open: impl FnMut(&Path) -> std::io::Result<fs::File>,
+    ) -> Result<(PathBuf, fs::File), TempFileCreationError> {
+        self.create_temp_file_from(
+            operation_id,
+            |manager| manager.next_temp_path(operation_id),
+            open,
+        )
+    }
+
+    // A separate candidate supplier makes destination collisions deterministic
+    // in tests without relying on a clock tick or changing the production names.
+    fn create_temp_file_from(
+        &mut self,
+        operation_id: &str,
+        mut next: impl FnMut(&Self) -> Result<PathBuf, TempManagementError>,
+        mut open: impl FnMut(&Path) -> std::io::Result<fs::File>,
+    ) -> Result<(PathBuf, fs::File), TempFileCreationError> {
+        for _ in 0..8 {
+            let path = next(self).map_err(TempFileCreationError::Path)?;
+            if self.is_protected_destination(&path) {
+                // Check BEFORE the opener. create_new alone would happily
+                // create an absent final path and expose unfinished payload.
+                continue;
+            }
+            match open(&path) {
+                Ok(file) => {
+                    // Do not track unowned collision paths: stale cleanup must
+                    // never treat those names as this manager's discarded work.
+                    self.track_temp_path(&path, operation_id);
+                    return Ok((path, file));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(TempFileCreationError::Open(error)),
+            }
+        }
+        Err(TempFileCreationError::Open(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "staging file creation exhausted eight name attempts",
+        )))
+    }
+
+    fn is_protected_destination(&self, path: &Path) -> bool {
+        match (&self.protected_file_name, path.file_name()) {
+            (Some(protected), Some(candidate)) => {
+                // Generated names are ASCII. Conservatively exclude ASCII case
+                // variants too, including when the host filesystem folds case.
+                // This is not a general path-alias or parent-race confinement.
+                candidate.as_encoded_bytes().eq_ignore_ascii_case(protected.as_encoded_bytes())
+            }
+            _ => false,
+        }
     }
 
     /// Update the state of a temporary file
@@ -381,7 +490,7 @@ impl TempPathManager {
         Ok(cleaned_files)
     }
 
-    /// Get statistics about temporary file usage
+    /// Get statistics about temporary path usage
     pub fn get_stats(&self) -> TempPathStats {
         let active_count = self.active_temps.len();
         let total_size = self
@@ -476,24 +585,11 @@ impl TempPathManager {
     }
 
     fn ensure_directories(&self) -> Result<(), TempManagementError> {
-        // Create base directory
-        if !self.base_dir.exists() {
-            fs::create_dir_all(&self.base_dir)
-                .map_err(|e| TempManagementError::DirectoryCreation(e.to_string()))?;
-        }
+        // The destination may be an existing user/shared directory. Creating a
+        // writer is not permission to replace that directory's access policy.
+        self.create_directory(&self.base_dir)
+            .map_err(|e| TempManagementError::DirectoryCreation(e.to_string()))?;
 
-        // Set permissions if specified
-        #[cfg(unix)]
-        {
-            if let Some(perms) = self.config.temp_dir_permissions {
-                use std::os::unix::fs::PermissionsExt;
-                let permissions = fs::Permissions::from_mode(perms);
-                fs::set_permissions(&self.base_dir, permissions)
-                    .map_err(|e| TempManagementError::PermissionsSetting(e.to_string()))?;
-            }
-        }
-
-        // Create quarantine directory if auto-create is enabled
         if self.config.auto_create_quarantine {
             self.ensure_quarantine_dir()?;
         }
@@ -502,22 +598,28 @@ impl TempPathManager {
     }
 
     fn ensure_quarantine_dir(&self) -> Result<(), TempManagementError> {
-        if !self.quarantine_dir.exists() {
-            fs::create_dir_all(&self.quarantine_dir)
-                .map_err(|e| TempManagementError::QuarantineDirectoryCreation(e.to_string()))?;
+        self.create_directory(&self.quarantine_dir)
+            .map_err(|e| TempManagementError::QuarantineDirectoryCreation(e.to_string()))
+    }
 
-            #[cfg(unix)]
-            {
-                if let Some(perms) = self.config.temp_dir_permissions {
-                    use std::os::unix::fs::PermissionsExt;
-                    let permissions = fs::Permissions::from_mode(perms);
-                    fs::set_permissions(&self.quarantine_dir, permissions)
-                        .map_err(|e| TempManagementError::PermissionsSetting(e.to_string()))?;
-                }
+    fn create_directory(&self, path: &Path) -> std::io::Result<()> {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            if let Some(mode) = self.config.temp_dir_permissions {
+                // Apply permissions at creation, not through a later pathname
+                // chmod. The same mode covers newly created ancestors. Existing
+                // directories, including those created by another concurrent
+                // manager, retain their permissions and the process umask wins.
+                builder.mode(mode);
             }
         }
-
-        Ok(())
+        // Do not use exists()+chmod: it can both reconfigure an unrelated
+        // directory and follow a pathname replaced after the existence check.
+        // This remains ordinary path-based creation, not path confinement.
+        builder.create(path)
     }
 }
 
@@ -586,212 +688,13 @@ pub enum TempManagementError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs::File;
+#[path = "temp_management_inline_tests.rs"]
+mod tests;
 
-    #[test]
-    fn test_temp_path_creation() {
-        let temp_dir = std::env::temp_dir().join("atp_test_temp_mgmt");
-        let mut manager = TempPathManager::new(&temp_dir);
+#[cfg(test)]
+#[path = "temp_directory_tests.rs"]
+mod directory_tests;
 
-        let temp_path = manager.create_temp_path("test_operation").unwrap();
-        assert!(temp_path.to_string_lossy().contains("atp_sparse"));
-        assert!(temp_path.to_string_lossy().contains("test_operation"));
-
-        // Should be tracked
-        assert!(manager.get_temp_info(&temp_path).is_some());
-        assert_eq!(manager.list_active_temps().len(), 1);
-
-        // Cleanup
-        manager.cleanup_temp_file(&temp_path).unwrap();
-        assert!(manager.get_temp_info(&temp_path).is_none());
-
-        // Clean up test directory
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_temp_paths_are_unique_across_managers() {
-        let temp_dir = std::env::temp_dir().join("atp_test_temp_manager_uniqueness");
-        let mut manager_a = TempPathManager::new(&temp_dir);
-        let mut manager_b = TempPathManager::new(&temp_dir);
-
-        let temp_a = manager_a.create_temp_path("same_operation").unwrap();
-        let temp_b = manager_b.create_temp_path("same_operation").unwrap();
-
-        assert_ne!(temp_a, temp_b);
-        assert_eq!(temp_a.parent(), Some(temp_dir.as_path()));
-        assert_eq!(temp_b.parent(), Some(temp_dir.as_path()));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_quarantine_reason_is_single_safe_path_component() {
-        let temp_dir = std::env::temp_dir().join("atp_test_quarantine_reason_safety");
-        let mut manager = TempPathManager::new(&temp_dir);
-
-        let temp_path = manager.create_temp_path("quarantine_reason").unwrap();
-        File::create(&temp_path).unwrap();
-
-        let quarantine_path = manager
-            .quarantine_file(&temp_path, "../../escape/attempt")
-            .unwrap();
-        assert_eq!(
-            quarantine_path.parent(),
-            Some(manager.quarantine_dir.as_path())
-        );
-        let quarantine_name = quarantine_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap();
-        assert!(quarantine_name.contains("______escape_attempt"));
-        assert!(!quarantine_name.contains('/'));
-        assert!(!quarantine_name.contains(".."));
-
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_quarantine_original_name_is_single_safe_path_component() {
-        let temp_dir = std::env::temp_dir().join("atp_test_quarantine_original_safety");
-        let manager = TempPathManager::new(&temp_dir);
-        let original_path = PathBuf::from("bad name..\n\t.tmp");
-
-        let quarantine_path = manager
-            .generate_quarantine_path(&original_path, "../../escape/attempt")
-            .unwrap();
-        assert_eq!(
-            quarantine_path.parent(),
-            Some(manager.quarantine_dir.as_path())
-        );
-        let quarantine_name = quarantine_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap();
-        assert!(quarantine_name.starts_with("bad_name_____tmp."));
-        assert!(quarantine_name.contains("______escape_attempt"));
-        assert!(!quarantine_name.contains('/'));
-        assert!(!quarantine_name.contains(".."));
-        assert!(!quarantine_name.contains('\n'));
-        assert!(!quarantine_name.contains('\t'));
-    }
-
-    #[test]
-    fn test_temp_file_states() {
-        let temp_dir = std::env::temp_dir().join("atp_test_states");
-        let mut manager = TempPathManager::new(&temp_dir);
-
-        let temp_path = manager.create_temp_path("state_test").unwrap();
-
-        // Check initial state
-        let info = manager.get_temp_info(&temp_path).unwrap();
-        assert_eq!(info.state, PathState::Creating);
-
-        // Update state
-        manager
-            .update_temp_state(&temp_path, PathState::Writing)
-            .unwrap();
-        let info = manager.get_temp_info(&temp_path).unwrap();
-        assert_eq!(info.state, PathState::Writing);
-
-        // Update size
-        manager.update_temp_size(&temp_path, 1024).unwrap();
-        let info = manager.get_temp_info(&temp_path).unwrap();
-        assert_eq!(info.size, Some(1024));
-
-        // Cleanup
-        manager.cleanup_temp_file(&temp_path).unwrap();
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_quarantine_functionality() {
-        let temp_dir = std::env::temp_dir().join("atp_test_quarantine");
-        let mut manager = TempPathManager::new(&temp_dir);
-
-        let temp_path = manager.create_temp_path("quarantine_test").unwrap();
-
-        // Create the actual file
-        File::create(&temp_path).unwrap();
-
-        // Quarantine the file
-        let quarantine_path = manager.quarantine_file(&temp_path, "test_reason").unwrap();
-
-        // Original should be gone, quarantine should exist
-        assert!(!temp_path.exists());
-        assert!(quarantine_path.exists());
-        assert!(quarantine_path.to_string_lossy().contains("test_reason"));
-
-        // Should not be in active temps anymore
-        assert!(manager.get_temp_info(&temp_path).is_none());
-
-        // Cleanup
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_stale_file_cleanup() {
-        let temp_dir = std::env::temp_dir().join("atp_test_stale");
-        let mut config = TempManagementConfig::default();
-        config.max_temp_age = std::time::Duration::from_millis(1); // Very short age
-        config.auto_create_quarantine = false; // Just remove, don't quarantine
-
-        let mut manager = TempPathManager::with_config(&temp_dir, config);
-
-        let temp_path = manager.create_temp_path("stale_test").unwrap();
-        File::create(&temp_path).unwrap();
-
-        // Wait for file to become stale
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Clean up stale files
-        let cleaned = manager.cleanup_stale_files().unwrap();
-        assert_eq!(cleaned.len(), 1);
-        assert!(!temp_path.exists());
-
-        // Cleanup
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-
-    #[test]
-    fn test_quarantine_reason_properties() {
-        let cancelled = QuarantineReason::Cancelled;
-        assert_eq!(cancelled.severity(), 20);
-        assert!(cancelled.description().contains("cancelled"));
-
-        let corruption = QuarantineReason::CorruptionDetected;
-        assert_eq!(corruption.severity(), 100);
-        assert!(corruption.description().contains("corruption"));
-    }
-
-    #[test]
-    fn test_stats_collection() {
-        let temp_dir = std::env::temp_dir().join("atp_test_stats");
-        let mut manager = TempPathManager::new(&temp_dir);
-
-        // Create a few temp files
-        let temp1 = manager.create_temp_path("stats_test1").unwrap();
-        let temp2 = manager.create_temp_path("stats_test2").unwrap();
-
-        manager.update_temp_size(&temp1, 1024).unwrap();
-        manager.update_temp_size(&temp2, 2048).unwrap();
-        manager
-            .update_temp_state(&temp2, PathState::Writing)
-            .unwrap();
-
-        let stats = manager.get_stats();
-        assert_eq!(stats.active_count, 2);
-        assert_eq!(stats.total_size, 3072);
-
-        // Check state counts
-        assert_eq!(stats.state_counts.get("creating"), Some(&1));
-        assert_eq!(stats.state_counts.get("writing"), Some(&1));
-
-        // Cleanup
-        manager.cleanup_temp_file(&temp1).unwrap();
-        manager.cleanup_temp_file(&temp2).unwrap();
-        std::fs::remove_dir_all(&temp_dir).ok();
-    }
-}
+#[cfg(test)]
+#[path = "temp_management_destination_tests_inline_tests.rs"]
+mod destination_tests;

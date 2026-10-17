@@ -36,8 +36,24 @@ pub enum Level {
     Fast,
 }
 
-/// Encoder settings.
+/// Encoder settings, built with [`Self::new`] and the `with_*` methods.
+///
+/// The struct is `#[non_exhaustive]`, so later settings (dictionaries,
+/// long-distance matching, window sizes) can be added without breaking
+/// callers, and a struct literal does not compile outside this crate:
+///
+/// ```compile_fail,E0639
+/// use asupersync_zstd::{EncodeParams, Level};
+/// let params = EncodeParams { level: Level::Fast, checksum: false };
+/// ```
+///
+/// ```
+/// use asupersync_zstd::{EncodeParams, Level};
+/// let params = EncodeParams::new(Level::Fast).with_checksum(false);
+/// assert!(!params.checksum);
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EncodeParams {
     /// The compression level.
     pub level: Level,
@@ -47,11 +63,19 @@ pub struct EncodeParams {
 
 impl EncodeParams {
     /// `level` with the content checksum on.
+    #[must_use]
     pub const fn new(level: Level) -> Self {
         Self {
             level,
             checksum: true,
         }
+    }
+
+    /// These settings with the XXH64 content checksum on or off.
+    #[must_use]
+    pub const fn with_checksum(mut self, checksum: bool) -> Self {
+        self.checksum = checksum;
+        self
     }
 }
 
@@ -208,6 +232,20 @@ mod tests {
     const STORED: &str = include_str!("../tests/vectors/store_frames.txt");
     const FAST: &str = include_str!("../tests/vectors/fast_frames.txt");
     const CLI_FRAMES: &str = include_str!("../tests/vectors/frames_zstd_cli.txt");
+
+    /// `with_checksum` sets the checksum and keeps the level.
+    #[test]
+    fn with_checksum_sets_only_the_checksum() {
+        let fast = EncodeParams::new(Level::Fast);
+        assert_eq!(
+            (fast.level, fast.checksum),
+            (Level::Fast, true),
+            "new() keeps the checksum on"
+        );
+        let unchecked = fast.with_checksum(false);
+        assert_eq!((unchecked.level, unchecked.checksum), (Level::Fast, false));
+        assert_eq!(unchecked.with_checksum(true), fast);
+    }
 
     fn lcg(seed: u64, len: usize) -> Vec<u8> {
         let mut state = seed;

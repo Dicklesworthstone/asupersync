@@ -465,8 +465,20 @@ impl HuffmanCode {
 
     /// One backward Huffman stream for `data`: the first byte is read first.
     pub fn encode_stream(&self, data: &[u8]) -> Vec<u8> {
-        let mut writer = BitWriter::new();
-        for &byte in data.iter().rev() {
+        // At most MAX_CODE_BITS per byte, plus the end mark.
+        let mut writer = BitWriter::with_capacity(data.len() * 11 / 8 + 8);
+        // Four codes of at most 11 bits fit in one reservation, so one room
+        // check covers four symbols. The stream is written back to front.
+        let (head, tail) = data.split_at(data.len() % 4);
+        for quad in tail.rchunks_exact(4) {
+            writer.reserve(4 * u32::from(MAX_CODE_BITS));
+            for &byte in quad.iter().rev() {
+                let (code, length) = self.codes[usize::from(byte)];
+                debug_assert!(length > 0, "byte {byte} has no code");
+                writer.push(u64::from(code), u32::from(length));
+            }
+        }
+        for &byte in head.iter().rev() {
             let (code, length) = self.codes[usize::from(byte)];
             debug_assert!(length > 0, "byte {byte} has no code");
             writer.add(u64::from(code), u32::from(length));

@@ -162,7 +162,8 @@ pub struct TcpListenerBuilder<A> {
     backlog: Option<u32>,
     reuse_addr: bool,
     reuse_port: bool,
-    only_v6: bool,
+    /// `None` keeps the OS default for IPv6 sockets.
+    only_v6: Option<bool>,
 }
 
 impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
@@ -173,7 +174,7 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
             backlog: None,
             reuse_addr: false,
             reuse_port: false,
-            only_v6: false,
+            only_v6: None,
         }
     }
 
@@ -199,9 +200,16 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
     }
 
     /// Set IPV6_V6ONLY option for IPv6 sockets.
+    ///
+    /// Without a call the operating system's default applies, and it differs
+    /// (Linux defaults to dual-stack, Windows to IPv6-only). `false` requests a
+    /// dual-stack socket and `true` an IPv6-only one; a platform that cannot
+    /// honor the request makes `bind` fail instead of ignoring it. Only the
+    /// unspecified address `[::]` can be dual-stack: a socket bound to a
+    /// specific IPv6 address serves IPv6 alone either way.
     #[must_use]
     pub fn only_v6(mut self, enable: bool) -> Self {
-        self.only_v6 = enable;
+        self.only_v6 = Some(enable);
         self
     }
 
@@ -258,8 +266,10 @@ impl<A: ToSocketAddrs + Send + 'static> TcpListenerBuilder<A> {
                     }
                 }
 
-                if addr.is_ipv6() && self.only_v6 {
-                    if let Err(e) = socket.set_only_v6(true) {
+                if addr.is_ipv6()
+                    && let Some(only_v6) = self.only_v6
+                {
+                    if let Err(e) = socket.set_only_v6(only_v6) {
                         last_err = Some(e);
                         continue;
                     }
@@ -385,34 +395,5 @@ impl<L: TcpListenerApi> crate::stream::Stream for IncomingStream<'_, L> {
 }
 
 #[cfg(test)]
-mod tests {
-    #![allow(
-        clippy::pedantic,
-        clippy::nursery,
-        clippy::expect_fun_call,
-        clippy::map_unwrap_or,
-        clippy::cast_possible_wrap,
-        clippy::future_not_send
-    )]
-    use super::*;
-
-    #[test]
-    fn builder_creates_with_defaults() {
-        let builder = TcpListenerBuilder::new("127.0.0.1:0");
-        assert_eq!(builder.backlog, None);
-        assert!(!builder.reuse_addr);
-        assert!(!builder.reuse_port);
-    }
-
-    #[test]
-    fn builder_chain_works() {
-        let builder = TcpListenerBuilder::new("127.0.0.1:0")
-            .backlog(256)
-            .reuse_addr(true)
-            .reuse_port(true);
-
-        assert_eq!(builder.backlog, Some(256));
-        assert!(builder.reuse_addr);
-        assert!(builder.reuse_port);
-    }
-}
+#[path = "traits_inline_tests.rs"]
+mod tests;

@@ -86,6 +86,30 @@ fn project_dir(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
+/// `path`'s source plus the unit-test modules it declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), where the lab fixtures live.
+fn read_with_inline_tests(path: &std::path::Path) -> Option<String> {
+    let mut content = std::fs::read_to_string(path).ok()?;
+    let dir = path.parent()?.to_path_buf();
+    let modules: Vec<String> = content
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        content.push('\n');
+        content.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    Some(content)
+}
+
 fn collect_rs_files(dir: &PathBuf) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -220,7 +244,7 @@ fn lab_oracle_uses_scoped_with_default_only() {
 
     for rel in &lab_oracle_files {
         let path = project_dir(rel);
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = read_with_inline_tests(&path) else {
             continue;
         };
 

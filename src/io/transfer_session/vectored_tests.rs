@@ -249,8 +249,8 @@ fn empty_and_completed_runs_do_no_io_even_after_cancellation() {
 
 #[test]
 fn long_empty_runs_yield_and_large_lists_use_bounded_descriptor_windows() {
-    let mut buffers: Vec<_> = (0..MAX_SLICES * POLL_BUDGET + 1).map(|_| IoSlice::new(b"")).collect();
-    buffers.extend((0..MAX_SLICES * 2 + 1).map(|_| IoSlice::new(b"x")));
+    let mut buffers: Vec<_> = (0..=MAX_SLICES * POLL_BUDGET).map(|_| IoSlice::new(b"")).collect();
+    buffers.extend((0..=MAX_SLICES * 2).map(|_| IoSlice::new(b"x")));
     let mut writer = Writer::new(usize::MAX, Stop::Panic);
     writer.chunk = usize::MAX;
     let mut session = WriteAllVectoredSession::new(writer, &buffers).unwrap();

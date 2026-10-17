@@ -6,8 +6,6 @@ license = "LicenseRef-MIT-OpenAI-Anthropic-Rider"
 description = "Memory-safe Zstandard (RFC 8878) codec for asupersync: no unsafe code, explicit decode limits."
 repository = "https://github.com/Dicklesworthstone/asupersync"
 keywords = ["zstd", "zstandard", "compression", "rfc8878"]
-# Publishing waits for the owner's release decision (br-asupersync-t1fblr).
-publish = false
 
 [dependencies]
 

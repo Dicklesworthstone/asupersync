@@ -459,11 +459,66 @@ fn add_extra_bits(writer: &mut BitWriter, codes: &[(u32, u8)], code: u8, value: 
 }
 
 /// The code whose baseline is the largest one not above `value`.
+#[cfg(test)]
 fn code_for(codes: &[(u32, u8)], value: u32) -> u8 {
     let index = codes
         .partition_point(|&(baseline, _)| baseline <= value)
         .saturating_sub(1);
     u8::try_from(index).unwrap_or(u8::MAX)
+}
+
+/// `code_for(codes, offset + i)` for every `i` below `N`, at compile time.
+/// The index and value counters advance together, so nothing is cast.
+const fn small_codes<const N: usize>(codes: &[(u32, u8)], offset: u32) -> [u8; N] {
+    let mut table = [0_u8; N];
+    let (mut index, mut value) = (0_usize, offset);
+    while index < N {
+        let (mut at, mut code) = (0_usize, 0_u8);
+        while at + 1 < codes.len() && codes[at + 1].0 <= value {
+            at += 1;
+            code += 1;
+        }
+        table[index] = code;
+        index += 1;
+        value += 1;
+    }
+    table
+}
+
+/// The last literals length code.
+const LAST_LITERALS_LENGTH_CODE: u32 = 35;
+
+/// The last match length code.
+const LAST_MATCH_LENGTH_CODE: u32 = 52;
+
+/// The literals length code of `value` without a search (RFC 8878
+/// §3.1.1.3.2.1.1): a table below 64; from 64 on, each code covers one
+/// power of two, so the code is the bit width plus a constant, as in
+/// libzstd's ZSTD_LLcode.
+fn literals_length_code(value: u32) -> u8 {
+    const SMALL: [u8; 64] = small_codes(&LITERALS_LENGTH_CODES, 0);
+    match usize::try_from(value)
+        .ok()
+        .and_then(|index| SMALL.get(index))
+    {
+        Some(&code) => code,
+        None => u8::try_from((value.ilog2() + 19).min(LAST_LITERALS_LENGTH_CODE)).unwrap_or(0),
+    }
+}
+
+/// The match length code of `value` (at least 3) without a search: a table
+/// for the first 128 lengths; above, one code per power of two, as in
+/// libzstd's ZSTD_MLcode.
+fn match_length_code(value: u32) -> u8 {
+    const SMALL: [u8; 128] = small_codes(&MATCH_LENGTH_CODES, 3);
+    let base = value.saturating_sub(3);
+    match usize::try_from(base)
+        .ok()
+        .and_then(|index| SMALL.get(index))
+    {
+        Some(&code) => code,
+        None => u8::try_from((base.ilog2() + 36).min(LAST_MATCH_LENGTH_CODE)).unwrap_or(0),
+    }
 }
 
 /// The coding limits of one symbol type.
@@ -599,11 +654,11 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
     };
     let literal_codes: Vec<u8> = sequences
         .iter()
-        .map(|sequence| code_for(&LITERALS_LENGTH_CODES, sequence.literals_length))
+        .map(|sequence| literals_length_code(sequence.literals_length))
         .collect();
     let match_codes: Vec<u8> = sequences
         .iter()
-        .map(|sequence| code_for(&MATCH_LENGTH_CODES, sequence.match_length))
+        .map(|sequence| match_length_code(sequence.match_length))
         .collect();
     let offset_codes = sequences
         .iter()
@@ -620,7 +675,8 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
     out.extend_from_slice(&offset_description);
     out.extend_from_slice(&match_description);
 
-    let mut writer = BitWriter::new();
+    // About five bytes per sequence: three states and the extra bits.
+    let mut writer = BitWriter::with_capacity(count * 5 + 16);
     // Extra bits go literals length, match length, offset: the reverse of
     // the order the decoder reads them in.
     let write_extras = |writer: &mut BitWriter, index: usize| -> Option<()> {
@@ -666,8 +722,10 @@ pub fn encode_sequences(sequences: &[EncodedSequence], out: &mut Vec<u8>) -> Opt
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockBounds, EncodedSequence, LITERALS_LENGTH_CODES, MATCH_LENGTH_CODES, SequenceState,
-        code_for, copy_match, decode_sequences, encode_sequences, offset_value, reserve,
+        BlockBounds, EncodedSequence, LAST_LITERALS_LENGTH_CODE, LAST_MATCH_LENGTH_CODE,
+        LITERALS_LENGTH_CODES, MATCH_LENGTH_CODES, SequenceState, code_for, copy_match,
+        decode_sequences, encode_sequences, literals_length_code, match_length_code, offset_value,
+        reserve,
     };
     use crate::frame::DecodeError;
     use std::collections::BTreeSet;
@@ -734,6 +792,35 @@ mod tests {
                 let code = u8::try_from(code).unwrap();
                 assert_eq!(code_for(codes, baseline), code);
                 assert_eq!(code_for(codes, baseline + (1 << bits) - 1), code);
+            }
+        }
+    }
+
+    /// The encoder's search-free length codes equal the baseline search for
+    /// every length up to twice the largest one a block can hold, and the
+    /// last-code constants name the tables' last entries.
+    #[test]
+    fn search_free_length_codes_equal_the_search() {
+        assert_eq!(
+            usize::try_from(LAST_LITERALS_LENGTH_CODE).unwrap(),
+            LITERALS_LENGTH_CODES.len() - 1
+        );
+        assert_eq!(
+            usize::try_from(LAST_MATCH_LENGTH_CODE).unwrap(),
+            MATCH_LENGTH_CODES.len() - 1
+        );
+        for value in 0..=2 * 131_072_u32 {
+            assert_eq!(
+                literals_length_code(value),
+                code_for(&LITERALS_LENGTH_CODES, value),
+                "literals length {value}"
+            );
+            if value >= 3 {
+                assert_eq!(
+                    match_length_code(value),
+                    code_for(&MATCH_LENGTH_CODES, value),
+                    "match length {value}"
+                );
             }
         }
     }

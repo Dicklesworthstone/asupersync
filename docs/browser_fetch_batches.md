@@ -1,8 +1,8 @@
 # Bounded, scope-owned fetch batches
 
-`mapFetches` is exported from `@asupersync/browser/batch`. Unlike the
-header race/join helpers, it **admits** requests through a supplied SDK Scope.
-It never calls ambient `fetch` or creates another runtime task.
+`mapFetches` and `tryMapFetches` are exported from `@asupersync/browser/batch`.
+Unlike the header race/join helpers, they **admit** requests through a supplied
+SDK Scope. They never call ambient `fetch` or create another runtime task.
 
 ```ts
 import { mapFetches } from "@asupersync/browser/batch";
@@ -25,6 +25,57 @@ const batch = admitted.value;
 const result = await batch.result;
 // A UI teardown handler can instead await batch.cancel("view closed").
 ```
+
+## Typed consumer outcomes
+
+Use `tryMapFetches` when an application-level rejection is an ordinary error,
+not an exception. Its consumer returns `Outcome<T>` (or a promise of one).
+Successful values are unwrapped into an input-ordered `readonly T[]`.
+
+```ts
+import { tryMapFetches } from "@asupersync/browser/batch";
+
+const admitted = tryMapFetches<string>(
+  scope,
+  urls.map(url => ({ url })),
+  async ({ response, body }) => {
+    if (response.status !== 200) {
+      return { outcome: "err", failure: {
+        code: "compatibility_rejected",
+        recoverability: "permanent",
+        message: "response rejected by application policy",
+      } };
+    }
+    return { outcome: "ok", value: await new Response(body).text() };
+  },
+  { concurrency: 4, signal: viewController.signal },
+);
+if (admitted.outcome === "ok") {
+  const result = await admitted.value.result;
+  // result is Outcome<readonly string[]>; an HTTP-policy rejection is err.
+}
+```
+
+A returned `err`, `cancelled`, or `panicked` stops queued admission, notifies
+active consumer signals, and joins every admitted consumer, body cleanup, and
+terminal publication. Late typed failures still participate in
+`panicked > cancelled > err` ordering. Equal-severity consumer failures keep the
+first observed cause; cleanup ties use input order. Returned errors must use
+the SDK's existing failure-code and recoverability vocabulary. Malformed
+envelopes become `internal_failure`, not success. Failure envelopes are copied
+and frozen before cancellation callbacks can mutate the consumer's originals.
+
+Actual throws and rejected promises remain sanitized panics. Rethrowing an
+error from this batch's own body or signal preserves its original Outcome.
+Successful values retain identity: they are not deep-frozen or recursively
+unwrapped. In particular, an `ok` value containing another Outcome is still data.
+The existing `mapFetches` remains unchanged: **all** returned values, including
+Outcome-shaped objects, are ordinary data. Select the new API explicitly.
+
+This is fail-fast processing with full cleanup, not all-settled collection,
+rollback, or a partial-success result. It does not undo completed remote writes
+and adds no retries, timer, or authority. Both APIs use the same batch driver
+and retain the cancellation and resource boundaries below.
 
 ## Parent cancellation and caller-owned deadlines
 
@@ -140,3 +191,11 @@ doubles. It does not execute the SDK task ABI or certify browser/WASM integratio
 Set `ASUPERSYNC_FETCH_BATCH_SOURCE` to a pre-feature source file for negative
 controls. TypeScript stripping is not a strict typecheck; run the package's
 existing typecheck and full SDK suite separately.
+
+The typed-consumer lane is
+`node --experimental-vm-modules --test scripts/test_browser_fetch_batch_outcomes.mjs`.
+It exercises actual batch code with native Streams/signals and loopback HTTP;
+scope, fetch handles, terminal receipts, and the imported request limit are
+explicit doubles. Its pre-feature control uses the original `mapFetches` with
+the same typed consumers; a separate assertion requires the new export. No
+SDK/WASM integration or strict package typecheck is implied by that lane.

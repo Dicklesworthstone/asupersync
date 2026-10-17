@@ -1,0 +1,25 @@
+# Golden decoding vectors for asupersync-zstd (br-asupersync-t1fblr.10). Provenance: PROVENANCE.md.
+# Format: path expect length xxh64
+# ok: decodes to `length` bytes whose XXH64 (seed 0) is `xxh64`. error: every decoder refuses it.
+upstream/golden-decompression/block-128k.zst ok 131068 2c254ff19aba22ea
+upstream/golden-decompression/empty-block.zst ok 0 ef46db3751d8e999
+upstream/golden-decompression/rle-first-block.zst ok 1048576 87d2a1b6e1163ef1
+upstream/golden-decompression/zeroSeq_2B.zst ok 13 2de0458b04f96095
+upstream/golden-decompression-errors/off0.bin.zst error - -
+upstream/golden-decompression-errors/truncated_huff_state.zst error - -
+upstream/golden-decompression-errors/zeroSeq_extraneous.zst error - -
+cli/tar400k_l1.zst ok 409600 d85d449439e7529a
+cli/tar400k_l3.zst ok 409600 d85d449439e7529a
+cli/tar400k_l19.zst ok 409600 d85d449439e7529a
+cli/tar400k_ultra22.zst ok 409600 d85d449439e7529a
+cli/tar400k_l3_stream.zst ok 409600 d85d449439e7529a
+cli/tar400k_l19_long23_stream.zst ok 409600 d85d449439e7529a
+cli/jsonl300k_l3_check.zst ok 307200 cd9242178fe1f2a2
+cli/jsonl300k_l9_nocheck.zst ok 307200 cd9242178fe1f2a2
+cli/libc300k_l3.zst ok 307200 f1b081328cfc1525
+cli/libc300k_l19_stream.zst ok 307200 f1b081328cfc1525
+cli/random200k_l3.zst ok 204800 8ea088778d26b257
+cli/concat_jsonl_tar.zst ok 131072 48ebc0381120fe57
+cli/skippable_then_frame.zst ok 4096 12fc1ae202dd2ba3
+cli/frame_then_skippable.zst ok 4096 7f5e8d6404d72744
+cli/empty_stream.zst ok 0 ef46db3751d8e999

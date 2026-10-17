@@ -47,6 +47,35 @@ fn read_repo_file(path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+/// `read_repo_file(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so an R3.7.1 evidence selector
+/// naming an in-tree unit test keeps finding it after the test body moved next to its module.
+fn read_repo_file_with_inline_tests(path: &str) -> String {
+    let mut source = read_repo_file(path);
+    let dir = repo_root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn read_repo_bytes(path: &str) -> Vec<u8> {
     std::fs::read(repo_root().join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
@@ -2077,7 +2106,9 @@ fn validate_r3_7_1_full_surface_join(map: &Value) -> Result<(), String> {
         let case_id = checked_text(case, "case_id")?;
         let path = checked_text(case, "source_path")?;
         let selector = checked_text(case, "selector")?;
-        if !allowed_evidence_paths.contains(path) || !read_repo_file(path).contains(selector) {
+        if !allowed_evidence_paths.contains(path)
+            || !read_repo_file_with_inline_tests(path).contains(selector)
+        {
             return Err(format!(
                 "case {case_id} has stale evidence selector {path}:{selector}"
             ));
@@ -2176,7 +2207,7 @@ fn validate_r3_7_1_full_surface_join(map: &Value) -> Result<(), String> {
         let path = checked_text(generator, "source_path")?;
         let selector = checked_text(generator, "selector")?;
         if !allowed_evidence_paths.contains(path)
-            || !read_repo_file(path).contains(selector)
+            || !read_repo_file_with_inline_tests(path).contains(selector)
             || checked_text(generator, "normalized_expectation")?.is_empty()
         {
             return Err(format!(

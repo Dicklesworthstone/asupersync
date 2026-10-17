@@ -116,6 +116,35 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&path).expect("read source file")
 }
 
+/// `read(rel)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "<stem>[_<name>]_inline_tests.rs"] mod <name>;`), so a pin on an
+/// in-tree unit test keeps finding it after the test body moved next to its module.
+fn read_with_inline_tests(rel: &str) -> String {
+    let mut source = read(rel);
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(rel)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 #[test]
 fn cx_scope_with_budget_api_exists() {
     let source = read("src/cx/cx.rs");
@@ -351,7 +380,7 @@ fn region_with_budget_uses_budget_meet_semantics() {
 #[test]
 fn budget_exhaustion_inline_tests_pin_three_kinds() {
     // Pin: inline tests cover all three exhaustion kinds.
-    let source = read("src/cx/cx.rs");
+    let source = read_with_inline_tests("src/cx/cx.rs");
 
     assert!(
         source.contains("fn checkpoint_deadline_exhaustion_sets_cancel_reason()"),

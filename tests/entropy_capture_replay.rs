@@ -13,6 +13,7 @@ use asupersync::util::entropy_replay::{
 };
 use asupersync::util::{ArenaIndex, DetEntropy, EntropySource, OsEntropy};
 use asupersync::{Budget, Cx, TaskId};
+use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::time::Duration;
@@ -81,6 +82,68 @@ fn task_contexts_replay_actual_os_entropy_without_a_seed_or_provider_fallback() 
     let actual = run_contexts(Arc::new(replay.clone()), 777);
     assert_eq!(actual, expected);
     replay.verify_complete().unwrap();
+}
+
+/// Children spawned with `Cx::spawn` fork their entropy at admission, in spawn
+/// order, so each child draws the same values on every schedule. They used to
+/// fork on their first poll, whose order is the schedule's (br-asupersync-01oghn).
+#[test]
+fn cx_spawned_children_draw_the_same_entropy_on_every_schedule() {
+    fn run(seed: u64) -> (Vec<usize>, Vec<u64>) {
+        let mut lab = LabRuntime::new(LabConfig::new(seed).worker_count(2).max_steps(20_000));
+        lab.state
+            .set_entropy_source(Arc::new(DetEntropy::new(0x01_0c4b)));
+        let region = lab.state.create_root_region(Budget::INFINITE);
+        let first_polls = Arc::new(Mutex::new(Vec::new()));
+        let polls = Arc::clone(&first_polls);
+        let (task, mut result) = lab
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("lab task must have its runtime context");
+                let mut children = Vec::new();
+                for label in 0..4_usize {
+                    let polls = Arc::clone(&polls);
+                    children.push(
+                        cx.spawn(move |child| async move {
+                            polls.lock().unwrap().push(label);
+                            child.random_u64()
+                        })
+                        .expect("spawn admitted"),
+                    );
+                }
+                let mut values = Vec::new();
+                for child in &mut children {
+                    values.push(child.join(&cx).await.expect("child joins"));
+                }
+                values
+            })
+            .unwrap();
+        lab.scheduler.lock().schedule(task, 0);
+        lab.run_until_quiescent();
+        assert!(lab.is_quiescent(), "every child must drain");
+        let values = result
+            .try_join()
+            .unwrap()
+            .expect("the spawning task returned");
+        let first_polls = first_polls.lock().unwrap().clone();
+        (first_polls, values)
+    }
+
+    let (order, expected) = run(0);
+    let mut orders = BTreeSet::from([order]);
+    for seed in 1..32 {
+        let (order, values) = run(seed);
+        orders.insert(order);
+        assert_eq!(
+            values, expected,
+            "schedule seed {seed} changed a child's entropy"
+        );
+    }
+    // Witness: the schedules really polled the children in different orders.
+    assert!(
+        orders.len() > 1,
+        "every schedule polled the children in one order, so this proves nothing"
+    );
 }
 
 #[test]

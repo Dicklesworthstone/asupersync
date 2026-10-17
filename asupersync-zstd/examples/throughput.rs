@@ -105,10 +105,7 @@ fn best_pair(bytes: usize, mut ours: impl FnMut(), mut theirs: impl FnMut()) -> 
 }
 
 fn main() {
-    let params = EncodeParams {
-        checksum: false,
-        ..EncodeParams::new(Level::Fast)
-    };
+    let params = EncodeParams::new(Level::Fast).with_checksum(false);
     let inputs = [
         ("text", text(LEN)),
         ("mixed", mixed(LEN)),

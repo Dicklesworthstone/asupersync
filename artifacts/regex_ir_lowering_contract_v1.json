@@ -329,36 +329,36 @@
     "r3_3_2_claim_rewritten": false
   },
   "current_source_review": {
-    "reviewed_at_utc": "2026-10-10",
+    "reviewed_at_utc": "2026-10-16",
     "release_bead": "asupersync-ae4jmn",
     "claim_scope": "CURRENT_SOURCE_STATIC_REVIEW_ONLY",
     "execution_receipts_rebound": false,
-    "review": "R3.3.3 retains ownership of the successor lowerer. Subsequent b12cc7ad adds a separate capture-name output through shared analyze_and_lower; the original lower function still returns only Program. da992970 adds deny_unknown_fields Serde support to the six limit structures. e80034f77 changes only lowering internals: clone_fragment, which copies a fragment for bounded repetition, maps states through an indexed RemapTable over the fragment's state-id range instead of a dense table sized to every state, and semantic-class, fold and boundary lookups use a span-keyed SpanIndex instead of a linear scan. Static review r21-d0 B3 (asupersync-ae4jmn) found both return exactly what the replaced structures returned, including the MissingFragment and duplicate-span InvalidAnalysis errors. Instruction layout, validation, defaults, semantic analysis and existing lowering behavior are unchanged. Original R3.3.2 decisions, deferred rows, source pins and execution receipts remain historical and do not prove these later APIs; no execution receipt is rebound to e80034f77.",
+    "review": "R3.3.3 retains ownership of the successor lowerer. Subsequent b12cc7ad adds a separate capture-name output through shared analyze_and_lower; the original lower function still returns only Program. da992970 adds deny_unknown_fields Serde support to the six limit structures. e80034f77 changes only lowering internals: clone_fragment, which copies a fragment for bounded repetition, maps states through an indexed RemapTable over the fragment's state-id range instead of a dense table sized to every state, and semantic-class, fold and boundary lookups use a span-keyed SpanIndex instead of a linear scan. Static review r21-d0 B3 (asupersync-ae4jmn) found both return exactly what the replaced structures returned, including the MissingFragment and duplicate-span InvalidAnalysis errors. Instruction layout, validation, defaults, semantic analysis and existing lowering behavior are unchanged. Original R3.3.2 decisions, deferred rows, source pins and execution receipts remain historical and do not prove these later APIs; no execution receipt is rebound to e80034f77. c5012547e then moves the inline #[cfg(test)] unit-test module of each of these five sources into a sibling *_inline_tests.rs file declared with #[path] (crates.io 10 MiB package cap); re-inlining each file reproduces the parent bytes exactly, so production lowering, IR, syntax, semantics and boundary code are byte-identical and no execution receipt is rebound.",
     "sources": [
       {
         "path": "src/observability/regex_lowering.rs",
-        "sha256": "dcf35e7f080dc6cb0b9323d3227fcf952ff1b9c1fa1c5bd3ef96761895ff7036",
-        "bytes": 74958
+        "sha256": "0b483efd443087c46ceda2b0214becb10373f2e0ad9f23b7cfa63dd3ecea79ca",
+        "bytes": 60738
       },
       {
         "path": "src/observability/regex_ir.rs",
-        "sha256": "aa287fd02abd3a2a4196e01b9c27d86937cb220f796e652263c94726b28f48b4",
-        "bytes": 45117
+        "sha256": "ec137a887970a852c3daa81dd2c74b4750bc8c9633dea143359b3d69030d528a",
+        "bytes": 28090
       },
       {
         "path": "src/observability/regex_syntax.rs",
-        "sha256": "17dd552c2e5d9ec5e7e06bc4c14d29aac7f0c175609f389d720ad94b6a3514ac",
-        "bytes": 119221
+        "sha256": "ee22a523950b3ef5ca0d6041d5495f48726fc7890be67564bf406678caa4a54f",
+        "bytes": 78157
       },
       {
         "path": "src/observability/regex_semantics.rs",
-        "sha256": "ab0821e49cb0233c31ec23172c18fde56610e42136ec42dd14da0b02cb1cc64c",
-        "bytes": 44083
+        "sha256": "b64b587e03c30c05d0f2f6fcc35c2e8c464979ef115372a295d686d028315d15",
+        "bytes": 35934
       },
       {
         "path": "src/observability/regex_boundaries.rs",
-        "sha256": "3f87bdd55ad86cd40d4eb7300595abea4133ec76dac1d144132714abc7835658",
-        "bytes": 49608
+        "sha256": "de0eaabed58658b848378eb357b814ff07f1d41377be6542aed7f67c9d9feb60",
+        "bytes": 36241
       }
     ]
   },

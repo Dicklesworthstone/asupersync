@@ -43,6 +43,34 @@ fn test_atp_modules_are_tracked_in_ledger() {
     }
 }
 
+/// The inline-test skip fails closed: only a file that a sibling declares as
+/// its `#[cfg(test)]` module is skipped; anything else still needs a row.
+#[test]
+fn inline_test_files_are_skipped_only_when_declared_as_test_modules() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let write = |name: &str, body: &str| fs::write(dir.path().join(name), body).expect("write");
+    write(
+        "parent.rs",
+        "#[cfg(test)]\n#[path = \"parent_inline_tests.rs\"]\nmod tests;\n\
+         #[path = \"plain_inline_tests.rs\"]\nmod plain;\n",
+    );
+    for name in [
+        "parent_inline_tests.rs",
+        "plain_inline_tests.rs",
+        "orphan_inline_tests.rs",
+    ] {
+        write(name, "");
+    }
+    let skipped = |name: &str| is_declared_inline_test_module(&dir.path().join(name));
+    assert!(skipped("parent_inline_tests.rs"));
+    assert!(
+        !skipped("plain_inline_tests.rs"),
+        "declared without #[cfg(test)]"
+    );
+    assert!(!skipped("orphan_inline_tests.rs"), "declared by no sibling");
+    assert!(!skipped("parent.rs"), "not an inline-test file");
+}
+
 /// Test that critical path modules have explicit test requirements
 #[test]
 fn test_critical_path_modules_have_test_requirements() {
@@ -50,7 +78,7 @@ fn test_critical_path_modules_have_test_requirements() {
         "src/atp/object.rs",
         "src/atp/manifest.rs",
         "src/atp/verifier.rs",
-        "src/net/atp/protocol.rs",
+        "src/net/atp/protocol/mod.rs",
         "src/atp/sdk.rs",
     ];
 
@@ -182,6 +210,7 @@ fn discover_atp_modules() -> HashSet<String> {
                     && Path::new(file_name)
                         .extension()
                         .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+                    && !is_declared_inline_test_module(&path)
                 {
                     if let Some(path_str) = path.to_str() {
                         modules.insert(path_str.to_string());
@@ -203,13 +232,45 @@ fn scan_directory_recursive(dir: &str, modules: &mut HashSet<String>) {
                 if let Some(path_str) = path.to_str() {
                     scan_directory_recursive(path_str, modules);
                 }
-            } else if path.extension().is_some_and(|s| s == "rs") {
+            } else if path.extension().is_some_and(|s| s == "rs")
+                && !is_declared_inline_test_module(&path)
+            {
                 if let Some(path_str) = path.to_str() {
                     modules.insert(path_str.to_string());
                 }
             }
         }
     }
+}
+
+/// c5012547e moved each top-level inline `#[cfg(test)]` module into a sibling
+/// `*_inline_tests.rs` file. Such a file holds its parent's unit tests, which
+/// the parent's ledger row covers, as it did while the tests were inline. It
+/// is skipped only when a sibling declares it with `#[cfg(test)]` directly
+/// above `#[path = "<file>"]`; any other file, whatever its name, is a module
+/// and needs a ledger row.
+fn is_declared_inline_test_module(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !file_name.ends_with("_inline_tests.rs") {
+        return false;
+    }
+    let Some(Ok(entries)) = path.parent().map(fs::read_dir) else {
+        return false;
+    };
+    let path_attribute = format!("#[path = \"{file_name}\"]");
+    entries.flatten().any(|entry| {
+        let sibling = entry.path();
+        sibling != path
+            && sibling.extension().is_some_and(|s| s == "rs")
+            && fs::read_to_string(&sibling).is_ok_and(|source| {
+                let lines: Vec<&str> = source.lines().map(str::trim).collect();
+                lines
+                    .windows(2)
+                    .any(|pair| pair[0] == "#[cfg(test)]" && pair[1] == path_attribute)
+            })
+    })
 }
 
 /// Parse module names from the coverage ledger

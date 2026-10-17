@@ -1,0 +1,1652 @@
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+    use super::*;
+
+    fn sent(space: PacketNumberSpace, pn: u64, t: u64) -> SentPacketMeta {
+        SentPacketMeta {
+            space,
+            packet_number: pn,
+            bytes: 100,
+            ack_eliciting: true,
+            in_flight: true,
+            time_sent_micros: t,
+        }
+    }
+
+    #[test]
+    fn transport_state_transitions() {
+        let mut t = QuicTransportMachine::new();
+        assert_eq!(t.state(), QuicConnectionState::Idle);
+        t.begin_handshake().expect("handshake");
+        assert_eq!(t.state(), QuicConnectionState::Handshaking);
+        t.on_established().expect("established");
+        assert_eq!(t.state(), QuicConnectionState::Established);
+        t.start_draining(1_000, 500).expect("drain");
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        t.poll(1_499);
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        t.poll(1_500);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    #[test]
+    fn loss_recovery_ack_and_loss_detection() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 10_200));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 4, 10_300));
+        assert_eq!(t.bytes_in_flight(), 400);
+
+        // Ack packet 4 only; packet threshold should mark packet 1 lost.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[4], 0, 20_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 1);
+        assert_eq!(t.packets_acked_total(), 1);
+        assert_eq!(t.packets_lost_total(), 1);
+        assert!((t.packet_loss_rate() - 0.5).abs() < f64::EPSILON);
+        assert_eq!(t.bytes_in_flight(), 200);
+    }
+
+    #[test]
+    fn packet_threshold_loss_does_not_overflow_near_u64_max() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(
+            PacketNumberSpace::ApplicationData,
+            u64::MAX - 2,
+            10_000,
+        ));
+        t.on_packet_sent(sent(
+            PacketNumberSpace::ApplicationData,
+            u64::MAX - 1,
+            10_100,
+        ));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, u64::MAX, 10_200));
+
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[u64::MAX], 0, 20_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 2);
+    }
+
+    #[test]
+    fn ack_ranges_allow_sparse_ack_processing() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 1_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 1_100));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 1_200));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 9, 1_300));
+        let ranges = [
+            AckRange::new(3, 2).expect("range"),
+            AckRange::new(9, 9).expect("range"),
+        ];
+        let event = t.on_ack_ranges(PacketNumberSpace::ApplicationData, &ranges, 0, 10_000);
+        assert_eq!(event.acked_packets, 3);
+        assert_eq!(event.acked_bytes, 300);
+    }
+
+    #[test]
+    fn ack_range_builder_deduplicates_and_compacts() {
+        let ranges = ack_ranges_from_packet_numbers(&[5, 3, 4, 4, 10, 12, 11]);
+        assert_eq!(
+            ranges,
+            vec![
+                AckRange::new(5, 3).expect("range"),
+                AckRange::new(12, 10).expect("range"),
+            ]
+        );
+    }
+
+    // br-asupersync-5f1fcj: ACK membership and the persistent-congestion check
+    // are binary searches over sorted data; these compare them with the direct
+    // scans they replaced, on unsorted, overlapping and adjacent inputs.
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn ack_range_set_matches_a_scan_of_every_range() {
+        let mut state = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..500 {
+            // Arbitrary ranges: unsorted, overlapping, adjacent.
+            let count = xorshift(&mut state) % 12;
+            let arbitrary: Vec<AckRange> = (0..count)
+                .map(|_| {
+                    let smallest = xorshift(&mut state) % 64;
+                    let largest = smallest + xorshift(&mut state) % 8;
+                    AckRange::new(largest, smallest).expect("range")
+                })
+                .collect();
+            // Ranges as an ACK frame carries them: disjoint, descending.
+            let mut decoded = Vec::new();
+            let mut largest = 64 + xorshift(&mut state) % 16;
+            for _ in 0..xorshift(&mut state) % 12 {
+                let smallest = largest.saturating_sub(xorshift(&mut state) % 6);
+                decoded.push(AckRange::new(largest, smallest).expect("range"));
+                let gap = 2 + xorshift(&mut state) % 4;
+                let Some(next) = smallest.checked_sub(gap) else {
+                    break;
+                };
+                largest = next;
+            }
+            for ranges in [&arbitrary, &decoded] {
+                let set = AckRangeSet::new(ranges);
+                for packet_number in 0..96 {
+                    assert_eq!(
+                        set.contains(packet_number),
+                        ranges.iter().any(|range| range.contains(packet_number)),
+                        "packet {packet_number} in {ranges:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_congestion_matches_a_scan_of_every_acked_packet() {
+        fn scanned(lost: &[u64], acked: &[u64], first_rtt_sample: u64, duration: u64) -> bool {
+            let mut lost: Vec<u64> = lost
+                .iter()
+                .copied()
+                .filter(|&t| t > first_rtt_sample)
+                .collect();
+            if lost.len() < 2 {
+                return false;
+            }
+            lost.sort_unstable();
+            let (mut run_start, mut prev) = (lost[0], lost[0]);
+            for &t in &lost[1..] {
+                if acked.iter().any(|&a| a > prev && a < t) {
+                    run_start = t;
+                } else if t.saturating_sub(run_start) > duration {
+                    return true;
+                }
+                prev = t;
+            }
+            false
+        }
+        let mut state = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..2_000 {
+            let lost: Vec<u64> = (0..xorshift(&mut state) % 8)
+                .map(|_| xorshift(&mut state) % 100)
+                .collect();
+            let acked: Vec<u64> = (0..xorshift(&mut state) % 8)
+                .map(|_| xorshift(&mut state) % 100)
+                .collect();
+            let first_rtt_sample = xorshift(&mut state) % 20;
+            let duration = xorshift(&mut state) % 60;
+            assert_eq!(
+                LossRecovery::is_persistent_congestion(&lost, &acked, first_rtt_sample, duration),
+                scanned(&lost, &acked, first_rtt_sample, duration),
+                "lost {lost:?} acked {acked:?} first sample {first_rtt_sample} duration {duration}"
+            );
+        }
+    }
+
+    #[test]
+    fn pto_deadline_is_computable() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 1_000));
+        // No RTT sample yet: fallback timeout is used.
+        let deadline = t.pto_deadline_micros(1_500).expect("deadline");
+        assert!(deadline > 1_500);
+    }
+
+    #[test]
+    fn pto_deadline_none_when_nothing_in_flight() {
+        let t = QuicTransportMachine::new();
+        assert!(t.pto_deadline_micros(10_000).is_none());
+    }
+
+    #[test]
+    fn pto_backoff_increases_after_timeout() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+        let first = t.pto_deadline_micros(2_000).expect("first deadline");
+        assert_eq!(t.pto_count(), 0);
+        t.on_pto_expired();
+        assert_eq!(t.pto_count(), 1);
+        let second = t.pto_deadline_micros(2_000).expect("second deadline");
+        assert!(second > first);
+    }
+
+    #[test]
+    fn loss_timeout_releases_ack_eliciting_in_flight_packets() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+        assert_eq!(t.bytes_in_flight(), 200);
+
+        let event = t.on_loss_timeout_expired(PacketNumberSpace::ApplicationData, 50_000);
+
+        assert_eq!(event.lost_packets, 2);
+        assert_eq!(event.lost_bytes, 200);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.packets_lost_total(), 2);
+        assert_eq!(t.pto_count(), 1);
+        assert!(t.congestion_window_bytes() < 12_000);
+    }
+
+    #[test]
+    fn immediate_close_sets_terminal_state_and_code() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("handshake");
+        t.close_immediately(0x1337);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        assert_eq!(t.close_code(), Some(0x1337));
+    }
+
+    #[test]
+    fn start_draining_with_code_sets_close_code() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("handshake");
+        t.start_draining_with_code(1_000, 500, 0x42)
+            .expect("draining");
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        assert_eq!(t.close_code(), Some(0x42));
+    }
+
+    #[test]
+    fn rtt_updates_on_ack() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 9, 50_000));
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[9], 2_000, 70_000);
+        assert_eq!(event.acked_packets, 1);
+        assert!(t.rtt().smoothed_rtt_micros().is_some());
+    }
+
+    #[test]
+    fn rtt_sample_uses_largest_acked_packet_even_when_it_is_ack_only() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 2,
+            bytes: 50,
+            ack_eliciting: false,
+            in_flight: false,
+            time_sent_micros: 19_000,
+        });
+
+        // RFC 9002 section 5.1: packet 1 makes this ACK eligible for a
+        // sample, but the frame's largest packet (2) supplies its send time.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_000);
+        assert_eq!(event.acked_packets, 2);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(t.rtt().smoothed_rtt_micros(), Some(1_000));
+    }
+
+    #[test]
+    fn rtt_sample_ignores_repeated_largest_ack_with_new_older_packet() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 11_000));
+        let first = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 20_000);
+        assert_eq!(first.acked_packets, 1);
+        assert_eq!(first.lost_packets, 0);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(9_000));
+        let original_rtt = t.rtt().clone();
+
+        // The older packet is newly acknowledged and still retires, but
+        // packet 2 was already sampled: its repeated ACK cannot sample 1.
+        let repeated = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1, 2], 0, 20_500);
+        assert_eq!(repeated.acked_packets, 1);
+        assert_eq!(repeated.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.rtt(), &original_rtt);
+    }
+
+    #[test]
+    fn ack_loss_detection_uses_the_rtt_sample_from_that_ack() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 0));
+        t.on_ack_received(PacketNumberSpace::ApplicationData, &[0], 0, 10_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(10_000));
+
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 20_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 21_000));
+        // This ACK witnesses the path growing from 10ms to 100ms. Packet 1
+        // is only 101ms old, below 9/8 of the newly observed RTT; using the
+        // previous 10ms estimate would falsely declare it lost.
+        let delayed = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 121_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(100_000));
+        assert_eq!(delayed.acked_packets, 1);
+        assert_eq!(delayed.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        // A subsequent fast ACK must still detect the genuinely old packet.
+        // The packet-number gap is only two, so this is time-threshold loss.
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 130_000));
+        let recovered = t.on_ack_received(PacketNumberSpace::ApplicationData, &[3], 0, 131_000);
+        assert_eq!(t.rtt().latest_rtt_micros(), Some(1_000));
+        assert_eq!(recovered.acked_packets, 1);
+        assert_eq!(recovered.lost_packets, 1);
+        assert_eq!(recovered.lost_bytes, 100);
+        assert_eq!(t.bytes_in_flight(), 0);
+    }
+
+    #[test]
+    fn congestion_window_grows_on_acks_and_shrinks_on_loss() {
+        let mut t = QuicTransportMachine::new();
+        let initial_cwnd = t.congestion_window_bytes();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_050));
+        let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 20_000);
+        assert!(t.congestion_window_bytes() > initial_cwnd);
+
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 10_100));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 4, 10_150));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 5, 10_200));
+        let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_050);
+        assert!(t.congestion_window_bytes() <= t.ssthresh_bytes());
+    }
+
+    #[test]
+    fn combined_ack_and_loss_still_halves_cwnd_without_growth() {
+        // asupersync-f3x3e3 / RFC 9002 Appendix A.7: an ACK that both
+        // acknowledges new packets and newly declares a loss must process the
+        // loss (which moves the recovery epoch to `now`) BEFORE ack-driven
+        // growth. Every packet acknowledged by this ACK was sent before `now`,
+        // so per `InCongestionRecovery` none of them may grow cwnd; the net
+        // result is exactly cwnd/2, never (cwnd + growth)/2.
+        let mut t = QuicTransportMachine::new();
+        assert_eq!(t.congestion_window_bytes(), 12_000, "default cwnd");
+
+        // Send pn 1..=15 (helper defaults: 100 bytes, ack-eliciting, in-flight).
+        for pn in 1..=15u64 {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, 1_000 + pn));
+        }
+        // One ACK acknowledges pn 4..=15 (12 * 100 = 1200 bytes of slow-start
+        // growth) and leaves pn 1,2,3 to the packet threshold (pn + 3 <= 15).
+        let acked: Vec<u64> = (4..=15).collect();
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &acked, 0, 50_000);
+        assert!(
+            event.lost_packets >= 3,
+            "pn 1,2,3 must be declared lost, saw {}",
+            event.lost_packets
+        );
+
+        // max(12000/2, 2 * 1200) = 6000, with NO growth from the 1200 acked
+        // bytes. The pre-fix order grew first (12000 + 1200 = 13200) then halved
+        // to 6600, leaving cwnd above the RFC-correct value after a loss.
+        assert_eq!(
+            t.congestion_window_bytes(),
+            6_000,
+            "combined ack+loss must net cwnd/2 (6000), not (cwnd + growth)/2 (6600)"
+        );
+        assert_eq!(t.ssthresh_bytes(), 6_000);
+    }
+
+    #[test]
+    fn congestion_recovery_epoch_prevents_double_reduction() {
+        // RFC 9002 Appendix B.6: cwnd should only be halved once per
+        // recovery round-trip, even if multiple ACKs report losses.
+        let mut t = QuicTransportMachine::new();
+
+        // Send packets 1-6 in quick succession.
+        for pn in 1..=6 {
+            t.on_packet_sent(sent(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                10_000 + pn * 10,
+            ));
+        }
+
+        // ACK pn 5 at time 20000 — triggers packet-threshold loss for pn 1 and 2.
+        let event1 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 20_000);
+        assert!(event1.lost_packets > 0, "first ACK should detect losses");
+        let cwnd_after_first_loss = t.congestion_window_bytes();
+
+        // ACK pn 6 at the same time (20000) — triggers more losses (pn 3).
+        // Should NOT reduce cwnd again because we're in the same recovery epoch.
+        let event2 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[6], 0, 20_000);
+        assert!(event2.lost_packets > 0, "second ACK should detect losses");
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_after_first_loss,
+            "cwnd must not be reduced twice in the same recovery epoch"
+        );
+    }
+
+    #[test]
+    fn congestion_recovery_uses_lost_packet_send_time_epoch() {
+        let mut t = QuicTransportMachine::new();
+        let initial_cwnd = t.congestion_window_bytes();
+
+        t.recovery.on_loss_congestion(20_000, 30_000);
+        let cwnd_after_first_loss = t.congestion_window_bytes();
+        assert!(cwnd_after_first_loss < initial_cwnd);
+
+        // Late ACK processing can report older losses in a later wall-clock tick.
+        // Recovery gating must key off lost-packet send-time, not ACK processing time.
+        t.recovery.on_loss_congestion(19_000, 31_000);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_after_first_loss,
+            "older lost packets must not trigger an additional reduction"
+        );
+
+        t.recovery.on_loss_congestion(35_000, 40_000);
+        assert!(
+            t.congestion_window_bytes() < cwnd_after_first_loss,
+            "newer lost packets should trigger the next recovery reduction"
+        );
+    }
+
+    #[test]
+    fn persistent_congestion_predicate_matches_rfc_9002_7_6() {
+        // RFC 9002 §7.6.2 AreAllPacketsLost, exercised directly so the run
+        // logic is pinned without any RTT arithmetic.
+
+        // Two ack-eliciting losses spanning > duration, nothing acked between.
+        assert!(LossRecovery::is_persistent_congestion(
+            &[100, 300],
+            &[],
+            0,
+            150
+        ));
+        // Span exactly equal to duration is NOT persistent congestion (>, not >=).
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 300],
+            &[],
+            0,
+            200
+        ));
+        // Span below duration.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 250],
+            &[],
+            0,
+            200
+        ));
+        // A single loss can never establish persistent congestion.
+        assert!(!LossRecovery::is_persistent_congestion(&[100], &[], 0, 10));
+        // An acknowledgement inside the span breaks the run.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 800],
+            &[400],
+            0,
+            150
+        ));
+        // A break resets the run, but a later unbroken sub-run still qualifies.
+        assert!(LossRecovery::is_persistent_congestion(
+            &[100, 200, 700],
+            &[150],
+            0,
+            150
+        ));
+        // Packets sent at or before the first RTT sample are excluded; only one
+        // qualifying packet remains, so persistent congestion cannot be declared.
+        assert!(!LossRecovery::is_persistent_congestion(
+            &[100, 800],
+            &[],
+            250,
+            150
+        ));
+    }
+
+    #[test]
+    fn persistent_congestion_duration_follows_rfc_9002_7_6_1() {
+        let mut t = QuicTransportMachine::new();
+        // (srtt + max(4*rttvar, kGranularity) + max_ack_delay) * 3.
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.max_ack_delay_micros = 25_000;
+        // (10_000 + max(20_000, 1_000) + 25_000) * 3 = 55_000 * 3 = 165_000.
+        assert_eq!(t.recovery.persistent_congestion_duration_micros(), 165_000);
+
+        // kGranularity floors the rttvar term.
+        t.recovery.rtt.rttvar_micros = Some(100);
+        // (10_000 + max(400, 1_000) + 25_000) * 3 = 36_000 * 3 = 108_000.
+        assert_eq!(t.recovery.persistent_congestion_duration_micros(), 108_000);
+    }
+
+    #[test]
+    fn persistent_congestion_collapses_cwnd_to_min_window() {
+        // RFC 9002 §7.6.2: a full-outage window collapses cwnd to kMinimumWindow
+        // (2 * max_datagram_size = 2_400), not merely cwnd/2.
+        let mut t = QuicTransportMachine::new();
+        // Seed a deterministic RTT estimate and first-sample instant so the
+        // duration is fixed (165_000 us) and independent of ACK timing.
+        t.recovery.rtt.min_rtt_micros = Some(10_000);
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.first_rtt_sample_micros = Some(1_000);
+
+        // pn 1 and pn 2 are ack-eliciting, both sent after the first RTT sample,
+        // and their send times span ~1 s — far beyond the 165 ms duration.
+        for (pn, ts) in [
+            (1u64, 2_000u64),
+            (2, 1_000_000),
+            (3, 1_000_010),
+            (4, 1_000_020),
+            (5, 1_000_030),
+        ] {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, ts));
+        }
+        // ACK pn 5: pn 1 (1+3<=5) and pn 2 (2+3<=5) fall to the packet threshold;
+        // pn 3, 4 survive. Nothing is acknowledged inside the 2_000..1_000_000
+        // interval, so the lost run is unbroken.
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 1_000_040);
+        assert!(
+            event.lost_packets >= 2,
+            "pn 1 and pn 2 must be declared lost, saw {}",
+            event.lost_packets
+        );
+        assert_eq!(
+            t.congestion_window_bytes(),
+            2_400,
+            "persistent congestion must collapse cwnd to the minimum window"
+        );
+        assert_eq!(
+            t.ssthresh_bytes(),
+            6_000,
+            "ssthresh keeps the ordinary cwnd/2 congestion-event value"
+        );
+    }
+
+    #[test]
+    fn loss_below_persistent_congestion_duration_only_halves_cwnd() {
+        // A loss run that does NOT exceed the persistent-congestion duration is
+        // an ordinary congestion event: cwnd is halved, never collapsed.
+        let mut t = QuicTransportMachine::new();
+        t.recovery.rtt.min_rtt_micros = Some(10_000);
+        t.recovery.rtt.smoothed_rtt_micros = Some(10_000);
+        t.recovery.rtt.rttvar_micros = Some(5_000);
+        t.recovery.first_rtt_sample_micros = Some(1_000);
+
+        // pn 1 and pn 2 span only 20_000 us, well under the 165_000 us duration.
+        for (pn, ts) in [
+            (1u64, 2_000u64),
+            (2, 22_000),
+            (3, 22_010),
+            (4, 22_020),
+            (5, 22_030),
+        ] {
+            t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, pn, ts));
+        }
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 40_000);
+        assert!(event.lost_packets >= 2, "pn 1 and pn 2 must be lost");
+        assert_eq!(
+            t.congestion_window_bytes(),
+            6_000,
+            "a short loss run halves cwnd rather than collapsing it"
+        );
+    }
+
+    #[test]
+    fn can_send_obeys_congestion_window() {
+        let mut t = QuicTransportMachine::new();
+        assert!(t.can_send(1_200));
+        for pn in 0..20 {
+            if !t.can_send(1_200) {
+                break;
+            }
+            t.on_packet_sent(sent(PacketNumberSpace::Initial, pn, 1_000 + pn));
+        }
+        assert!(!t.can_send(t.congestion_window_bytes()));
+    }
+
+    // ---- RttEstimator ----
+
+    #[test]
+    fn rtt_estimator_default_is_none() {
+        let rtt = RttEstimator::default();
+        assert_eq!(rtt.smoothed_rtt_micros(), None);
+        assert_eq!(rtt.rttvar_micros(), None);
+    }
+
+    #[test]
+    fn rtt_estimator_ignores_zero_sample() {
+        let mut rtt = RttEstimator::default();
+        rtt.update(0, 0);
+        assert_eq!(rtt.smoothed_rtt_micros(), None);
+    }
+
+    #[test]
+    fn rtt_estimator_first_sample_sets_values() {
+        let mut rtt = RttEstimator::default();
+        rtt.update(100_000, 0);
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(100_000));
+        assert_eq!(rtt.rttvar_micros(), Some(50_000)); // initial/2
+    }
+
+    #[test]
+    fn rtt_estimator_second_sample_ewma() {
+        let mut rtt = RttEstimator::default();
+        rtt.update(100_000, 0);
+        rtt.update(80_000, 0);
+        // EWMA: srtt = (7*100_000 + 80_000)/8 = 97_500
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(97_500));
+        // rttvar = (3*50_000 + |100_000-80_000|)/4 = (150_000 + 20_000)/4 = 42_500
+        assert_eq!(rtt.rttvar_micros(), Some(42_500));
+    }
+
+    // ---- TransportError ----
+
+    #[test]
+    fn transport_error_display() {
+        let err = TransportError::InvalidStateTransition {
+            from: QuicConnectionState::Idle,
+            to: QuicConnectionState::Established,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("invalid transport state transition"), "{msg}");
+        assert!(msg.contains("Idle"), "{msg}");
+        assert!(msg.contains("Established"), "{msg}");
+    }
+
+    #[test]
+    fn transport_error_source_is_none() {
+        use std::error::Error;
+        let err = TransportError::InvalidStateTransition {
+            from: QuicConnectionState::Idle,
+            to: QuicConnectionState::Closed,
+        };
+        assert!(err.source().is_none());
+    }
+
+    // ---- State transitions ----
+
+    #[test]
+    fn invalid_state_transition_idle_to_established() {
+        let mut t = QuicTransportMachine::new();
+        let err = t.on_established().unwrap_err();
+        assert!(matches!(err, TransportError::InvalidStateTransition { .. }));
+    }
+
+    #[test]
+    fn invalid_state_transition_established_to_handshaking() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        let err = t.begin_handshake().unwrap_err();
+        assert!(matches!(err, TransportError::InvalidStateTransition { .. }));
+    }
+
+    #[test]
+    fn same_state_transition_is_idempotent() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        // Same state should be a no-op success
+        t.begin_handshake().expect("idempotent");
+        assert_eq!(t.state(), QuicConnectionState::Handshaking);
+    }
+
+    #[test]
+    fn handshaking_can_drain_directly() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.start_draining(1000, 500)
+            .expect("handshaking -> draining");
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+    }
+
+    // ---- QuicConnectionState ----
+
+    #[test]
+    fn connection_state_debug() {
+        assert_eq!(format!("{:?}", QuicConnectionState::Idle), "Idle");
+        assert_eq!(
+            format!("{:?}", QuicConnectionState::Handshaking),
+            "Handshaking"
+        );
+        assert_eq!(
+            format!("{:?}", QuicConnectionState::Established),
+            "Established"
+        );
+        assert_eq!(format!("{:?}", QuicConnectionState::Draining), "Draining");
+        assert_eq!(format!("{:?}", QuicConnectionState::Closed), "Closed");
+    }
+
+    // ---- PacketNumberSpace ----
+
+    #[test]
+    fn packet_number_space_idx_values() {
+        assert_eq!(PacketNumberSpace::Initial.idx(), 0);
+        assert_eq!(PacketNumberSpace::Handshake.idx(), 1);
+        assert_eq!(PacketNumberSpace::ApplicationData.idx(), 2);
+    }
+
+    // ---- AckEvent ----
+
+    #[test]
+    fn ack_event_empty() {
+        let e = AckEvent::empty();
+        assert_eq!(e.acked_packets, 0);
+        assert_eq!(e.lost_packets, 0);
+        assert_eq!(e.acked_bytes, 0);
+        assert_eq!(e.lost_bytes, 0);
+    }
+
+    #[test]
+    fn ack_empty_packet_numbers_returns_empty_event() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 1000));
+        let event = t.on_ack_received(PacketNumberSpace::Initial, &[], 0, 2000);
+        assert_eq!(event.acked_packets, 0);
+    }
+
+    #[test]
+    fn ack_for_unsent_packet_does_not_force_loss() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+
+        let bogus = t.on_ack_received(PacketNumberSpace::ApplicationData, &[99], 0, 20_000);
+        assert_eq!(bogus, AckEvent::empty());
+        assert_eq!(t.bytes_in_flight(), 200);
+        assert_eq!(t.rtt().smoothed_rtt_micros(), None);
+
+        let real = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 30_000);
+        assert_eq!(real.acked_packets, 1);
+        assert_eq!(real.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+    }
+
+    // ---- close_immediately ----
+
+    #[test]
+    fn close_immediately_clears_drain_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        t.start_draining(1000, 5000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        t.close_immediately(0);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        assert_eq!(t.close_code(), Some(0));
+    }
+
+    #[test]
+    fn close_immediately_clears_in_flight_recovery_state() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        assert_eq!(t.bytes_in_flight(), 100);
+        assert!(t.pto_deadline_micros(20_000).is_some());
+
+        t.close_immediately(0x33);
+
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert!(t.pto_deadline_micros(20_000).is_none());
+    }
+
+    #[test]
+    fn close_code_none_before_close() {
+        let t = QuicTransportMachine::new();
+        assert_eq!(t.close_code(), None);
+    }
+
+    // ---- Non-ack-eliciting packet ----
+
+    #[test]
+    fn non_ack_eliciting_packet_no_rtt_update() {
+        let mut t = QuicTransportMachine::new();
+        let pkt = SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 1,
+            bytes: 50,
+            ack_eliciting: false,
+            in_flight: true,
+            time_sent_micros: 10_000,
+        };
+        t.on_packet_sent(pkt);
+        t.on_ack_received(PacketNumberSpace::ApplicationData, &[1], 0, 20_000);
+        // Non-ack-eliciting: RTT should not be updated
+        assert_eq!(t.rtt().smoothed_rtt_micros(), None);
+    }
+
+    #[test]
+    fn non_in_flight_packet_not_counted_in_bytes() {
+        let mut t = QuicTransportMachine::new();
+        let pkt = SentPacketMeta {
+            space: PacketNumberSpace::Initial,
+            packet_number: 0,
+            bytes: 200,
+            ack_eliciting: true,
+            in_flight: false,
+            time_sent_micros: 1000,
+        };
+        t.on_packet_sent(pkt);
+        assert_eq!(t.bytes_in_flight(), 0);
+        let ack = t.on_ack_received(PacketNumberSpace::Initial, &[0], 0, 2_000);
+        assert_eq!(ack.acked_packets, 1);
+        assert_eq!(ack.acked_bytes, 0);
+    }
+
+    // ---- Gap 1: Draining -> Established via on_established() is invalid ----
+
+    #[test]
+    fn draining_to_established_is_invalid() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        t.start_draining(1_000, 5_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        let err = t.on_established().unwrap_err();
+        assert_eq!(
+            err,
+            TransportError::InvalidStateTransition {
+                from: QuicConnectionState::Draining,
+                to: QuicConnectionState::Established,
+            }
+        );
+        // State unchanged after rejection
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+    }
+
+    // ---- Gap 2: Closed -> * transitions all produce InvalidStateTransition ----
+
+    #[test]
+    fn closed_to_any_transition_is_invalid() {
+        // Closed -> Handshaking
+        let mut t = QuicTransportMachine::new();
+        t.close_immediately(0);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        let err = t.begin_handshake().unwrap_err();
+        assert_eq!(
+            err,
+            TransportError::InvalidStateTransition {
+                from: QuicConnectionState::Closed,
+                to: QuicConnectionState::Handshaking,
+            }
+        );
+
+        // Closed -> Established
+        let mut t2 = QuicTransportMachine::new();
+        t2.close_immediately(0);
+        let err = t2.on_established().unwrap_err();
+        assert_eq!(
+            err,
+            TransportError::InvalidStateTransition {
+                from: QuicConnectionState::Closed,
+                to: QuicConnectionState::Established,
+            }
+        );
+
+        // Closed -> Draining
+        let mut t3 = QuicTransportMachine::new();
+        t3.close_immediately(0);
+        let err = t3.start_draining(1_000, 5_000).unwrap_err();
+        assert_eq!(
+            err,
+            TransportError::InvalidStateTransition {
+                from: QuicConnectionState::Closed,
+                to: QuicConnectionState::Draining,
+            }
+        );
+    }
+
+    #[test]
+    fn closed_to_closed_is_idempotent() {
+        // Closed -> Closed is same-state, should be Ok (idempotent)
+        let mut t = QuicTransportMachine::new();
+        t.close_immediately(0);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        // close_immediately bypasses transition(), so use poll to stay closed
+        t.poll(999_999);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    // ---- Gap 3: AckRange::new with smallest > largest returns None ----
+
+    #[test]
+    fn ack_range_new_invalid_returns_none() {
+        assert!(AckRange::new(5, 10).is_none());
+        assert!(AckRange::new(0, 1).is_none());
+        assert!(AckRange::new(100, u64::MAX).is_none());
+    }
+
+    #[test]
+    fn ack_range_new_equal_returns_some() {
+        let range = AckRange::new(7, 7).expect("equal range should be valid");
+        assert_eq!(range.largest, 7);
+        assert_eq!(range.smallest, 7);
+        assert!(range.contains(7));
+        assert!(!range.contains(6));
+        assert!(!range.contains(8));
+    }
+
+    // ---- Gap 4: Time-threshold loss detection ----
+
+    #[test]
+    fn time_threshold_loss_detection() {
+        let mut t = QuicTransportMachine::new();
+        // First, establish an RTT sample so loss_delay_micros is deterministic.
+        // Send pkt 0 at t=10_000, ack at t=20_000 => RTT=10_000 us
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 10_000));
+        let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[0], 0, 20_000);
+        // smoothed_rtt = 10_000, loss_delay = max(9*10_000/8, 1_000) = 11_250
+
+        // Send pkt 1 at t=30_000, pkt 2 at t=30_100
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 30_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 30_100));
+
+        // Ack pkt 2 at time that is NOT enough past pkt 1 send for time-threshold.
+        // Packet threshold: pkt 1 + 3 = 4, largest_acked = 2, so 4 > 2, NOT packet-threshold lost.
+        // Time threshold: pkt 1 sent at 30_000, now=40_000, threshold=40_000-11_250=28_750.
+        // pkt 1 sent at 30_000 > 28_750, so NOT time-threshold lost either.
+        let event1 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[2], 0, 40_000);
+        assert_eq!(event1.acked_packets, 1);
+        assert_eq!(event1.lost_packets, 0, "pkt 1 should NOT be lost yet");
+
+        // Now send pkt 3 and ack it at t=50_000 (further in the future).
+        // pkt 1 sent at 30_000, time_threshold = 50_000 - 11_250 = 38_750
+        // pkt 1 sent at 30_000 <= 38_750, and pkt 1 <= largest_acked=3, so time-threshold lost!
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 3, 40_100));
+        let event2 = t.on_ack_received(PacketNumberSpace::ApplicationData, &[3], 0, 50_000);
+        assert_eq!(event2.acked_packets, 1);
+        assert_eq!(
+            event2.lost_packets, 1,
+            "pkt 1 should be lost via time threshold"
+        );
+        assert_eq!(event2.lost_bytes, 100);
+    }
+
+    // ---- GH#71: ACK-only packets are never "lost" ----
+
+    fn ack_only(space: PacketNumberSpace, pn: u64, t: u64) -> SentPacketMeta {
+        SentPacketMeta {
+            space,
+            packet_number: pn,
+            bytes: 40,
+            ack_eliciting: false,
+            in_flight: false,
+            time_sent_micros: t,
+        }
+    }
+
+    /// The exact field sequence from GH#71: a cwnd-limited sender emits an
+    /// ACK-only packet between data packets, the receiver leaves that number
+    /// out of its ACK ranges, and three later data packets get acknowledged.
+    #[test]
+    fn ack_only_packet_behind_acked_data_is_forgotten_without_loss() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+
+        t.on_packet_sent(sent(space, 0, 10_000));
+        t.on_packet_sent(ack_only(space, 1, 10_050));
+        t.on_packet_sent(sent(space, 2, 10_100));
+        t.on_packet_sent(sent(space, 3, 10_200));
+        t.on_packet_sent(sent(space, 4, 10_300));
+        assert_eq!(
+            t.bytes_in_flight(),
+            400,
+            "ACK-only bytes never count as in flight"
+        );
+        let cwnd_before = t.congestion_window_bytes();
+
+        // pn 1 is unacknowledged with pn 4 acked: packet threshold satisfied.
+        let event = t.on_ack_received(space, &[0, 2, 3, 4], 0, 40_000);
+        assert_eq!(event.acked_packets, 4);
+        assert_eq!(event.acked_bytes, 400);
+        assert_eq!(event.lost_packets, 0, "an ACK-only packet cannot be lost");
+        assert_eq!(event.lost_bytes, 0);
+        assert_eq!(t.packets_lost_total(), 0);
+        assert!(t.packet_loss_rate().abs() < f64::EPSILON);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            cwnd_before + 400,
+            "no congestion event: slow start keeps growing"
+        );
+        assert_eq!(
+            t.ssthresh_bytes(),
+            u64::MAX,
+            "no recovery epoch was entered"
+        );
+        assert!(
+            t.take_newly_lost_packet_numbers(space).is_empty(),
+            "nothing is handed to the retransmission ledger"
+        );
+
+        // The forgotten packet is no longer tracked: a late ACK for it is a
+        // no-op rather than a second accounting of the same number.
+        let late = t.on_ack_received(space, &[1], 0, 50_000);
+        assert_eq!(late, AckEvent::empty());
+        assert_eq!(t.packets_acked_total(), 4);
+    }
+
+    /// A pure receiver sends only ACK-only packets, which its peer never
+    /// acknowledges, so largest_acked never advances past them.
+    #[test]
+    fn a_pure_receivers_ack_only_history_stays_bounded() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        for pn in 0..100_000u64 {
+            t.on_packet_sent(ack_only(space, pn, 10_000 + pn));
+            assert!(
+                t.recovery.sent_packets.len() <= ACK_ONLY_PRUNE_FLOOR,
+                "history grew to {} entries by packet {pn}",
+                t.recovery.sent_packets.len()
+            );
+        }
+        assert_eq!(t.bytes_in_flight(), 0);
+        // The newest ACK-only packets stay tracked for PTO-backoff resets.
+        let event = t.on_ack_received(space, &[99_999], 0, 200_000);
+        assert_eq!(event.acked_packets, 1);
+    }
+
+    /// RFC 9002 section 7.6.2: an acknowledged packet sent between two lost
+    /// in-flight packets breaks a persistent-congestion run, so pruning keeps
+    /// every ACK-only packet sent after an outstanding in-flight packet.
+    #[test]
+    fn ack_only_packets_sent_after_an_in_flight_packet_survive_pruning() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        t.on_packet_sent(sent(space, 0, 10_000));
+        for pn in 1..=2_000u64 {
+            t.on_packet_sent(ack_only(space, pn, 10_000 + pn));
+        }
+        assert_eq!(t.recovery.sent_packets.len(), 2_001);
+        assert_eq!(t.bytes_in_flight(), 100);
+        let event = t.on_ack_received(space, &[1_000], 0, 20_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(
+            event.lost_packets, 1,
+            "the in-flight packet is past the threshold"
+        );
+    }
+
+    /// Same defect through the time threshold: the ACK-only packet is older
+    /// than loss_delay and behind the largest acked packet.
+    #[test]
+    fn ack_only_packet_older_than_loss_delay_is_forgotten_without_loss() {
+        let mut t = QuicTransportMachine::new();
+        let space = PacketNumberSpace::ApplicationData;
+        // RTT sample of 10 ms => loss_delay 11.25 ms.
+        t.on_packet_sent(sent(space, 0, 10_000));
+        let _ = t.on_ack_received(space, &[0], 0, 20_000);
+        let cwnd_before = t.congestion_window_bytes();
+
+        t.on_packet_sent(ack_only(space, 1, 30_000));
+        t.on_packet_sent(sent(space, 2, 50_000));
+        // This ACK also measures 10 ms, keeping loss_delay at 11.25 ms.
+        // now - loss_delay = 48_750 > 30_000, pn 1 <= largest acked (2),
+        // but pn 1 + 3 > 2 so only the time threshold applies.
+        let event = t.on_ack_received(space, &[2], 0, 60_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.packets_lost_total(), 0);
+        assert_eq!(t.congestion_window_bytes(), cwnd_before + 100);
+        assert_eq!(t.ssthresh_bytes(), u64::MAX);
+        assert_eq!(t.on_ack_received(space, &[1], 0, 70_000), AckEvent::empty());
+    }
+
+    /// Planted negative: the identical sequence with an in-flight packet in
+    /// the ACK-only packet's place must still be declared lost, still hand the
+    /// number to the retransmission ledger, and still halve the window.
+    #[test]
+    fn in_flight_packet_in_the_same_gap_is_still_lost() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+
+        t.on_packet_sent(sent(space, 0, 10_000));
+        t.on_packet_sent(sent(space, 1, 10_050));
+        t.on_packet_sent(sent(space, 2, 10_100));
+        t.on_packet_sent(sent(space, 3, 10_200));
+        t.on_packet_sent(sent(space, 4, 10_300));
+        let cwnd_before = t.congestion_window_bytes();
+
+        let event = t.on_ack_received(space, &[0, 2, 3, 4], 0, 40_000);
+        assert_eq!(event.acked_packets, 4);
+        assert_eq!(event.lost_packets, 1);
+        assert_eq!(event.lost_bytes, 100);
+        assert_eq!(t.packets_lost_total(), 1);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert_eq!(t.take_newly_lost_packet_numbers(space), vec![1]);
+        // asupersync-f3x3e3 / RFC 9002 A.7: this ACK both acknowledges packets
+        // (400 bytes) and newly declares a loss, so the loss is processed first
+        // — it moves the recovery epoch to `now`, and the just-acknowledged
+        // packets (all sent before `now`) must not grow cwnd. cwnd therefore
+        // nets exactly cwnd_before/2, not (cwnd_before + 400)/2 as the previous
+        // grow-then-halve ordering produced.
+        let expected = (cwnd_before / 2).max(2_400);
+        assert_eq!(t.congestion_window_bytes(), expected, "loss halves cwnd");
+        assert_eq!(t.ssthresh_bytes(), expected);
+    }
+
+    /// The steady state of GH#71: one ACK-only packet per round trip must not
+    /// keep halving the window until it pins at two packets.
+    #[test]
+    fn repeated_ack_only_packets_never_collapse_cwnd() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().expect("hs");
+        t.on_established().expect("est");
+        let space = PacketNumberSpace::ApplicationData;
+        let mut pn = 0u64;
+        let mut now = 100_000u64;
+        for _ in 0..40 {
+            let data_a = pn;
+            t.on_packet_sent(sent(space, data_a, now));
+            t.on_packet_sent(ack_only(space, pn + 1, now + 10));
+            let data_b = pn + 2;
+            let data_c = pn + 3;
+            let data_d = pn + 4;
+            t.on_packet_sent(sent(space, data_b, now + 20));
+            t.on_packet_sent(sent(space, data_c, now + 30));
+            t.on_packet_sent(sent(space, data_d, now + 40));
+            pn += 5;
+            now += 30_000;
+            let event = t.on_ack_received(space, &[data_a, data_b, data_c, data_d], 0, now);
+            assert_eq!(event.acked_packets, 4);
+            assert_eq!(event.lost_packets, 0);
+        }
+        assert_eq!(t.packets_lost_total(), 0);
+        assert_eq!(t.packets_acked_total(), 160);
+        assert_eq!(t.ssthresh_bytes(), u64::MAX);
+        assert_eq!(
+            t.congestion_window_bytes(),
+            12_000 + 160 * 100,
+            "slow start grows by every acked byte and never halves"
+        );
+        assert_eq!(t.bytes_in_flight(), 0);
+    }
+
+    // ---- Gap 5: Congestion avoidance branch (AIMD after loss) ----
+
+    #[test]
+    fn congestion_avoidance_aimd_increment() {
+        let mut t = QuicTransportMachine::new();
+        let initial_cwnd = t.congestion_window_bytes(); // 12_000
+        assert_eq!(t.ssthresh_bytes(), u64::MAX); // slow start initially
+
+        // Trigger loss to set ssthresh via on_loss_congestion.
+        // Send packets 0..5, ack only pkt 5 => pkt 0,1,2 lost (packet threshold).
+        for pn in 0..6 {
+            t.on_packet_sent(sent(
+                PacketNumberSpace::ApplicationData,
+                pn,
+                10_000 + pn * 100,
+            ));
+        }
+        let event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[5], 0, 50_000);
+        assert!(event.lost_packets > 0, "should have loss");
+        let ssthresh_after_loss = t.ssthresh_bytes();
+        assert!(
+            ssthresh_after_loss < initial_cwnd,
+            "ssthresh should be reduced: {ssthresh_after_loss} < {initial_cwnd}"
+        );
+        assert_eq!(t.congestion_window_bytes(), ssthresh_after_loss);
+
+        // Now ack the remaining unacked packets (3 and 4) to clear them out
+        // so they don't trigger spurious loss on the next ack.
+        let _ = t.on_ack_received(PacketNumberSpace::ApplicationData, &[3, 4], 0, 51_000);
+
+        // Now cwnd >= ssthresh, so we are in congestion avoidance.
+        let cwnd_before = t.congestion_window_bytes();
+        assert!(
+            cwnd_before >= t.ssthresh_bytes(),
+            "should be in congestion avoidance"
+        );
+
+        // Send a single packet and ack it; no loss this time.
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 10, 60_000));
+        let ack_event = t.on_ack_received(PacketNumberSpace::ApplicationData, &[10], 0, 70_000);
+        assert_eq!(ack_event.lost_packets, 0, "no further loss expected");
+        let cwnd_after = t.congestion_window_bytes();
+
+        // AIMD increment: (max_datagram_size * acked_bytes) / cwnd
+        // = (1200 * 100) / cwnd_before, at least 1
+        assert!(
+            cwnd_after > cwnd_before,
+            "cwnd should grow in congestion avoidance: {cwnd_after} > {cwnd_before}"
+        );
+        let growth = cwnd_after - cwnd_before;
+        // Growth should be much less than acked_bytes (100), because AIMD is additive.
+        assert!(
+            growth < 100,
+            "congestion avoidance growth should be less than acked_bytes: {growth} < 100"
+        );
+    }
+
+    // ---- Gap 6: Multiple PTO backoff levels, capped at pto_count=10 ----
+
+    #[test]
+    fn pto_backoff_caps_at_count_10() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+
+        // Fire PTO 12 times to go past the cap
+        for _ in 0..12 {
+            t.on_pto_expired();
+        }
+        // pto_count is now 12, but backoff uses min(pto_count, 10)
+        let deadline_at_12 = t.pto_deadline_micros(100_000).expect("deadline at 12");
+
+        // Reset and fire exactly 10 times
+        let mut t2 = QuicTransportMachine::new();
+        t2.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+        for _ in 0..10 {
+            t2.on_pto_expired();
+        }
+        let deadline_at_10 = t2.pto_deadline_micros(100_000).expect("deadline at 10");
+
+        // Both should produce the same deadline because backoff is capped at 2^10
+        assert_eq!(
+            deadline_at_12, deadline_at_10,
+            "PTO backoff should be capped at pto_count=10: {deadline_at_12} == {deadline_at_10}"
+        );
+
+        // Verify the backoff is indeed 2^10 = 1024 times the base timeout,
+        // anchored to the latest ack-eliciting packet send time.
+        let sent_at = 1_000;
+        let mut t3 = QuicTransportMachine::new();
+        t3.on_packet_sent(sent(PacketNumberSpace::Initial, 1, sent_at));
+        let base_deadline = t3.pto_deadline_micros(100_000).expect("base deadline");
+        let base_timeout = base_deadline - sent_at;
+        let capped_timeout = deadline_at_10 - sent_at;
+        assert_eq!(
+            capped_timeout,
+            base_timeout * 1024,
+            "backoff at 10 should be 1024x base"
+        );
+    }
+
+    // ---- Gap 7: on_ack_ranges with empty ranges slice ----
+
+    #[test]
+    fn on_ack_ranges_empty_slice_returns_empty_event() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 2, 10_100));
+        assert_eq!(t.bytes_in_flight(), 200);
+
+        let event = t.on_ack_ranges(PacketNumberSpace::ApplicationData, &[], 0, 20_000);
+        assert_eq!(event, AckEvent::empty());
+        // Nothing changed
+        assert_eq!(t.bytes_in_flight(), 200);
+    }
+
+    // ---- Gap 8: RttEstimator with large ack_delay edge cases ----
+
+    #[test]
+    fn rtt_estimator_large_ack_delay_clamped() {
+        let mut rtt = RttEstimator::default();
+        // First sample: 50_000us with zero ack_delay to establish min_rtt
+        rtt.update(50_000, 0);
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(50_000));
+
+        // Second sample: 80_000us with ack_delay larger than (sample - min_rtt)
+        // RFC 9002: if min_rtt + ack_delay >= sample, adjusted_rtt = sample
+        // min_rtt (50k) + ack_delay (1M) >= sample (80k), so adjusted = 80_000.
+        rtt.update(80_000, 1_000_000);
+        // srtt = (7*50_000 + 80_000)/8 = 53_750
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(53_750));
+    }
+
+    #[test]
+    fn rtt_estimator_ack_delay_equal_to_sample() {
+        let mut rtt = RttEstimator::default();
+        // First sample: 100_000us; ack_delay = 100_000 (equal to sample)
+        // min_rtt = 100_000
+        // ack_delay.min(sample - min_rtt) = 100_000.min(0) = 0
+        // adjusted = 100_000 - 0 = 100_000
+        rtt.update(100_000, 100_000);
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(100_000));
+        assert_eq!(rtt.latest_rtt_micros(), Some(100_000));
+    }
+
+    #[test]
+    fn rtt_estimator_very_large_sample_saturating() {
+        let mut rtt = RttEstimator::default();
+        // Very large sample near u64 limits
+        rtt.update(u64::MAX / 2, 0);
+        assert_eq!(rtt.smoothed_rtt_micros(), Some(u64::MAX / 2));
+        assert_eq!(rtt.rttvar_micros(), Some((u64::MAX / 2) / 2));
+    }
+
+    // ---- Gap 9: Bytes-in-flight across Initial/Handshake spaces ----
+
+    #[test]
+    fn bytes_in_flight_across_initial_and_handshake_spaces() {
+        let mut t = QuicTransportMachine::new();
+
+        // Send packets in Initial space
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 1_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_100));
+        assert_eq!(t.bytes_in_flight(), 200);
+
+        // Send packets in Handshake space
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 0, 2_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 1, 2_100));
+        assert_eq!(t.bytes_in_flight(), 400);
+
+        // Ack one Initial packet
+        let event_init = t.on_ack_received(PacketNumberSpace::Initial, &[0], 0, 3_000);
+        assert_eq!(event_init.acked_packets, 1);
+        assert_eq!(event_init.acked_bytes, 100);
+        assert_eq!(t.bytes_in_flight(), 300);
+
+        // Ack one Handshake packet
+        let event_hs = t.on_ack_received(PacketNumberSpace::Handshake, &[1], 0, 3_100);
+        assert_eq!(event_hs.acked_packets, 1);
+        assert_eq!(event_hs.acked_bytes, 100);
+        assert_eq!(t.bytes_in_flight(), 200);
+
+        // Cross-space ack should NOT ack packets from wrong space
+        let event_cross = t.on_ack_received(PacketNumberSpace::Initial, &[0, 1], 0, 4_000);
+        // pn 0 already acked, pn 1 is still there; should ack pn 1
+        assert_eq!(event_cross.acked_packets, 1);
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        // Remaining: Handshake pn 0
+        let event_final = t.on_ack_received(PacketNumberSpace::Handshake, &[0], 0, 5_000);
+        assert_eq!(event_final.acked_packets, 1);
+        assert_eq!(t.bytes_in_flight(), 0);
+    }
+
+    #[test]
+    fn ack_wrong_space_does_not_ack_packets() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 5, 1_000));
+        // Try to ack with Handshake space -- should not match
+        let event = t.on_ack_received(PacketNumberSpace::Handshake, &[5], 0, 2_000);
+        assert_eq!(event.acked_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+    }
+
+    #[test]
+    fn packet_number_space_debug_clone_copy_eq() {
+        let sp = PacketNumberSpace::ApplicationData;
+        let dbg = format!("{sp:?}");
+        assert!(dbg.contains("ApplicationData"), "{dbg}");
+        let copied: PacketNumberSpace = sp;
+        let cloned = sp;
+        assert_eq!(copied, cloned);
+        assert_ne!(sp, PacketNumberSpace::Initial);
+    }
+
+    #[test]
+    fn sent_packet_meta_debug_clone_eq() {
+        let m = SentPacketMeta {
+            space: PacketNumberSpace::Handshake,
+            packet_number: 7,
+            bytes: 1200,
+            ack_eliciting: true,
+            in_flight: true,
+            time_sent_micros: 500,
+        };
+        let dbg = format!("{m:?}");
+        assert!(dbg.contains("Handshake"), "{dbg}");
+        let cloned = m.clone();
+        assert_eq!(m, cloned);
+    }
+
+    #[test]
+    fn ack_range_debug_clone_copy_eq() {
+        let r = AckRange::new(10, 5).unwrap();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("10"), "{dbg}");
+        let copied: AckRange = r;
+        let cloned = r;
+        assert_eq!(copied, cloned);
+        assert_eq!(r, AckRange::new(10, 5).unwrap());
+    }
+
+    #[test]
+    fn ack_event_debug_clone_eq() {
+        let e = AckEvent {
+            acked_packets: 3,
+            lost_packets: 1,
+            acked_bytes: 3600,
+            lost_bytes: 1200,
+        };
+        let dbg = format!("{e:?}");
+        assert!(dbg.contains("3600"), "{dbg}");
+        let cloned = e.clone();
+        assert_eq!(e, cloned);
+    }
+
+    #[test]
+    fn rtt_estimator_debug_clone_default_eq() {
+        let r = RttEstimator::default();
+        let dbg = format!("{r:?}");
+        assert!(dbg.contains("RttEstimator"), "{dbg}");
+        let cloned = r.clone();
+        assert_eq!(r, cloned);
+    }
+
+    // ---- Gap 10: start_draining without code -> close_code() stays None ----
+
+    #[test]
+    fn start_draining_without_code_keeps_close_code_none() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        assert_eq!(t.close_code(), None);
+
+        // Drain without code
+        t.start_draining(1_000, 5_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        assert_eq!(
+            t.close_code(),
+            None,
+            "close_code should remain None after start_draining without code"
+        );
+
+        // Poll to closed
+        t.poll(6_000);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        assert_eq!(
+            t.close_code(),
+            None,
+            "close_code should remain None after poll to Closed"
+        );
+    }
+
+    #[test]
+    fn repeated_start_draining_preserves_original_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+
+        // First drain: deadline = 1000 + 5000 = 6000
+        t.start_draining(1_000, 5_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+
+        // Second drain call with a later now and shorter timeout.
+        // If not idempotent, this would reset deadline to 4000 + 1000 = 5000.
+        t.start_draining(4_000, 1_000).unwrap();
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+
+        // At time 5500, original deadline (6000) should still be in effect.
+        t.poll(5_500);
+        assert_eq!(
+            t.state(),
+            QuicConnectionState::Draining,
+            "original deadline must be preserved; connection should still be draining"
+        );
+
+        // At time 6000, original deadline expires.
+        t.poll(6_000);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    #[test]
+    fn repeated_start_draining_with_code_preserves_original_code_and_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+
+        t.start_draining_with_code(1_000, 5_000, 42).unwrap();
+        assert_eq!(t.close_code(), Some(42));
+
+        // Second call with different code. Must not overwrite.
+        t.start_draining_with_code(2_000, 500, 99).unwrap();
+        assert_eq!(
+            t.close_code(),
+            Some(42),
+            "original close code must be preserved across repeated drain calls"
+        );
+
+        // Original deadline (6000) still in effect.
+        t.poll(5_500);
+        assert_eq!(t.state(), QuicConnectionState::Draining);
+        t.poll(6_000);
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+    }
+
+    #[test]
+    fn drain_timeout_closes_and_clears_in_flight_recovery_state() {
+        let mut t = QuicTransportMachine::new();
+        t.begin_handshake().unwrap();
+        t.on_established().unwrap();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 1, 10_000));
+        assert_eq!(t.bytes_in_flight(), 100);
+
+        t.start_draining(1_000, 5_000).unwrap();
+        t.poll(6_000);
+
+        assert_eq!(t.state(), QuicConnectionState::Closed);
+        assert_eq!(t.bytes_in_flight(), 0);
+        assert!(t.pto_deadline_micros(6_000).is_none());
+    }
+
+    #[test]
+    fn loss_delay_micros_saturates_on_extreme_rtt() {
+        // Regression: `9 * base_rtt` used to overflow when base_rtt > u64::MAX/9.
+        let mut recovery = LossRecovery::default();
+
+        // Inject an extreme RTT sample that would overflow 9*rtt.
+        recovery.rtt.update(u64::MAX / 8, 0);
+        let delay = recovery.loss_delay_micros();
+        // Should be saturated rather than panicking or wrapping.
+        assert!(
+            delay >= 1_000,
+            "loss_delay_micros must be at least the 1ms floor, got {delay}"
+        );
+        // The result should be very large since 9*saturate/8 ≈ MAX.
+        assert!(
+            delay > 1_000_000,
+            "loss_delay for extreme RTT should be large, got {delay}"
+        );
+    }
+
+    #[test]
+    fn pto_deadline_does_not_slide_without_a_new_ack_eliciting_send() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+
+        let first = t.pto_deadline_micros(2_000).expect("first deadline");
+        let later = t.pto_deadline_micros(200_000).expect("later deadline");
+
+        assert_eq!(first, later);
+        assert_eq!(first, 1_000_000);
+    }
+
+    // br-asupersync-bi2462.75: explicit microsecond fixtures exercise the
+    // managed PTO repair without substituting wall-clock timing for behavior.
+    #[test]
+    fn managed_pto_latest_send_restarts_deadline_and_survives_its_ack() {
+        let mut t = QuicTransportMachine::new();
+        // Packet 1 must remain younger than the loss delay computed from
+        // the ACK's fresh 1000us RTT: its age will be 1100us < 1125us.
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 2_900));
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 2, 3_000));
+        assert_eq!(t.pto_deadline_micros(3_000), Some(1_002_000));
+
+        let mut ack_only = sent(PacketNumberSpace::Initial, 3, 4_000);
+        ack_only.ack_eliciting = false;
+        ack_only.in_flight = false;
+        t.on_packet_sent(ack_only);
+        assert_eq!(t.pto_deadline_micros(4_000), Some(1_002_000));
+
+        let event = t.on_ack_received(PacketNumberSpace::Initial, &[2], 0, 4_000);
+        assert_eq!(event.acked_packets, 1);
+        assert_eq!(event.lost_packets, 0);
+        assert_eq!(t.bytes_in_flight(), 100);
+        // The fresh RTT is 1000us with 500us variance: 3000us PTO. The
+        // acknowledged latest send remains the anchor while packet 1 waits.
+        assert_eq!(t.pto_deadline_micros(4_000), Some(6_000));
+    }
+
+    #[test]
+    fn managed_pto_selects_earliest_space_and_discards_retired_space() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 10_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 0, 5_000));
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 1_000));
+        assert_eq!(t.pto_deadline_micros(10_000), Some(1_004_000));
+        t.on_packet_sent(sent(PacketNumberSpace::Handshake, 1, 50_000));
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_009_000));
+        t.discard_space(PacketNumberSpace::Initial);
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_025_000));
+        t.discard_space(PacketNumberSpace::ApplicationData);
+        assert_eq!(t.pto_deadline_micros(50_000), Some(1_049_000));
+        t.discard_space(PacketNumberSpace::Handshake);
+        assert_eq!(t.pto_deadline_micros(50_000), None);
+    }
+
+    #[test]
+    fn managed_pto_late_and_capped_expirations_wait_a_full_backed_off_duration() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::ApplicationData, 0, 1_000));
+        let mut deadline = t.pto_deadline_micros(1_000).expect("first PTO");
+        for expiration in 1u32..=14 {
+            let fired_at = deadline + 3_000_000;
+            deadline = t.on_pto_expired_at(fired_at).expect("rearmed PTO");
+            let backed_off_duration = 1_024_000 * (1u64 << expiration.min(10));
+            assert_eq!(t.pto_count(), expiration);
+            assert_eq!(deadline - fired_at, backed_off_duration);
+            assert!(deadline > fired_at);
+            assert_eq!(t.pto_deadline_micros(fired_at + 1), Some(deadline));
+            assert_eq!(t.bytes_in_flight(), 100);
+            assert_eq!(t.packets_lost_total(), 0);
+        }
+    }
+
+    #[test]
+    fn managed_pto_unrepresentable_rearm_never_returns_an_expired_deadline() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 0, 1_000));
+        assert_eq!(t.on_pto_expired_at(u64::MAX), None);
+        assert_eq!(t.pto_deadline_micros(u64::MAX), None);
+        assert_eq!(t.bytes_in_flight(), 100);
+        assert_eq!(t.packets_lost_total(), 0);
+    }
+
+    #[test]
+    fn pto_deadline_skips_max_ack_delay_for_initial_space() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(sent(PacketNumberSpace::Initial, 1, 1_000));
+
+        let deadline = t.pto_deadline_micros(2_000).expect("deadline");
+        assert_eq!(deadline, 1_000_000);
+    }
+
+    #[test]
+    fn pto_deadline_requires_ack_eliciting_packets() {
+        let mut t = QuicTransportMachine::new();
+        t.on_packet_sent(SentPacketMeta {
+            space: PacketNumberSpace::ApplicationData,
+            packet_number: 1,
+            bytes: 100,
+            ack_eliciting: false,
+            in_flight: true,
+            time_sent_micros: 10_000,
+        });
+
+        assert!(t.pto_deadline_micros(20_000).is_none());
+    }

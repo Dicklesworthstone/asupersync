@@ -1915,11 +1915,15 @@ fn production_public_and_comment_only_sites_match_source() {
             .count(),
         2
     );
+    // c5012547e moved stream.rs's inline unit tests into a sibling file that
+    // stream.rs still declares as its test module.
+    assert!(stream.contains("#[cfg(test)]\n#[path = \"stream_inline_tests.rs\"]"));
+    let stream_tests = read_repo_file("src/net/atp/sdk/stream_inline_tests.rs");
     for test_name in [
         "owned_writer_progress_registers_sender_wake_without_self_wake",
         "owned_reader_progress_observes_creation_context_cancellation",
     ] {
-        assert!(stream.contains(&format!("fn {test_name}()")));
+        assert!(stream_tests.contains(&format!("fn {test_name}()")));
     }
     assert!(stream.contains("obligation.resolve(Resolution::Abort)"));
 
@@ -1966,8 +1970,10 @@ fn production_public_and_comment_only_sites_match_source() {
     ] {
         assert!(remote.contains(&format!("async fn {function}")));
     }
-    assert!(remote.contains(".cancel(cx, reason)"));
-    assert!(remote.contains(".renew_lease(cx, lease)"));
+    // The native driver cancels and renews on its own owned session after a
+    // control win (bi2462.123 and b0484c39f renamed the call arguments).
+    assert!(remote.contains("session.cancel(cx, reason.clone())"));
+    assert!(remote.contains("session.renew_lease(cx, requested_lease)"));
     assert!(multipart.contains("wait_for_streaming_multipart_cancellation(cx).await"));
     assert!(multipart.contains("return Err(StreamingMultipartError::cancelled(kind))"));
 
@@ -1980,15 +1986,18 @@ fn production_public_and_comment_only_sites_match_source() {
         .collect();
     notify_lines.sort_unstable();
     let projection = notify_lines.join("\n") + "\n";
+    // e5f04ac2b added a third hidden doctest line, identical to the other
+    // two, for Notified::enable; without it the projection hashes to the
+    // earlier ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7.
     assert_eq!(
         hex_bytes(&Sha256::digest(projection.as_bytes())),
-        "ff73e9793bd9748d2e82dba7b4d16e27830b5d35491c2759021dcbb81b33b2c7"
+        "81dddf10bba69dfb55d11bf1b32801cd557e14aa51b80d3265421ee3e5dd8868"
     );
     assert_eq!(
         notify
             .matches(&format!("{TOKEN}::future::block_on(async"))
             .count(),
-        2
+        3
     );
 
     let baseline_rows = all_occurrence_rows();

@@ -190,7 +190,7 @@ fn task_handle_constructor_census() -> BTreeMap<String, usize> {
             .lines()
             .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
             .filter(|line| {
-                !(rel == "src/conformance/mod.rs"
+                !(rel == "src/conformance/mod_inline_tests.rs"
                     && line
                         .contains("let handle = TaskHandle::new(tid, async { Outcome::Ok(42) });"))
             })
@@ -1640,7 +1640,7 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
     // capability-restricted pair factories. A new producer in a new file must
     // fail this lane until its publication behavior is deliberately classified.
     let expected_census = BTreeMap::from([
-        ("src/combinator/join_set.rs|TaskHandle::new(".to_owned(), 1),
+        ("src/combinator/join_set_inline_tests.rs|TaskHandle::new(".to_owned(), 1),
         // Classified (02469ad83, 1sngsf, bi2462.147): a `#[cfg(test)]` fixture
         // in the fail-fast JoinSet owner tests (`manual_member`) that builds a
         // handle over a hand-held oneshot so a test can complete members in
@@ -1648,7 +1648,7 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
         // spawned through `Cx` spawn paths, whose pair factories are counted
         // under src/cx/cx.rs.
         (
-            "src/combinator/join_set/owner/fail_fast.rs|TaskHandle::new(".to_owned(),
+            "src/combinator/join_set/owner/fail_fast_inline_tests.rs|TaskHandle::new(".to_owned(),
             1,
         ),
         // Classified (5f8303a12, b3d54ec0f; ov3xtg): `#[cfg(test)]` fixtures
@@ -1672,7 +1672,7 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
         // adapters; production members spawn through `Cx` spawn paths, whose
         // pair factories are counted under src/cx/cx.rs.
         (
-            "src/combinator/join_set/collector.rs|TaskHandle::new(".to_owned(),
+            "src/combinator/join_set/collector_selection_tests_inline_tests.rs|TaskHandle::new(".to_owned(),
             2,
         ),
         (
@@ -1686,7 +1686,7 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
         // `Cx::spawn_in` / `spawn_in_cancellation_dominant`, whose pair
         // factories are counted under src/cx/cx.rs.
         (
-            "src/http/h2/listener/ownership.rs|TaskHandle::new(".to_owned(),
+            "src/http/h2/listener/ownership_inline_tests.rs|TaskHandle::new(".to_owned(),
             1,
         ),
         (
@@ -1704,22 +1704,29 @@ fn mailbox_and_scope_spawn_paths_classify_before_terminal_publication() {
         // production drained blocking work is spawned with `Cx::spawn` /
         // `Cx::spawn_in`, whose pair factories are counted under src/cx/cx.rs.
         (
-            "src/runtime/spawn_blocking.rs|crate::runtime::task_handle::task_handle_channel::<"
+            "src/runtime/spawn_blocking_inline_tests.rs|crate::runtime::task_handle::task_handle_channel::<"
                 .to_owned(),
             1,
         ),
         (
-            "src/runtime/spawn_mailbox.rs|TaskHandle::new_pending(".to_owned(),
+            "src/runtime/spawn_mailbox_inline_tests.rs|TaskHandle::new_pending(".to_owned(),
             3,
         ),
         (
             "src/runtime/state.rs|crate::runtime::task_handle::task_handle_channel::<".to_owned(),
             1,
         ),
-        ("src/runtime/task_handle.rs|TaskHandle::new(".to_owned(), 27),
+        // c5012547e moved task_handle.rs's unit tests into task_handle_inline_tests.rs:
+        // the production file keeps one of each constructor, the tests the rest.
+        ("src/runtime/task_handle.rs|TaskHandle::new(".to_owned(), 1),
+        ("src/runtime/task_handle.rs|TaskHandle::new_pending(".to_owned(), 1),
         (
-            "src/runtime/task_handle.rs|TaskHandle::new_pending(".to_owned(),
-            5,
+            "src/runtime/task_handle_inline_tests.rs|TaskHandle::new(".to_owned(),
+            26,
+        ),
+        (
+            "src/runtime/task_handle_inline_tests.rs|TaskHandle::new_pending(".to_owned(),
+            4,
         ),
     ]);
     assert_eq!(

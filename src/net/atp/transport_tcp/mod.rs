@@ -52,14 +52,19 @@ use crate::atp::safety::{
     validate_portable_relative_path,
 };
 use crate::net::atp::transport_common::codec::{
-    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability,
+    self, CodecAccept, CodecOffer, CompressionMode, DecodeCapability, EntryCompression,
 };
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
-    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
+    commit_symlink_transactionally, path_is_link_or_reparse, path_is_link_or_reparse_sync,
+    validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
+    write_sparse_zero_runs,
 };
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::apply_entry_metadata_sync;
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::metadata::install_staged_regular_file_sync;
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -67,10 +72,11 @@ use crate::net::atp::transport_common::metadata::{
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode,
-    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError,
-    MirrorPolicy, SourceEntry, StagedEntryReceive, StreamingError, apply_entry_metadata,
-    capture_directory_metadata_manifest, flat_merkle_root_from_digests, hash_file_streaming,
-    hex_encode, metadata_commitment, mirror_dest, read_entry_metadata,
+    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet,
+    MetadataApplyReport, MirrorError, MirrorPolicy, SourceEntry, StagedEntryReceive,
+    StreamingError, apply_entry_metadata, capture_directory_metadata_manifest,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode, metadata_commitment,
+    mirror_dest, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -496,6 +502,13 @@ struct FrameTransport<S> {
     /// The payload codec both sides agreed on in the handshake, if any. Only
     /// then may data frames carry compressed chunks.
     chunk_codec: Option<CodecAccept>,
+    /// What the sender asked for, which decides the chunks it tries to
+    /// compress once a codec is agreed (br-asupersync-t1fblr.24).
+    compression: CompressionMode,
+    /// Chunks of a file the sender compresses at once
+    /// (br-asupersync-t1fblr.25).
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    compression_parallelism: usize,
 }
 
 impl<S> FrameTransport<S>
@@ -509,6 +522,8 @@ where
             rbuf: BytesMut::new(),
             decode: codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
             chunk_codec: None,
+            compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -1160,6 +1175,7 @@ where
         .await
         .map_err(|e| TransportError::Source(format!("{}: {e}", path.display())))?;
     let mut offset: u64 = 0;
+    let mut entry = EntryCompression::new(transport.compression, &path.to_string_lossy());
     loop {
         let n = file
             .read(buf)
@@ -1168,7 +1184,13 @@ where
         if n == 0 {
             break;
         }
-        let frame = chunk_frame(transport.chunk_codec.as_ref(), index, offset, &buf[..n])?;
+        let frame = chunk_frame(
+            transport.chunk_codec.as_ref(),
+            &mut entry,
+            index,
+            offset,
+            &buf[..n],
+        )?;
         with_transport_timeout(
             cx,
             config.idle_timeout,
@@ -1179,6 +1201,197 @@ where
         offset = offset.saturating_add(n as u64);
     }
     Ok(())
+}
+
+/// An entry whose chunks are not all sent yet, in
+/// [`send_full_entries_pipelined`].
+#[cfg(feature = "zstd")]
+struct OpenEntry {
+    /// The manifest size, reported as progress once the entry is sent.
+    size: u64,
+    /// Chunks queued in the pipeline so far.
+    queued: usize,
+    /// Chunks sent so far.
+    sent: usize,
+    /// The whole file has been read and queued.
+    read_all: bool,
+}
+
+/// The pipelined counterpart of [`send_full_entries_streaming`]'s loop, for a
+/// session that agreed on a codec (br-asupersync-t1fblr.25).
+///
+/// Chunks of consecutive files share one [`codec::ChunkPipeline`]: up to
+/// `compression_parallelism` compress at once on the runtime's blocking pool
+/// and go out in the order they were read, so a tree of small files
+/// compresses in parallel too. Memory is bounded by that many chunks in
+/// flight, raw and compressed, plus the one being read. Progress is reported
+/// as before: once per regular entry, in order, after its last chunk is sent.
+#[cfg(feature = "zstd")]
+async fn send_full_entries_pipelined<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    digests: &[EntryDigest],
+    config: &TransferConfig,
+    chunk_len: usize,
+    accept: CodecAccept,
+    on_progress: &mut impl FnMut(u64, u64),
+) -> Result<u64, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let total_bytes = digests
+        .iter()
+        .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
+    let mut sent_bytes = 0u64;
+    let mut pipeline = codec::ChunkPipeline::new(accept, transport.compression_parallelism);
+    // Buffers of chunks already sent, reused for the next reads.
+    let mut spare: Vec<Vec<u8>> = Vec::new();
+    let mut open: std::collections::VecDeque<OpenEntry> = std::collections::VecDeque::new();
+    // The entry being read and its decisions: only its outcomes still decide.
+    let mut current = u32::MAX;
+    let mut decisions = EntryCompression::new(CompressionMode::Off, "");
+    for (i, entry) in entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        if !matches!(metadatas[i].file_kind, FileKind::Regular)
+            || metadatas[i].hardlink_target.is_some()
+        {
+            continue;
+        }
+        let index = u32::try_from(i).unwrap_or(u32::MAX);
+        let mut file = crate::fs::File::open(&entry.abs_path)
+            .await
+            .map_err(|e| TransportError::Source(format!("{}: {e}", entry.abs_path.display())))?;
+        current = index;
+        decisions = EntryCompression::new(transport.compression, &entry.abs_path.to_string_lossy());
+        open.push_back(OpenEntry {
+            size: digests[i].size,
+            queued: 0,
+            sent: 0,
+            read_all: false,
+        });
+        let mut offset: u64 = 0;
+        loop {
+            while pipeline.is_full() {
+                send_pipelined_chunk(
+                    cx,
+                    transport,
+                    config,
+                    &mut pipeline,
+                    current,
+                    &mut decisions,
+                    &mut open,
+                    &mut spare,
+                )
+                .await?;
+                report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+            }
+            let mut raw = spare.pop().unwrap_or_default();
+            raw.resize(chunk_len.max(1), 0);
+            let n = file.read(&mut raw).await.map_err(|e| {
+                TransportError::Source(format!("{}: {e}", entry.abs_path.display()))
+            })?;
+            if n == 0 {
+                break;
+            }
+            raw.truncate(n);
+            pipeline.push(cx, &mut decisions, index, offset, raw);
+            offset = offset.saturating_add(n as u64);
+            if let Some(last) = open.back_mut() {
+                last.queued += 1;
+            }
+        }
+        if let Some(last) = open.back_mut() {
+            last.read_all = true;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    while !open.is_empty() {
+        if !send_pipelined_chunk(
+            cx,
+            transport,
+            config,
+            &mut pipeline,
+            current,
+            &mut decisions,
+            &mut open,
+            &mut spare,
+        )
+        .await?
+        {
+            break;
+        }
+        report_sent_entries(&mut open, &mut sent_bytes, total_bytes, on_progress);
+    }
+    on_progress(total_bytes, total_bytes);
+    Ok(total_bytes)
+}
+
+/// Sends the oldest chunk of `pipeline` once it is ready and counts it
+/// against its entry in `open`. `false` when the pipeline was empty.
+#[cfg(feature = "zstd")]
+async fn send_pipelined_chunk<S>(
+    cx: &Cx,
+    transport: &mut FrameTransport<S>,
+    config: &TransferConfig,
+    pipeline: &mut codec::ChunkPipeline,
+    current: u32,
+    decisions: &mut EntryCompression,
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    spare: &mut Vec<Vec<u8>>,
+) -> Result<bool, TransportError>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
+    let Some(chunk) = pipeline.next(current, decisions).await else {
+        return Ok(false);
+    };
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => TransportError::Cancelled,
+        other => TransportError::Frame(format!("compressing a chunk failed: {other}")),
+    })?;
+    let frame = match &chunk.compressed {
+        Some((record, payload)) => {
+            compressed_data_frame(chunk.index, chunk.offset, *record, payload)?
+        }
+        None => data_frame(chunk.index, chunk.offset, &chunk.raw)?,
+    };
+    with_transport_timeout(
+        cx,
+        config.idle_timeout,
+        "send data frame",
+        transport.send(&frame),
+    )
+    .await?;
+    // Chunks leave in the order they were read, so this one belongs to the
+    // oldest entry that still has chunks to send.
+    if let Some(entry) = open.iter_mut().find(|entry| entry.sent < entry.queued) {
+        entry.sent += 1;
+    }
+    spare.push(chunk.raw);
+    Ok(true)
+}
+
+/// Reports, in order, every leading entry of `open` that is read to the end
+/// with all its chunks sent, as [`send_full_entries_streaming`] does after
+/// each entry.
+#[cfg(feature = "zstd")]
+fn report_sent_entries(
+    open: &mut std::collections::VecDeque<OpenEntry>,
+    sent_bytes: &mut u64,
+    total_bytes: u64,
+    on_progress: &mut impl FnMut(u64, u64),
+) {
+    while open
+        .front()
+        .is_some_and(|entry| entry.read_all && entry.sent == entry.queued)
+    {
+        if let Some(entry) = open.pop_front() {
+            *sent_bytes = sent_bytes.saturating_add(entry.size);
+            on_progress(*sent_bytes, total_bytes);
+        }
+    }
 }
 
 fn transfer_manifest_metadata_commitment(manifest: &TransferManifest) -> Option<String> {
@@ -1632,28 +1845,43 @@ fn data_frame(index: u32, offset: u64, chunk: &[u8]) -> Result<Frame, TransportE
         .map_err(|e| TransportError::Frame(e.to_string()))
 }
 
-/// An `ObjectData` frame for `chunk`. When the session negotiated a codec and
+/// An `ObjectData` frame for `chunk`, the bytes at `offset` of entry `index`.
+/// When the session negotiated a codec, `entry` decides to try, and
 /// compressing makes the chunk smaller, the payload carries the compressed
 /// chunk and the frame a [`codec::CHUNK_CODEC_EXTENSION`] record; otherwise
 /// the frame is byte-identical to [`data_frame`]'s.
 #[cfg(feature = "zstd")]
 fn chunk_frame(
     accept: Option<&CodecAccept>,
+    entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
 ) -> Result<Frame, TransportError> {
     if let Some((record, compressed)) =
-        accept.and_then(|accept| codec::compress_chunk(accept, chunk))
+        accept.and_then(|accept| entry.compress(accept, offset, chunk))
     {
-        let mut frame = data_frame(index, offset, &compressed)?;
-        frame
-            .header
-            .extensions
-            .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
-        return Ok(frame);
+        return compressed_data_frame(index, offset, record, &compressed);
     }
     data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed chunk at
+/// `offset` of entry `index`, with its [`codec::CHUNK_CODEC_EXTENSION`]
+/// record.
+#[cfg(feature = "zstd")]
+fn compressed_data_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, TransportError> {
+    let mut frame = data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
 }
 
 /// Without the `zstd` feature no codec is ever negotiated, so every chunk is
@@ -1661,6 +1889,7 @@ fn chunk_frame(
 #[cfg(not(feature = "zstd"))]
 fn chunk_frame(
     _accept: Option<&CodecAccept>,
+    _entry: &mut EntryCompression,
     index: u32,
     offset: u64,
     chunk: &[u8],
@@ -1925,6 +2154,22 @@ async fn send_full_entries_streaming<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    #[cfg(feature = "zstd")]
+    if let Some(accept) = transport.chunk_codec {
+        let chunk_len = read_buf.len();
+        return send_full_entries_pipelined(
+            cx,
+            transport,
+            entries,
+            metadatas,
+            digests,
+            config,
+            chunk_len,
+            accept,
+            &mut on_progress,
+        )
+        .await;
+    }
     let total_bytes = digests
         .iter()
         .fold(0u64, |sum, digest| sum.saturating_add(digest.size));
@@ -1998,8 +2243,12 @@ where
                 chunk.rel_path, chunk.entry_offset
             )));
         }
+        // Delta chunks are scattered, so each is decided on its own: by its
+        // entry's name, and at offset 0 by its first bytes.
+        let mut decisions = EntryCompression::new(transport.compression, &chunk.rel_path);
         let frame = chunk_frame(
             transport.chunk_codec.as_ref(),
+            &mut decisions,
             chunk.entry_index,
             chunk.entry_offset,
             &bytes,
@@ -2029,6 +2278,7 @@ async fn build_receiver_delta_state(
             baseline: None,
         });
     };
+    delta_manifest_validation::validate(manifest, delta_manifest)?;
     let sender_manifest = planner_manifest_from_wire(delta_manifest)?;
     if !config.enable_delta {
         return Ok(ReceiverDeltaState {
@@ -2051,8 +2301,14 @@ async fn build_receiver_delta_state(
         });
     }
 
-    let Some(baseline) =
-        build_receiver_delta_baseline(dest_dir, manifest, delta_manifest, config).await?
+    let Some(baseline) = build_receiver_delta_baseline(
+        dest_dir,
+        manifest,
+        delta_manifest,
+        config,
+        MAX_RECEIVER_DELTA_BASELINE_CHUNKS,
+    )
+    .await?
     else {
         return Ok(ReceiverDeltaState {
             request: DeltaObjectRequest::full(
@@ -2301,11 +2557,18 @@ fn wire_missing_chunks(
         .collect()
 }
 
+/// Most chunks a receiver splits its existing destination into for a delta.
+/// The sender picks the chunk size, and each chunk costs the receiver a planner
+/// entry, a CAS insert and a read, so a finer baseline falls back to a full
+/// transfer. 4 Mi chunks are 1 TiB at the default chunk size.
+const MAX_RECEIVER_DELTA_BASELINE_CHUNKS: u64 = 1 << 22;
+
 async fn build_receiver_delta_baseline(
     dest_dir: &Path,
     manifest: &TransferManifest,
     delta_manifest: &DeltaManifestWire,
     config: &TransferConfig,
+    max_chunks: u64,
 ) -> Result<Option<ReceiverDeltaBaseline>, TransportError> {
     let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     if !base.exists() {
@@ -2345,6 +2608,11 @@ async fn build_receiver_delta_baseline(
             content_id,
             content_sha256,
         });
+        let chunk_size = u64::try_from(delta_manifest.chunk_size.max(1)).unwrap_or(u64::MAX);
+        let chunks = u64::try_from(planner_chunks.len()).unwrap_or(u64::MAX);
+        if chunks.saturating_add(size.div_ceil(chunk_size)) > max_chunks {
+            return Ok(None);
+        }
         append_receiver_delta_chunks(
             &entry.abs_path,
             delta_manifest.chunk_size.max(1),
@@ -2614,12 +2882,45 @@ async fn commit_verified_staging(
     // Each committed file's directory is fsynced once, after the loop and
     // before the receipt, instead of after every rename (r02ssd).
     let mut parent_syncs = DeferredParentSyncs::default();
+    // Plain regular files commit in batches, one blocking call each (dfdwyt).
+    #[cfg(not(windows))]
+    let mut regular_batch = Vec::new();
     for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
         let out_path = if manifest.is_directory {
             join_relative(&base, &entry.rel_path)?
         } else {
             base.clone()
         };
+        #[cfg(not(windows))]
+        if is_plain_regular_entry(entry.metadata.as_ref()) {
+            regular_batch.push(RegularCommit {
+                out_path,
+                staging_path: staging_path.clone(),
+                metadata: entry.metadata.clone(),
+            });
+            if regular_batch.len() == REGULAR_COMMIT_BATCH {
+                commit_regular_entries(
+                    cx,
+                    &base,
+                    std::mem::take(&mut regular_batch),
+                    &mut parent_syncs,
+                    &mut committed_paths,
+                )
+                .await?;
+            }
+            continue;
+        }
+        // Any other entry may depend on an earlier one (a hardlink's primary),
+        // so the files batched before it commit first.
+        #[cfg(not(windows))]
+        commit_regular_entries(
+            cx,
+            &base,
+            std::mem::take(&mut regular_batch),
+            &mut parent_syncs,
+            &mut committed_paths,
+        )
+        .await?;
         reject_entry_destination_link_prefixes(
             &base,
             &out_path,
@@ -2716,6 +3017,15 @@ async fn commit_verified_staging(
         }
         committed_paths.push(out_path);
     }
+    #[cfg(not(windows))]
+    commit_regular_entries(
+        cx,
+        &base,
+        regular_batch,
+        &mut parent_syncs,
+        &mut committed_paths,
+    )
+    .await?;
     parent_syncs.sync().await?;
     mirror_committed_manifest(cx, dest_dir, manifest, config.mirror_policy).await?;
     apply_directory_metadata_best_effort(cx, &base, manifest).await?;
@@ -2976,7 +3286,17 @@ fn trace_tcp_metadata_skips(cx: &Cx, out_path: &Path, skipped: &[(&'static str, 
 }
 
 async fn apply_entry_metadata_best_effort(cx: &Cx, out_path: &Path, meta: &EntryMetadata) {
-    match apply_entry_metadata(out_path, meta).await {
+    trace_entry_metadata_result(cx, out_path, apply_entry_metadata(out_path, meta).await);
+}
+
+/// Traces what applying an entry's metadata skipped, or why it failed; a
+/// failure never fails the commit.
+fn trace_entry_metadata_result(
+    cx: &Cx,
+    out_path: &Path,
+    applied: Result<MetadataApplyReport, StreamingError>,
+) {
+    match applied {
         Ok(report) => trace_tcp_metadata_skips(cx, out_path, &report.skipped),
         Err(err) => {
             let skipped = [("apply", err.to_string())];
@@ -3107,12 +3427,23 @@ pub async fn send_path_filtered(
 
 /// Sender options beyond [`TransferConfig`], which is exhaustively
 /// constructible and so cannot gain fields without breaking its callers.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct SendOptions {
     /// Bulk-data compression (br-asupersync-t1fblr.16). The default,
     /// [`CompressionMode::Off`], sends exactly the frames older senders send.
     pub compression: CompressionMode,
+    /// How many chunks of a file are compressed at once on the runtime's
+    /// blocking pool (br-asupersync-t1fblr.25; at least 1, default
+    /// [`codec::DEFAULT_COMPRESSION_PARALLELISM`]). It changes speed, never
+    /// what [`CompressionMode::Zstd`] sends.
+    pub compression_parallelism: usize,
+}
+
+impl Default for SendOptions {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SendOptions {
@@ -3121,6 +3452,7 @@ impl SendOptions {
     pub const fn new() -> Self {
         Self {
             compression: CompressionMode::Off,
+            compression_parallelism: codec::DEFAULT_COMPRESSION_PARALLELISM,
         }
     }
 
@@ -3130,6 +3462,237 @@ impl SendOptions {
         self.compression = compression;
         self
     }
+
+    /// These options compressing up to `chunks` chunks at once (0 counts as
+    /// 1).
+    #[must_use]
+    pub const fn with_compression_parallelism(mut self, chunks: usize) -> Self {
+        self.compression_parallelism = chunks;
+        self
+    }
+}
+
+/// Files hashed by one blocking task of the sender's first pass, at most
+/// (br-asupersync-dfdwyt).
+const HASH_BATCH_FILES: usize = 64;
+
+/// Bytes one first-pass hashing task reads, at most, plus one read. The
+/// task stops there even inside a file, which the next task resumes, so a
+/// dropped transfer stops reading within one task.
+const HASH_BATCH_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Entries whose metadata one blocking task of the first pass reads.
+const METADATA_BATCH_ENTRIES: usize = 1024;
+
+/// The size, content id and SHA-256 of one entry's content.
+type ContentDigest = (u64, ObjectId, [u8; 32]);
+
+/// The primary entry of each hardlinked inode seen so far.
+type HardlinkPrimaries = std::collections::HashMap<HardlinkIdentity, String>;
+
+/// What one hashing task returns: the finished digests, the next content
+/// job, and the file it stopped inside, if any.
+type HashTaskOutcome = (
+    Vec<(usize, ContentDigest)>,
+    usize,
+    Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+);
+
+/// Reads the policy-selected metadata of `entries` and detects hardlinks:
+/// the first entry (by sorted path) for an inode is the primary that carries
+/// the content, and later entries sharing it are sent content-free and
+/// `hard_link`ed on the receiver. `primaries` carries over between calls.
+/// Symlink metadata is validated as the receiver will.
+fn capture_entry_metadata_sync(
+    entries: &[(String, PathBuf)],
+    policy: &MetadataPolicy,
+    preserve_hardlinks: bool,
+    primaries: &mut HardlinkPrimaries,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    use crate::net::atp::transport_common::metadata::{
+        inode_key_if_regular_sync, read_entry_metadata_sync,
+    };
+    let mut metadatas = Vec::with_capacity(entries.len());
+    for (rel_path, abs_path) in entries {
+        let mut metadata = read_entry_metadata_sync(abs_path, policy)?;
+        if preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
+            if let Some(key) = inode_key_if_regular_sync(abs_path)? {
+                if let Some(primary) = primaries.get(&key) {
+                    metadata.hardlink_target = Some(primary.clone());
+                } else {
+                    primaries.insert(key, rel_path.clone());
+                }
+            }
+        }
+        validate_symlink_metadata_for_receive(rel_path, &metadata).map_err(|error| {
+            TransportError::Source(format!(
+                "{}: invalid symlink metadata: {error}",
+                abs_path.display()
+            ))
+        })?;
+        metadatas.push(metadata);
+    }
+    Ok(metadatas)
+}
+
+/// The metadata half of the sender's first pass (br-asupersync-dfdwyt), in
+/// blocking tasks of [`METADATA_BATCH_ENTRIES`] entries with a cancellation
+/// checkpoint between them.
+async fn capture_entry_metadata(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    config: &TransferConfig,
+) -> Result<Vec<EntryMetadata>, TransportError> {
+    let mut metadatas = Vec::with_capacity(entries.len());
+    let mut primaries = HardlinkPrimaries::new();
+    for batch in entries.chunks(METADATA_BATCH_ENTRIES) {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let policy = config.metadata_policy.clone();
+        let preserve_hardlinks = config.preserve_hardlinks;
+        let paths: Vec<(String, PathBuf)> = batch
+            .iter()
+            .map(|entry| (entry.rel_path.clone(), entry.abs_path.clone()))
+            .collect();
+        let (result, carried) = crate::runtime::spawn_blocking(move || {
+            let result =
+                capture_entry_metadata_sync(&paths, &policy, preserve_hardlinks, &mut primaries);
+            (result, primaries)
+        })
+        .await;
+        primaries = carried;
+        metadatas.extend(result?);
+    }
+    Ok(metadatas)
+}
+
+/// Paths the first pass opened, for tests that check which files it read.
+#[cfg(test)]
+static FIRST_PASS_OPENS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// One blocking task of the sender's first pass (br-asupersync-dfdwyt).
+///
+/// It hashes the content `jobs` from `next` on, resuming `open` (a file an
+/// earlier task stopped inside). It stops after [`HASH_BATCH_FILES`] files;
+/// after [`HASH_BATCH_BYTES`] bytes, possibly inside a file, which it returns
+/// open; or right after the file that takes `total` past `max`, so no later
+/// file is opened.
+fn hash_task(
+    jobs: &[(usize, PathBuf)],
+    mut next: usize,
+    mut open: Option<crate::net::atp::transport_common::streaming::SyncFileHash>,
+    buf: &mut [u8],
+    mut total: u64,
+    max: u64,
+) -> Result<HashTaskOutcome, StreamingError> {
+    use crate::net::atp::transport_common::streaming::SyncFileHash;
+
+    let mut done = Vec::new();
+    let mut read = 0u64;
+    while let Some((index, path)) = jobs.get(next) {
+        if done.len() >= HASH_BATCH_FILES || read >= HASH_BATCH_BYTES {
+            break;
+        }
+        let mut file = match open.take() {
+            Some(file) => file,
+            None => {
+                #[cfg(test)]
+                {
+                    if let Ok(mut opens) = FIRST_PASS_OPENS.lock() {
+                        opens.push(path.clone());
+                    }
+                }
+                SyncFileHash::open(path)?
+            }
+        };
+        let n = file.read_some(path, buf)?;
+        if n > 0 {
+            read = read.saturating_add(n as u64);
+            open = Some(file);
+            continue;
+        }
+        let digest = file.finish();
+        total = total.saturating_add(digest.0);
+        done.push((*index, digest));
+        next += 1;
+        if total > max {
+            break;
+        }
+    }
+    Ok((done, next, open))
+}
+
+/// The content half of the sender's first pass (br-asupersync-dfdwyt): the
+/// digest of every entry that carries content, `None` for the rest.
+///
+/// - Only regular files that are not hardlinks to a primary carry content,
+///   so a FIFO is never opened (it would block the sender).
+/// - Files are hashed in blocking tasks ([`hash_task`]) of at most
+///   [`HASH_BATCH_FILES`] files or [`HASH_BATCH_BYTES`] bytes, with a
+///   cancellation checkpoint between tasks.
+/// - As before, the transfer is refused with `TooLarge`, carrying the total
+///   through the end of the first file that takes it past
+///   `max_transfer_bytes`, before any later file is opened.
+///
+/// `buf` (the send phase's read buffer) is the tasks' read buffer.
+async fn hash_content_entries(
+    cx: &Cx,
+    entries: &[SourceEntry],
+    metadatas: &[EntryMetadata],
+    config: &TransferConfig,
+    buf: &mut Vec<u8>,
+) -> Result<Vec<Option<ContentDigest>>, TransportError> {
+    let jobs: std::sync::Arc<Vec<(usize, PathBuf)>> = std::sync::Arc::new(
+        entries
+            .iter()
+            .zip(metadatas)
+            .enumerate()
+            .filter(|(_, (_, metadata))| {
+                matches!(metadata.file_kind, FileKind::Regular)
+                    && metadata.hardlink_target.is_none()
+            })
+            .map(|(index, (entry, _))| (index, entry.abs_path.clone()))
+            .collect(),
+    );
+    let mut hashed: Vec<Option<ContentDigest>> = std::iter::repeat_with(|| None)
+        .take(entries.len())
+        .collect();
+    if jobs.is_empty() {
+        return Ok(hashed);
+    }
+    // The opens below are std::fs on the blocking pool: check the same gate
+    // crate::fs::File::open checks.
+    crate::cx::io_gate::require_ambient_io("fs::File::open")
+        .map_err(|error| TransportError::Source(format!("source hashing: {error}")))?;
+    let max = config.max_transfer_bytes;
+    let mut task_buf = std::mem::take(buf);
+    if task_buf.is_empty() {
+        task_buf = vec![0u8; config.chunk_size.max(1)];
+    }
+    let (mut total, mut next, mut open) = (0u64, 0usize, None);
+    while next < jobs.len() {
+        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        let task_jobs = std::sync::Arc::clone(&jobs);
+        let mut moved_buf = std::mem::take(&mut task_buf);
+        let moved_open = open.take();
+        let (outcome, returned_buf) = crate::runtime::spawn_blocking(move || {
+            let outcome = hash_task(&task_jobs, next, moved_open, &mut moved_buf, total, max);
+            (outcome, moved_buf)
+        })
+        .await;
+        task_buf = returned_buf;
+        let (done, after, still_open) = outcome?;
+        for (index, digest) in done {
+            total = total.saturating_add(digest.0);
+            if total > max {
+                return Err(TransportError::TooLarge { size: total, max });
+            }
+            hashed[index] = Some(digest);
+        }
+        next = after;
+        open = still_open;
+    }
+    *buf = task_buf;
+    Ok(hashed)
 }
 
 /// Like [`send_path_filtered`], with [`SendOptions`].
@@ -3151,6 +3714,7 @@ pub async fn send_path_with_options(
     mut on_progress: impl FnMut(u64, u64) + Send,
 ) -> Result<SendReport, TransportError> {
     cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+    sender_validation::validate_config(&config)?;
 
     let (root_name, is_directory, mut entries) =
         collect_entries_with_policy(source, &config.metadata_policy).await?;
@@ -3170,72 +3734,37 @@ pub async fn send_path_with_options(
         None
     };
 
-    // First pass: stream each file off disk to compute its size, content id, and
-    // SHA-256 incrementally. `read_buf` is the only data-sized allocation and is
-    // reused across files, so peak memory is `chunk_size`, not the transfer size.
+    // First pass (br-asupersync-dfdwyt). Every awaited file operation is a
+    // blocking-pool handoff, and on a loaded host each one waits for a
+    // scheduler wakeup: a small file used to cost about five here (metadata,
+    // inode key, open, two reads). So metadata is read in blocking tasks of
+    // many entries, as the QUIC sender's pass 1 does (br-asupersync-i7pdxb),
+    // and content is hashed in blocking tasks of many files, each bounded in
+    // bytes, with a cancellation checkpoint between tasks. `read_buf` is the
+    // send phase's buffer and the hashing tasks'; peak memory stays one chunk
+    // per side.
     let mut read_buf = vec![0u8; config.chunk_size.max(1)];
+    let metadatas = capture_entry_metadata(cx, &entries, &config).await?;
+    let hashed = hash_content_entries(cx, &entries, &metadatas, &config, &mut read_buf).await?;
     let mut digests: Vec<EntryDigest> = Vec::with_capacity(entries.len());
-    let mut metadatas: Vec<EntryMetadata> = Vec::with_capacity(entries.len());
     let mut total_bytes: u64 = 0;
-    // Hardlink detection: the first entry (by sorted path) for a given inode is
-    // the primary that carries the content; later entries sharing the inode are
-    // hardlinks to it (sent content-free, `hard_link`ed on the receiver).
-    let mut hardlink_primary: std::collections::HashMap<HardlinkIdentity, String> =
-        std::collections::HashMap::new();
-    for entry in &entries {
-        cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
-        let mut metadata = read_entry_metadata(&entry.abs_path, &config.metadata_policy).await?;
-        if config.preserve_hardlinks && matches!(metadata.file_kind, FileKind::Regular) {
-            if let Some(key) =
-                crate::net::atp::transport_common::metadata::inode_key_if_regular(&entry.abs_path)
-                    .await?
-            {
-                if let Some(primary) = hardlink_primary.get(&key) {
-                    metadata.hardlink_target = Some(primary.clone());
-                } else {
-                    hardlink_primary.insert(key, entry.rel_path.clone());
-                }
-            }
-        }
-        validate_symlink_metadata_for_receive(&entry.rel_path, &metadata).map_err(|error| {
-            TransportError::Source(format!(
-                "{}: invalid symlink metadata: {error}",
-                entry.abs_path.display()
-            ))
-        })?;
-        // Only regular files carry content bytes. Symlinks (target in
-        // `metadata`), empty directories, special files (FIFO/socket/device),
-        // and hardlinks-to-a-primary are zero-content — crucially this avoids
-        // `hash_file_streaming` opening a FIFO, which would block the sender.
-        let zero_content =
-            !matches!(metadata.file_kind, FileKind::Regular) || metadata.hardlink_target.is_some();
-        let (size, content_id, content_sha256) = if zero_content {
-            // Emit the canonical empty-content digest so the receiver — which
-            // sees zero ObjectData frames for this entry — reconstructs the same
-            // digest.
-            let empty_sha: [u8; 32] = Sha256::digest(b"").into();
+    for (entry, digest) in entries.iter().zip(hashed) {
+        // Zero-content entries carry the canonical empty-content digest, which
+        // the receiver, seeing no ObjectData frames for them, reconstructs.
+        let (size, content_id, content_sha256) = digest.unwrap_or_else(|| {
             (
                 0u64,
                 ObjectId::content(ContentId::from_bytes(b"")),
-                empty_sha,
+                Sha256::digest(b"").into(),
             )
-        } else {
-            hash_file_streaming(&entry.abs_path, &mut read_buf).await?
-        };
+        });
         total_bytes = total_bytes.saturating_add(size);
-        if total_bytes > config.max_transfer_bytes {
-            return Err(TransportError::TooLarge {
-                size: total_bytes,
-                max: config.max_transfer_bytes,
-            });
-        }
         digests.push(EntryDigest {
             rel_path: entry.rel_path.clone(),
             size,
             content_id,
             content_sha256,
         });
-        metadatas.push(metadata);
     }
 
     let merkle_root_hex = flat_merkle_root_from_digests(&digests);
@@ -3304,6 +3833,8 @@ pub async fn send_path_with_options(
         },
     )?;
     let offer = codec::local_offer(options.compression, config.chunk_size);
+    transport.compression = options.compression;
+    transport.compression_parallelism = options.compression_parallelism;
     if let Some(offer) = &offer {
         hello
             .header
@@ -3369,6 +3900,7 @@ pub async fn send_path_with_options(
         });
     }
     let delta_request: DeltaObjectRequest = parse_json(&request_frame)?;
+    sender_validation::validate_request(&manifest, &delta_request)?;
 
     // Bulk data, entry by entry — second streaming pass. For a delta request,
     // only receiver-missing chunks are re-read and framed. Otherwise this is the
@@ -3439,14 +3971,7 @@ pub async fn send_path_with_options(
     )
     .await;
 
-    if !receipt.committed {
-        return Err(TransportError::Integrity(
-            receipt
-                .reason
-                .clone()
-                .unwrap_or_else(|| "receiver did not commit".to_string()),
-        ));
-    }
+    sender_validation::validate_receipt(&manifest, bytes_sent, &receipt)?;
 
     Ok(SendReport {
         transfer_id,
@@ -3459,6 +3984,9 @@ pub async fn send_path_with_options(
         peer,
     })
 }
+
+mod delta_manifest_validation;
+mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
     let mut hasher = Sha256::new();
@@ -3563,6 +4091,11 @@ impl StagingFileGuard {
         self.armed = false;
         crate::fs::File::from_std(file)
     }
+
+    /// Keeps the staging file, which the caller has already closed.
+    fn keep(mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for StagingFileGuard {
@@ -3578,6 +4111,28 @@ async fn create_owned_staging_file(path: &Path) -> Result<crate::fs::File, Trans
     let path = path.to_owned();
     let guard = crate::runtime::spawn_blocking_io(move || StagingFileGuard::create(path)).await?;
     Ok(guard.into_async_file())
+}
+
+/// Creates the staging file at `path` holding `contents` in one blocking
+/// call: the same create as [`create_owned_staging_file`], then the write and
+/// the close, which were a blocking-pool handoff each (br-asupersync-dfdwyt).
+/// A failed write removes the file, and so does dropping this future before
+/// the call returns.
+async fn write_whole_staging_file(path: &Path, contents: &[u8]) -> Result<(), TransportError> {
+    use std::io::Write as _;
+
+    let path = path.to_owned();
+    let contents = contents.to_vec();
+    let guard = crate::runtime::spawn_blocking_io(move || {
+        let mut guard = StagingFileGuard::create(path)?;
+        if let Some(mut file) = guard.file.take() {
+            file.write_all(&contents)?;
+        }
+        Ok(guard)
+    })
+    .await?;
+    guard.keep();
+    Ok(())
 }
 
 async fn receive_delta_chunks_and_commit<S>(
@@ -4062,7 +4617,10 @@ where
         .enumerate()
         .map(|(i, _)| StagedEntryReceive::new(staging_dir.join(i.to_string())))
         .collect();
-    let mut active: Option<(usize, crate::fs::File)> = None;
+    // The entry being received and its open staging file. The file is `None`
+    // for an entry that arrived whole in one frame and is already written
+    // and closed.
+    let mut active: Option<(usize, Option<crate::fs::File>)> = None;
     let mut received: u64 = 0;
     // Holds one decompressed chunk at a time (at most MAX_COMPRESSED_CHUNK_RAW).
     let mut raw_scratch = Vec::new();
@@ -4099,10 +4657,11 @@ where
                     // begins (the sender streams entries in index order).
                     let switch = matches!(&active, Some((cur, _)) if *cur != idx);
                     if switch {
-                        if let Some((_, mut file)) = active.take() {
+                        if let Some((_, Some(mut file))) = active.take() {
                             file.flush().await?;
                         }
                     }
+                    let mut whole_file = false;
                     if active.is_none() {
                         let st = &mut states[idx];
                         if st.created {
@@ -4115,13 +4674,21 @@ where
                                 "ObjectData entry {index} starts at offset {offset}, expected 0"
                             )));
                         }
-                        let file = create_owned_staging_file(&st.staging_path).await?;
-                        // Pre-size a sparse file to the full length so holes
-                        // (seeked-over zero runs) and a trailing hole are
-                        // preserved without growing allocation.
-                        if config.sparse_files {
-                            file.set_len(entry.size).await?;
-                        }
+                        // A file whose whole content is this frame is created,
+                        // written and closed in one blocking call below.
+                        whole_file = !config.sparse_files && chunk.len() as u64 == entry.size;
+                        let file = if whole_file {
+                            None
+                        } else {
+                            let file = create_owned_staging_file(&st.staging_path).await?;
+                            // Pre-size a sparse file to the full length so holes
+                            // (seeked-over zero runs) and a trailing hole are
+                            // preserved without growing allocation.
+                            if config.sparse_files {
+                                file.set_len(entry.size).await?;
+                            }
+                            Some(file)
+                        };
                         st.mark_created();
                         active = Some((idx, file));
                     }
@@ -4154,10 +4721,23 @@ where
                             "internal: no active staging file for entry {index}"
                         )));
                     };
-                    if config.sparse_files {
-                        write_sparse_zero_runs(file, chunk).await?;
-                    } else {
-                        file.write_all(chunk).await?;
+                    match file {
+                        _ if whole_file => {
+                            write_whole_staging_file(&states[idx].staging_path, chunk).await?;
+                        }
+                        Some(file) if config.sparse_files => {
+                            write_sparse_zero_runs(file, chunk).await?;
+                        }
+                        Some(file) => file.write_all(chunk).await?,
+                        // An entry that arrived whole already holds all its
+                        // bytes; the size check above admits only an empty
+                        // chunk, and any other would be lost, so refuse it.
+                        None if chunk.is_empty() => {}
+                        None => {
+                            return Err(TransportError::Frame(format!(
+                                "internal: entry {index} was already staged whole"
+                            )));
+                        }
                     }
                     let st = &mut states[idx];
                     st.update_with_chunk(chunk);
@@ -4178,7 +4758,7 @@ where
                 }
             }
         }
-        if let Some((_, mut file)) = active.take() {
+        if let Some((_, Some(mut file))) = active.take() {
             file.flush().await?;
         }
         Ok(())
@@ -4238,12 +4818,46 @@ where
             // Each committed file's directory is fsynced once, after the loop
             // and before the receipt, instead of after every rename (r02ssd).
             let mut parent_syncs = DeferredParentSyncs::default();
+            // Plain regular files commit in batches, one blocking call each
+            // (dfdwyt).
+            #[cfg(not(windows))]
+            let mut regular_batch = Vec::new();
             for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
                 let out_path = if manifest.is_directory {
                     join_relative(&base, &entry.rel_path)?
                 } else {
                     base.clone()
                 };
+                #[cfg(not(windows))]
+                if is_plain_regular_entry(entry.metadata.as_ref()) {
+                    regular_batch.push(RegularCommit {
+                        out_path,
+                        staging_path: staging_path.clone(),
+                        metadata: entry.metadata.clone(),
+                    });
+                    if regular_batch.len() == REGULAR_COMMIT_BATCH {
+                        commit_regular_entries(
+                            cx,
+                            &base,
+                            std::mem::take(&mut regular_batch),
+                            &mut parent_syncs,
+                            &mut committed_paths,
+                        )
+                        .await?;
+                    }
+                    continue;
+                }
+                // Any other entry may depend on an earlier one (a hardlink's
+                // primary), so the files batched before it commit first.
+                #[cfg(not(windows))]
+                commit_regular_entries(
+                    cx,
+                    &base,
+                    std::mem::take(&mut regular_batch),
+                    &mut parent_syncs,
+                    &mut committed_paths,
+                )
+                .await?;
                 reject_entry_destination_link_prefixes(
                     &base,
                     &out_path,
@@ -4358,6 +4972,15 @@ where
                 }
                 committed_paths.push(out_path);
             }
+            #[cfg(not(windows))]
+            commit_regular_entries(
+                cx,
+                &base,
+                regular_batch,
+                &mut parent_syncs,
+                &mut committed_paths,
+            )
+            .await?;
             parent_syncs.sync().await?;
             mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             apply_directory_metadata_best_effort(cx, &base, &manifest).await?;
@@ -4560,6 +5183,33 @@ async fn reject_destination_link_prefix_cached(
     verified: &mut BTreeSet<PathBuf>,
     include_leaf: bool,
 ) -> Result<(), TransportError> {
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, verified, include_leaf)?;
+    // The whole chain is checked in one blocking call, in the same order as
+    // before. One call per component cost about 20 blocking-pool handoffs per
+    // received file (br-asupersync-dfdwyt). The components before an unsafe
+    // one are still checked first.
+    if !pending.is_empty() {
+        crate::runtime::spawn_blocking(move || check_link_prefixes_sync(&pending)).await?;
+    }
+    unsafe_component.map_or(Ok(()), Err)
+}
+
+fn check_link_prefixes_sync(paths: &[PathBuf]) -> Result<(), TransportError> {
+    paths
+        .iter()
+        .try_for_each(|path| reject_existing_link_or_reparse_sync(path))
+}
+
+/// The paths `reject_destination_link_prefix_cached` checks, in order, each
+/// added to `verified`, plus the error for a component that is not a plain
+/// name, which is raised only after those checks pass.
+fn collect_link_prefix_checks(
+    base: &Path,
+    out_path: &Path,
+    verified: &mut BTreeSet<PathBuf>,
+    include_leaf: bool,
+) -> Result<(Vec<PathBuf>, Option<TransportError>), TransportError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         TransportError::Source(format!(
             "destination path {} is outside safe base {}",
@@ -4573,39 +5223,164 @@ async fn reject_destination_link_prefix_cached(
     // would then follow the substituted ancestor and see an apparently normal
     // tree. Per-entry guards use a fresh cache, so this revalidates the complete
     // outer chain immediately before each mutation.
+    let mut pending = Vec::new();
     for ancestor in base
         .ancestors()
         .skip(1)
         .filter(|path| !path.as_os_str().is_empty())
     {
         if verified.insert(ancestor.to_path_buf()) {
-            reject_existing_link_or_reparse(ancestor).await?;
+            pending.push(ancestor.to_path_buf());
         }
     }
 
     let components = rel.components().collect::<Vec<_>>();
     let mut current = base.to_path_buf();
     if (include_leaf || !components.is_empty()) && verified.insert(current.clone()) {
-        reject_existing_link_or_reparse(&current).await?;
+        pending.push(current.clone());
     }
     let component_count = components.len();
+    let mut unsafe_component = None;
     for (index, component) in components.into_iter().enumerate() {
         let Component::Normal(component) = component else {
-            return Err(TransportError::Source(format!(
+            unsafe_component = Some(TransportError::Source(format!(
                 "unsafe destination component in {}",
                 out_path.display()
             )));
+            break;
         };
         current.push(component);
         if (include_leaf || index + 1 < component_count) && verified.insert(current.clone()) {
-            reject_existing_link_or_reparse(&current).await?;
+            pending.push(current.clone());
         }
     }
-    Ok(())
+    Ok((pending, unsafe_component))
+}
+
+/// [`reject_entry_destination_link_prefixes`] for a plain regular file (no
+/// hardlink, not a symlink leaf), for a caller already on a blocking thread:
+/// a fresh cache and the same checks in the same order.
+#[cfg(not(windows))]
+fn reject_regular_destination_link_prefixes_sync(
+    base: &Path,
+    out_path: &Path,
+) -> Result<(), TransportError> {
+    let mut verified = BTreeSet::new();
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, &mut verified, true)?;
+    check_link_prefixes_sync(&pending)?;
+    unsafe_component.map_or(Ok(()), Err)
+}
+
+/// Plain regular files committed per blocking call (br-asupersync-dfdwyt).
+#[cfg(not(windows))]
+const REGULAR_COMMIT_BATCH: usize = 64;
+
+/// A plain regular entry waiting to commit with the others of its batch.
+#[cfg(not(windows))]
+struct RegularCommit {
+    out_path: PathBuf,
+    staging_path: PathBuf,
+    metadata: Option<EntryMetadata>,
+}
+
+/// One regular file's commit on a blocking thread: the destination's
+/// link-prefix walk, creating its parent, the walk again, the staged
+/// install, then the captured metadata. That is the order the general
+/// commit path runs them in. The metadata result is returned so the caller
+/// traces it; a metadata failure never fails the commit.
+#[cfg(not(windows))]
+fn commit_regular_entry_sync(
+    base: &Path,
+    file: &RegularCommit,
+) -> Result<Option<Result<MetadataApplyReport, StreamingError>>, TransportError> {
+    reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
+    if let Some(parent) = file.out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
+    install_staged_regular_file_sync(&file.staging_path, &file.out_path)?;
+    Ok(file
+        .metadata
+        .as_ref()
+        .map(|meta| apply_entry_metadata_sync(&file.out_path, meta)))
+}
+
+/// Commits a run of plain regular files in one blocking call
+/// (br-asupersync-dfdwyt). Each file was one call of its own, after eight
+/// separate handoffs per file before that. The files commit in order, and
+/// the first failure stops the run: the files before it stay committed, are
+/// recorded for the deferred parent sync and pushed to `committed_paths`,
+/// exactly as one-by-one commits leave them, and the error is returned. A
+/// receive dropped while the call runs lets the rest of its run commit.
+#[cfg(not(windows))]
+async fn commit_regular_entries(
+    cx: &Cx,
+    base: &Path,
+    files: Vec<RegularCommit>,
+    parent_syncs: &mut DeferredParentSyncs,
+    committed_paths: &mut Vec<PathBuf>,
+) -> Result<(), TransportError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let base_path = base.to_path_buf();
+    let (committed, failure) = crate::runtime::spawn_blocking(move || {
+        let mut committed = Vec::with_capacity(files.len());
+        for file in files {
+            match commit_regular_entry_sync(&base_path, &file) {
+                Ok(applied) => committed.push((file.out_path, applied)),
+                Err(error) => return (committed, Some(error)),
+            }
+        }
+        (committed, None)
+    })
+    .await;
+    for (out_path, applied) in committed {
+        parent_syncs.record(&out_path);
+        if let Some(applied) = applied {
+            trace_entry_metadata_result(cx, &out_path, applied);
+        }
+        committed_paths.push(out_path);
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+/// One regular file through [`commit_regular_entries`].
+#[cfg(all(test, not(windows)))]
+async fn commit_regular_entry(
+    cx: &Cx,
+    base: &Path,
+    out_path: &Path,
+    staging_path: &Path,
+    metadata: Option<&EntryMetadata>,
+    parent_syncs: &mut DeferredParentSyncs,
+) -> Result<(), TransportError> {
+    let file = RegularCommit {
+        out_path: out_path.to_path_buf(),
+        staging_path: staging_path.to_path_buf(),
+        metadata: metadata.cloned(),
+    };
+    commit_regular_entries(cx, base, vec![file], parent_syncs, &mut Vec::new()).await
+}
+
+/// Whether `metadata` describes a plain regular file, the entries
+/// [`commit_regular_entries`] commits: not special, not a directory or a
+/// symlink, and not a hardlink to an earlier entry.
+#[cfg(not(windows))]
+fn is_plain_regular_entry(metadata: Option<&EntryMetadata>) -> bool {
+    metadata.is_none_or(|metadata| {
+        matches!(metadata.file_kind, FileKind::Regular) && metadata.hardlink_target.is_none()
+    })
 }
 
 async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {
-    match path_is_link_or_reparse(path).await {
+    let path = path.to_path_buf();
+    crate::runtime::spawn_blocking(move || reject_existing_link_or_reparse_sync(&path)).await
+}
+
+fn reject_existing_link_or_reparse_sync(path: &Path) -> Result<(), TransportError> {
+    match path_is_link_or_reparse_sync(path) {
         Ok(true) => Err(TransportError::Source(format!(
             "destination path crosses existing symlink or reparse point: {}",
             path.display()
@@ -4718,2301 +5493,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Test scratch dir whose path has no symlinked ancestors.
-    ///
-    /// macOS `$TMPDIR` lives under `/var`, and `/var -> /private/var` is an
-    /// OS-level symlink. The ATP destination traversal defense correctly
-    /// rejects any symlinked ancestor, so scratch roots are canonicalized
-    /// before paths are handed to transfers.
-    fn canonical_test_root(name: &str) -> std::path::PathBuf {
-        let base = std::env::temp_dir().join(format!(
-            "{}-{}-{}",
-            name,
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create test root");
-        base.canonicalize().expect("canonicalize test root")
-    }
-
-    #[test]
-    fn content_delta_accepts_only_ordinary_windows_file_attributes() {
-        for attributes in [None, Some(0), Some(0x0000_0020)] {
-            assert!(metadata_is_content_delta_compatible(&EntryMetadata {
-                windows_attributes: attributes,
-                ..EntryMetadata::default()
-            }));
-        }
-
-        for attributes in [0x0000_0001, 0x0000_0002, 0x0000_0004, 0x0000_2000] {
-            assert!(!metadata_is_content_delta_compatible(&EntryMetadata {
-                windows_attributes: Some(attributes),
-                ..EntryMetadata::default()
-            }));
-        }
-    }
-
-    #[test]
-    fn content_delta_accepts_committed_regular_file_metadata() {
-        assert!(metadata_is_content_delta_compatible(&EntryMetadata {
-            unix_mode: Some(0o644),
-            mtime_unix_secs: Some(1),
-            mtime_nanos: Some(2),
-            uid: Some(1000),
-            gid: Some(1000),
-            ..EntryMetadata::default()
-        }));
-    }
-
-    #[test]
-    fn content_delta_rejects_structural_or_unreplayed_metadata() {
-        assert!(!metadata_is_content_delta_compatible(&EntryMetadata {
-            xattrs: BTreeMap::from([("user.test".to_string(), b"value".to_vec())]),
-            ..EntryMetadata::default()
-        }));
-        assert!(!metadata_is_content_delta_compatible(&EntryMetadata {
-            hardlink_target: Some("primary.bin".to_string()),
-            ..EntryMetadata::default()
-        }));
-        assert!(!metadata_is_content_delta_compatible(&EntryMetadata {
-            file_kind: FileKind::Symlink,
-            symlink_target: Some("target.bin".to_string()),
-            ..EntryMetadata::default()
-        }));
-    }
-
-    #[test]
-    fn unchanged_content_requires_receiver_metadata_to_match_sender() {
-        let expected = EntryMetadata {
-            mtime_unix_secs: Some(10),
-            mtime_nanos: Some(20),
-            windows_attributes: Some(0x0000_0020),
-            ..EntryMetadata::default()
-        };
-        let entries = vec![ManifestEntry {
-            index: 0,
-            rel_path: "payload.bin".to_string(),
-            size: 0,
-            sha256_hex: hex_encode(&Sha256::digest([])),
-            metadata: Some(expected.clone()),
-            members: Vec::new(),
-        }];
-        let matching = BTreeMap::from([("payload.bin".to_string(), expected.clone())]);
-        assert!(receiver_metadata_matches_sender(&entries, &matching));
-
-        let mut changed = expected;
-        changed.mtime_nanos = Some(21);
-        let mismatched = BTreeMap::from([("payload.bin".to_string(), changed)]);
-        assert!(!receiver_metadata_matches_sender(&entries, &mismatched));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn delta_metadata_comparison_ignores_unmaterializable_unix_fields_on_windows() {
-        let expected = EntryMetadata {
-            unix_mode: Some(0o640),
-            uid: Some(1000),
-            gid: Some(1000),
-            ..EntryMetadata::default()
-        };
-        let observed = EntryMetadata {
-            windows_attributes: Some(0x0000_0020),
-            ..EntryMetadata::default()
-        };
-        assert!(receiver_materializable_metadata_matches(
-            &expected, &observed
-        ));
-
-        let expected_directories = DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                unix_mode: Some(0o750),
-                ..EntryMetadata::default()
-            }),
-            entries: Vec::new(),
-        };
-        assert!(receiver_directory_metadata_matches_sender(
-            Some(&expected_directories),
-            None
-        ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn delta_metadata_comparison_ignores_unmaterializable_windows_fields_on_unix() {
-        let expected = EntryMetadata {
-            windows_attributes: Some(0x0000_0020),
-            ..EntryMetadata::default()
-        };
-        let observed = EntryMetadata {
-            unix_mode: Some(0o640),
-            uid: Some(1000),
-            gid: Some(1000),
-            ..EntryMetadata::default()
-        };
-        assert!(receiver_materializable_metadata_matches(
-            &expected, &observed
-        ));
-
-        let expected_directories = DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                windows_attributes: Some(0x0000_0002),
-                ..EntryMetadata::default()
-            }),
-            entries: Vec::new(),
-        };
-        assert!(receiver_directory_metadata_matches_sender(
-            Some(&expected_directories),
-            None
-        ));
-    }
-
-    #[test]
-    fn flat_graph_is_deterministic_and_order_independent() {
-        let a = vec![
-            ("a.txt".to_string(), b"alpha".to_vec()),
-            ("b.txt".to_string(), b"bravo".to_vec()),
-        ];
-        let b = vec![
-            ("b.txt".to_string(), b"bravo".to_vec()),
-            ("a.txt".to_string(), b"alpha".to_vec()),
-        ];
-        let (_, ra) = build_flat_graph(&a);
-        let (_, rb) = build_flat_graph(&b);
-        assert_eq!(ra, rb, "merkle root must be independent of entry order");
-        assert_eq!(ra.len(), 64, "sha-256 hex root is 64 chars");
-    }
-
-    #[test]
-    fn borrowed_flat_merkle_root_matches_owned_graph_with_duplicate_content() {
-        let entries = vec![
-            ("b.txt".to_string(), b"same".to_vec()),
-            ("a.txt".to_string(), b"same".to_vec()),
-            ("c.txt".to_string(), b"different".to_vec()),
-        ];
-        let borrowed_root = flat_merkle_root_from_slices(
-            entries
-                .iter()
-                .map(|(rel_path, bytes)| (rel_path.as_str(), bytes.as_slice())),
-        );
-        let (_, owned_root) = build_flat_graph(&entries);
-        assert_eq!(
-            borrowed_root, owned_root,
-            "borrowed receive-side hashing must preserve the owned ObjectGraph contract"
-        );
-    }
-
-    #[test]
-    fn flat_graph_detects_content_change() {
-        let a = vec![("x".to_string(), b"one".to_vec())];
-        let b = vec![("x".to_string(), b"two".to_vec())];
-        assert_ne!(build_flat_graph(&a).1, build_flat_graph(&b).1);
-    }
-
-    #[test]
-    fn flat_graph_detects_path_change() {
-        let a = vec![("x".to_string(), b"same".to_vec())];
-        let b = vec![("y".to_string(), b"same".to_vec())];
-        assert_ne!(build_flat_graph(&a).1, build_flat_graph(&b).1);
-    }
-
-    #[test]
-    fn data_frame_roundtrips() {
-        let frame = data_frame(7, 256, b"payload-bytes").unwrap();
-        let (index, offset, chunk) = parse_data_frame(&frame).unwrap();
-        assert_eq!(index, 7);
-        assert_eq!(offset, 256);
-        assert_eq!(chunk, b"payload-bytes");
-    }
-
-    #[test]
-    fn data_frame_rejects_short_header() {
-        let frame = Frame::new(
-            ProtocolVersion::CURRENT,
-            FrameType::ObjectData,
-            vec![0, 1, 2],
-        )
-        .unwrap();
-        assert!(parse_data_frame(&frame).is_err());
-    }
-
-    #[test]
-    fn manifest_json_roundtrips() {
-        let delta_manifest = DeltaManifestWire {
-            schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
-            tree_id: "data".to_string(),
-            chunk_size: 64 * 1024,
-            total_size_bytes: 9,
-            merkle_root_hex: "11".repeat(32),
-            chunks: vec![DeltaChunkWire {
-                index: 0,
-                entry_index: 0,
-                rel_path: "a/b.txt".to_string(),
-                entry_offset: 0,
-                stream_offset: 0,
-                size_bytes: 9,
-                content_id_hex: "22".repeat(32),
-            }],
-        };
-        let manifest = TransferManifest {
-            transfer_id: "abc".to_string(),
-            root_name: "data".to_string(),
-            is_directory: true,
-            total_bytes: 9,
-            merkle_root_hex: "00".repeat(32),
-            metadata_root_hex: None,
-            directory_metadata: None,
-            entries: vec![ManifestEntry {
-                index: 0,
-                rel_path: "a/b.txt".to_string(),
-                size: 9,
-                sha256_hex: "ff".repeat(32),
-                metadata: None,
-                members: Vec::new(),
-            }],
-            delta_manifest: Some(delta_manifest),
-        };
-        let json = serde_json::to_vec(&manifest).unwrap();
-        assert!(
-            !String::from_utf8_lossy(&json).contains("directory_metadata"),
-            "absent directory metadata must preserve the legacy wire shape"
-        );
-        let back: TransferManifest = serde_json::from_slice(&json).unwrap();
-        assert_eq!(manifest, back);
-    }
-
-    #[test]
-    fn delta_object_request_uses_live_tcp_object_request_frame() {
-        let request = DeltaObjectRequest {
-            mode: DeltaWireMode::AlreadyInSync,
-            fallback_reason: None,
-            sender_merkle_root_hex: "33".repeat(32),
-            receiver_merkle_root_hex: Some("44".repeat(32)),
-            missing_bytes: 0,
-            shared_chunks: 1,
-            stale_chunks: 0,
-            missing_chunks: Vec::new(),
-        };
-
-        let frame = json_frame(FrameType::ObjectRequest, &request).expect("frame delta request");
-        assert_eq!(frame.frame_type(), FrameType::ObjectRequest);
-        let decoded: DeltaObjectRequest = parse_json(&frame).expect("parse delta request frame");
-        assert_eq!(decoded, request);
-    }
-
-    #[test]
-    fn json_frame_rejects_oversized_manifest_with_actionable_error() {
-        let manifest = TransferManifest {
-            transfer_id: "abc".to_string(),
-            root_name: "x".repeat(usize::try_from(MAX_FRAME_SIZE).unwrap()),
-            is_directory: true,
-            total_bytes: 0,
-            merkle_root_hex: "00".repeat(32),
-            metadata_root_hex: None,
-            directory_metadata: None,
-            entries: Vec::new(),
-            delta_manifest: None,
-        };
-        assert!(matches!(
-            json_frame(FrameType::ObjectManifest, &manifest),
-            Err(TransportError::Frame(msg))
-                if msg.contains("ObjectManifest")
-                    && msg.contains("split or chunk")
-                    && msg.contains("max")
-        ));
-    }
-
-    #[test]
-    fn transfer_config_defaults_bound_accept_and_idle_waits() {
-        let cfg = TransferConfig::default();
-        assert_eq!(cfg.idle_timeout, DEFAULT_IDLE_TIMEOUT);
-        assert_eq!(cfg.accept_timeout, DEFAULT_ACCEPT_TIMEOUT);
-        assert_eq!(cfg.max_active_connections, DEFAULT_MAX_ACTIVE_CONNECTIONS);
-        assert!(!cfg.idle_timeout.is_zero());
-        assert!(!cfg.accept_timeout.is_zero());
-        assert!(cfg.max_active_connections > 0);
-    }
-
-    #[test]
-    fn timeout_error_names_operation_and_duration() {
-        let err = TransportError::Timeout {
-            operation: "receive frame",
-            timeout: Duration::from_secs(60),
-        };
-        let rendered = err.to_string();
-        assert!(rendered.contains("receive frame"));
-        assert!(rendered.contains("60s"));
-    }
-
-    #[test]
-    fn send_path_rejects_zero_idle_timeout_before_connecting() {
-        let cx = Cx::for_testing();
-        let cfg = TransferConfig {
-            idle_timeout: Duration::ZERO,
-            ..TransferConfig::default()
-        };
-        let addr = "127.0.0.1:9".parse().unwrap();
-        let result =
-            futures_lite::future::block_on(send_path(&cx, addr, Path::new(file!()), cfg, "sender"));
-
-        assert!(matches!(
-            result,
-            Err(TransportError::Timeout {
-                operation: "connect",
-                timeout,
-            }) if timeout.is_zero()
-        ));
-    }
-
-    #[test]
-    fn receive_task_join_error_preserves_cancellation() {
-        let err = receive_task_join_error(crate::runtime::JoinError::Cancelled(
-            crate::types::CancelReason::parent_cancelled(),
-        ));
-        assert!(matches!(err, TransportError::Cancelled));
-    }
-
-    /// Passes a receive's reads and writes through to its TCP stream. Once
-    /// `committed` exists in the destination, the receiver's next write is its
-    /// receipt. Before passing that write through, the stream aborts the
-    /// receive task the way `serve`'s stop path does. With `park_receipt`, the
-    /// receipt write then never completes and registers no wakeup, like a
-    /// socket whose peer has stopped reading.
-    struct AbortAtReceipt {
-        stream: TcpStream,
-        committed: PathBuf,
-        receive: std::sync::Arc<parking_lot::Mutex<Option<ReceiveTaskHandle>>>,
-        receive_cx: Cx,
-        aborted_before_receipt: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        park_receipt: bool,
-    }
-
-    impl crate::io::AsyncRead for AbortAtReceipt {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &mut crate::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_read(task, buf)
-        }
-    }
-
-    impl crate::io::AsyncWrite for AbortAtReceipt {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            let this = self.get_mut();
-            if !this.aborted_before_receipt.load(Ordering::Acquire) && this.committed.exists() {
-                let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                loop {
-                    if let Some(receive) = this.receive.lock().as_ref() {
-                        receive.abort_with_reason(crate::types::CancelReason::parent_cancelled());
-                        break;
-                    }
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the test never published the receive task's handle"
-                    );
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                this.aborted_before_receipt
-                    .store(this.receive_cx.is_cancel_requested(), Ordering::Release);
-            }
-            if this.park_receipt && this.aborted_before_receipt.load(Ordering::Acquire) {
-                return std::task::Poll::Pending;
-            }
-            std::pin::Pin::new(&mut this.stream).poll_write(task, buf)
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
-        }
-    }
-
-    /// What [`stop_at_receipt`] observed.
-    struct StoppedAtReceipt {
-        joined: Result<Result<ReceiveReport, TransportError>, crate::runtime::JoinError>,
-        aborted_before_receipt: bool,
-        receive_time: Duration,
-        sent: Result<SendReport, TransportError>,
-        committed: PathBuf,
-        payload: Vec<u8>,
-    }
-
-    /// A real sender (`send_path`) transfers one file over loopback TCP to a
-    /// receive task whose stream is an [`AbortAtReceipt`], which aborts the task
-    /// at its receipt (and, with `park_receipt`, never delivers it).
-    fn stop_at_receipt(label: &str, park_receipt: bool) -> StoppedAtReceipt {
-        const DEADLINE: Duration = Duration::from_secs(30);
-        let root = canonical_test_root(label);
-        let source = root.join("payload.bin");
-        let payload: Vec<u8> = (0..70_001u32)
-            .map(|index| u8::try_from(index % 251).expect("below 251"))
-            .collect();
-        std::fs::write(&source, &payload).expect("write the source file");
-        let dest = root.join("inbox");
-        std::fs::create_dir_all(&dest).expect("create the destination");
-        let committed = dest.join("payload.bin");
-
-        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
-        let sender = std::thread::spawn(move || {
-            let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
-            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
-                .build()
-                .expect("sender runtime");
-            // A sender whose receipt never comes gives up after its idle
-            // timeout, so keep that short of the test's deadline.
-            let config = TransferConfig {
-                idle_timeout: Duration::from_secs(10),
-                ..TransferConfig::default()
-            };
-            runtime.block_on(runtime.handle().spawn(async move {
-                let cx = Cx::current().expect("sender cx");
-                send_path(&cx, addr, &source, config, "sender").await
-            }))
-        });
-
-        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
-            .build()
-            .expect("receiver runtime");
-        let committed_path = committed.clone();
-        let (joined, aborted_before_receipt, receive_time) =
-            runtime.block_on(runtime.handle().spawn(async move {
-                let cx = Cx::current().expect("receiver cx");
-                let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-                addr_tx
-                    .send(listener.local_addr().expect("listener address"))
-                    .expect("publish the listener address");
-                let (stream, peer) =
-                    with_transport_timeout(&cx, DEADLINE, "accept", listener.accept())
-                        .await
-                        .expect("accept the sender");
-                let receive = std::sync::Arc::new(parking_lot::Mutex::new(None));
-                let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let receive_slot = std::sync::Arc::clone(&receive);
-                let aborted_witness = std::sync::Arc::clone(&aborted);
-                let handle = cx
-                    .spawn(move |child| async move {
-                        let stream = AbortAtReceipt {
-                            stream,
-                            committed: committed_path,
-                            receive: receive_slot,
-                            receive_cx: child.clone(),
-                            aborted_before_receipt: aborted_witness,
-                            park_receipt,
-                        };
-                        receive_on_transport(
-                            &child,
-                            FrameTransport::new(stream),
-                            peer,
-                            &dest,
-                            TransferConfig::default(),
-                            "receiver",
-                        )
-                        .await
-                    })
-                    .expect("spawn the receive task");
-                let started = std::time::Instant::now();
-                *receive.lock() = Some(handle);
-                let deadline = started + DEADLINE;
-                while !receive
-                    .lock()
-                    .as_ref()
-                    .is_some_and(crate::runtime::TaskHandle::is_finished)
-                {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "the receive task did not finish within {DEADLINE:?}"
-                    );
-                    crate::time::sleep(cx.now(), Duration::from_millis(5)).await;
-                }
-                let receive_time = started.elapsed();
-                let mut handle = receive.lock().take().expect("the receive task's handle");
-                (
-                    handle.join(&cx).await,
-                    aborted.load(Ordering::Acquire),
-                    receive_time,
-                )
-            }));
-        let sent = sender.join().expect("sender thread");
-        StoppedAtReceipt {
-            joined,
-            aborted_before_receipt,
-            receive_time,
-            sent,
-            committed,
-            payload,
-        }
-    }
-
-    /// A stop (the receive task's abort, as `serve` issues it) that lands after
-    /// the files are committed must not turn the transfer into a failure on
-    /// both sides: the receipt still reaches the sender, and joining the
-    /// receive task yields the committed report.
-    #[test]
-    fn a_stop_after_the_commit_still_sends_the_receipt_and_reports_the_transfer() {
-        let run = stop_at_receipt("atp-tcp-stop-at-receipt", false);
-        assert!(
-            run.aborted_before_receipt,
-            "the receive task must be aborted after its commit and before its receipt"
-        );
-        let report = match run.joined {
-            Ok(Ok(report)) => report,
-            other => panic!("the receive committed its files, so it must report them: {other:?}"),
-        };
-        assert!(report.committed);
-        assert_eq!(report.committed_paths, vec![run.committed.clone()]);
-        let sent = run.sent.expect("the sender holds the receiver's receipt");
-        assert!(sent.receipt.committed);
-        assert_eq!(
-            std::fs::read(&run.committed).expect("read the committed file"),
-            run.payload
-        );
-    }
-
-    /// The receipt is sent with the stop held off, but a peer that has stopped
-    /// reading must not hold the stop for an idle_timeout (60 s by default) per
-    /// frame. The receive ends RECEIPT_STOP_GRACE after the stop, as cancelled;
-    /// its files stay committed.
-    #[test]
-    fn a_stop_ends_a_receipt_the_peer_does_not_read_after_the_grace() {
-        let run = stop_at_receipt("atp-tcp-stop-at-unread-receipt", true);
-        assert!(
-            run.aborted_before_receipt,
-            "the receive task must be aborted after its commit and before its receipt"
-        );
-        assert!(
-            run.receive_time < RECEIPT_STOP_GRACE + Duration::from_secs(8),
-            "a stop waited {:?} for an unread receipt",
-            run.receive_time
-        );
-        assert!(
-            matches!(
-                run.joined,
-                Ok(Err(TransportError::Cancelled)) | Err(crate::runtime::JoinError::Cancelled(_))
-            ),
-            "an undelivered receipt must end the receive as cancelled: {:?}",
-            run.joined
-        );
-        assert!(
-            run.sent.is_err(),
-            "the sender never received the receipt: {:?}",
-            run.sent
-        );
-        assert_eq!(
-            std::fs::read(&run.committed).expect("read the committed file"),
-            run.payload
-        );
-    }
-
-    /// Passes a receive's reads and writes through to its TCP stream and
-    /// counts the bytes read: what actually crossed the wire to the receiver.
-    #[cfg(feature = "zstd")]
-    struct CountingStream {
-        stream: TcpStream,
-        read: std::sync::Arc<AtomicU64>,
-    }
-
-    #[cfg(feature = "zstd")]
-    impl crate::io::AsyncRead for CountingStream {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &mut crate::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            let this = self.get_mut();
-            let before = buf.filled().len();
-            let polled = std::pin::Pin::new(&mut this.stream).poll_read(task, buf);
-            let read = (buf.filled().len() - before) as u64;
-            this.read.fetch_add(read, Ordering::AcqRel);
-            polled
-        }
-    }
-
-    #[cfg(feature = "zstd")]
-    impl crate::io::AsyncWrite for CountingStream {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_write(task, buf)
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
-        }
-    }
-
-    /// What [`transfer_with_options`] observed.
-    #[cfg(feature = "zstd")]
-    struct OptionsTransfer {
-        sent: Result<SendReport, TransportError>,
-        received: Result<ReceiveReport, TransportError>,
-        /// Bytes the receiver read off the socket.
-        wire_bytes: u64,
-        /// The committed file's bytes (empty if it is missing).
-        committed: Vec<u8>,
-    }
-
-    /// Rewrites one data frame on its way to the receiver.
-    #[cfg(feature = "zstd")]
-    type Tamper = Box<dyn FnOnce(Frame) -> Frame + Send>;
-
-    /// Hands a receive the frames read from `stream`, with the first data
-    /// frame replaced by `tamper`'s: a sender that turns hostile once the
-    /// handshake is over.
-    #[cfg(feature = "zstd")]
-    struct TamperingStream<S> {
-        stream: S,
-        codec: AtpFrameCodec,
-        incoming: BytesMut,
-        outgoing: Vec<u8>,
-        served: usize,
-        tamper: Option<Tamper>,
-    }
-
-    #[cfg(feature = "zstd")]
-    impl<S: crate::io::AsyncRead + Unpin> crate::io::AsyncRead for TamperingStream<S> {
-        fn poll_read(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &mut crate::io::ReadBuf<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            let this = self.get_mut();
-            loop {
-                if this.served < this.outgoing.len() {
-                    let count = buf.remaining().min(this.outgoing.len() - this.served);
-                    buf.put_slice(&this.outgoing[this.served..this.served + count]);
-                    this.served += count;
-                    return std::task::Poll::Ready(Ok(()));
-                }
-                this.outgoing.clear();
-                this.served = 0;
-                while let Some(mut frame) = this
-                    .codec
-                    .decode(&mut this.incoming)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?
-                {
-                    if frame.frame_type() == FrameType::ObjectData
-                        && let Some(tamper) = this.tamper.take()
-                    {
-                        frame = tamper(frame);
-                    }
-                    let bytes = frame
-                        .to_wire_bytes()
-                        .map_err(|error| std::io::Error::other(error.to_string()))?;
-                    this.outgoing.extend_from_slice(&bytes);
-                }
-                if !this.outgoing.is_empty() {
-                    continue;
-                }
-                let mut bytes = [0_u8; 16 * 1024];
-                let mut read = crate::io::ReadBuf::new(&mut bytes);
-                match std::pin::Pin::new(&mut this.stream).poll_read(task, &mut read) {
-                    std::task::Poll::Ready(Ok(())) if read.filled().is_empty() => {
-                        return std::task::Poll::Ready(Ok(()));
-                    }
-                    std::task::Poll::Ready(Ok(())) => {
-                        this.incoming.extend_from_slice(read.filled());
-                    }
-                    other => return other,
-                }
-            }
-        }
-    }
-
-    #[cfg(feature = "zstd")]
-    impl<S: crate::io::AsyncWrite + Unpin> crate::io::AsyncWrite for TamperingStream<S> {
-        fn poll_write(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-            buf: &[u8],
-        ) -> std::task::Poll<std::io::Result<usize>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_write(task, buf)
-        }
-
-        fn poll_flush(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_flush(task)
-        }
-
-        fn poll_shutdown(
-            self: std::pin::Pin<&mut Self>,
-            task: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<std::io::Result<()>> {
-            std::pin::Pin::new(&mut self.get_mut().stream).poll_shutdown(task)
-        }
-    }
-
-    /// A real sender (`send_path_with_options`) transfers `payload` as
-    /// `<root>/payload.bin` over loopback TCP to `receive_on_transport`
-    /// committing into `<root>/inbox`. `receiver_decode` replaces what the
-    /// receiver can decode; an empty capability makes it behave like a
-    /// receiver that predates compression, which never answers an offer.
-    #[cfg(feature = "zstd")]
-    fn transfer_with_options(
-        root: &Path,
-        payload: &[u8],
-        options: SendOptions,
-        receiver_decode: Option<DecodeCapability>,
-    ) -> OptionsTransfer {
-        transfer_through(root, payload, options, receiver_decode, None)
-    }
-
-    /// [`transfer_with_options`], with the sender's first data frame
-    /// rewritten by `tamper` on its way to the receiver.
-    #[cfg(feature = "zstd")]
-    fn transfer_through(
-        root: &Path,
-        payload: &[u8],
-        options: SendOptions,
-        receiver_decode: Option<DecodeCapability>,
-        tamper: Option<Tamper>,
-    ) -> OptionsTransfer {
-        const DEADLINE: Duration = Duration::from_secs(60);
-        let source = root.join("payload.bin");
-        std::fs::write(&source, payload).expect("write the source file");
-        let dest = root.join("inbox");
-        std::fs::create_dir_all(&dest).expect("create the destination");
-
-        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
-        let sender = std::thread::spawn(move || {
-            let addr = addr_rx.recv_timeout(DEADLINE).expect("receiver address");
-            let runtime = crate::runtime::RuntimeBuilder::multi_thread()
-                .build()
-                .expect("sender runtime");
-            runtime.block_on(runtime.handle().spawn(async move {
-                let cx = Cx::current().expect("sender cx");
-                send_path_with_options(
-                    &cx,
-                    addr,
-                    &source,
-                    TransferConfig::default(),
-                    "sender",
-                    &FilterSet::new(),
-                    options,
-                    |_, _| {},
-                )
-                .await
-            }))
-        });
-
-        let wire = std::sync::Arc::new(AtomicU64::new(0));
-        let read = std::sync::Arc::clone(&wire);
-        let dest_dir = dest.clone();
-        let runtime = crate::runtime::RuntimeBuilder::multi_thread()
-            .build()
-            .expect("receiver runtime");
-        let received = runtime.block_on(runtime.handle().spawn(async move {
-            let cx = Cx::current().expect("receiver cx");
-            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-            addr_tx
-                .send(listener.local_addr().expect("listener address"))
-                .expect("publish the listener address");
-            let (stream, peer) = with_transport_timeout(&cx, DEADLINE, "accept", listener.accept())
-                .await
-                .expect("accept the sender");
-            let counting = CountingStream { stream, read };
-            if let Some(tamper) = tamper {
-                let transport = FrameTransport::new(TamperingStream {
-                    stream: counting,
-                    codec: AtpFrameCodec::new(),
-                    incoming: BytesMut::new(),
-                    outgoing: Vec::new(),
-                    served: 0,
-                    tamper: Some(tamper),
-                });
-                return receive_on_transport(
-                    &cx,
-                    transport,
-                    peer,
-                    &dest_dir,
-                    TransferConfig::default(),
-                    "receiver",
-                )
-                .await;
-            }
-            let mut transport = FrameTransport::new(counting);
-            if let Some(decode) = receiver_decode {
-                transport.decode = decode;
-            }
-            receive_on_transport(
-                &cx,
-                transport,
-                peer,
-                &dest_dir,
-                TransferConfig::default(),
-                "receiver",
-            )
-            .await
-        }));
-        let sent = sender.join().expect("sender thread");
-        OptionsTransfer {
-            sent,
-            received,
-            wire_bytes: wire.load(Ordering::Acquire),
-            committed: std::fs::read(dest.join("payload.bin")).unwrap_or_default(),
-        }
-    }
-
-    /// Text-like bytes: words from a small vocabulary, several chunks long.
-    #[cfg(feature = "zstd")]
-    fn compressible_payload(seed: u64, len: usize) -> Vec<u8> {
-        const WORDS: [&str; 8] = [
-            "region ",
-            "obligation ",
-            "cancel ",
-            "scope ",
-            "budget ",
-            "trace ",
-            "join ",
-            "spawn\n",
-        ];
-        let mut state = seed;
-        let mut out = Vec::with_capacity(len + 16);
-        while out.len() < len {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            out.extend_from_slice(WORDS[usize::try_from(state >> 61).expect("3 bits")].as_bytes());
-        }
-        out.truncate(len);
-        out
-    }
-
-    #[cfg(feature = "zstd")]
-    fn assert_delivered(run: &OptionsTransfer, payload: &[u8], what: &str) {
-        assert!(
-            run.sent.is_ok(),
-            "{what}: sender failed: {:?}",
-            run.sent.as_ref().err()
-        );
-        assert!(
-            run.received.is_ok(),
-            "{what}: receiver failed: {:?}",
-            run.received.as_ref().err()
-        );
-        assert!(
-            run.committed == payload,
-            "{what}: committed bytes differ from the source"
-        );
-    }
-
-    /// The receive path refuses a compressed chunk on a session that
-    /// negotiated no codec, before decoding anything, and passes an
-    /// unmarked payload through untouched.
-    #[test]
-    fn a_compressed_chunk_without_a_negotiated_codec_is_refused() {
-        let mut frame = data_frame(0, 0, b"not really compressed").expect("data frame");
-        let mut scratch = Vec::new();
-        let (_, _, payload) = parse_data_frame(&frame).expect("parse");
-        assert_eq!(
-            raw_chunk(&frame, None, 100, payload, &mut scratch).expect("raw payload"),
-            b"not really compressed"
-        );
-        frame.header.extensions.insert(
-            codec::CHUNK_CODEC_EXTENSION,
-            codec::ChunkCodec::new(codec::WireCodec::Zstd, 21).to_bytes(),
-        );
-        let (_, _, payload) = parse_data_frame(&frame).expect("parse");
-        let refused = raw_chunk(&frame, None, 100, payload, &mut scratch);
-        assert!(
-            matches!(&refused, Err(TransportError::Frame(message)) if message.contains("without a negotiated codec")),
-            "{refused:?}"
-        );
-        assert!(scratch.is_empty(), "nothing was decoded");
-    }
-
-    /// A compressed data frame is never larger on the wire than the raw frame
-    /// for the same chunk, whatever the chunk's size and compressibility, so
-    /// a chunk that fits a frame raw also fits compressed.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn a_compressed_frame_is_never_larger_than_the_raw_frame() {
-        let offer = codec::local_offer(CompressionMode::Zstd, DEFAULT_CHUNK_SIZE).unwrap();
-        let accept = codec::negotiate(
-            &codec::local_decode_capability(MAX_COMPRESSED_CHUNK_RAW),
-            &offer,
-        )
-        .unwrap();
-        let mut state = 3_u64;
-        let mut compressed_frames = 0;
-        for len in [1_usize, 16, 17, 30, 64, 100, 300, 1000, 5000, 70_000] {
-            for noise_every in [1_usize, 2, 7, 64, 1000] {
-                let chunk: Vec<u8> = (0..len)
-                    .map(|i| {
-                        state = state
-                            .wrapping_mul(6_364_136_223_846_793_005)
-                            .wrapping_add(1_442_695_040_888_963_407);
-                        if i % noise_every == 0 {
-                            state.to_be_bytes()[0]
-                        } else {
-                            u8::try_from(i % 7).unwrap()
-                        }
-                    })
-                    .collect();
-                let raw = data_frame(0, 0, &chunk).unwrap().to_wire_bytes().unwrap();
-                let frame = chunk_frame(Some(&accept), 0, 0, &chunk).unwrap();
-                if frame
-                    .header
-                    .extensions
-                    .contains_key(&codec::CHUNK_CODEC_EXTENSION)
-                {
-                    compressed_frames += 1;
-                }
-                let framed = frame.to_wire_bytes().unwrap();
-                assert!(
-                    framed.len() <= raw.len(),
-                    "len {len}, noise every {noise_every}: {} > {}",
-                    framed.len(),
-                    raw.len()
-                );
-            }
-        }
-        assert!(compressed_frames > 10, "some chunks were compressed");
-    }
-
-    /// With the default options a sender makes no offer, so its handshake is
-    /// byte-for-byte what senders before compression sent.
-    #[test]
-    fn default_send_options_make_no_offer() {
-        assert_eq!(SendOptions::default(), SendOptions::new());
-        assert_eq!(
-            codec::local_offer(SendOptions::new().compression, DEFAULT_CHUNK_SIZE),
-            None
-        );
-    }
-
-    /// Compression end to end over real TCP: the same compressible file
-    /// crosses the wire in a fraction of its size with zstd and in full
-    /// without, and both commits are byte-identical (the receiver verified
-    /// the raw SHA-256 and merkle root before committing).
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn zstd_chunks_shrink_the_wire_and_commit_identical_bytes() {
-        // Four full chunks and a short one: enough to cross chunk boundaries,
-        // small enough that the unoptimized test build does not starve the
-        // wall-clock-bounded tests running beside it.
-        let payload = compressible_payload(1, 4 * DEFAULT_CHUNK_SIZE + 17);
-        let zstd = transfer_with_options(
-            &canonical_test_root("atp-tcp-zstd-on"),
-            &payload,
-            SendOptions::new().with_compression(CompressionMode::Zstd),
-            None,
-        );
-        assert_delivered(&zstd, &payload, "zstd");
-        let off = transfer_with_options(
-            &canonical_test_root("atp-tcp-zstd-off"),
-            &payload,
-            SendOptions::new(),
-            None,
-        );
-        assert_delivered(&off, &payload, "off");
-        let len = payload.len() as u64;
-        assert!(
-            off.wire_bytes > len,
-            "raw: {} wire bytes for {len}",
-            off.wire_bytes
-        );
-        assert!(
-            zstd.wire_bytes < len / 4,
-            "zstd: {} wire bytes for {len}",
-            zstd.wire_bytes
-        );
-    }
-
-    /// A receiver that cannot decode (like one that predates compression)
-    /// sends no accept, and a sender that offered zstd then sends every
-    /// chunk raw.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn a_receiver_without_a_codec_gets_raw_chunks() {
-        let payload = compressible_payload(2, 300_000);
-        let run = transfer_with_options(
-            &canonical_test_root("atp-tcp-zstd-old-receiver"),
-            &payload,
-            SendOptions::new().with_compression(CompressionMode::Zstd),
-            Some(DecodeCapability::new(0, 0, 0)),
-        );
-        assert_delivered(&run, &payload, "receiver without a codec");
-        assert!(
-            run.wire_bytes > payload.len() as u64,
-            "{} wire bytes",
-            run.wire_bytes
-        );
-    }
-
-    /// Chunks that do not shrink go raw on a compressed session.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn incompressible_chunks_go_raw_on_a_zstd_session() {
-        let mut state = 9_u64;
-        let payload: Vec<u8> = (0..300_000)
-            .map(|_| {
-                state = state
-                    .wrapping_mul(6_364_136_223_846_793_005)
-                    .wrapping_add(1_442_695_040_888_963_407);
-                state.to_be_bytes()[0]
-            })
-            .collect();
-        let run = transfer_with_options(
-            &canonical_test_root("atp-tcp-zstd-noise"),
-            &payload,
-            SendOptions::new().with_compression(CompressionMode::Zstd),
-            None,
-        );
-        assert_delivered(&run, &payload, "noise");
-        assert!(
-            run.wire_bytes > payload.len() as u64,
-            "{} wire bytes",
-            run.wire_bytes
-        );
-    }
-
-    /// A delta resync on a compressed session: the second transfer of a
-    /// changed file sends only the changed chunks, compressed, and commits
-    /// the new bytes. The same resync without compression costs more wire.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn delta_chunks_are_compressed_and_commit_the_new_bytes() {
-        let first = compressible_payload(3, 1024 * 1024);
-        let mut second = first.clone();
-        let middle = second.len() / 2;
-        let changed = compressible_payload(4, 150_000);
-        second[middle..middle + changed.len()].copy_from_slice(&changed);
-        let mut wire = Vec::new();
-        for (label, options) in [
-            (
-                "atp-tcp-delta-zstd",
-                SendOptions::new().with_compression(CompressionMode::Zstd),
-            ),
-            ("atp-tcp-delta-raw", SendOptions::new()),
-        ] {
-            let root = canonical_test_root(label);
-            let initial = transfer_with_options(&root, &first, options, None);
-            assert_delivered(&initial, &first, label);
-            let resync = transfer_with_options(&root, &second, options, None);
-            assert_delivered(&resync, &second, label);
-            wire.push(resync.wire_bytes);
-        }
-        let (zstd, raw) = (wire[0], wire[1]);
-        assert!(
-            raw < second.len() as u64 / 2,
-            "the raw resync was a delta: {raw}"
-        );
-        assert!(zstd < raw / 2, "compressed delta {zstd} vs raw delta {raw}");
-    }
-
-    #[cfg(feature = "zstd")]
-    fn tamper(rewrite: impl FnOnce(Frame) -> Frame + Send + 'static) -> Tamper {
-        Box::new(rewrite)
-    }
-
-    /// `frame`, a data frame, with its chunk replaced by `chunk` and a codec
-    /// record claiming that `chunk` is zstd decoding to `raw_len` bytes.
-    #[cfg(feature = "zstd")]
-    fn claimed_chunk(frame: &Frame, raw_len: u32, chunk: &[u8]) -> Frame {
-        let (index, offset, _) = parse_data_frame(frame).expect("a data frame");
-        let mut claimed = data_frame(index, offset, chunk).expect("a data frame");
-        claimed.header.extensions.insert(
-            codec::CHUNK_CODEC_EXTENSION,
-            codec::ChunkCodec::new(codec::WireCodec::Zstd, raw_len).to_bytes(),
-        );
-        claimed
-    }
-
-    /// A zstd frame of `blocks` RLE blocks of 128 KiB: a few dozen bytes
-    /// that decode to `blocks` times 128 KiB. Its window is
-    /// `1 << window_log`; it declares `content_size` when given one.
-    #[cfg(feature = "zstd")]
-    fn rle_bomb(window_log: u8, content_size: Option<u32>, blocks: u32) -> Vec<u8> {
-        let mut frame = vec![0x28, 0xb5, 0x2f, 0xfd];
-        frame.push(if content_size.is_some() { 0x80 } else { 0 });
-        frame.push((window_log - 10) << 3);
-        if let Some(size) = content_size {
-            frame.extend_from_slice(&size.to_le_bytes());
-        }
-        for block in 1..=blocks {
-            let header = ((128 * 1024) << 3) | (1 << 1) | u32::from(block == blocks);
-            frame.extend_from_slice(&header.to_le_bytes()[..3]);
-            frame.push(b'a');
-        }
-        frame
-    }
-
-    /// A sender that turns hostile after the handshake. Each rewrite of its
-    /// first data frame is refused with its own typed error before anything
-    /// is committed, and the inbox is left empty: no file, no staging.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn a_hostile_sender_is_refused_before_anything_is_committed() {
-        // One 50 000-byte chunk, which a zstd session sends compressed.
-        let payload = compressible_payload(5, 50_000);
-        let zstd = SendOptions::new().with_compression(CompressionMode::Zstd);
-        let cases: Vec<(&str, SendOptions, Tamper, &str)> = vec![
-            (
-                "a bomb that declares its size",
-                zstd,
-                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, Some(8 << 17), 8))),
-                "output exceeds the decode limit",
-            ),
-            (
-                "a bomb that declares the claimed size",
-                zstd,
-                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, Some(50_000), 8))),
-                "content size mismatch",
-            ),
-            (
-                "a bomb that declares no size",
-                zstd,
-                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, None, 8))),
-                "does not declare its content size",
-            ),
-            (
-                "a raw length past what the entry lacks",
-                zstd,
-                tamper(|frame| {
-                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
-                    claimed_chunk(&frame, 50_001, &chunk)
-                }),
-                "chunk raw length 50001 exceeds the limit 50000",
-            ),
-            (
-                "a raw length short of the frame's content",
-                zstd,
-                tamper(|frame| {
-                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
-                    claimed_chunk(&frame, 49_999, &chunk)
-                }),
-                "output exceeds the decode limit",
-            ),
-            (
-                "a window past the negotiated one",
-                zstd,
-                tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(19, Some(50_000), 1))),
-                "window exceeds the decode limit",
-            ),
-            (
-                "a truncated frame",
-                zstd,
-                tamper(|frame| {
-                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
-                    claimed_chunk(&frame, 50_000, &chunk[..chunk.len() / 2])
-                }),
-                "input truncated",
-            ),
-            (
-                "garbage",
-                zstd,
-                tamper(|frame| claimed_chunk(&frame, 50_000, b"garbage, not a zstd frame")),
-                "not a Zstandard frame",
-            ),
-            (
-                "a record naming another codec",
-                zstd,
-                tamper(|mut frame| {
-                    let record = frame
-                        .header
-                        .extensions
-                        .get_mut(&codec::CHUNK_CODEC_EXTENSION)
-                        .expect("a compressed chunk");
-                    record[1] = 9;
-                    frame
-                }),
-                "does not match the negotiated codec",
-            ),
-            (
-                "a compressed chunk on a session without a codec",
-                SendOptions::new(),
-                tamper(|frame| {
-                    let chunk = parse_data_frame(&frame).expect("a data frame").2.to_vec();
-                    let params = asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast);
-                    let raw_len = u32::try_from(chunk.len()).expect("one chunk");
-                    let compressed = asupersync_zstd::encode_all(&chunk, &params);
-                    claimed_chunk(&frame, raw_len, &compressed)
-                }),
-                "compressed chunk without a negotiated codec",
-            ),
-        ];
-        let mut wrong = Vec::new();
-        for (number, (what, options, rewrite, expected)) in cases.into_iter().enumerate() {
-            let root = canonical_test_root(&format!("atp-tcp-hostile-{number}"));
-            let run = transfer_through(&root, &payload, options, None, Some(rewrite));
-            let left: Vec<_> = std::fs::read_dir(root.join("inbox"))
-                .expect("read the inbox")
-                .map(|entry| entry.expect("an inbox entry").file_name())
-                .collect();
-            let refused = matches!(
-                &run.received,
-                Err(TransportError::Frame(message)) if message.contains(expected)
-            );
-            if !refused || !left.is_empty() {
-                wrong.push(format!("{what}: {:?}, inbox {left:?}", run.received));
-            }
-        }
-        assert!(wrong.is_empty(), "{wrong:#?}");
-    }
-
-    /// A refused transfer leaves nothing in the way: the same transfer, sent
-    /// cleanly into the same inbox, commits.
-    #[cfg(feature = "zstd")]
-    #[test]
-    fn a_clean_retry_commits_after_a_refused_transfer() {
-        let payload = compressible_payload(6, 50_000);
-        let zstd = SendOptions::new().with_compression(CompressionMode::Zstd);
-        let root = canonical_test_root("atp-tcp-refused-then-clean");
-        let bomb = tamper(|frame| claimed_chunk(&frame, 50_000, &rle_bomb(17, None, 8)));
-        let refused = transfer_through(&root, &payload, zstd, None, Some(bomb));
-        assert!(refused.received.is_err(), "{:?}", refused.received);
-        assert!(refused.committed.is_empty());
-        let retry = transfer_with_options(&root, &payload, zstd, None);
-        assert_delivered(&retry, &payload, "the retry");
-    }
-
-    #[test]
-    fn metadata_apply_error_is_best_effort_not_commit_fatal() {
-        let cx = Cx::for_testing();
-        let meta = EntryMetadata {
-            unix_mode: Some(0o600),
-            ..Default::default()
-        };
-        let missing = Path::new("/asupersync-tcp-metadata-best-effort-missing-file");
-
-        futures_lite::future::block_on(apply_entry_metadata_best_effort(&cx, missing, &meta));
-    }
-
-    #[test]
-    fn join_relative_rejects_traversal() {
-        let base = Path::new("/tmp/inbox/data");
-        assert!(join_relative(base, "../escape").is_err());
-        assert!(join_relative(base, "ok/sub/file.txt").is_ok());
-        assert_eq!(
-            join_relative(base, "ok/sub/file.txt").unwrap(),
-            Path::new("/tmp/inbox/data/ok/sub/file.txt")
-        );
-    }
-
-    #[test]
-    fn safe_base_for_root_name_contains_hostile_inputs() {
-        let dest = Path::new("/tmp/inbox");
-        // Legitimate single-component name is preserved.
-        assert_eq!(
-            safe_base_for_root_name(dest, "payload").unwrap(),
-            Path::new("/tmp/inbox/payload")
-        );
-        // Hostile names fail closed instead of being silently rewritten.
-        assert!(safe_base_for_root_name(dest, "/etc/cron.d/evil").is_err());
-        assert!(safe_base_for_root_name(dest, "../../etc/passwd").is_err());
-        assert!(safe_base_for_root_name(dest, "").is_err());
-        assert!(safe_base_for_root_name(dest, "/").is_err());
-        assert!(safe_base_for_root_name(dest, "..").is_err());
-        assert!(safe_base_for_root_name(dest, "NUL.txt").is_err());
-    }
-
-    fn manifest_with(entries: Vec<ManifestEntry>, total_bytes: u64) -> TransferManifest {
-        TransferManifest {
-            transfer_id: "t".to_string(),
-            root_name: "r".to_string(),
-            is_directory: true,
-            total_bytes,
-            merkle_root_hex: "0".repeat(64),
-            metadata_root_hex: None,
-            directory_metadata: None,
-            entries,
-            delta_manifest: None,
-        }
-    }
-
-    fn refresh_manifest_metadata_commitment(manifest: &mut TransferManifest) {
-        manifest.metadata_root_hex = transfer_manifest_metadata_commitment(manifest);
-    }
-
-    fn entry(index: u32, size: u64) -> ManifestEntry {
-        ManifestEntry {
-            index,
-            rel_path: format!("f{index}"),
-            size,
-            sha256_hex: "0".repeat(64),
-            metadata: None,
-            members: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validate_manifest_accepts_sane_bounds() {
-        let m = manifest_with(vec![entry(0, 100), entry(1, 200)], 300);
-        assert!(validate_manifest(&m, &TransferConfig::default()).is_ok());
-    }
-
-    #[test]
-    fn validate_manifest_rejects_noncanonical_bare_metadata_block() {
-        let mut bare = entry(0, 1);
-        bare.metadata = Some(EntryMetadata::default());
-        assert!(matches!(
-            validate_manifest(&manifest_with(vec![bare], 1), &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("non-canonical bare metadata")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_entry_size_sum_overflow() {
-        let manifest = manifest_with(vec![entry(0, u64::MAX), entry(1, 1)], u64::MAX);
-        let config = TransferConfig {
-            max_transfer_bytes: u64::MAX,
-            ..TransferConfig::default()
-        };
-        assert!(matches!(
-            validate_manifest(&manifest, &config),
-            Err(TransportError::Frame(message)) if message.contains("overflow")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_hardlink_metadata_that_differs_from_primary() {
-        let mut primary = entry(0, 4);
-        primary.rel_path = "primary.bin".to_string();
-        primary.metadata = Some(EntryMetadata {
-            unix_mode: Some(0o644),
-            ..EntryMetadata::default()
-        });
-        let mut alias = entry(1, 0);
-        alias.rel_path = "alias.bin".to_string();
-        alias.sha256_hex = sha256_hex(b"");
-        alias.metadata = Some(EntryMetadata {
-            unix_mode: Some(0o644),
-            hardlink_target: Some("primary.bin".to_string()),
-            ..EntryMetadata::default()
-        });
-        let mut valid = manifest_with(vec![primary, alias], 4);
-        let config = TransferConfig {
-            preserve_hardlinks: true,
-            ..TransferConfig::default()
-        };
-        refresh_manifest_metadata_commitment(&mut valid);
-        validate_manifest(&valid, &config).expect("hardlink alias with primary metadata validates");
-
-        valid.entries[1]
-            .metadata
-            .as_mut()
-            .expect("alias metadata")
-            .unix_mode = Some(0o600);
-        refresh_manifest_metadata_commitment(&mut valid);
-        assert!(matches!(
-            validate_manifest(&valid, &config),
-            Err(TransportError::Frame(message)) if message.contains("metadata different from primary")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_windows_path_aliases_before_staging() {
-        for rel_path in ["NUL.txt", "dir/COM1.log", "trailing.", "trailing "] {
-            let mut manifest_entry = entry(0, 10);
-            manifest_entry.rel_path = rel_path.to_string();
-            let manifest = manifest_with(vec![manifest_entry], 10);
-            assert!(
-                validate_manifest(&manifest, &TransferConfig::default()).is_err(),
-                "Windows-unsafe path {rel_path:?} must fail closed"
-            );
-        }
-
-        let mut entries = vec![entry(0, 10), entry(1, 20)];
-        entries[0].rel_path = "Docs/Readme.txt".to_string();
-        entries[1].rel_path = "docs/README.TXT".to_string();
-        let manifest = manifest_with(entries, 30);
-        assert!(matches!(
-            validate_manifest(&manifest, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("case collision")
-        ));
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn per_entry_guard_rejects_replaced_destination_directory_ancestor() {
-        let temp = tempfile::tempdir().expect("temporary directory");
-        let outside = temp.path().join("outside");
-        let pivot = temp.path().join("pivot");
-        std::fs::create_dir(&outside).expect("create outside directory");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&outside, &pivot).expect("create directory symlink");
-        #[cfg(windows)]
-        std::os::windows::fs::symlink_dir(&outside, &pivot).expect("create directory symlink");
-
-        let base = pivot.join("payload");
-        let out_path = base.join("file.bin");
-        let error = futures_lite::future::block_on(reject_entry_destination_link_prefixes(
-            &base, &out_path, None, false,
-        ))
-        .expect_err("outer destination junction must fail closed");
-        assert!(matches!(
-            error,
-            TransportError::Source(message) if message.contains("symlink or reparse point")
-        ));
-        assert!(!outside.join("payload/file.bin").exists());
-    }
-
-    fn directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
-        DirectoryMetadataEntry {
-            rel_path: rel_path.to_string(),
-            metadata: EntryMetadata {
-                file_kind: FileKind::Directory,
-                unix_mode: Some(0o755),
-                ..EntryMetadata::default()
-            },
-        }
-    }
-
-    #[test]
-    fn validate_manifest_accepts_nested_directory_metadata_without_counting_it_as_files() {
-        let mut payload = named_entry(0, "a/b/payload.bin");
-        payload.sha256_hex = sha256_hex(b"");
-        let mut manifest = manifest_with(vec![payload], 0);
-        manifest.directory_metadata = Some(DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                unix_mode: Some(0o755),
-                ..EntryMetadata::default()
-            }),
-            entries: vec![
-                directory_metadata_entry("a"),
-                directory_metadata_entry("a/b"),
-            ],
-        });
-        refresh_manifest_metadata_commitment(&mut manifest);
-
-        validate_manifest(&manifest, &TransferConfig::default())
-            .expect("nested directory metadata must validate");
-        assert_eq!(manifest.entries.len(), 1);
-    }
-
-    #[test]
-    fn validate_manifest_rejects_noncanonical_empty_directory_metadata_block() {
-        let mut manifest = manifest_with(Vec::new(), 0);
-        manifest.directory_metadata = Some(DirectoryMetadataManifest::default());
-        assert!(matches!(
-            validate_manifest(&manifest, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("non-canonical empty")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_unsafe_or_non_directory_directory_metadata() {
-        let mut payload = named_entry(0, "a/b/payload.bin");
-        payload.sha256_hex = sha256_hex(b"");
-        let mut valid = manifest_with(vec![payload], 0);
-        valid.directory_metadata = Some(DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                unix_mode: Some(0o755),
-                ..EntryMetadata::default()
-            }),
-            entries: vec![
-                directory_metadata_entry("a"),
-                directory_metadata_entry("a/b"),
-            ],
-        });
-        refresh_manifest_metadata_commitment(&mut valid);
-
-        let mut no_fidelity = valid.clone();
-        no_fidelity
-            .directory_metadata
-            .as_mut()
-            .and_then(|metadata| metadata.root.as_mut())
-            .expect("root metadata")
-            .unix_mode = None;
-        refresh_manifest_metadata_commitment(&mut no_fidelity);
-        assert!(matches!(
-            validate_manifest(&no_fidelity, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("no fidelity fields")
-        ));
-
-        let mut wrong_root_kind = valid.clone();
-        wrong_root_kind
-            .directory_metadata
-            .as_mut()
-            .and_then(|metadata| metadata.root.as_mut())
-            .expect("root metadata")
-            .file_kind = FileKind::Regular;
-        refresh_manifest_metadata_commitment(&mut wrong_root_kind);
-        assert!(matches!(
-            validate_manifest(&wrong_root_kind, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("non-directory kind")
-        ));
-
-        let mut unsorted = valid.clone();
-        unsorted
-            .directory_metadata
-            .as_mut()
-            .expect("directory metadata")
-            .entries
-            .reverse();
-        refresh_manifest_metadata_commitment(&mut unsorted);
-        assert!(matches!(
-            validate_manifest(&unsorted, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("strictly increasing")
-        ));
-
-        let mut case_alias = valid.clone();
-        case_alias
-            .directory_metadata
-            .as_mut()
-            .expect("directory metadata")
-            .entries[0]
-            .rel_path = "A".to_string();
-        refresh_manifest_metadata_commitment(&mut case_alias);
-        assert!(matches!(
-            validate_manifest(&case_alias, &TransferConfig::default()),
-            Err(TransportError::Frame(message))
-                if message.contains("not represented") || message.contains("case-colliding")
-        ));
-
-        let mut file_alias = valid.clone();
-        file_alias
-            .directory_metadata
-            .as_mut()
-            .expect("directory metadata")
-            .entries
-            .push(directory_metadata_entry("a/b/payload.bin"));
-        refresh_manifest_metadata_commitment(&mut file_alias);
-        assert!(matches!(
-            validate_manifest(&file_alias, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("aliases logical content")
-        ));
-
-        let mut explicit_directory = entry(0, 0);
-        explicit_directory.rel_path = "empty".to_string();
-        explicit_directory.sha256_hex = sha256_hex(b"");
-        explicit_directory.metadata = Some(directory_metadata_entry("empty").metadata);
-        let mut duplicate_explicit = manifest_with(vec![explicit_directory], 0);
-        duplicate_explicit.directory_metadata = Some(DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                unix_mode: Some(0o755),
-                ..EntryMetadata::default()
-            }),
-            entries: vec![directory_metadata_entry("empty")],
-        });
-        refresh_manifest_metadata_commitment(&mut duplicate_explicit);
-        assert!(matches!(
-            validate_manifest(&duplicate_explicit, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("aliases logical content")
-        ));
-
-        let mut orphan = valid;
-        orphan
-            .directory_metadata
-            .as_mut()
-            .expect("directory metadata")
-            .entries
-            .push(directory_metadata_entry("orphan"));
-        refresh_manifest_metadata_commitment(&mut orphan);
-        assert!(matches!(
-            validate_manifest(&orphan, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("not represented")
-        ));
-    }
-
-    #[test]
-    fn directory_metadata_tamper_breaks_the_shared_metadata_commitment() {
-        let mut payload = named_entry(0, "nested/payload.bin");
-        payload.sha256_hex = sha256_hex(b"");
-        let mut manifest = manifest_with(vec![payload], 0);
-        manifest.directory_metadata = Some(DirectoryMetadataManifest {
-            root: Some(EntryMetadata {
-                file_kind: FileKind::Directory,
-                windows_attributes: Some(0x0000_0002),
-                ..EntryMetadata::default()
-            }),
-            entries: vec![directory_metadata_entry("nested")],
-        });
-        refresh_manifest_metadata_commitment(&mut manifest);
-        validate_manifest(&manifest, &TransferConfig::default())
-            .expect("untampered directory metadata validates");
-
-        manifest
-            .directory_metadata
-            .as_mut()
-            .and_then(|metadata| metadata.root.as_mut())
-            .expect("root metadata")
-            .windows_attributes = Some(0x0000_0003);
-        assert!(matches!(
-            validate_manifest(&manifest, &TransferConfig::default()),
-            Err(TransportError::Frame(message)) if message.contains("commitment mismatch")
-        ));
-    }
-
-    #[test]
-    fn directory_metadata_apply_rejects_a_stable_regular_file_leaf() {
-        let mut payload = named_entry(0, "nested/payload.bin");
-        payload.sha256_hex = sha256_hex(b"");
-        let mut manifest = manifest_with(vec![payload], 0);
-        manifest.directory_metadata = Some(DirectoryMetadataManifest {
-            root: None,
-            entries: vec![directory_metadata_entry("nested")],
-        });
-        refresh_manifest_metadata_commitment(&mut manifest);
-        validate_manifest(&manifest, &TransferConfig::default())
-            .expect("directory metadata manifest");
-
-        let base = canonical_test_root("atp-directory-kind-guard");
-        let wrong_kind = base.join("nested");
-        std::fs::write(&wrong_kind, b"must remain a regular file")
-            .expect("write wrong-kind destination leaf");
-
-        let error = futures_lite::future::block_on(apply_directory_metadata_best_effort(
-            &Cx::for_testing(),
-            &base,
-            &manifest,
-        ))
-        .expect_err("directory metadata must not be applied to a regular file");
-        assert!(matches!(
-            error,
-            TransportError::Source(message) if message.contains("not a directory")
-        ));
-        assert_eq!(
-            std::fs::read(&wrong_kind).expect("read preserved regular file"),
-            b"must remain a regular file"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn validate_manifest_rejects_lying_entry_size() {
-        // total_bytes is small but a single entry declares u64::MAX — the
-        // pre-fix code would `Vec::with_capacity(u64::MAX as usize)` and abort.
-        let m = manifest_with(vec![entry(0, u64::MAX)], 10);
-        assert!(matches!(
-            validate_manifest(&m, &TransferConfig::default()),
-            Err(TransportError::TooLarge { .. })
-        ));
-    }
-
-    fn symlink_entry(index: u32, rel: &str, target: &str) -> ManifestEntry {
-        ManifestEntry {
-            index,
-            rel_path: rel.to_string(),
-            size: 0,
-            sha256_hex: sha256_hex(b""),
-            metadata: Some(EntryMetadata {
-                file_kind: FileKind::Symlink,
-                symlink_target: Some(target.to_string()),
-                symlink_target_info: Some(SymlinkTargetInfo {
-                    kind: Some(SymlinkTargetKind::File),
-                    semantics: SymlinkTargetSemantics::PortableRelative,
-                }),
-                ..Default::default()
-            }),
-            members: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validate_manifest_enforces_symlink_containment_and_receiver_policy() {
-        let mut contained = manifest_with(vec![symlink_entry(0, "dir/link", "../target")], 0);
-        refresh_manifest_metadata_commitment(&mut contained);
-        validate_manifest(&contained, &TransferConfig::default())
-            .expect("contained portable symlink validates");
-
-        for target in ["../../escape", "/rooted", r"C:\escape", r"..\escape"] {
-            let mut rejected = manifest_with(vec![symlink_entry(0, "dir/link", target)], 0);
-            refresh_manifest_metadata_commitment(&mut rejected);
-            assert!(
-                matches!(
-                    validate_manifest(&rejected, &TransferConfig::default()),
-                    Err(TransportError::Frame(ref message))
-                        if message.contains("invalid metadata")
-                ),
-                "unsafe symlink target {target:?} must fail before staging"
-            );
-        }
-
-        let portable_receiver = TransferConfig {
-            metadata_policy: MetadataPolicy::portable(),
-            ..TransferConfig::default()
-        };
-        assert!(matches!(
-            validate_manifest(&contained, &portable_receiver),
-            Err(TransportError::Frame(ref message))
-                if message.contains("denied by receiver metadata policy")
-        ));
-    }
-
-    fn named_entry(index: u32, rel: &str) -> ManifestEntry {
-        ManifestEntry {
-            index,
-            rel_path: rel.to_string(),
-            size: 0,
-            sha256_hex: "0".repeat(64),
-            metadata: None,
-            members: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn reject_symlink_traversal_blocks_entries_nested_under_a_symlink() {
-        // A file written through a manifest-declared symlink would escape dest.
-        let bad = manifest_with(
-            vec![symlink_entry(0, "x", "/etc"), named_entry(1, "x/payload")],
-            0,
-        );
-        assert!(
-            matches!(
-                reject_symlink_traversal(&bad),
-                Err(TransportError::Source(_))
-            ),
-            "entry nested under a symlink must be rejected"
-        );
-
-        // Nested symlink-under-symlink is also rejected.
-        let bad2 = manifest_with(
-            vec![symlink_entry(0, "a", "/x"), symlink_entry(1, "a/b", "/y")],
-            0,
-        );
-        assert!(reject_symlink_traversal(&bad2).is_err());
-    }
-
-    #[test]
-    fn reject_symlink_traversal_allows_siblings_and_links_without_nesting() {
-        // "xy" is a sibling of symlink "x", not nested under it; a normal link
-        // with no entries beneath it is fine.
-        let ok = manifest_with(
-            vec![
-                symlink_entry(0, "x", "data.txt"),
-                named_entry(1, "xy"),
-                named_entry(2, "data.txt"),
-            ],
-            0,
-        );
-        assert!(reject_symlink_traversal(&ok).is_ok());
-        // No symlinks at all: trivially ok.
-        let plain = manifest_with(vec![entry(0, 10), entry(1, 20)], 30);
-        assert!(reject_symlink_traversal(&plain).is_ok());
-    }
-
-    #[test]
-    fn validate_manifest_rejects_declared_sum_over_limit() {
-        let cfg = TransferConfig {
-            max_transfer_bytes: 1000,
-            ..TransferConfig::default()
-        };
-        let m = manifest_with(vec![entry(0, 600), entry(1, 600)], 1200);
-        assert!(matches!(
-            validate_manifest(&m, &cfg),
-            Err(TransportError::TooLarge { .. })
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_single_file_with_multiple_entries() {
-        let mut m = manifest_with(vec![entry(0, 10), entry(1, 20)], 30);
-        m.is_directory = false;
-        assert!(matches!(
-            validate_manifest(&m, &TransferConfig::default()),
-            Err(TransportError::Frame(msg)) if msg.contains("single-file transfer")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_duplicate_relative_paths() {
-        let mut entries = vec![entry(0, 10), entry(1, 20)];
-        entries[1].rel_path = entries[0].rel_path.clone();
-        let m = manifest_with(entries, 30);
-        assert!(matches!(
-            validate_manifest(&m, &TransferConfig::default()),
-            Err(TransportError::Frame(msg)) if msg.contains("duplicate manifest rel_path")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_nonsequential_indexes() {
-        let m = manifest_with(vec![entry(0, 10), entry(7, 20)], 30);
-        assert!(matches!(
-            validate_manifest(&m, &TransferConfig::default()),
-            Err(TransportError::Frame(msg)) if msg.contains("does not match position")
-        ));
-    }
-
-    #[test]
-    fn validate_manifest_rejects_unsafe_relative_paths() {
-        for rel_path in [
-            "",
-            "/abs",
-            "../escape",
-            "a/../escape",
-            "a//b",
-            "a\\b",
-            "c:drive",
-        ] {
-            let mut e = entry(0, 10);
-            e.rel_path = rel_path.to_string();
-            let m = manifest_with(vec![e], 10);
-            assert!(
-                matches!(
-                    validate_manifest(&m, &TransferConfig::default()),
-                    Err(TransportError::Source(msg)) if msg.contains("unsafe manifest rel_path")
-                ),
-                "rel_path {rel_path:?} should fail closed"
-            );
-        }
-    }
-
-    #[test]
-    fn sha256_hex_is_lowercase_64() {
-        let h = sha256_hex(b"hello world");
-        assert_eq!(h.len(), 64);
-        assert!(
-            h.chars()
-                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
-        );
-        // Known SHA-256("hello world").
-        assert_eq!(
-            h,
-            "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
-        );
-    }
-
-    #[test]
-    fn empty_directory_metadata_is_deferred_until_after_update_mirror_cleanup() {
-        fn directory_metadata(readonly: bool, mtime_unix_secs: i64) -> EntryMetadata {
-            let mut metadata = EntryMetadata {
-                file_kind: FileKind::Directory,
-                mtime_unix_secs: Some(mtime_unix_secs),
-                mtime_nanos: Some(0),
-                ..EntryMetadata::default()
-            };
-            #[cfg(unix)]
-            {
-                metadata.unix_mode = Some(if readonly { 0o555 } else { 0o755 });
-            }
-            #[cfg(windows)]
-            {
-                const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
-                metadata.windows_attributes =
-                    Some(if readonly { FILE_ATTRIBUTE_READONLY } else { 0 });
-            }
-            metadata
-        }
-
-        let base = canonical_test_root("atp-directory-mirror-order");
-        let dest_dir = base.join("dest");
-        let transfer_root = dest_dir.join("r");
-        let empty_dir = transfer_root.join("empty");
-        let stale_child = empty_dir.join("stale.txt");
-
-        let mut empty_entry = entry(0, 0);
-        empty_entry.rel_path = "empty".to_string();
-        empty_entry.sha256_hex = sha256_hex(b"");
-        empty_entry.metadata = Some(directory_metadata(false, 1_700_010_000));
-        let mut manifest = manifest_with(vec![empty_entry], 0);
-        manifest.directory_metadata = Some(DirectoryMetadataManifest {
-            root: Some(directory_metadata(false, 1_700_010_100)),
-            entries: Vec::new(),
-        });
-        refresh_manifest_metadata_commitment(&mut manifest);
-        let config = TransferConfig {
-            metadata_policy: MetadataPolicy::full_preservation(),
-            mirror_policy: MirrorPolicy {
-                enabled: true,
-                max_delete_fraction: 1.0,
-            },
-            ..TransferConfig::default()
-        };
-        validate_manifest(&manifest, &config).expect("initial empty-directory manifest");
-
-        let first_committed = futures_lite::future::block_on(commit_verified_staging(
-            &Cx::for_testing(),
-            &dest_dir,
-            &manifest,
-            &config,
-            &[base.join("unused-first-staging")],
-        ))
-        .expect("initial empty-directory commit");
-        assert_eq!(first_committed, vec![empty_dir.clone()]);
-        std::fs::write(&stale_child, b"delete on update").expect("create stale child");
-
-        manifest.entries[0].metadata = Some(directory_metadata(true, 1_700_020_000));
-        manifest
-            .directory_metadata
-            .as_mut()
-            .expect("root directory metadata")
-            .root = Some(directory_metadata(true, 1_700_020_100));
-        refresh_manifest_metadata_commitment(&mut manifest);
-        validate_manifest(&manifest, &config).expect("updated empty-directory manifest");
-
-        let second_committed = futures_lite::future::block_on(commit_verified_staging(
-            &Cx::for_testing(),
-            &dest_dir,
-            &manifest,
-            &config,
-            &[base.join("unused-second-staging")],
-        ))
-        .expect("mirror must remove stale child before applying readonly metadata");
-        assert_eq!(second_committed, vec![empty_dir.clone()]);
-        assert!(
-            !stale_child.exists(),
-            "stale child must be removed during the update pass"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            assert_eq!(
-                std::fs::symlink_metadata(&empty_dir)
-                    .expect("empty directory metadata")
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o555
-            );
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt as _;
-            const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
-            assert_ne!(
-                std::fs::symlink_metadata(&empty_dir)
-                    .expect("empty directory metadata")
-                    .file_attributes()
-                    & FILE_ATTRIBUTE_READONLY,
-                0
-            );
-        }
-
-        let writable = directory_metadata(false, 1_700_020_100);
-        futures_lite::future::block_on(async {
-            apply_entry_metadata(&empty_dir, &writable)
-                .await
-                .expect("restore empty-directory metadata");
-            apply_entry_metadata(&transfer_root, &writable)
-                .await
-                .expect("restore root-directory metadata");
-        });
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn staging_dir_guard_reclaims_on_hard_drop_unless_disarmed() {
-        let base = std::env::temp_dir().join(format!("atp-staging-guard-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-
-        // An armed guard reclaims the staging dir when dropped without a
-        // cooperative cleanup (the hard-future-drop backstop path).
-        let armed = base.join("armed");
-        std::fs::create_dir_all(&armed).expect("create armed staging dir");
-        drop(StagingDirGuard::new(armed.clone()));
-        assert!(
-            !armed.exists(),
-            "armed StagingDirGuard must reclaim the staging dir on drop"
-        );
-
-        // A disarmed guard leaves the directory in place (the cooperative path
-        // already removed it asynchronously, so the backstop must not run).
-        let disarmed = base.join("disarmed");
-        std::fs::create_dir_all(&disarmed).expect("create disarmed staging dir");
-        let mut guard = StagingDirGuard::new(disarmed.clone());
-        guard.disarm();
-        drop(guard);
-        assert!(
-            disarmed.exists(),
-            "disarmed StagingDirGuard must leave the staging dir in place"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn staging_create_results_own_cleanup_before_async_delivery() {
-        let base = std::env::temp_dir().join(format!(
-            "atp-staging-create-guard-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create staging guard test root");
-
-        let dir = base.join("owned-dir");
-        let dir_guard = StagingDirGuard::create(dir.clone()).expect("create guarded staging dir");
-        assert!(dir.is_dir());
-        drop(dir_guard);
-        assert!(
-            !dir.exists(),
-            "an undelivered directory-create result must reclaim its directory"
-        );
-
-        let file = base.join("owned-file");
-        let file_guard =
-            StagingFileGuard::create(file.clone()).expect("create guarded staging file");
-        assert!(file.is_file());
-        drop(file_guard);
-        assert!(
-            !file.exists(),
-            "an undelivered file-create result must reclaim its file"
-        );
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn directory_metadata_preserves_root_and_nested_windows_attributes_and_mtime_on_update() {
-        use std::os::windows::fs::MetadataExt as _;
-        use std::time::UNIX_EPOCH;
-
-        const FILE_ATTRIBUTE_READONLY: u32 = 0x0000_0001;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x0000_0002;
-        const ATTRIBUTE_MASK: u32 = FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN;
-
-        fn metadata(attributes: u32, mtime_unix_secs: i64) -> EntryMetadata {
-            EntryMetadata {
-                file_kind: FileKind::Directory,
-                mtime_unix_secs: Some(mtime_unix_secs),
-                mtime_nanos: Some(0),
-                windows_attributes: Some(attributes),
-                ..EntryMetadata::default()
-            }
-        }
-
-        fn assert_directory_metadata(path: &Path, attributes: u32, mtime_unix_secs: u64) {
-            let observed = std::fs::symlink_metadata(path).expect("directory metadata");
-            assert!(
-                observed.is_dir(),
-                "{} must remain a directory",
-                path.display()
-            );
-            assert_eq!(observed.file_attributes() & ATTRIBUTE_MASK, attributes);
-            assert_eq!(
-                observed
-                    .modified()
-                    .expect("directory modified time")
-                    .duration_since(UNIX_EPOCH)
-                    .expect("post-epoch directory modified time")
-                    .as_secs(),
-                mtime_unix_secs
-            );
-        }
-
-        let base = std::env::temp_dir().join(format!(
-            "atp-windows-directory-metadata-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).expect("create directory metadata test root");
-        let source_root = base.join("source-r");
-        let source_nested = source_root.join("nested");
-        let source_file = source_nested.join("payload.bin");
-        std::fs::create_dir_all(&source_nested).expect("create source directory tree");
-        let dest_dir = base.join("dest");
-        let root = dest_dir.join("r");
-        let nested = root.join("nested");
-        let destination_file = nested.join("payload.bin");
-        let config = TransferConfig {
-            metadata_policy: MetadataPolicy::full_preservation(),
-            ..TransferConfig::default()
-        };
-
-        let first_bytes = b"first directory metadata pass";
-        std::fs::write(&source_file, first_bytes).expect("write first source file");
-        futures_lite::future::block_on(async {
-            apply_entry_metadata(
-                &source_nested,
-                &metadata(
-                    FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
-                    1_700_000_100,
-                ),
-            )
-            .await
-            .expect("set initial nested source metadata");
-            apply_entry_metadata(
-                &source_root,
-                &metadata(
-                    FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
-                    1_700_000_000,
-                ),
-            )
-            .await
-            .expect("set initial root source metadata");
-        });
-        let first_directory_metadata = futures_lite::future::block_on(
-            capture_directory_metadata_manifest(&source_root, &config.metadata_policy),
-        )
-        .expect("capture initial source directory metadata");
-        let mut payload = named_entry(0, "nested/payload.bin");
-        payload.size = u64::try_from(first_bytes.len()).expect("payload length");
-        payload.sha256_hex = sha256_hex(first_bytes);
-        let mut manifest = manifest_with(vec![payload], first_bytes.len() as u64);
-        manifest.directory_metadata = Some(first_directory_metadata);
-        refresh_manifest_metadata_commitment(&mut manifest);
-        validate_manifest(&manifest, &config).expect("initial directory metadata manifest");
-
-        let first_staging = base.join("first-staging");
-        std::fs::write(&first_staging, first_bytes).expect("write first staging file");
-        let first_committed = futures_lite::future::block_on(commit_verified_staging(
-            &Cx::for_testing(),
-            &dest_dir,
-            &manifest,
-            &config,
-            &[first_staging],
-        ))
-        .expect("commit initial directory metadata");
-        assert_eq!(first_committed, vec![destination_file.clone()]);
-        assert_eq!(
-            std::fs::read(&destination_file).expect("first payload"),
-            first_bytes
-        );
-        assert_directory_metadata(
-            &root,
-            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
-            1_700_000_000,
-        );
-        assert_directory_metadata(
-            &nested,
-            FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN,
-            1_700_000_100,
-        );
-
-        let second_bytes = b"updated directory metadata pass";
-        std::fs::write(&source_file, second_bytes).expect("write updated source file");
-        futures_lite::future::block_on(async {
-            apply_entry_metadata(
-                &source_nested,
-                &metadata(FILE_ATTRIBUTE_HIDDEN, 1_700_001_100),
-            )
-            .await
-            .expect("set updated nested source metadata");
-            apply_entry_metadata(
-                &source_root,
-                &metadata(FILE_ATTRIBUTE_HIDDEN, 1_700_001_000),
-            )
-            .await
-            .expect("set updated root source metadata");
-        });
-        manifest.entries[0].size = u64::try_from(second_bytes.len()).expect("payload length");
-        manifest.entries[0].sha256_hex = sha256_hex(second_bytes);
-        manifest.total_bytes = second_bytes.len() as u64;
-        manifest.directory_metadata = Some(
-            futures_lite::future::block_on(capture_directory_metadata_manifest(
-                &source_root,
-                &config.metadata_policy,
-            ))
-            .expect("capture updated source directory metadata"),
-        );
-        refresh_manifest_metadata_commitment(&mut manifest);
-        validate_manifest(&manifest, &config).expect("updated directory metadata manifest");
-
-        let second_staging = base.join("second-staging");
-        std::fs::write(&second_staging, second_bytes).expect("write second staging file");
-        let second_committed = futures_lite::future::block_on(commit_verified_staging(
-            &Cx::for_testing(),
-            &dest_dir,
-            &manifest,
-            &config,
-            &[second_staging],
-        ))
-        .expect("commit updated directory metadata");
-        assert_eq!(second_committed, vec![destination_file.clone()]);
-        assert_eq!(
-            std::fs::read(&destination_file).expect("updated payload"),
-            second_bytes
-        );
-        assert_directory_metadata(&root, FILE_ATTRIBUTE_HIDDEN, 1_700_001_000);
-        assert_directory_metadata(&nested, FILE_ATTRIBUTE_HIDDEN, 1_700_001_100);
-
-        let clear = metadata(0, 1_700_001_100);
-        futures_lite::future::block_on(async {
-            apply_entry_metadata(&nested, &clear)
-                .await
-                .expect("clear nested attributes");
-            apply_entry_metadata(&root, &clear)
-                .await
-                .expect("clear root attributes");
-            apply_entry_metadata(&source_nested, &clear)
-                .await
-                .expect("clear source nested attributes");
-            apply_entry_metadata(&source_root, &clear)
-                .await
-                .expect("clear source root attributes");
-        });
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn fifo_opt_in_does_not_replace_existing_file_on_windows() {
-        let base = std::env::temp_dir().join(format!(
-            "atp-windows-fifo-preserve-{}-{}",
-            std::process::id(),
-            STAGING_SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&base);
-        let dest_dir = base.join("dest");
-        let existing = dest_dir.join("r").join("fifo");
-        std::fs::create_dir_all(existing.parent().expect("existing file parent"))
-            .expect("create destination root");
-        std::fs::write(&existing, b"keep-existing-bytes").expect("write existing destination");
-
-        let mut fifo = entry(0, 0);
-        fifo.rel_path = "fifo".to_string();
-        fifo.metadata = Some(EntryMetadata {
-            file_kind: FileKind::Fifo,
-            unix_mode: Some(0o644),
-            ..EntryMetadata::default()
-        });
-        let manifest = manifest_with(vec![fifo], 0);
-        let config = TransferConfig {
-            allow_special_files: true,
-            ..TransferConfig::default()
-        };
-        let staging_paths = vec![base.join("unused-staging")];
-        let cx = Cx::for_testing();
-
-        let committed = futures_lite::future::block_on(commit_verified_staging(
-            &cx,
-            &dest_dir,
-            &manifest,
-            &config,
-            &staging_paths,
-        ))
-        .expect("unsupported FIFO must be skipped without a commit error");
-
-        assert!(committed.is_empty());
-        assert_eq!(
-            std::fs::read(&existing).expect("read preserved destination"),
-            b"keep-existing-bytes"
-        );
-        let metadata = std::fs::metadata(&existing).expect("preserved destination metadata");
-        assert!(metadata.is_file());
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-}
+#[path = "mod_inline_tests.rs"]
+mod tests;

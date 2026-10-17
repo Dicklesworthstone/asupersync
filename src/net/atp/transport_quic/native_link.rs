@@ -63,6 +63,7 @@ use rustls::{ClientConfig, ServerConfig};
 use sha2::{Digest, Sha256};
 
 use crate::bytes::{Bytes, BytesMut};
+use crate::codec::Decoder;
 use crate::cx::Cx;
 use crate::io::{AsyncReadExt, AsyncWriteExt};
 use crate::net::atp::datagram::beacons::{BeaconMeasurement, BeaconScheduler};
@@ -70,9 +71,11 @@ use crate::net::atp::datagram::congestion::{
     CongestionConfig, CongestionController, DatagramRateConfig, DatagramRateController,
     DatagramRateDecision, DatagramRateSample, DatagramSendAdmission,
 };
-use crate::net::atp::protocol::frames::{Frame, FrameType};
+use crate::net::atp::protocol::codec::AtpFrameCodec;
+use crate::net::atp::protocol::frames::{Frame, FrameType, ProtocolVersion};
 use crate::net::atp::protocol::quic_frames::QuicFrame;
 use crate::net::atp::quic::packet_protection::{AtpPacketProtection, AtpPacketProtectionConfig};
+use crate::net::atp::transport_common::codec::{self, CodecAccept, CodecOffer, EntryCompression};
 use crate::net::atp::transport_common::{
     EntryDigest, EntryMetadata, MetadataApplyReport, flat_merkle_root_from_digests,
     hash_file_streaming, hex_encode,
@@ -282,7 +285,11 @@ async fn keep_peer_alive_while<T>(
                 // Keep trying at every tick: a transient failure must not
                 // silence the receiver for the rest of the step. The last
                 // failure is still reported once the step has finished.
-                if let Err(failure) = emit_keep_alive(cx, link, control).await {
+                // The emission is boxed behind `dyn Future + Send` (one
+                // allocation per tick) so the Send proof of every caller
+                // stops here instead of nesting through the flush
+                // (br-asupersync-c2unfu).
+                if let Err(failure) = erase_send(emit_keep_alive(cx, link, control)).await {
                     quic_rqtrace!("receiver: keep_alive_failed error={failure:?}");
                     keep_alive_failure = Some(failure);
                 }
@@ -486,6 +493,9 @@ const QUIC_STREAM_PACKET_OVERHEAD_BUDGET: u64 = 48;
 /// packets amplified loss tails on shaped netns links, while this envelope keeps
 /// the repair tail small and avoids IP fragmentation.
 const QUIC_SOURCE_STREAM_FLUSH_BYTES: u64 = 512 * 1024;
+/// The largest raw chunk a receiver decodes from one compressed source-stream
+/// frame, and so the bound on the frame it buffers (br-asupersync-t1fblr.29).
+const QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK: u32 = 1 << 20;
 /// Upper bound on un-flushed send-side stream bytes; the disk reader waits on
 /// paced flushes past this, so sender RSS stays a few bursts deep instead of
 /// scaling with the transfer size.
@@ -900,6 +910,33 @@ async fn receiver_member_path_delay_for_testing(cx: &Cx) {
 #[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
 #[allow(clippy::unused_async)]
 async fn receiver_member_path_delay_for_testing(_cx: &Cx) {}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+std::thread_local! {
+    static RECEIVER_IGNORES_CODEC_OFFERS: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Test hook (br-asupersync-t1fblr.29): receives polled on this thread ignore
+/// compression offers, as receivers that predate compression do.
+///
+/// A test can then show that an offering sender streams raw. Drive the
+/// receive on the calling thread, as `block_on` does; other threads are
+/// unaffected. `false`, the default, turns it off.
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+pub fn set_receiver_ignores_codec_offers_for_testing(ignore: bool) {
+    RECEIVER_IGNORES_CODEC_OFFERS.with(|cell| cell.set(ignore));
+}
+
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "test-internals")))]
+fn receiver_ignores_codec_offers() -> bool {
+    RECEIVER_IGNORES_CODEC_OFFERS.with(std::cell::Cell::get)
+}
+
+#[cfg(not(all(not(target_arch = "wasm32"), any(test, feature = "test-internals"))))]
+const fn receiver_ignores_codec_offers() -> bool {
+    false
+}
 
 /// Socket waits shorter than this are drain-grace polls between batches,
 /// not idle parks; `pump_idle` traces only real parks.
@@ -3892,7 +3929,19 @@ impl QuicLink {
 
     /// Drain all currently-pending application frames, protect each into a 1-RTT
     /// packet, and send the batch over UDP. Returns the number of packets sent.
+    ///
+    /// The work is boxed behind `dyn Future + Send` (one allocation per
+    /// flush), so a caller's Send proof stops here instead of nesting through
+    /// the packet build and send. The same holds for `pump_inbound_for` and
+    /// `retransmit_stream_frames`: proving a session Send through them
+    /// overflowed rustc's default recursion depth in builds of bin atp
+    /// (br-asupersync-c2unfu).
     async fn flush(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
+        erase_send(self.flush_inner(cx)).await
+    }
+
+    /// The body of [`Self::flush`].
+    async fn flush_inner(&mut self, cx: &Cx) -> Result<usize, QuicTransportError> {
         struct PlainOneRttPacket {
             packet_number: u64,
             header: [u8; ONE_RTT_HEADER_LEN],
@@ -5047,7 +5096,18 @@ impl QuicLink {
         self.pending_fountain_feedback_count() > 0
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn retransmit_stream_frames(
+        &mut self,
+        cx: &Cx,
+        frames: &[SentControlStreamFrame],
+        reason: &'static str,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.retransmit_stream_frames_inner(cx, frames, reason)).await
+    }
+
+    /// The body of [`Self::retransmit_stream_frames`].
+    async fn retransmit_stream_frames_inner(
         &mut self,
         cx: &Cx,
         frames: &[SentControlStreamFrame],
@@ -5487,7 +5547,19 @@ impl QuicLink {
         Ok(())
     }
 
+    /// Boxed like [`Self::flush`] (br-asupersync-c2unfu).
     async fn pump_inbound_for_with_drain_budget(
+        &mut self,
+        cx: &Cx,
+        timeout: Duration,
+        max_drain_batches: usize,
+    ) -> Result<usize, QuicTransportError> {
+        erase_send(self.pump_inbound_for_with_drain_budget_inner(cx, timeout, max_drain_batches))
+            .await
+    }
+
+    /// The body of [`Self::pump_inbound_for_with_drain_budget`].
+    async fn pump_inbound_for_with_drain_budget_inner(
         &mut self,
         cx: &Cx,
         timeout: Duration,
@@ -8282,7 +8354,16 @@ async fn wait_source_stream_send_admission(
         }
         if link.conn.pending_stream_data_bytes() > QUIC_SOURCE_STREAM_SEND_QUEUE_MAX_BYTES {
             pending_stall = classify_source_stream_admission(true, true, true);
-            drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+            // Boxed (one allocation per admission stall) so the sender's
+            // Send proof stops here instead of nesting through the flush and
+            // its retransmits (br-asupersync-c2unfu).
+            erase_send(drive_native_source_stream_flush(
+                cx,
+                link,
+                config.idle_timeout,
+                false,
+            ))
+            .await?;
             check_source_stream_control(cx, link, control, early).await?;
             continue;
         }
@@ -8396,15 +8477,32 @@ async fn send_native_source_stream_entries_pumped(
     stream: StreamId,
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
+    chunk_codec: Option<&CodecAccept>,
+    options: super::QuicSendOptions,
 ) -> Result<u64, QuicTransportError> {
     let max_chunk = link
         .max_app_payload
         .saturating_sub(usize::try_from(QUIC_STREAM_PACKET_OVERHEAD_BUDGET).unwrap_or(usize::MAX))
         .max(1);
     let flush_chunk = usize::try_from(QUIC_SOURCE_STREAM_FLUSH_BYTES).unwrap_or(usize::MAX);
-    let mut buf = vec![0_u8; max_chunk.min(flush_chunk).max(1)];
+    let piece = max_chunk.min(flush_chunk).max(1);
+    // A framed (compressed) stream reads one codec chunk per frame; a raw
+    // stream reads one write's worth at a time.
+    let read_len = chunk_codec.map_or(piece, |accept| {
+        usize::try_from(accept.max_chunk_raw)
+            .unwrap_or(piece)
+            .max(1)
+    });
+    let mut buf = vec![0_u8; read_len];
+    // Logical (raw) bytes: what the manifest totals, compressed or not.
     let mut streamed = 0u64;
     let mut queued_since_flush = 0u64;
+    // Framed chunks compress on the blocking pool, up to
+    // `compression_parallelism` at once, and go out in order; consecutive
+    // entries share the pipeline (t1fblr.25).
+    #[cfg(feature = "zstd")]
+    let mut pipeline = chunk_codec
+        .map(|accept| codec::ChunkPipeline::new(*accept, options.compression_parallelism()));
 
     for entry in &prepared.entries {
         cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
@@ -8418,6 +8516,10 @@ async fn send_native_source_stream_entries_pumped(
             })?;
         let mut hasher = Sha256::new();
         let mut read = 0u64;
+        // The entry's decisions (t1fblr.24): only outcomes of its own chunks
+        // still decide.
+        let mut decisions =
+            EntryCompression::new(options.compression(), &entry.abs_path.to_string_lossy());
         loop {
             cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
             let n = file.read(&mut buf).await.map_err(|err| {
@@ -8436,38 +8538,75 @@ async fn send_native_source_stream_entries_pumped(
             }
             hasher.update(&buf[..n]);
             let n_u64 = u64::try_from(n).unwrap_or(u64::MAX);
-            // Never write past the receiver's bounded window: `write_stream_bytes`
-            // consumes send credit at queue time and fails on exhaustion, so a
-            // credit shortfall waits on the ACK/advertisement clock instead.
-            if link.conn.stream_send_credit_remaining(stream) < n_u64 {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
-                queued_since_flush = 0;
-                wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config)
+            match chunk_codec {
+                None => {
+                    queue_source_stream_bytes(
+                        cx,
+                        link,
+                        control,
+                        early,
+                        stream,
+                        config,
+                        &buf[..n],
+                        &mut queued_since_flush,
+                    )
                     .await?;
+                }
+                #[cfg(feature = "zstd")]
+                Some(_) => {
+                    if let Some(pipeline) = pipeline.as_mut() {
+                        pipeline.push(
+                            cx,
+                            &mut decisions,
+                            entry.index,
+                            read - n_u64,
+                            buf[..n].to_vec(),
+                        );
+                        while pipeline.is_full() {
+                            let Some(chunk) = pipeline.next(entry.index, &mut decisions).await
+                            else {
+                                break;
+                            };
+                            let frame = pipelined_chunk_frame(chunk)?;
+                            queue_source_stream_frame(
+                                cx,
+                                link,
+                                control,
+                                early,
+                                stream,
+                                config,
+                                &frame,
+                                piece,
+                                &mut queued_since_flush,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                #[cfg(not(feature = "zstd"))]
+                Some(accept) => {
+                    let frame = source_stream_chunk_frame(
+                        accept,
+                        &mut decisions,
+                        entry.index,
+                        read - n_u64,
+                        &buf[..n],
+                    )?;
+                    queue_source_stream_frame(
+                        cx,
+                        link,
+                        control,
+                        early,
+                        stream,
+                        config,
+                        &frame,
+                        piece,
+                        &mut queued_since_flush,
+                    )
+                    .await?;
+                }
             }
-            link.conn
-                .write_stream_bytes(cx, stream, Bytes::copy_from_slice(&buf[..n]), false)?;
             streamed = streamed.saturating_add(n_u64);
-            queued_since_flush = queued_since_flush.saturating_add(n_u64);
-            if queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
-                drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
-                queued_since_flush = 0;
-                // Bound sender-side buffering (RSS), sent-but-unacked bytes
-                // (runaway guard), and the next flush window's send credit:
-                // without the first, the disk reader queues the entire file
-                // ahead of the pacer (~540 MB RSS on a 500 MB transfer);
-                // without the second, a mis-estimated pacing rate streams the
-                // file into a loss gap faster than the receiver can
-                // reassemble; the third keeps writes inside the receiver's
-                // advertised reassembly window. All waits are ACK/pacer
-                // clocked, not spins.
-                // Credit is gated per-write above (demanding a full flush
-                // window of credit here quantized the transfer into one
-                // window per RTT); this wait only enforces the queue and
-                // unacked ceilings.
-                wait_source_stream_send_admission(cx, link, control, early, stream, 0, config)
-                    .await?;
-            }
         }
         if read != entry.size {
             return Err(QuicTransportError::Source(format!(
@@ -8485,6 +8624,27 @@ async fn send_native_source_stream_entries_pumped(
             )));
         }
     }
+    // The chunks still compressing go out after the last entry is read. Their
+    // outcomes no longer decide anything, so they record into a throwaway.
+    #[cfg(feature = "zstd")]
+    if let Some(pipeline) = pipeline.as_mut() {
+        let mut finished = EntryCompression::new(options.compression(), "");
+        while let Some(chunk) = pipeline.next(u32::MAX, &mut finished).await {
+            let frame = pipelined_chunk_frame(chunk)?;
+            queue_source_stream_frame(
+                cx,
+                link,
+                control,
+                early,
+                stream,
+                config,
+                &frame,
+                piece,
+                &mut queued_since_flush,
+            )
+            .await?;
+        }
+    }
 
     // Source exhausted: everything from here (tail drain, FIN, proof
     // exchange) is app-limited for the delivery sampler.
@@ -8493,6 +8653,219 @@ async fn send_native_source_stream_entries_pumped(
         .write_stream_bytes(cx, stream, Bytes::new(), true)?;
     drive_native_source_stream_flush(cx, link, config.idle_timeout, true).await?;
     Ok(streamed)
+}
+
+/// Queues `bytes` (at most one write's worth) on the source stream, waiting
+/// for send credit and draining the queue the way every source-stream write
+/// does.
+async fn queue_source_stream_bytes(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+    stream: StreamId,
+    config: &QuicConfig,
+    bytes: &[u8],
+    queued_since_flush: &mut u64,
+) -> Result<(), QuicTransportError> {
+    let n_u64 = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    // Never write past the receiver's bounded window: `write_stream_bytes`
+    // consumes send credit at queue time and fails on exhaustion, so a
+    // credit shortfall waits on the ACK/advertisement clock instead.
+    if link.conn.stream_send_credit_remaining(stream) < n_u64 {
+        drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+        *queued_since_flush = 0;
+        wait_source_stream_send_admission(cx, link, control, early, stream, n_u64, config).await?;
+    }
+    link.conn
+        .write_stream_bytes(cx, stream, Bytes::copy_from_slice(bytes), false)?;
+    *queued_since_flush = queued_since_flush.saturating_add(n_u64);
+    if *queued_since_flush >= QUIC_SOURCE_STREAM_FLUSH_BYTES {
+        drive_native_source_stream_flush(cx, link, config.idle_timeout, false).await?;
+        *queued_since_flush = 0;
+        // Bound sender-side buffering (RSS), sent-but-unacked bytes
+        // (runaway guard), and the next flush window's send credit:
+        // without the first, the disk reader queues the entire file
+        // ahead of the pacer (~540 MB RSS on a 500 MB transfer);
+        // without the second, a mis-estimated pacing rate streams the
+        // file into a loss gap faster than the receiver can
+        // reassemble; the third keeps writes inside the receiver's
+        // advertised reassembly window. All waits are ACK/pacer
+        // clocked, not spins.
+        // Credit is gated per-write above (demanding a full flush
+        // window of credit here quantized the transfer into one
+        // window per RTT); this wait only enforces the queue and
+        // unacked ceilings.
+        wait_source_stream_send_admission(cx, link, control, early, stream, 0, config).await?;
+    }
+    Ok(())
+}
+
+/// The largest raw chunk one compressed source-stream frame carries: the
+/// configured chunk size, within what a receiver decodes per frame.
+fn source_stream_codec_chunk(config: &QuicConfig) -> usize {
+    config.chunk_size.clamp(
+        1,
+        usize::try_from(QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK).unwrap_or(usize::MAX),
+    )
+}
+
+/// The `ObjectData` frame for the source-stream chunk at `offset` of entry
+/// `index`: the chunk compressed when `entry` decides to try and that makes
+/// the frame smaller, with a [`codec::CHUNK_CODEC_EXTENSION`] record, and raw
+/// otherwise. The payload is the TCP transport's: a 4-byte entry index, an
+/// 8-byte offset, then the chunk. With `zstd` the sender goes through
+/// [`codec::ChunkPipeline`] instead; tests build single frames with this.
+#[cfg(any(test, not(feature = "zstd")))]
+fn source_stream_chunk_frame(
+    accept: &CodecAccept,
+    entry: &mut EntryCompression,
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    #[cfg(feature = "zstd")]
+    if let Some((record, compressed)) = entry.compress(accept, offset, chunk) {
+        return source_stream_compressed_frame(index, offset, record, &compressed);
+    }
+    #[cfg(not(feature = "zstd"))]
+    let _ = (accept, entry);
+    source_stream_data_frame(index, offset, chunk)
+}
+
+/// The `ObjectData` frame carrying `payload`, the compressed source-stream
+/// chunk at `offset` of entry `index`, with its
+/// [`codec::CHUNK_CODEC_EXTENSION`] record.
+#[cfg(feature = "zstd")]
+fn source_stream_compressed_frame(
+    index: u32,
+    offset: u64,
+    record: codec::ChunkCodec,
+    payload: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    let mut frame = source_stream_data_frame(index, offset, payload)?;
+    frame
+        .header
+        .extensions
+        .insert(codec::CHUNK_CODEC_EXTENSION, record.to_bytes());
+    Ok(frame)
+}
+
+/// The frame for a chunk leaving the compression pipeline.
+#[cfg(feature = "zstd")]
+fn pipelined_chunk_frame(
+    chunk: Result<codec::PipelinedChunk, crate::runtime::JoinError>,
+) -> Result<Frame, QuicTransportError> {
+    let chunk = chunk.map_err(|error| match error {
+        crate::runtime::JoinError::Cancelled(_) => QuicTransportError::Cancelled,
+        other => QuicTransportError::Source(format!("compressing a chunk failed: {other}")),
+    })?;
+    match &chunk.compressed {
+        Some((record, payload)) => {
+            source_stream_compressed_frame(chunk.index, chunk.offset, *record, payload)
+        }
+        None => source_stream_data_frame(chunk.index, chunk.offset, &chunk.raw),
+    }
+}
+
+/// Queues `frame` on the source stream in write-sized pieces, so each write
+/// still fits the receiver's window, however small.
+async fn queue_source_stream_frame(
+    cx: &Cx,
+    link: &mut QuicLink,
+    control: &mut NativeQuicFrameTransport,
+    early: &mut Option<Frame>,
+    stream: StreamId,
+    config: &QuicConfig,
+    frame: &Frame,
+    piece: usize,
+    queued_since_flush: &mut u64,
+) -> Result<(), QuicTransportError> {
+    let wire = frame
+        .to_wire_bytes()
+        .map_err(|error| QuicTransportError::Frame(error.to_string()))?;
+    for bytes in wire.chunks(piece.max(1)) {
+        queue_source_stream_bytes(
+            cx,
+            link,
+            control,
+            early,
+            stream,
+            config,
+            bytes,
+            queued_since_flush,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn source_stream_data_frame(
+    index: u32,
+    offset: u64,
+    chunk: &[u8],
+) -> Result<Frame, QuicTransportError> {
+    let mut payload = Vec::with_capacity(12 + chunk.len());
+    payload.extend_from_slice(&index.to_be_bytes());
+    payload.extend_from_slice(&offset.to_be_bytes());
+    payload.extend_from_slice(chunk);
+    Frame::new(ProtocolVersion::CURRENT, FrameType::ObjectData, payload)
+        .map_err(|error| QuicTransportError::Frame(error.to_string()))
+}
+
+/// The raw bytes a compressed-mode source-stream frame carries for the entry
+/// `index` at `offset`, with `remaining` bytes still to come. The frame must
+/// be the next `ObjectData` frame of that entry, carry at least one byte,
+/// and not run past the entry. A compressed chunk is decoded into `scratch`
+/// within those bounds, before anything else is allocated for it.
+fn source_stream_frame_chunk<'a>(
+    frame: &'a Frame,
+    accept: &CodecAccept,
+    index: u32,
+    offset: u64,
+    remaining: u64,
+    scratch: &'a mut Vec<u8>,
+) -> Result<&'a [u8], QuicTransportError> {
+    let refuse = |reason: String| {
+        QuicTransportError::Integrity(format!("compressed source stream frame: {reason}"))
+    };
+    if frame.frame_type() != FrameType::ObjectData {
+        return Err(refuse(format!(
+            "{:?} where ObjectData was due",
+            frame.frame_type()
+        )));
+    }
+    let payload = frame.payload();
+    let (head, chunk) = payload
+        .split_at_checked(12)
+        .ok_or_else(|| refuse("shorter than its 12-byte header".to_string()))?;
+    let frame_index = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    let frame_offset = u64::from_be_bytes([
+        head[4], head[5], head[6], head[7], head[8], head[9], head[10], head[11],
+    ]);
+    if (frame_index, frame_offset) != (index, offset) {
+        return Err(refuse(format!(
+            "entry {frame_index} at {frame_offset}, expected entry {index} at {offset}"
+        )));
+    }
+    let raw = match frame.header.extensions.get(&codec::CHUNK_CODEC_EXTENSION) {
+        Some(record) => {
+            codec::decompress_chunk(record, Some(accept), remaining, chunk, scratch)
+                .map_err(|error| refuse(error.to_string()))?;
+            scratch.as_slice()
+        }
+        None => chunk,
+    };
+    if raw.is_empty() {
+        return Err(refuse("an empty chunk".to_string()));
+    }
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > remaining {
+        return Err(refuse(format!(
+            "{} bytes where the entry lacks {remaining}",
+            raw.len()
+        )));
+    }
+    Ok(raw)
 }
 
 #[allow(
@@ -8554,6 +8927,7 @@ async fn run_sender_session(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     peer_id: &str,
+    options: super::QuicSendOptions,
 ) -> Result<SendReport, QuicTransportError> {
     let config = prepared.effective_config(config);
     let config = &config;
@@ -8577,6 +8951,10 @@ async fn run_sender_session(
         } else {
             None
         };
+    // Only the reliable source stream can carry compressed chunks, so a sender
+    // that offers no source stream offers no codec either.
+    let codec_offer = offered_source_stream
+        .and_then(|_| codec::local_offer(options.compression(), source_stream_codec_chunk(config)));
     super::send_native_sender_hello(
         cx,
         &mut link.conn,
@@ -8587,6 +8965,7 @@ async fn run_sender_session(
         offered_source_stream,
         manifest.total_bytes,
         delta_sender_nonce,
+        codec_offer.as_ref(),
     )?;
     link.flush(cx).await?;
     let hello_frames = link.last_flushed_stream_frames();
@@ -8610,6 +8989,18 @@ async fn run_sender_session(
         }
         _ => None,
     };
+    // Compress the source stream only after an accept that fits this offer,
+    // and only when the stream itself was accepted.
+    let chunk_codec = codec_offer
+        .filter(|_| source_stream.is_some())
+        .and_then(|offer| {
+            ack_frame
+                .header
+                .extensions
+                .get(&codec::CODEC_ACCEPT_EXTENSION)
+                .and_then(|bytes| CodecAccept::from_bytes(bytes))
+                .filter(|accept| offer.admits(accept))
+        });
     if let (Some(stream), Some(window)) = (source_stream, ack.source_stream_recv_window) {
         // Honor the receiver's bounded reassembly window: cap initial send
         // credit at one window; MAX_STREAM_DATA advertisements (re-attached to
@@ -8744,7 +9135,9 @@ async fn run_sender_session(
             // A control frame read while the stream was still queueing, other
             // than a refusal, which ends the send at once.
             let mut early_control: Option<Frame> = None;
-            let bytes_streamed = send_native_source_stream_entries_pumped(
+            // Boxed (one allocation per transfer), as the receiver's
+            // source-stream receive is (br-asupersync-c2unfu).
+            let bytes_streamed = erase_send(send_native_source_stream_entries_pumped(
                 cx,
                 link,
                 &mut control,
@@ -8752,7 +9145,9 @@ async fn run_sender_session(
                 source_stream,
                 prepared,
                 config,
-            )
+                chunk_codec.as_ref(),
+                options,
+            ))
             .await?;
             if bytes_streamed != manifest.total_bytes {
                 return Err(QuicTransportError::Integrity(format!(
@@ -10640,7 +11035,15 @@ async fn receive_native_source_stream_entries_pumped(
     manifest: &TransferManifest,
     staged: &mut [QuicStagedEntryReceive],
     config: &QuicConfig,
+    chunk_codec: Option<&CodecAccept>,
 ) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
+    if let Some(accept) = chunk_codec {
+        // Boxed, as its caller is (br-asupersync-c2unfu).
+        return erase_send(receive_compressed_source_stream_entries(
+            cx, link, stream, manifest, staged, config, accept,
+        ))
+        .await;
+    }
     let mut received = 0u64;
     // Profiling-only (env ATP_QUIC_RECV_PROFILE): attribute the source-stream receiver's
     // per-byte CPU between pump+AEAD-decrypt (read chunk), staging write, and per-chunk
@@ -10729,6 +11132,114 @@ async fn receive_native_source_stream_entries_pumped(
         quic_rqtrace!(
             "receiver: native_source_stream byte-complete before FIN bytes={} stream={}",
             received,
+            stream.0
+        );
+    }
+    flush_cached_quic_staging_files(staged).await?;
+    Ok((received, 0, super::QuicDecodeStats::default()))
+}
+
+/// The source stream as the compressed mode carries it: one `ObjectData`
+/// frame per chunk, compressed or raw, in entry order (br-asupersync-t1fblr.29).
+/// Each frame must name the entry and offset that are due. Its chunk is
+/// decoded within what the entry still lacks, then written exactly as a raw
+/// stream's bytes are, so SHA-256 and the merkle root are checked on raw bytes.
+/// A frame is buffered whole, and no frame may exceed one codec chunk plus its
+/// header.
+async fn receive_compressed_source_stream_entries(
+    cx: &Cx,
+    link: &mut QuicLink,
+    stream: StreamId,
+    manifest: &TransferManifest,
+    staged: &mut [QuicStagedEntryReceive],
+    config: &QuicConfig,
+    accept: &CodecAccept,
+) -> Result<(u64, u64, super::QuicDecodeStats), QuicTransportError> {
+    // A compressed chunk is never larger than its raw chunk, so a frame holds
+    // at most the 12-byte chunk header, one codec chunk and its header slack.
+    // The 256 bytes of slack also bound the frame's header extensions: a
+    // sender that attached more than about 240 bytes of them to data frames
+    // would be refused here (fail closed), so a new extension on data frames
+    // must raise this bound for receivers first.
+    let max_frame = u64::from(accept.max_chunk_raw).saturating_add(12 + 256);
+    let mut frames = AtpFrameCodec::with_max_frame_size(max_frame);
+    let mut pending = BytesMut::new();
+    let mut scratch = Vec::new();
+    let mut received = 0u64;
+    let mut wire = 0u64;
+    for (entry_index, entry) in manifest.entries.iter().enumerate() {
+        cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+        let staged_entry = staged.get_mut(entry_index).ok_or_else(|| {
+            QuicTransportError::Integrity(format!(
+                "source stream has no staging slot for entry {}",
+                entry.index
+            ))
+        })?;
+        let mut entry_offset = 0u64;
+        while entry_offset < entry.size {
+            cx.checkpoint().map_err(|_| QuicTransportError::Cancelled)?;
+            let frame = loop {
+                if let Some(frame) = frames
+                    .decode(&mut pending)
+                    .map_err(|error| QuicTransportError::Frame(error.to_string()))?
+                {
+                    break frame;
+                }
+                let bytes = read_native_source_stream_chunk(
+                    cx,
+                    link,
+                    stream,
+                    super::QUIC_SOURCE_STREAM_READ_CHUNK,
+                    config.idle_timeout,
+                )
+                .await?;
+                if bytes.is_empty() {
+                    return Err(QuicTransportError::Integrity(format!(
+                        "source stream ended before entry {} completed ({} of {} bytes)",
+                        entry.index, entry_offset, entry.size
+                    )));
+                }
+                wire = wire.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+                pending.extend_from_slice(&bytes);
+            };
+            let remaining = entry.size.saturating_sub(entry_offset);
+            let chunk = source_stream_frame_chunk(
+                &frame,
+                accept,
+                entry.index,
+                entry_offset,
+                remaining,
+                &mut scratch,
+            )?;
+            staged_entry.write_range(entry, entry_offset, chunk).await?;
+            let n = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            entry_offset = entry_offset.saturating_add(n);
+            received = received.saturating_add(n);
+            let flushed = link.flush(cx).await?;
+            quic_rqtrace!(
+                "receiver: compressed_source_chunk entry={} end_offset={entry_offset} len={n} wire={wire} flush_packets={flushed}",
+                entry.index
+            );
+        }
+    }
+    if !pending.is_empty() || !link.conn.read_stream_bytes(cx, stream, 1)?.is_empty() {
+        return Err(QuicTransportError::Integrity(
+            "compressed source stream carried bytes after the last chunk".to_string(),
+        ));
+    }
+    // The transport saw stream offsets, which count compressed bytes.
+    let fin_seen = validate_native_source_stream_observed_completion(link, wire)?;
+    if received != manifest.total_bytes {
+        return Err(QuicTransportError::Integrity(format!(
+            "source stream delivered {received} bytes, expected {}",
+            manifest.total_bytes
+        )));
+    }
+    if !fin_seen && !link.conn.is_stream_read_eof(stream)? {
+        quic_rqtrace!(
+            "receiver: compressed source stream byte-complete before FIN bytes={} wire={} stream={}",
+            received,
+            wire,
             stream.0
         );
     }
@@ -10932,7 +11443,31 @@ async fn run_receiver_session(
         delta_receiver_nonce: delta_handshake.map(|binding| binding.receiver_nonce),
         delta_destination_root: delta_handshake.map(|binding| binding.destination_root),
     };
-    let ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    let mut ack_frame = super::json_frame(FrameType::HandshakeAck, &ack)?;
+    // Accept a compression offer this build can decode, for the source stream
+    // only. Senders that predate compression make no offer and get no accept,
+    // so their stream stays raw (br-asupersync-t1fblr.29).
+    let chunk_codec = if accepted_source_stream && !receiver_ignores_codec_offers() {
+        hello_frame
+            .header
+            .extensions
+            .get(&codec::CODEC_OFFER_EXTENSION)
+            .and_then(|bytes| CodecOffer::from_bytes(bytes))
+            .and_then(|offer| {
+                codec::negotiate(
+                    &codec::local_decode_capability(QUIC_SOURCE_STREAM_CODEC_MAX_CHUNK),
+                    &offer,
+                )
+            })
+    } else {
+        None
+    };
+    if let Some(accept) = &chunk_codec {
+        ack_frame
+            .header
+            .extensions
+            .insert(codec::CODEC_ACCEPT_EXTENSION, accept.to_bytes());
+    }
     control.send(cx, &mut link.conn, &ack_frame)?;
     link.flush(cx).await?;
     let mut ack_frames = link.last_flushed_stream_frames();
@@ -11243,15 +11778,19 @@ async fn run_receiver_session(
                     source_stream.0
                 )));
             }
+            // Boxed (one allocation per transfer) so the session's Send proof
+            // does not nest through the source-stream receive and its flushes
+            // (br-asupersync-c2unfu).
             let (bytes_received, symbols_accepted, decode_stats) =
-                receive_native_source_stream_entries_pumped(
+                erase_send(receive_native_source_stream_entries_pumped(
                     cx,
                     link,
                     source_stream,
                     &manifest,
                     &mut staged,
                     config,
-                )
+                    chunk_codec.as_ref(),
+                ))
                 .await?;
             quic_rqtrace!(
                 "receiver: native_source_stream received bytes={} stream={} symbols_accepted={} decode_count={}",
@@ -11260,7 +11799,9 @@ async fn run_receiver_session(
                 symbols_accepted,
                 decode_stats.decode_count
             );
-            let (mut receipt, committed_paths) = commit_staged_entries(
+            // Boxed (one allocation per transfer), as at the symbol-round
+            // commit below (br-asupersync-c2unfu).
+            let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
                 cx,
                 link,
                 &mut control,
@@ -11269,7 +11810,7 @@ async fn run_receiver_session(
                 &mut staged,
                 config,
                 options,
-            )
+            ))
             .await?;
             receipt.symbols_accepted = symbols_accepted;
             receipt.feedback_rounds = 0;
@@ -11769,7 +12310,12 @@ async fn run_receiver_session(
         intake_stats.trace_summary(cx, manifest.transfer_id.as_str());
         send_native_keep_alive(cx, &mut link.conn, &mut control)?;
         link.flush(cx).await?;
-        let (mut receipt, committed_paths) = commit_staged_entries(
+        // The commit is boxed behind `dyn Future + Send` (one allocation per
+        // transfer): proving run_receiver_session Send through the commit,
+        // keep-alive and flush chain overflowed rustc's default recursion
+        // depth in a build of bin atp (recursion_depth_exceeding_limit,
+        // br-asupersync-c2unfu; the same cut as br-asupersync-lf8muy).
+        let (mut receipt, committed_paths) = erase_send(commit_staged_entries(
             cx,
             link,
             &mut control,
@@ -11778,7 +12324,7 @@ async fn run_receiver_session(
             &mut staged,
             config,
             options,
-        )
+        ))
         .await?;
         receipt.symbols_accepted = symbols_accepted;
         receipt.feedback_rounds = feedback_rounds;
@@ -11851,6 +12397,7 @@ pub(crate) async fn send_prepared_over_udp(
     prepared: &QuicPreparedSource,
     config: &QuicConfig,
     peer_id: &str,
+    options: super::QuicSendOptions,
 ) -> Result<(SendReport, QuicSendLimiterReport), QuicTransportError> {
     let config = prepared.effective_config(config);
     config.validate()?;
@@ -11868,7 +12415,7 @@ pub(crate) async fn send_prepared_over_udp(
     // sessions are erased the same way.
     let mut link = erase_send(connect(cx, addr, client_tls, &config)).await?;
     let report = erase_send(run_sender_session(
-        cx, &mut link, prepared, &config, peer_id,
+        cx, &mut link, prepared, &config, peer_id, options,
     ))
     .await?;
     let limiter = link.limiter_report();
@@ -11941,946 +12488,8 @@ pub async fn bind_server_endpoint(
 /// look dead to the sender, and a receiver busy with local work must keep
 /// proving it is alive. Mechanism tests over real loopback UDP.
 #[cfg(test)]
-mod gh67_liveness_tests {
-    use super::*;
-    use crate::net::quic_native::handshake_driver::tests::{
-        CA_CERT_PEM, LEAF_CERT_PEM, leaf_key, parse_one_cert,
-    };
-    use crate::net::quic_native::handshake_driver::{client_config, server_config};
-    use futures_lite::future::{block_on, zip};
-
-    async fn established_loopback_links(cx: &Cx, config: &QuicConfig) -> (QuicLink, QuicLink) {
-        let endpoint = bind_endpoint(cx, "127.0.0.1:0".parse().unwrap())
-            .await
-            .expect("bind endpoint");
-        let address = endpoint.local_addr();
-        let client_tls = QuicClientTls {
-            server_name: ServerName::try_from("localhost").unwrap(),
-            config: client_config(
-                vec![parse_one_cert(CA_CERT_PEM)],
-                vec![ATP_QUIC_ALPN.to_vec()],
-            )
-            .unwrap(),
-        };
-        let server_tls = QuicServerTls {
-            config: server_config(
-                vec![parse_one_cert(LEAF_CERT_PEM)],
-                leaf_key(),
-                vec![ATP_QUIC_ALPN.to_vec()],
-            )
-            .unwrap(),
-        };
-        let (client, server) = zip(
-            connect(cx, address, &client_tls, config),
-            accept(cx, endpoint, &server_tls, config),
-        )
-        .await;
-        let client = client.expect("client link");
-        let (mut server, early) = server.expect("server link");
-        server.ingest_packets(cx, early).expect("early packets");
-        (client, server)
-    }
-
-    // br-asupersync-5f1fcj: a long-header datagram that fails to authenticate
-    // made the server's accept return an error, so anyone who could reach the
-    // port could end an accept with one garbage packet (ATP's Initial DCID is
-    // a protocol constant). It must be discarded and the handshake complete.
-    #[test]
-    fn a_garbage_long_header_datagram_does_not_end_an_accept() {
-        let cx = Cx::for_testing();
-        let config = QuicConfig::default();
-        block_on(async {
-            let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("bind endpoint");
-            let address = endpoint.local_addr();
-            // An Initial-typed long header with ATP's Initial DCID and a body
-            // that cannot authenticate, queued before the real client.
-            let mut garbage = vec![0xc0, 0x00, 0x00, 0x00, 0x01];
-            garbage.push(u8::try_from(ATP_QUIC_INITIAL_DCID.len()).expect("dcid length"));
-            garbage.extend_from_slice(ATP_QUIC_INITIAL_DCID);
-            garbage.extend_from_slice(&[8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0x44, 0x00]);
-            garbage.resize(1_200, 0xa5);
-            let forger = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind forger");
-            forger.send_to(&garbage, address).expect("send garbage");
-
-            let client_tls = QuicClientTls {
-                server_name: ServerName::try_from("localhost").unwrap(),
-                config: client_config(
-                    vec![parse_one_cert(CA_CERT_PEM)],
-                    vec![ATP_QUIC_ALPN.to_vec()],
-                )
-                .unwrap(),
-            };
-            let server_tls = QuicServerTls {
-                config: server_config(
-                    vec![parse_one_cert(LEAF_CERT_PEM)],
-                    leaf_key(),
-                    vec![ATP_QUIC_ALPN.to_vec()],
-                )
-                .unwrap(),
-            };
-            let (client, server) = zip(
-                connect(&cx, address, &client_tls, &config),
-                accept(&cx, endpoint, &server_tls, &config),
-            )
-            .await;
-            client.expect("client link");
-            server.expect("the accept survives the garbage datagram");
-        });
-    }
-
-    // br-asupersync-8vrx8q (audit r8 H1): accept stashed every short-header
-    // datagram from any address while no peer was known, without bound. Those
-    // sent before the client's Initial must not reach the replayed early data.
-    #[test]
-    fn short_header_datagrams_before_the_client_is_known_are_not_stashed() {
-        let cx = Cx::for_testing();
-        let config = QuicConfig::default();
-        block_on(async {
-            let endpoint = bind_endpoint(&cx, "127.0.0.1:0".parse().unwrap())
-                .await
-                .expect("bind endpoint");
-            let address = endpoint.local_addr();
-            let sprayer = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind sprayer");
-            let sprayer_addr = sprayer.local_addr().expect("sprayer address");
-            for _ in 0..64 {
-                sprayer
-                    .send_to(&[0x40; 1_200], address)
-                    .expect("send short header");
-            }
-
-            let client_tls = QuicClientTls {
-                server_name: ServerName::try_from("localhost").unwrap(),
-                config: client_config(
-                    vec![parse_one_cert(CA_CERT_PEM)],
-                    vec![ATP_QUIC_ALPN.to_vec()],
-                )
-                .unwrap(),
-            };
-            let server_tls = QuicServerTls {
-                config: server_config(
-                    vec![parse_one_cert(LEAF_CERT_PEM)],
-                    leaf_key(),
-                    vec![ATP_QUIC_ALPN.to_vec()],
-                )
-                .unwrap(),
-            };
-            let (client, server) = zip(
-                connect(&cx, address, &client_tls, &config),
-                accept(&cx, endpoint, &server_tls, &config),
-            )
-            .await;
-            client.expect("client link");
-            let (_server, early) = server.expect("server link");
-            let sprayed = early
-                .iter()
-                .filter(|packet| packet.src_addr == sprayer_addr)
-                .count();
-            assert_eq!(
-                sprayed, 0,
-                "short-header datagrams sent before the client's Initial were stashed"
-            );
-        });
-    }
-
-    // br-asupersync-8vrx8q (audit r8 H1): once the peer is known the stash is
-    // bounded by packet count and by bytes.
-    #[test]
-    fn the_early_one_rtt_stash_is_bounded() {
-        let packet = |len: usize| ReceivedPacket {
-            src_addr: "127.0.0.1:9".parse().unwrap(),
-            data: vec![0x40; len],
-            receive_time: Instant::now(),
-            transmit_time: None,
-        };
-        let mut stash = EarlyOneRttStash::default();
-        assert!(!stash.offer(packet(64), false), "no peer yet: dropped");
-        for _ in 0..ACCEPT_EARLY_ONE_RTT_MAX_PACKETS {
-            assert!(stash.offer(packet(1), true));
-        }
-        assert!(!stash.offer(packet(1), true), "count cap reached");
-
-        let mut stash = EarlyOneRttStash::default();
-        let big = 64 * 1024;
-        for _ in 0..ACCEPT_EARLY_ONE_RTT_MAX_BYTES / big {
-            assert!(stash.offer(packet(big), true));
-        }
-        assert!(!stash.offer(packet(1), true), "byte cap reached");
-        assert_eq!(stash.bytes, ACCEPT_EARLY_ONE_RTT_MAX_BYTES);
-    }
-
-    // asupersync-18hhdp: the client's handshake source CID is per connection,
-    // not the former protocol constant, so an off-path sender cannot aim a
-    // forged Retry or stale-key long header at it.
-    #[test]
-    fn client_handshake_source_connection_id_is_per_connection() {
-        const FORMER_CONSTANT: [u8; 8] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
-        let server = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind raw server");
-        server
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .expect("raw server read timeout");
-        let address = server.local_addr().expect("raw server address");
-        let client_tls = QuicClientTls {
-            server_name: ServerName::try_from("localhost").unwrap(),
-            config: client_config(
-                vec![parse_one_cert(CA_CERT_PEM)],
-                vec![ATP_QUIC_ALPN.to_vec()],
-            )
-            .unwrap(),
-        };
-        let config = QuicConfig {
-            handshake_timeout: Duration::from_millis(300),
-            ..QuicConfig::default()
-        };
-        let cx = Cx::for_testing();
-        let mut seen = Vec::new();
-        for _ in 0..2 {
-            let result = block_on(connect(&cx, address, &client_tls, &config));
-            assert!(
-                matches!(result, Err(QuicTransportError::Timeout { .. })),
-                "no server answers: {:?}",
-                result.as_ref().err()
-            );
-            let mut datagram = vec![0_u8; 65_536];
-            let (len, _) = server.recv_from(&mut datagram).expect("client Initial");
-            // Long header: flags, version (4), DCID length + DCID, SCID length + SCID.
-            let dcid_len = usize::from(datagram[5]);
-            let scid_len = usize::from(datagram[6 + dcid_len]);
-            assert!(len > 7 + dcid_len + scid_len, "truncated client Initial");
-            assert_eq!(&datagram[6..6 + dcid_len], ATP_QUIC_INITIAL_DCID);
-            seen.push(datagram[7 + dcid_len..7 + dcid_len + scid_len].to_vec());
-            // Discard anything else this attempt sent before the next one.
-            server.set_nonblocking(true).expect("drain mode");
-            while server.recv_from(&mut datagram).is_ok() {}
-            server.set_nonblocking(false).expect("blocking mode");
-        }
-        for scid in &seen {
-            assert_eq!(scid.len(), ATP_QUIC_CLIENT_SCID_LEN);
-            assert_ne!(
-                scid.as_slice(),
-                FORMER_CONSTANT,
-                "client SCID must not be a protocol constant"
-            );
-        }
-        assert_ne!(
-            seen[0], seen[1],
-            "each connection draws a fresh client SCID"
-        );
-    }
-
-    // asupersync-gsnci5: RFC 9001 §6.6 — the send path must not protect beyond
-    // the AEAD confidentiality limit under one key. Since 1bheeo the flush
-    // rotates the key before the limit, but only when no local update is still
-    // awaiting the peer's confirmation. While one is, it cannot rotate again, so
-    // it must fail closed at the limit rather than over-use the key.
-    #[test]
-    fn one_rtt_send_fails_closed_at_confidentiality_limit() {
-        use crate::net::atp::quic::packet_protection::AEAD_CONFIDENTIALITY_LIMIT;
-        use crate::net::quic_native::tls::PacketProtectionSpace;
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (mut client, _server) = established_loopback_links(&cx, &config).await;
-            // A local key update the peer never confirms: the flush's own
-            // rotation steps, so the local phase moves ahead of the remote one.
-            let next_phase = !client.conn.tls().local_key_phase();
-            assert!(
-                client
-                    .protection
-                    .ensure_next_gen_keys(&cx, PacketProtectionSpace::OneRtt, next_phase)
-                    .is_ok()
-            );
-            client.conn.request_local_key_update(&cx).unwrap();
-            client.conn.commit_local_key_update(&cx).unwrap();
-            client
-                .protection
-                .note_local_key_update(PacketProtectionSpace::OneRtt);
-            assert_ne!(
-                client.conn.tls().local_key_phase(),
-                client.conn.tls().remote_key_phase(),
-                "a key update must be awaiting the peer's confirmation"
-            );
-            client.protection.set_protected_packet_count_for_test(
-                PacketProtectionSpace::OneRtt,
-                AEAD_CONFIDENTIALITY_LIMIT,
-            );
-            // Queue a control-stream frame so the flush assembles a 1-RTT batch
-            // and reaches the confidentiality guard.
-            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
-            let frame = Frame::empty(FrameType::KeepAlive).unwrap();
-            client_control.send(&cx, &mut client.conn, &frame).unwrap();
-            let result = client.flush(&cx).await;
-            assert!(
-                matches!(&result, Err(QuicTransportError::Quic(msg)) if msg.contains("confidentiality limit")),
-                "flush must fail closed at the confidentiality limit, got {result:?}"
-            );
-        });
-    }
-
-    // asupersync-1bheeo: with no key update awaiting confirmation, the same
-    // preloaded limit makes the flush rotate the key instead of failing, and
-    // the batch goes out under the fresh key.
-    #[test]
-    fn one_rtt_send_rotates_before_the_confidentiality_limit() {
-        use crate::net::atp::quic::packet_protection::AEAD_CONFIDENTIALITY_LIMIT;
-        use crate::net::quic_native::tls::PacketProtectionSpace;
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (mut client, _server) = established_loopback_links(&cx, &config).await;
-            let phase_before = client.conn.tls().local_key_phase();
-            assert_eq!(phase_before, client.conn.tls().remote_key_phase());
-            client.protection.set_protected_packet_count_for_test(
-                PacketProtectionSpace::OneRtt,
-                AEAD_CONFIDENTIALITY_LIMIT,
-            );
-            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
-            let frame = Frame::empty(FrameType::KeepAlive).unwrap();
-            client_control.send(&cx, &mut client.conn, &frame).unwrap();
-            let result = client.flush(&cx).await;
-            assert!(result.is_ok(), "flush must rotate, not fail: {result:?}");
-            assert_ne!(
-                client.conn.tls().local_key_phase(),
-                phase_before,
-                "the send key rotated"
-            );
-            assert!(
-                !client
-                    .protection
-                    .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
-                "the fresh key starts below the limit"
-            );
-        });
-    }
-
-    // asupersync-gsnci5: RFC 9001 §6.6 — the receive path must close the
-    // connection once too many packets have failed authentication under one key
-    // (integrity limit). This bounds forgery attempts; it never fires normally.
-    #[test]
-    fn one_rtt_receive_fails_closed_at_integrity_limit() {
-        use crate::net::atp::quic::packet_protection::AEAD_INTEGRITY_LIMIT;
-        use crate::net::quic_native::endpoint::ReceivedPacket;
-        use crate::net::quic_native::tls::PacketProtectionSpace;
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (_client, mut server) = established_loopback_links(&cx, &config).await;
-            server.protection.set_auth_failure_count_for_test(
-                PacketProtectionSpace::OneRtt,
-                AEAD_INTEGRITY_LIMIT,
-            );
-            // A well-formed short-header 1-RTT packet with a high packet number
-            // (past the accepted window) and undecryptable body.
-            let mut data = encode_one_rtt_header(1_000_000, false).to_vec();
-            data.extend_from_slice(&[0u8; ONE_RTT_TAG_LEN + 8]);
-            let packet = ReceivedPacket {
-                src_addr: "127.0.0.1:0".parse().unwrap(),
-                data,
-                receive_time: Instant::now(),
-                transmit_time: None,
-            };
-            let result = server.ingest_packets(&cx, vec![packet]);
-            assert!(
-                matches!(&result, Err(QuicTransportError::Integrity(_))),
-                "ingest must fail closed at the integrity limit, got {result:?}"
-            );
-        });
-    }
-
-    // asupersync-1bheeo (RFC 9001 §6.3/§6.5): with a lowered soft key-update
-    // threshold, a long-lived bidirectional 1-RTT exchange crosses the
-    // confidentiality threshold repeatedly, so BOTH endpoints rotate their keys
-    // several times (alternating phases). Each endpoint's flush initiates a
-    // local update (Part 1) and each receive path installs the peer's
-    // next-generation keys and decrypts the rotated traffic (Part 2). Every
-    // control frame must survive intact — its AEAD tag verifies only under the
-    // correct rotated keys — and neither side may fall back to the hard
-    // confidentiality-limit fail-closed. The `>= 3` rotation asserts make this
-    // non-vacuous: without the rotation wiring the remote key phase never moves
-    // and the test fails.
-    #[test]
-    fn bidirectional_key_rotation_over_real_udp() {
-        use crate::net::quic_native::tls::PacketProtectionSpace;
-
-        // Deliver `frame` over the control stream, rotating keys as the soft
-        // threshold trips, pumping until it authenticates and decodes. Returns
-        // the received frame type so the caller can assert byte-intactness.
-        async fn ping(
-            cx: &Cx,
-            from: &mut QuicLink,
-            from_control: &mut NativeQuicFrameTransport,
-            to: &mut QuicLink,
-            to_control: &mut NativeQuicFrameTransport,
-            frame: &Frame,
-        ) -> FrameType {
-            from_control.send(cx, &mut from.conn, frame).unwrap();
-            from.flush(cx).await.unwrap();
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                to.pump_inbound_for(cx, Duration::from_secs(2))
-                    .await
-                    .unwrap();
-                if let Some(received) = to_control.try_recv(cx, &mut to.conn).unwrap() {
-                    return received.frame_type();
-                }
-                assert!(
-                    Instant::now() < deadline,
-                    "rotated control frame never arrived"
-                );
-            }
-        }
-
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-
-            // A tiny soft threshold forces a key update every few sent packets;
-            // production uses the RFC 9001 §6.6 default (millions of packets).
-            client
-                .protection
-                .set_key_update_confidentiality_threshold(2);
-            server
-                .protection
-                .set_key_update_confidentiality_threshold(2);
-
-            let (mut client_control, mut server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-
-            let mut client_remote_phases = vec![client.conn.tls().remote_key_phase()];
-            let mut server_remote_phases = vec![server.conn.tls().remote_key_phase()];
-
-            for round in 0..14u32 {
-                // Alternate frame types so a decrypt under the wrong key would
-                // surface as a wrong or absent frame, not a silent pass.
-                let c2s = if round % 2 == 0 {
-                    Frame::empty(FrameType::KeepAlive).unwrap()
-                } else {
-                    Frame::empty(FrameType::Proof).unwrap()
-                };
-                let got = ping(
-                    &cx,
-                    &mut client,
-                    &mut client_control,
-                    &mut server,
-                    &mut server_control,
-                    &c2s,
-                )
-                .await;
-                assert_eq!(
-                    got,
-                    c2s.frame_type(),
-                    "client->server frame corrupted in round {round}"
-                );
-                server_remote_phases.push(server.conn.tls().remote_key_phase());
-
-                let s2c = if round % 2 == 0 {
-                    Frame::empty(FrameType::Proof).unwrap()
-                } else {
-                    Frame::empty(FrameType::KeepAlive).unwrap()
-                };
-                let got = ping(
-                    &cx,
-                    &mut server,
-                    &mut server_control,
-                    &mut client,
-                    &mut client_control,
-                    &s2c,
-                )
-                .await;
-                assert_eq!(
-                    got,
-                    s2c.frame_type(),
-                    "server->client frame corrupted in round {round}"
-                );
-                client_remote_phases.push(client.conn.tls().remote_key_phase());
-
-                // Rotation must keep each key's packet count below the hard
-                // limit; a fail-closed here means Part 1 never rotated.
-                assert!(
-                    !client
-                        .protection
-                        .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
-                    "client hit the hard confidentiality limit instead of rotating",
-                );
-                assert!(
-                    !server
-                        .protection
-                        .confidentiality_limit_reached(PacketProtectionSpace::OneRtt),
-                    "server hit the hard confidentiality limit instead of rotating",
-                );
-            }
-
-            // Count accepted peer rotations on each side (adjacent phase flips of
-            // the remote key phase). Both receive paths must have installed and
-            // committed several peer key updates.
-            let count_flips = |phases: &[bool]| phases.windows(2).filter(|w| w[0] != w[1]).count();
-            let client_rotations = count_flips(&client_remote_phases);
-            let server_rotations = count_flips(&server_remote_phases);
-            assert!(
-                client_rotations >= 3,
-                "client should accept several peer key updates, saw {client_rotations}: {client_remote_phases:?}",
-            );
-            assert!(
-                server_rotations >= 3,
-                "server should accept several peer key updates, saw {server_rotations}: {server_remote_phases:?}",
-            );
-        });
-    }
-
-    #[test]
-    fn stream_pto_budget_counts_consecutive_silent_windows() {
-        assert_eq!(stream_pto_attempts_after_pump(0, 0), 1);
-        assert_eq!(stream_pto_attempts_after_pump(5, 0), 6);
-        assert_eq!(
-            stream_pto_attempts_after_pump(5, 1),
-            0,
-            "any 1-RTT packet from the peer restarts the silent-window count"
-        );
-        assert_eq!(stream_pto_attempts_after_pump(u32::MAX, 0), u32::MAX);
-    }
-
-    #[test]
-    fn local_work_keep_alive_fires_once_per_cadence() {
-        let start = Instant::now();
-        let cadence = Duration::from_millis(200);
-        let mut keep_alive = LocalWorkKeepAlive::new(start);
-        assert!(!keep_alive.due(start, cadence));
-        assert!(!keep_alive.due(start + Duration::from_millis(199), cadence));
-        assert!(keep_alive.due(start + Duration::from_millis(200), cadence));
-        assert!(
-            !keep_alive.due(start + Duration::from_millis(399), cadence),
-            "re-based on the emission, not on the poll"
-        );
-        assert!(keep_alive.due(start + Duration::from_millis(400), cadence));
-    }
-
-    /// Sender side: with a 3 s idle budget (two 1.5 s windows) the proof wait
-    /// used to give up after ANY three silent windows in total, even with a
-    /// keep-alive between each pair. The peer here pings every 2.2 s (one
-    /// silent window per gap, three gaps) and then answers at ~8 s; the
-    /// cumulative count died in the third gap (~5.9 s).
-    #[test]
-    fn proof_wait_survives_a_slow_but_pinging_peer_over_real_udp() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig {
-                idle_timeout: Duration::from_secs(3),
-                ..QuicConfig::default()
-            };
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let control_stream = super::super::first_client_bidi_stream();
-            // The client opens its control stream (as the sender's Hello does)
-            // and writes on it so the server can answer on the same stream.
-            let mut client_control = NativeQuicFrameTransport::open(&cx, &mut client.conn).unwrap();
-            assert_eq!(client_control.stream, control_stream);
-            let mut server_control = NativeQuicFrameTransport::for_stream(control_stream);
-            let opener = Frame::empty(FrameType::KeepAlive).unwrap();
-            client_control.send(&cx, &mut client.conn, &opener).unwrap();
-            client.flush(&cx).await.unwrap();
-            let opened_at = Instant::now();
-            loop {
-                server
-                    .pump_inbound_for(&cx, Duration::from_secs(2))
-                    .await
-                    .unwrap();
-                if server_control
-                    .try_recv(&cx, &mut server.conn)
-                    .unwrap()
-                    .is_some()
-                {
-                    break;
-                }
-                assert!(
-                    opened_at.elapsed() < Duration::from_secs(10),
-                    "control stream never opened"
-                );
-            }
-
-            let placeholder = [SentControlStreamFrame {
-                stream: control_stream,
-                offset: 0,
-                len: 1,
-            }];
-            let client_wait = async {
-                let started = Instant::now();
-                let frame = client
-                    .next_control_frame_with_stream_pto(
-                        &cx,
-                        &mut client_control,
-                        "gh67 proof wait",
-                        &placeholder,
-                        "gh67_test_pto",
-                    )
-                    .await;
-                (started.elapsed(), frame.map(|frame| frame.frame_type()))
-            };
-            let server_pinger = async {
-                for _ in 0..3 {
-                    crate::time::sleep(cx.now(), Duration::from_millis(2200)).await;
-                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
-                        .await
-                        .unwrap();
-                }
-                crate::time::sleep(cx.now(), Duration::from_millis(1400)).await;
-                let proof = Frame::empty(FrameType::Proof).unwrap();
-                server_control.send(&cx, &mut server.conn, &proof).unwrap();
-                server.flush(&cx).await.unwrap();
-            };
-            let ((elapsed, frame), ()) = zip(client_wait, server_pinger).await;
-            assert_eq!(
-                frame.expect("proof after three keep-alives"),
-                FrameType::Proof
-            );
-            assert!(
-                elapsed >= Duration::from_millis(7500),
-                "the wait must have outlived the cumulative budget (~5.9 s): {elapsed:?}"
-            );
-            assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
-        });
-    }
-
-    /// Opens the client's control stream (as the sender's Hello does) and
-    /// pumps the server until it holds the opener, returning both ends.
-    async fn opened_control_streams(
-        cx: &Cx,
-        client: &mut QuicLink,
-        server: &mut QuicLink,
-    ) -> (NativeQuicFrameTransport, NativeQuicFrameTransport) {
-        let control_stream = super::super::first_client_bidi_stream();
-        let mut client_control = NativeQuicFrameTransport::open(cx, &mut client.conn).unwrap();
-        assert_eq!(client_control.stream, control_stream);
-        let mut server_control = NativeQuicFrameTransport::for_stream(control_stream);
-        let opener = Frame::empty(FrameType::KeepAlive).unwrap();
-        client_control.send(cx, &mut client.conn, &opener).unwrap();
-        client.flush(cx).await.unwrap();
-        let opened_at = Instant::now();
-        loop {
-            server
-                .pump_inbound_for(cx, Duration::from_secs(2))
-                .await
-                .unwrap();
-            if server_control
-                .try_recv(cx, &mut server.conn)
-                .unwrap()
-                .is_some()
-            {
-                break;
-            }
-            assert!(
-                opened_at.elapsed() < Duration::from_secs(10),
-                "control stream never opened"
-            );
-        }
-        (client_control, server_control)
-    }
-
-    /// Sender side, pure-stream path (asupersync-ybczmx): the source-stream
-    /// proof wait measured its idle budget from the start of the wait, so a
-    /// receiver that pinged every 200 ms through a long packed-tree commit
-    /// was declared dead the moment the budget elapsed (149 pumped windows on
-    /// record when the 45 s budget fired). The peer here pings every 400 ms
-    /// for 4.4 s against a 2 s budget and then answers; the old clock died
-    /// at 2 s.
-    #[test]
-    fn source_stream_proof_wait_survives_a_slow_but_pinging_peer_over_real_udp() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig {
-                idle_timeout: Duration::from_secs(2),
-                ..QuicConfig::default()
-            };
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let (mut client_control, mut server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-            let client_wait = async {
-                let started = Instant::now();
-                let frame = client
-                    .next_control_frame_with_source_stream_recovery(
-                        &cx,
-                        &mut client_control,
-                        "ybczmx proof wait",
-                    )
-                    .await;
-                (started.elapsed(), frame.map(|frame| frame.frame_type()))
-            };
-            let server_pinger = async {
-                for _ in 0..11 {
-                    crate::time::sleep(cx.now(), Duration::from_millis(400)).await;
-                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
-                        .await
-                        .unwrap();
-                }
-                let proof = Frame::empty(FrameType::Proof).unwrap();
-                server_control.send(&cx, &mut server.conn, &proof).unwrap();
-                server.flush(&cx).await.unwrap();
-            };
-            let ((elapsed, frame), ()) = zip(client_wait, server_pinger).await;
-            assert_eq!(
-                frame.expect("proof after eleven keep-alives"),
-                FrameType::Proof
-            );
-            assert!(
-                elapsed >= Duration::from_millis(4000),
-                "the wait must have outlived the 2 s budget measured from its start: {elapsed:?}"
-            );
-            assert!(elapsed < Duration::from_secs(12), "{elapsed:?}");
-        });
-    }
-
-    /// A peer that stays silent still fails closed after one idle budget of
-    /// silence, well before the liveness cap.
-    #[test]
-    fn source_stream_proof_wait_fails_closed_after_an_idle_budget_of_silence() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig {
-                idle_timeout: Duration::from_secs(1),
-                ..QuicConfig::default()
-            };
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let (mut client_control, _server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-            let started = Instant::now();
-            let result = client
-                .next_control_frame_with_source_stream_recovery(
-                    &cx,
-                    &mut client_control,
-                    "ybczmx silent peer",
-                )
-                .await;
-            let elapsed = started.elapsed();
-            match result {
-                Err(QuicTransportError::Quic(message)) => assert!(
-                    message.contains("source_stream_proof_timeout"),
-                    "silence must expire on the idle clock: {message}"
-                ),
-                Err(other) => panic!("unexpected error class: {other:?}"),
-                Ok(frame) => panic!("a silent peer delivered {:?}", frame.frame_type()),
-            }
-            assert!(
-                elapsed >= Duration::from_secs(1) && elapsed < Duration::from_secs(6),
-                "one idle budget of silence, not the 8 s liveness cap: {elapsed:?}"
-            );
-        });
-    }
-
-    /// A peer that keeps pinging but never delivers the Proof is bounded by
-    /// the absolute liveness cap (eight idle budgets), not held forever.
-    #[test]
-    fn source_stream_proof_wait_caps_a_live_peer_that_never_answers_over_real_udp() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig {
-                idle_timeout: Duration::from_millis(500),
-                ..QuicConfig::default()
-            };
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let (mut client_control, mut server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-            let client_wait = async {
-                let started = Instant::now();
-                let result = client
-                    .next_control_frame_with_source_stream_recovery(
-                        &cx,
-                        &mut client_control,
-                        "ybczmx capped wait",
-                    )
-                    .await;
-                (started.elapsed(), result)
-            };
-            let server_pinger = async {
-                for _ in 0..70 {
-                    crate::time::sleep(cx.now(), Duration::from_millis(100)).await;
-                    send_and_flush_native_keep_alive(&cx, &mut server, &mut server_control)
-                        .await
-                        .unwrap();
-                }
-            };
-            let ((elapsed, result), ()) = zip(client_wait, server_pinger).await;
-            match result {
-                Err(QuicTransportError::Quic(message)) => assert!(
-                    message.contains("source_stream_proof_liveness_cap"),
-                    "a live peer that never answers must hit the cap: {message}"
-                ),
-                Err(other) => panic!("unexpected error class: {other:?}"),
-                Ok(frame) => panic!("the peer never sent a frame, got {:?}", frame.frame_type()),
-            }
-            assert!(
-                elapsed >= Duration::from_secs(4) && elapsed < Duration::from_secs(7),
-                "cap = 8 x 500 ms: {elapsed:?}"
-            );
-        });
-    }
-
-    /// Receiver side: a long blocking step raced with the keep-alive pinger
-    /// keeps the peer fed at the cadence (and drains the socket) until the
-    /// step completes; the step's result is returned unchanged.
-    #[test]
-    fn long_blocking_step_keeps_pinging_the_peer_over_real_udp() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let mut server_control =
-                NativeQuicFrameTransport::for_stream(super::super::first_client_bidi_stream());
-            let work = async {
-                let started = crate::runtime::spawn_blocking_io(|| {
-                    std::thread::sleep(Duration::from_millis(1100));
-                    Ok::<Instant, std::io::Error>(Instant::now())
-                })
-                .await
-                .expect("blocking step");
-                Ok::<Instant, QuicTransportError>(started)
-            };
-            let server_side = async {
-                let began = Instant::now();
-                let finished = keep_peer_alive_while(&cx, &mut server, &mut server_control, work)
-                    .await
-                    .expect("raced step result");
-                (began, finished)
-            };
-            let client_listener = async {
-                let started = Instant::now();
-                let mut packets = 0usize;
-                while started.elapsed() < Duration::from_millis(1700) {
-                    packets += client
-                        .pump_inbound_for(&cx, Duration::from_millis(200))
-                        .await
-                        .unwrap();
-                }
-                packets
-            };
-            let ((began, finished), packets) = zip(server_side, client_listener).await;
-            assert!(finished.saturating_duration_since(began) >= Duration::from_millis(1000));
-            assert!(
-                (4..=8).contains(&packets),
-                "expected roughly one keep-alive per 200 ms over 1.1 s, got {packets}"
-            );
-        });
-    }
-
-    /// asupersync-nnm3gw (review MEDIUMs 1 and 3): a refusing receiver waits
-    /// its whole bound for the sender's Close however busy the sender is, and
-    /// sends the Proof alone. This sender keeps the receiver's socket busy and
-    /// reads control only at the end, as a v0.4.x source-stream sender does.
-    /// Each packet used to end a wait round, so the receiver left within
-    /// milliseconds, and the Close it sent behind the Proof made a spray sender
-    /// that read both in one pass fail on the Close instead of the reason.
-    #[test]
-    fn a_refusing_receiver_waits_its_bound_for_a_busy_sender_and_sends_only_the_proof() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig::default();
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let (mut client_control, mut server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-            let bound = NEEDMORE_PTO * REFUSAL_CLOSE_WAIT_ROUNDS;
-            let receiver = async {
-                let started = Instant::now();
-                let reason = "nnm3gw test refusal".to_string();
-                refuse_transfer_in_band(&cx, &mut server, &mut server_control, reason).await;
-                started.elapsed()
-            };
-            let busy_sender = async {
-                let started = Instant::now();
-                while started.elapsed() < bound + Duration::from_secs(1) {
-                    send_and_flush_native_keep_alive(&cx, &mut client, &mut client_control)
-                        .await
-                        .unwrap();
-                    client
-                        .pump_inbound_for(&cx, Duration::from_millis(50))
-                        .await
-                        .unwrap();
-                }
-                let mut frames = Vec::new();
-                while let Some(frame) = client_control.try_recv(&cx, &mut client.conn).unwrap() {
-                    frames.push(frame);
-                }
-                frames
-            };
-            let (waited, frames) = zip(receiver, busy_sender).await;
-            assert!(
-                waited >= bound.saturating_sub(Duration::from_millis(250)),
-                "a busy sender cut the refusal wait short: {waited:?} of {bound:?}"
-            );
-            assert!(waited < bound + Duration::from_secs(2), "{waited:?}");
-            let kinds: Vec<FrameType> = frames.iter().map(Frame::frame_type).collect();
-            assert_eq!(
-                kinds,
-                vec![FrameType::Proof],
-                "the refusal Proof alone, no Close"
-            );
-            let receipt = super::super::parse_json::<ReceiveReceipt>(&frames[0]).unwrap();
-            assert!(!receipt.committed);
-            assert_eq!(receipt.reason.as_deref(), Some("nnm3gw test refusal"));
-        });
-    }
-
-    /// asupersync-nnm3gw (review MEDIUM 2): a source-stream sender held by its
-    /// unacked-bytes cap, with credit to spare, reads control too. A refusing
-    /// receiver that has stopped acknowledging leaves a sender exactly there,
-    /// and it used to read control only while credit-blocked, so it waited out
-    /// its idle timeout without the receiver's reason.
-    #[test]
-    fn a_sender_held_by_its_unacked_cap_hears_a_refusal() {
-        block_on(async {
-            let cx = Cx::for_testing();
-            let config = QuicConfig {
-                idle_timeout: Duration::from_secs(3),
-                ..QuicConfig::default()
-            };
-            let (mut client, mut server) = established_loopback_links(&cx, &config).await;
-            let (mut client_control, mut server_control) =
-                opened_control_streams(&cx, &mut client, &mut server).await;
-            let refusal = ReceiveReceipt {
-                committed: false,
-                bytes_received: 0,
-                files: 0,
-                sha_ok: false,
-                merkle_ok: false,
-                symbols_accepted: 0,
-                feedback_rounds: 0,
-                decode_count: 0,
-                decode_micros: 0,
-                reason: Some("nnm3gw unacked refusal".to_string()),
-                committed_paths: Vec::new(),
-            };
-            let proof = super::super::json_frame(FrameType::Proof, &refusal).unwrap();
-            server_control.send(&cx, &mut server.conn, &proof).unwrap();
-            server.flush(&cx).await.unwrap();
-            // No credit minimum, but more bytes in flight than the cap admits.
-            client.stream_unacked_bytes = client
-                .source_stream_unacked_admission_max()
-                .saturating_add(1);
-            let stream = client_control.stream;
-            let mut early = None;
-            let started = Instant::now();
-            let result = wait_source_stream_send_admission(
-                &cx,
-                &mut client,
-                &mut client_control,
-                &mut early,
-                stream,
-                0,
-                &config,
-            )
-            .await;
-            let elapsed = started.elapsed();
-            match result {
-                Err(QuicTransportError::Integrity(reason)) => {
-                    assert_eq!(reason, "nnm3gw unacked refusal");
-                }
-                other => {
-                    panic!("the held sender must report the refusal: {other:?} after {elapsed:?}")
-                }
-            }
-            assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
-            assert!(early.is_none());
-        });
-    }
-}
+#[path = "native_link_gh67_liveness_tests_inline_tests.rs"]
+mod gh67_liveness_tests;
 
 #[cfg(test)]
 include!("native_link_tests.rs");

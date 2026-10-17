@@ -13,6 +13,7 @@ const HTTP_MOD_PATH: &str = "src/http/mod.rs";
 const NET_QUIC_TEST_PATH: &str = "tests/net_quic.rs";
 const QUIC_NATIVE_CONNECTION_PATH: &str = "src/net/quic_native/connection.rs";
 const QUIC_NATIVE_TRANSPORT_PATH: &str = "src/net/quic_native/transport.rs";
+const QUIC_NATIVE_TRANSPORT_TESTS_PATH: &str = "src/net/quic_native/transport_inline_tests.rs";
 const QUIC_NATIVE_FORENSIC_LOG_PATH: &str = "src/net/quic_native/forensic_log.rs";
 const H3_NATIVE_PATH: &str = "src/http/h3_native.rs";
 const QUIC_H3_VIOLATIONS_TEST_PATH: &str = "tests/quic_h3_e2e_violations.rs";
@@ -72,8 +73,12 @@ fn load_quic_h3_loss_test() -> String {
     load_doc(QUIC_H3_LOSS_TEST_PATH)
 }
 
+/// The transport source plus its out-of-line unit-test module, where the pinned tests live.
 fn load_quic_native_transport() -> String {
-    load_doc(QUIC_NATIVE_TRANSPORT_PATH)
+    let mut source = load_doc(QUIC_NATIVE_TRANSPORT_PATH);
+    source.push('\n');
+    source.push_str(&load_doc(QUIC_NATIVE_TRANSPORT_TESTS_PATH));
+    source
 }
 
 #[test]

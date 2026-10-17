@@ -1692,6 +1692,21 @@ def zstd_fuzz_lanes(paths: list[str], jobs: int) -> list[dict[str, Any]]:
     ]
 
 
+def zstd_wasm_lanes(paths: list[str], jobs: int) -> list[dict[str, Any]]:
+    """A wasm32 check of the zstd codec when it changes. The browser edition is to decode
+    with it, and check-wasm32 never builds it: browser-core does not depend on the codec
+    (br-asupersync-t1fblr.36)."""
+    if not any(path.startswith("asupersync-zstd/") for path in paths):
+        return []
+    return [
+        {
+            "id": "check-wasm32-zstd",
+            "kind": "build",
+            "argv": ["cargo", "check", "-j", str(jobs), "-p", "asupersync-zstd", "--target", "wasm32-unknown-unknown", "--keep-going", "--message-format=short"],
+        }
+    ]
+
+
 def feature_lanes(src_features: list[str], test_features: list[str], jobs: int) -> list[dict[str, Any]]:
     """Lanes for what the default lanes never build. `check-features` compiles every
     target with the touched modules' features. `clippy-features` lints every target
@@ -1768,6 +1783,7 @@ def build_lanes(head: str, paths: list[str], jobs: int, with_all_features: bool)
             "argv": ["cargo", "check", "-j", str(jobs), "--manifest-path", "fuzz/Cargo.toml", "--bins", "--keep-going", "--message-format=short"],
         },
         *zstd_fuzz_lanes(paths, jobs),
+        *zstd_wasm_lanes(paths, jobs),
     ]
     if with_all_features:
         lanes.insert(1, {"id": "check-all-features", "kind": "build", "argv": ["cargo", "check", "-j", str(jobs), "--all-targets", "--all-features", "--keep-going", "--message-format=short"]})
@@ -3235,6 +3251,9 @@ def main(argv: list[str]) -> int:
             ],
             "zstd_fuzz_lanes": [
                 zstd_fuzz_lanes(case["paths"], case["jobs"]) for case in probes.get("zstd_fuzz_lanes", [])
+            ],
+            "zstd_wasm_lanes": [
+                zstd_wasm_lanes(case["paths"], case["jobs"]) for case in probes.get("zstd_wasm_lanes", [])
             ],
             "receipt_ledger": [
                 {

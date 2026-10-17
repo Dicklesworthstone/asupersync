@@ -24,6 +24,35 @@ fn read(path: &str) -> String {
     fs::read_to_string(root().join(path)).unwrap_or_else(|error| panic!("read {path}: {error}"))
 }
 
+/// `read(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn read_with_inline_tests(path: &str) -> String {
+    let mut source = read(path);
+    let dir = root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn parse(path: &str) -> Value {
     serde_json::from_str(&read(path)).unwrap_or_else(|error| panic!("parse {path}: {error}"))
 }
@@ -331,7 +360,7 @@ fn atp_delegates_without_an_independent_parser_or_verifier() {
 
 #[test]
 fn focused_failure_matrix_and_local_policy_owners_remain_present() {
-    let shared = read(SHARED_SOURCE);
+    let shared = read_with_inline_tests(SHARED_SOURCE);
     for test in [
         "fn exact_leaf_shape_enforces_validity_bounds",
         "fn exact_leaf_shape_requires_server_auth_and_digital_signature",
@@ -341,7 +370,7 @@ fn focused_failure_matrix_and_local_policy_owners_remain_present() {
     ] {
         assert!(shared.contains(test), "missing focused test {test}");
     }
-    let connector = read("src/tls/connector.rs");
+    let connector = read_with_inline_tests("src/tls/connector.rs");
     for marker in [
         "fn is_ca_certificate",
         "fn test_is_ca_certificate_rejects_self_signed_leaf",
@@ -352,7 +381,7 @@ fn focused_failure_matrix_and_local_policy_owners_remain_present() {
             "CA policy owner missing {marker}"
         );
     }
-    let acceptor = read("src/tls/acceptor.rs");
+    let acceptor = read_with_inline_tests("src/tls/acceptor.rs");
     for marker in [
         "fn validate_certificate_chain",
         "fn test_certificate_validation_rejects_empty_chain",

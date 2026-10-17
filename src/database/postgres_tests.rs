@@ -11358,6 +11358,42 @@ mod tests {
         }
     }
 
+    /// An RSASSA-PSS server certificate binds with the hash in its PSS
+    /// parameters, as libpq and the server compute it. SHA-256 for every PSS
+    /// certificate failed the -PLUS login when that hash is SHA-384 or SHA-512.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn scram_plus_binds_an_rsa_pss_certificate_with_its_parameter_hash() {
+        use sha2::Digest;
+        let leaf = |pem: &[u8]| {
+            crate::tls::Certificate::from_pem(pem).expect("fixture PEM")[0]
+                .as_der()
+                .to_vec()
+        };
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+        let sha256 = leaf(include_bytes!("../../tests/fixtures/tls/pss/sha256.crt"));
+        let sha384 = leaf(include_bytes!("../../tests/fixtures/tls/pss/sha384.crt"));
+        let sha512 = leaf(include_bytes!("../../tests/fixtures/tls/pss/sha512.crt"));
+        let cases = [
+            ("SHA-256", sha2::Sha256::digest(&sha256).to_vec(), sha256),
+            ("SHA-384", sha2::Sha384::digest(&sha384).to_vec(), sha384),
+            ("SHA-512", sha2::Sha512::digest(&sha512).to_vec(), sha512),
+        ];
+        for (name, expected, der) in cases {
+            match PgConnection::pick_scram_channel_binding(&mechanisms, true, Some(der)) {
+                Ok(ScramChannelBinding::TlsServerEndPoint { cbind_data }) => {
+                    assert_eq!(cbind_data, expected, "RSASSA-PSS with {name}");
+                }
+                other => {
+                    panic!("expected a tls-server-end-point binding for {name}, got {other:?}")
+                }
+            }
+        }
+    }
+
     #[test]
     fn regression_postgres_streaming_params_writes_extended_protocol_frames() {
         let (mut conn, mut peer) = make_test_connection_with_peer();

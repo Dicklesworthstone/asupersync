@@ -291,6 +291,162 @@ pub enum CompressionMode {
     /// whenever that makes it smaller, and raw otherwise. Without the `zstd`
     /// cargo feature this behaves as [`Self::Off`].
     Zstd,
+    /// Offer zstd as [`Self::Zstd`] does, but spend no effort where it does
+    /// not pay (br-asupersync-t1fblr.24). An entry whose name or first bytes
+    /// mark an already-compressed format (zstd, gzip, xz, zip, JPEG, PNG,
+    /// MP4, ...) is sent raw. A chunk that saves less than a twentieth of its
+    /// size sends the next 1, 2, 4, ... up to 64 chunks of that entry raw
+    /// before the next try. The decisions are deterministic. Without the
+    /// `zstd` cargo feature this behaves as [`Self::Off`].
+    Auto,
+}
+
+/// File-name extensions of formats that are already compressed.
+const COMPRESSED_EXTENSIONS: [&str; 29] = [
+    "zst", "gz", "tgz", "xz", "txz", "bz2", "lz4", "br", "zip", "7z", "rar", "jar", "apk", "jpg",
+    "jpeg", "png", "gif", "webp", "avif", "heic", "mp4", "m4v", "mov", "webm", "mkv", "mp3", "ogg",
+    "opus", "flac",
+];
+
+/// Whether `name`'s extension names an already-compressed format.
+fn has_compressed_extension(name: &str) -> bool {
+    let file = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    file.rsplit_once('.').is_some_and(|(stem, extension)| {
+        !stem.is_empty()
+            && COMPRESSED_EXTENSIONS
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known))
+    })
+}
+
+/// Whether `head`, the first bytes of an entry, starts with the signature of
+/// an already-compressed format: zstd, gzip, xz, bzip2, lz4, zip, 7z, JPEG,
+/// PNG, GIF, WebP, ISO base media (MP4, MOV, HEIC, AVIF), Matroska/WebM, Ogg,
+/// FLAC or ID3-tagged MP3.
+fn has_compressed_signature(head: &[u8]) -> bool {
+    const PREFIXES: [&[u8]; 14] = [
+        &[0x28, 0xB5, 0x2F, 0xFD],
+        &[0x1F, 0x8B],
+        &[0xFD, b'7', b'z', b'X', b'Z', 0x00],
+        b"BZh",
+        &[0x04, 0x22, 0x4D, 0x18],
+        &[b'P', b'K', 0x03, 0x04],
+        &[b'7', b'z', 0xBC, 0xAF, 0x27, 0x1C],
+        &[0xFF, 0xD8, 0xFF],
+        &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A],
+        b"GIF8",
+        &[0x1A, 0x45, 0xDF, 0xA3],
+        b"OggS",
+        b"fLaC",
+        b"ID3",
+    ];
+    PREFIXES.iter().any(|prefix| head.starts_with(prefix))
+        || (head.starts_with(b"RIFF") && head.get(8..12) == Some(b"WEBP".as_slice()))
+        || head.get(4..8) == Some(b"ftyp".as_slice())
+}
+
+/// The longest run of chunks [`CompressionMode::Auto`] sends raw before it
+/// tries an entry's data again.
+const MAX_RAW_RUN: u32 = 64;
+
+/// Which chunks of one entry a sender tries to compress
+/// (br-asupersync-t1fblr.24).
+///
+/// Under [`CompressionMode::Zstd`] every chunk is tried, and under
+/// [`CompressionMode::Off`] none. Under [`CompressionMode::Auto`]:
+/// - an entry whose name or first bytes mark an already-compressed format
+///   (zstd, gzip, xz, zip, JPEG, PNG, MP4, ...) is never tried;
+/// - a tried chunk that saves less than a twentieth of its size is a miss.
+///   After the first miss the next chunk goes raw, after the second the next
+///   two, then four, and so on up to 64, before the next try. A chunk that
+///   saves at least a twentieth ends the backoff.
+///
+/// The decisions depend only on the entry's name, its bytes and the order of
+/// its chunks, so a transfer makes the same ones every time. Crate-private:
+/// its inputs will grow with the goodput rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EntryCompression {
+    mode: CompressionMode,
+    /// The entry is an already-compressed format.
+    skip: bool,
+    /// Chunks still to send raw before the next try.
+    raw_left: u32,
+    /// The raw run that follows the next miss (0 before any miss).
+    run: u32,
+}
+
+impl EntryCompression {
+    /// The decisions for the entry named `name` (a path; only its extension
+    /// is read) under `mode`.
+    #[must_use]
+    pub(crate) fn new(mode: CompressionMode, name: &str) -> Self {
+        Self {
+            mode,
+            skip: mode == CompressionMode::Auto && has_compressed_extension(name),
+            raw_left: 0,
+            run: 0,
+        }
+    }
+
+    /// Whether to try compressing `chunk`, the entry's bytes at `offset`.
+    /// After a `true`, report the outcome with [`Self::record`]. Only
+    /// compressing builds (`zstd`) decide anything.
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(crate) fn should_try(&mut self, offset: u64, chunk: &[u8]) -> bool {
+        match self.mode {
+            CompressionMode::Off => false,
+            CompressionMode::Zstd => true,
+            CompressionMode::Auto => {
+                if offset == 0 && has_compressed_signature(chunk) {
+                    self.skip = true;
+                }
+                if self.skip {
+                    return false;
+                }
+                if self.raw_left > 0 {
+                    self.raw_left -= 1;
+                    return false;
+                }
+                true
+            }
+        }
+    }
+
+    /// Records how a tried chunk of `raw_len` bytes fared: compressed to
+    /// `compressed_len` bytes, or `None` when it went raw.
+    #[cfg_attr(not(feature = "zstd"), allow(dead_code))]
+    pub(crate) fn record(&mut self, raw_len: usize, compressed_len: Option<usize>) {
+        if self.mode != CompressionMode::Auto {
+            return;
+        }
+        let saved = compressed_len.map_or(0, |len| raw_len.saturating_sub(len));
+        if saved > 0 && saved >= raw_len / 20 {
+            self.run = 0;
+        } else {
+            self.run = (self.run * 2).clamp(1, MAX_RAW_RUN);
+            self.raw_left = self.run;
+        }
+    }
+
+    /// [`compress_chunk`] for the entry's bytes at `offset`, when these
+    /// decisions say to try.
+    #[cfg(feature = "zstd")]
+    pub(crate) fn compress(
+        &mut self,
+        accept: &CodecAccept,
+        offset: u64,
+        raw: &[u8],
+    ) -> Option<(ChunkCodec, Vec<u8>)> {
+        if !self.should_try(offset, raw) {
+            return None;
+        }
+        let compressed = compress_chunk(accept, raw);
+        self.record(
+            raw.len(),
+            compressed.as_ref().map(|(_, payload)| payload.len()),
+        );
+        compressed
+    }
 }
 
 /// Why a compressed chunk was refused.
@@ -345,7 +501,7 @@ pub fn local_decode_capability(max_chunk_raw: u32) -> DecodeCapability {
 pub fn local_offer(mode: CompressionMode, chunk_size: usize) -> Option<CodecOffer> {
     match mode {
         CompressionMode::Off => None,
-        CompressionMode::Zstd => {
+        CompressionMode::Zstd | CompressionMode::Auto => {
             #[cfg(feature = "zstd")]
             {
                 let max_chunk_raw = u32::try_from(chunk_size).ok()?;
@@ -384,10 +540,8 @@ pub fn compress_chunk(accept: &CodecAccept, raw: &[u8]) -> Option<(ChunkCodec, V
     let WireCodec::Zstd = accept.codec;
     // The chunk is covered by the transfer's SHA-256, so the frame skips
     // zstd's own content checksum.
-    let params = asupersync_zstd::EncodeParams {
-        checksum: false,
-        ..asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast)
-    };
+    let params =
+        asupersync_zstd::EncodeParams::new(asupersync_zstd::Level::Fast).with_checksum(false);
     let compressed = asupersync_zstd::encode_all(raw, &params);
     (compressed.len() + CHUNK_CODEC_OVERHEAD <= raw.len())
         .then(|| (ChunkCodec::new(WireCodec::Zstd, raw_len), compressed))
@@ -418,14 +572,14 @@ pub fn decompress_chunk(
     }
     let raw_len =
         usize::try_from(chunk.raw_len).map_err(|_| ChunkCodecError::TooLarge { raw_len, limit })?;
-    let limits = asupersync_zstd::DecodeLimits {
-        max_window: 1_usize
-            .checked_shl(u32::from(accept.max_window_log))
-            .unwrap_or(0),
-        require_content_size: true,
-        allow_skippable_frames: false,
-        ..asupersync_zstd::DecodeLimits::new(raw_len)
-    };
+    let limits = asupersync_zstd::DecodeLimits::new(raw_len)
+        .with_max_window(
+            1_usize
+                .checked_shl(u32::from(accept.max_window_log))
+                .unwrap_or(0),
+        )
+        .with_require_content_size(true)
+        .with_allow_skippable_frames(false);
     // Decoding appends to the cleared scratch buffer, so a receiver reuses
     // one allocation for every chunk, with no zero fill and no copy.
     out.clear();
@@ -452,198 +606,192 @@ pub fn decompress_chunk(
     Err(ChunkCodecError::NotNegotiated)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
+/// How many chunks a sender compresses at once by default
+/// (br-asupersync-t1fblr.25).
+pub const DEFAULT_COMPRESSION_PARALLELISM: usize = 4;
 
-    #[test]
-    fn records_round_trip() {
-        let offer = CodecOffer::new(WireCodec::Zstd.bit(), 18, 256 * 1024);
-        assert_eq!(offer.to_bytes().len(), 8);
-        assert_eq!(CodecOffer::from_bytes(&offer.to_bytes()), Some(offer));
-        let accept = negotiate(&DecodeCapability::new(1, 20, 1 << 20), &offer).unwrap();
-        assert_eq!(CodecAccept::from_bytes(&accept.to_bytes()), Some(accept));
-        let chunk = ChunkCodec::new(WireCodec::Zstd, 1234);
-        assert_eq!(chunk.to_bytes(), [1, 1, 0xD2, 0x04, 0, 0]);
-        assert_eq!(ChunkCodec::from_bytes(&chunk.to_bytes()), Some(chunk));
-    }
+/// One chunk as the sender emits it: its entry and offset, its raw bytes,
+/// and its compressed form when compression was tried and paid.
+#[cfg(feature = "zstd")]
+pub(crate) struct PipelinedChunk {
+    pub(crate) index: u32,
+    pub(crate) offset: u64,
+    pub(crate) raw: Vec<u8>,
+    pub(crate) compressed: Option<(ChunkCodec, Vec<u8>)>,
+}
 
-    #[test]
-    fn unknown_versions_codecs_and_lengths_mean_no_compression() {
-        let offer = CodecOffer::new(1, 18, 4096).to_bytes();
-        let mut future = offer.clone();
-        future[0] = 2;
-        assert_eq!(CodecOffer::from_bytes(&future), None);
-        assert_eq!(CodecOffer::from_bytes(&offer[..7]), None);
-        let mut longer = offer;
-        longer.push(0);
-        assert_eq!(CodecOffer::from_bytes(&longer), None);
-        assert_eq!(ChunkCodec::from_bytes(&[1, 9, 0, 0, 0, 0]), None, "codec 9");
-        assert_eq!(CodecAccept::from_bytes(&[1, 9, 20, 1, 0, 0, 1, 0]), None);
-        assert_eq!(ChunkCodec::from_bytes(&[]), None);
-    }
+/// A raw chunk and what [`compress_chunk`] made of it.
+#[cfg(feature = "zstd")]
+type CompressedChunk = (Vec<u8>, Option<(ChunkCodec, Vec<u8>)>);
 
-    #[test]
-    fn negotiation_takes_the_common_codec_and_the_smaller_limits() {
-        let local = DecodeCapability::new(WireCodec::Zstd.bit(), 20, 1 << 20);
-        let accept = negotiate(&local, &CodecOffer::new(1, 18, 256 * 1024)).unwrap();
-        assert_eq!(accept.codec, WireCodec::Zstd);
-        assert_eq!(
-            (accept.max_window_log, accept.max_chunk_raw),
-            (18, 256 * 1024)
-        );
-        let accept = negotiate(&local, &CodecOffer::new(1, 27, 8 << 20)).unwrap();
-        assert_eq!((accept.max_window_log, accept.max_chunk_raw), (20, 1 << 20));
-        assert_eq!(accept.decode_slots, 1);
-        // Nothing in common, or a receiver that decodes nothing.
-        assert_eq!(negotiate(&local, &CodecOffer::new(0b10, 18, 4096)), None);
-        assert_eq!(
-            negotiate(
-                &DecodeCapability::new(0, 0, 4096),
-                &CodecOffer::new(1, 18, 4096)
-            ),
-            None
-        );
-        assert_eq!(negotiate(&local, &CodecOffer::new(1, 18, 0)), None);
-    }
+#[cfg(feature = "zstd")]
+enum PipelineSlot {
+    /// Decided at push time: `tried` says whether the outcome feeds the
+    /// entry's decisions.
+    Ready { chunk: PipelinedChunk, tried: bool },
+    /// Compressing on the blocking pool.
+    Running {
+        index: u32,
+        offset: u64,
+        handle: crate::runtime::spawn_blocking::DrainedBlockingHandle<CompressedChunk>,
+    },
+}
 
-    #[test]
-    fn a_sender_admits_only_accepts_within_its_offer() {
-        let offer = CodecOffer::new(WireCodec::Zstd.bit(), 18, 256 * 1024);
-        let fitting = negotiate(&DecodeCapability::new(1, 20, 1 << 20), &offer).unwrap();
-        assert!(offer.admits(&fitting));
-        let mut wider = fitting;
-        wider.max_chunk_raw += 1;
-        assert!(!offer.admits(&wider), "a larger chunk limit than offered");
-        let mut deeper = fitting;
-        deeper.max_window_log = 19;
-        assert!(!offer.admits(&deeper), "a larger window than offered");
-        let mut no_slots = fitting;
-        no_slots.decode_slots = 0;
-        assert!(!offer.admits(&no_slots));
-        assert!(
-            !CodecOffer::new(0, 18, 256 * 1024).admits(&fitting),
-            "codec not offered"
-        );
-    }
+/// Compresses chunks up to `depth` at a time on the runtime's blocking pool
+/// and hands them back in the order they came in (br-asupersync-t1fblr.25).
+/// Chunks of consecutive entries share the pipeline, so a tree of small
+/// files compresses in parallel too.
+///
+/// Each chunk is one independent zstd frame, so the bytes sent do not depend
+/// on `depth` under [`CompressionMode::Zstd`]. Under [`CompressionMode::Auto`]
+/// a chunk's outcome reaches its entry's decisions when it leaves the
+/// pipeline while that entry is still being read, so a decision sees the
+/// outcomes of the chunks at least `depth` places earlier, the same with or
+/// without a pool.
+///
+/// The jobs are owned by the caller's region ([`Cx::spawn_blocking_drained`]):
+/// dropping the pipeline cancels the queued ones and its region waits for the
+/// running ones, so nothing is detached. Without a blocking pool or spawn
+/// authority (the lab runtime, a test `Cx`), chunks are compressed inline.
+#[cfg(feature = "zstd")]
+pub(crate) struct ChunkPipeline {
+    accept: CodecAccept,
+    depth: usize,
+    slots: std::collections::VecDeque<PipelineSlot>,
+    /// Chunks handed to the blocking pool, for tests.
+    #[cfg(test)]
+    pooled: usize,
+}
 
-    #[test]
-    fn extension_ids_are_unique() {
-        let unique: BTreeSet<u16> = ASSIGNED_EXTENSION_IDS.into_iter().collect();
-        assert_eq!(unique.len(), ASSIGNED_EXTENSION_IDS.len());
-    }
-
-    #[test]
-    fn off_never_offers() {
-        assert_eq!(local_offer(CompressionMode::Off, 256 * 1024), None);
-        assert_eq!(CompressionMode::default(), CompressionMode::Off);
-    }
-
-    #[cfg(not(feature = "zstd"))]
-    #[test]
-    fn without_the_feature_nothing_is_offered_or_accepted() {
-        assert_eq!(local_offer(CompressionMode::Zstd, 256 * 1024), None);
-        let local = local_decode_capability(1 << 20);
-        assert_eq!(negotiate(&local, &CodecOffer::new(1, 18, 4096)), None);
-        assert_eq!(
-            decompress_chunk(&[1, 1, 4, 0, 0, 0], None, 10, b"x", &mut Vec::new()),
-            Err(ChunkCodecError::NotNegotiated)
-        );
-    }
-
-    #[cfg(feature = "zstd")]
-    mod zstd {
-        use super::super::*;
-
-        fn session() -> CodecAccept {
-            let offer = local_offer(CompressionMode::Zstd, 256 * 1024).unwrap();
-            negotiate(&local_decode_capability(1 << 20), &offer).unwrap()
+#[cfg(feature = "zstd")]
+impl ChunkPipeline {
+    /// A pipeline compressing for `accept`, at most `depth` (at least 1)
+    /// chunks at once.
+    pub(crate) fn new(accept: CodecAccept, depth: usize) -> Self {
+        Self {
+            accept,
+            depth: depth.max(1),
+            slots: std::collections::VecDeque::new(),
+            #[cfg(test)]
+            pooled: 0,
         }
+    }
 
-        #[test]
-        fn compressible_chunks_round_trip() {
-            let accept = session();
-            let raw: Vec<u8> = b"asupersync transfer protocol "
-                .iter()
-                .copied()
-                .cycle()
-                .take(200_000)
-                .collect();
-            let (chunk, payload) = compress_chunk(&accept, &raw).unwrap();
-            assert!(payload.len() < raw.len() / 10);
-            let mut out = Vec::new();
-            decompress_chunk(
-                &chunk.to_bytes(),
-                Some(&accept),
-                1 << 30,
-                &payload,
-                &mut out,
-            )
-            .unwrap();
-            assert_eq!(out, raw);
+    /// Whether `depth` chunks are queued: take one with [`Self::next`] before
+    /// pushing another.
+    pub(crate) fn is_full(&self) -> bool {
+        self.slots.len() >= self.depth
+    }
+
+    /// Queues `raw`, the bytes at `offset` of entry `index`. When `entry` (that
+    /// entry's decisions) decides to try, the chunk is compressed on the
+    /// blocking pool (inline without one); otherwise it stays raw.
+    pub(crate) fn push(
+        &mut self,
+        cx: &crate::cx::Cx,
+        entry: &mut EntryCompression,
+        index: u32,
+        offset: u64,
+        raw: Vec<u8>,
+    ) {
+        if !entry.should_try(offset, &raw) {
+            self.slots.push_back(PipelineSlot::Ready {
+                chunk: PipelinedChunk {
+                    index,
+                    offset,
+                    raw,
+                    compressed: None,
+                },
+                tried: false,
+            });
+            return;
         }
-
-        #[test]
-        fn incompressible_and_oversized_chunks_stay_raw() {
-            let accept = session();
-            let mut state = 7_u64;
-            let noise: Vec<u8> = (0..4096)
-                .map(|_| {
-                    state = state
-                        .wrapping_mul(6_364_136_223_846_793_005)
-                        .wrapping_add(1_442_695_040_888_963_407);
-                    state.to_be_bytes()[0]
-                })
-                .collect();
-            assert!(compress_chunk(&accept, &noise).is_none());
-            assert!(compress_chunk(&accept, &vec![0; 256 * 1024 + 1]).is_none());
+        let accept = self.accept;
+        // The chunk waits in a slot the job takes it from: a refused spawn
+        // never ran the job, so the chunk is still there to compress inline.
+        let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(raw)));
+        let job_slot = std::sync::Arc::clone(&slot);
+        let spawned = cx.spawn_blocking_drained(move |_| {
+            let raw = job_slot.lock().take().unwrap_or_default();
+            let compressed = compress_chunk(&accept, &raw);
+            (raw, compressed)
+        });
+        match spawned {
+            Ok(handle) => {
+                #[cfg(test)]
+                {
+                    self.pooled += 1;
+                }
+                self.slots.push_back(PipelineSlot::Running {
+                    index,
+                    offset,
+                    handle,
+                });
+            }
+            Err(_) => {
+                let raw = slot.lock().take().unwrap_or_default();
+                let compressed = compress_chunk(&accept, &raw);
+                self.slots.push_back(PipelineSlot::Ready {
+                    chunk: PipelinedChunk {
+                        index,
+                        offset,
+                        raw,
+                        compressed,
+                    },
+                    tried: true,
+                });
+            }
         }
+    }
 
-        #[test]
-        fn hostile_chunks_are_refused_before_allocation() {
-            let accept = session();
-            let (chunk, payload) = compress_chunk(&accept, &[0; 1000]).unwrap();
-            let record = chunk.to_bytes();
-            let mut out = Vec::new();
-            assert_eq!(
-                decompress_chunk(&record, None, 1000, &payload, &mut out),
-                Err(ChunkCodecError::NotNegotiated)
+    /// The oldest queued chunk, once it is ready, or `None` when the pipeline
+    /// is empty. A tried chunk of entry `current` records its outcome in
+    /// `entry`, that entry's decisions; outcomes of earlier entries no longer
+    /// decide anything.
+    pub(crate) async fn next(
+        &mut self,
+        current: u32,
+        entry: &mut EntryCompression,
+    ) -> Option<Result<PipelinedChunk, crate::runtime::JoinError>> {
+        let (chunk, tried) = match self.slots.front_mut()? {
+            PipelineSlot::Ready { .. } => match self.slots.pop_front() {
+                Some(PipelineSlot::Ready { chunk, tried }) => (chunk, tried),
+                _ => return None,
+            },
+            PipelineSlot::Running {
+                index,
+                offset,
+                handle,
+            } => {
+                let (index, offset) = (*index, *offset);
+                // A dropped wait leaves the slot queued, so a later call
+                // resumes the same join.
+                let joined = handle.join().await;
+                self.slots.pop_front();
+                match joined {
+                    Ok((raw, compressed)) => (
+                        PipelinedChunk {
+                            index,
+                            offset,
+                            raw,
+                            compressed,
+                        },
+                        true,
+                    ),
+                    Err(error) => return Some(Err(error)),
+                }
+            }
+        };
+        if tried && chunk.index == current {
+            entry.record(
+                chunk.raw.len(),
+                chunk.compressed.as_ref().map(|(_, payload)| payload.len()),
             );
-            assert_eq!(
-                decompress_chunk(&[1, 1], Some(&accept), 1000, &payload, &mut out),
-                Err(ChunkCodecError::CodecMismatch)
-            );
-            // The entry has fewer bytes left than the chunk declares.
-            assert_eq!(
-                decompress_chunk(&record, Some(&accept), 999, &payload, &mut out),
-                Err(ChunkCodecError::TooLarge {
-                    raw_len: 1000,
-                    limit: 999
-                })
-            );
-            // A declared length beyond the negotiated chunk limit.
-            let huge = ChunkCodec::new(WireCodec::Zstd, u32::MAX).to_bytes();
-            assert!(matches!(
-                decompress_chunk(&huge, Some(&accept), u64::MAX, &payload, &mut out),
-                Err(ChunkCodecError::TooLarge { .. })
-            ));
-            // A declared length that does not match the frame.
-            let short = ChunkCodec::new(WireCodec::Zstd, 999).to_bytes();
-            assert!(matches!(
-                decompress_chunk(&short, Some(&accept), 1000, &payload, &mut out),
-                Err(ChunkCodecError::Corrupt(_))
-            ));
-            // A payload that is not a zstd frame.
-            let mut damaged = payload.clone();
-            damaged[0] ^= 0xFF;
-            assert!(matches!(
-                decompress_chunk(&record, Some(&accept), 1000, &damaged, &mut out),
-                Err(ChunkCodecError::Corrupt(_))
-            ));
-            // The untouched record still decodes.
-            decompress_chunk(&record, Some(&accept), 1000, &payload, &mut out).unwrap();
-            assert_eq!(out, vec![0; 1000]);
         }
+        Some(Ok(chunk))
     }
 }
+
+#[cfg(test)]
+#[path = "codec_inline_tests.rs"]
+mod tests;

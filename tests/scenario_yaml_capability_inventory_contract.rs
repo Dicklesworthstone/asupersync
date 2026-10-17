@@ -77,6 +77,35 @@ fn read_repo_file(path: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
+/// `read_repo_file(path)` plus the unit-test modules that source declares out of line
+/// (`#[cfg(test)] #[path = "..._inline_tests.rs"] mod ...;`), so a pin on an in-tree unit test
+/// keeps finding it after the test body moved next to its module.
+fn read_repo_file_with_inline_tests(path: &str) -> String {
+    let mut source = read_repo_file(path);
+    let dir = repo_root()
+        .join(path)
+        .parent()
+        .expect("source file has a parent directory")
+        .to_path_buf();
+    let modules: Vec<String> = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("#[path = \"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .filter(|name| name.ends_with("_inline_tests.rs"))
+                .map(str::to_owned)
+        })
+        .collect();
+    for module in modules {
+        source.push('\n');
+        source.push_str(
+            &std::fs::read_to_string(dir.join(&module)).expect("read out-of-line unit-test module"),
+        );
+    }
+    source
+}
+
 fn read_repo_bytes(path: &str) -> Vec<u8> {
     std::fs::read(repo_root().join(path))
         .unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
@@ -2984,8 +3013,11 @@ fn a3_current_consumers_writers_bounds_and_keep_decision_are_source_bound() {
     assert!(root_loader.contains("fs::read_to_string(path)"));
     assert!(root_loader.contains("serde_yaml::from_str(&yaml)"));
     assert!(root_loader.contains("\"scenario_parse_error\""));
-    assert!(root_cli.contains("fn load_scenario_parse_error_is_user_error("));
-    assert!(root_cli.contains("fn lab_validate_json_uses_output_writer_and_user_error("));
+    let root_cli_with_tests = read_repo_file_with_inline_tests("src/bin/asupersync.rs");
+    assert!(root_cli_with_tests.contains("fn load_scenario_parse_error_is_user_error("));
+    assert!(
+        root_cli_with_tests.contains("fn lab_validate_json_uses_output_writer_and_user_error(")
+    );
 
     let franken_cli = read_repo_file("frankenlab/src/main.rs");
     let franken_parser = source_item(&franken_cli, "fn parse_scenario(path: &Path, yaml: &str)");
@@ -3050,9 +3082,9 @@ fn a3_current_consumers_writers_bounds_and_keep_decision_are_source_bound() {
     assert!(!franken_cli.contains("serde_yaml::to_string"));
 
     let kafka_writer = read_repo_file("scripts/provision_kafka_test_env.rs");
-    let conformance_writer = read_repo_file("src/conformance/mod.rs");
-    let http_snapshot = read_repo_file("src/http/h1/codec.rs");
-    let diagnostic_snapshot = read_repo_file("src/observability/diagnostics.rs");
+    let conformance_writer = read_repo_file_with_inline_tests("src/conformance/mod.rs");
+    let http_snapshot = read_repo_file_with_inline_tests("src/http/h1/codec.rs");
+    let diagnostic_snapshot = read_repo_file_with_inline_tests("src/observability/diagnostics.rs");
     assert!(kafka_writer.contains("docker-compose-kafka-test.yml"));
     assert!(conformance_writer.contains("fn render_conformance_manifest_yaml("));
     assert!(http_snapshot.contains("insta::assert_yaml_snapshot!"));
@@ -3164,6 +3196,7 @@ fn canonical_json_contract_is_executable_and_residual_work_is_routed() {
     );
 
     let scenario_model = read_repo_file("src/lab/scenario.rs");
+    let scenario_model_with_tests = read_repo_file_with_inline_tests("src/lab/scenario.rs");
     for marker in [
         "fn canonicalize_json_value(",
         "canonical_contract_full_json_roundtrip",
@@ -3172,7 +3205,7 @@ fn canonical_json_contract_is_executable_and_residual_work_is_routed() {
         "canonical_contract_migrates_missing_version_without_meaning_change",
     ] {
         assert!(
-            scenario_model.contains(marker),
+            scenario_model_with_tests.contains(marker),
             "missing source marker {marker}"
         );
     }
@@ -3476,11 +3509,12 @@ fn execution_consumption_diagnostics_and_gap_routing_stay_truthful() {
     assert!(replay_writer.contains("staged.persist_noclobber(path)"));
     assert!(!replay_writer.contains("fs::write(path, payload)"));
     assert!(scenario.contains("pub struct ValidationError"));
-    assert!(runner.contains("[ASUP-E401]"));
+    assert!(read_repo_file_with_inline_tests("src/lab/scenario_runner.rs").contains("[ASUP-E401]"));
     assert!(root_cli.contains("[ASUP-E401]"));
     assert!(franken_cli.contains("[ASUP-E401]"));
     assert!(
-        root_cli.contains("fn scenario_runner_error_replay_divergence_preserves_stable_code()")
+        read_repo_file_with_inline_tests("src/bin/asupersync.rs")
+            .contains("fn scenario_runner_error_replay_divergence_preserves_stable_code()")
     );
     assert!(
         franken_cli.contains("fn runner_error_message_replay_divergence_preserves_stable_code()")
