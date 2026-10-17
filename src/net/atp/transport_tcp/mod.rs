@@ -61,6 +61,10 @@ use crate::net::atp::transport_common::metadata::{
     validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
     write_sparse_zero_runs,
 };
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::apply_entry_metadata_sync;
+#[cfg(not(windows))]
+use crate::net::atp::transport_common::metadata::install_staged_regular_file_sync;
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
     DirectoryMetadataEntry, SymlinkTargetInfo, SymlinkTargetKind, SymlinkTargetSemantics,
@@ -68,10 +72,11 @@ use crate::net::atp::transport_common::metadata::{
 use crate::net::atp::transport_common::streaming::collect_entries_with_policy;
 use crate::net::atp::transport_common::{
     DeltaChunkWire, DeltaManifestWire, DeltaObjectRequest, DeltaWireMode,
-    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet, MirrorError,
-    MirrorPolicy, SourceEntry, StagedEntryReceive, StreamingError, apply_entry_metadata,
-    capture_directory_metadata_manifest, flat_merkle_root_from_digests, hash_file_streaming,
-    hex_encode, metadata_commitment, mirror_dest, read_entry_metadata,
+    DirectoryMetadataManifest, EntryDigest, EntryMetadata, FileKind, FilterSet,
+    MetadataApplyReport, MirrorError, MirrorPolicy, SourceEntry, StagedEntryReceive,
+    StreamingError, apply_entry_metadata, capture_directory_metadata_manifest,
+    flat_merkle_root_from_digests, hash_file_streaming, hex_encode, metadata_commitment,
+    mirror_dest, read_entry_metadata,
 };
 // Owned-graph merkle helpers (`build_flat_graph`, `flat_merkle_root_from_slices`)
 // are now test-only differential oracles for the streaming digest path, so their
@@ -2865,6 +2870,21 @@ async fn commit_verified_staging(
         } else {
             base.clone()
         };
+        // A plain regular file commits in one blocking call (dfdwyt).
+        #[cfg(not(windows))]
+        if is_plain_regular_entry(entry.metadata.as_ref()) {
+            commit_regular_entry(
+                cx,
+                &base,
+                &out_path,
+                staging_path,
+                entry.metadata.as_ref(),
+                &mut parent_syncs,
+            )
+            .await?;
+            committed_paths.push(out_path);
+            continue;
+        }
         reject_entry_destination_link_prefixes(
             &base,
             &out_path,
@@ -3221,7 +3241,17 @@ fn trace_tcp_metadata_skips(cx: &Cx, out_path: &Path, skipped: &[(&'static str, 
 }
 
 async fn apply_entry_metadata_best_effort(cx: &Cx, out_path: &Path, meta: &EntryMetadata) {
-    match apply_entry_metadata(out_path, meta).await {
+    trace_entry_metadata_result(cx, out_path, apply_entry_metadata(out_path, meta).await);
+}
+
+/// Traces what applying an entry's metadata skipped, or why it failed; a
+/// failure never fails the commit.
+fn trace_entry_metadata_result(
+    cx: &Cx,
+    out_path: &Path,
+    applied: Result<MetadataApplyReport, StreamingError>,
+) {
+    match applied {
         Ok(report) => trace_tcp_metadata_skips(cx, out_path, &report.skipped),
         Err(err) => {
             let skipped = [("apply", err.to_string())];
@@ -4697,6 +4727,21 @@ where
                 } else {
                     base.clone()
                 };
+                // A plain regular file commits in one blocking call (dfdwyt).
+                #[cfg(not(windows))]
+                if is_plain_regular_entry(entry.metadata.as_ref()) {
+                    commit_regular_entry(
+                        cx,
+                        &base,
+                        &out_path,
+                        staging_path,
+                        entry.metadata.as_ref(),
+                        &mut parent_syncs,
+                    )
+                    .await?;
+                    committed_paths.push(out_path);
+                    continue;
+                }
                 reject_entry_destination_link_prefixes(
                     &base,
                     &out_path,
@@ -5013,6 +5058,33 @@ async fn reject_destination_link_prefix_cached(
     verified: &mut BTreeSet<PathBuf>,
     include_leaf: bool,
 ) -> Result<(), TransportError> {
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, verified, include_leaf)?;
+    // The whole chain is checked in one blocking call, in the same order as
+    // before. One call per component cost about 20 blocking-pool handoffs per
+    // received file (br-asupersync-dfdwyt). The components before an unsafe
+    // one are still checked first.
+    if !pending.is_empty() {
+        crate::runtime::spawn_blocking(move || check_link_prefixes_sync(&pending)).await?;
+    }
+    unsafe_component.map_or(Ok(()), Err)
+}
+
+fn check_link_prefixes_sync(paths: &[PathBuf]) -> Result<(), TransportError> {
+    paths
+        .iter()
+        .try_for_each(|path| reject_existing_link_or_reparse_sync(path))
+}
+
+/// The paths `reject_destination_link_prefix_cached` checks, in order, each
+/// added to `verified`, plus the error for a component that is not a plain
+/// name, which is raised only after those checks pass.
+fn collect_link_prefix_checks(
+    base: &Path,
+    out_path: &Path,
+    verified: &mut BTreeSet<PathBuf>,
+    include_leaf: bool,
+) -> Result<(Vec<PathBuf>, Option<TransportError>), TransportError> {
     let rel = out_path.strip_prefix(base).map_err(|_| {
         TransportError::Source(format!(
             "destination path {} is outside safe base {}",
@@ -5057,20 +5129,69 @@ async fn reject_destination_link_prefix_cached(
             pending.push(current.clone());
         }
     }
+    Ok((pending, unsafe_component))
+}
 
-    // The whole chain is checked in one blocking call, in the same order as
-    // before. One call per component cost about 20 blocking-pool handoffs per
-    // received file (br-asupersync-dfdwyt). The components before an unsafe
-    // one are still checked first.
-    if !pending.is_empty() {
-        crate::runtime::spawn_blocking(move || {
-            pending
-                .iter()
-                .try_for_each(|path| reject_existing_link_or_reparse_sync(path))
-        })
-        .await?;
-    }
+/// [`reject_entry_destination_link_prefixes`] for a plain regular file (no
+/// hardlink, not a symlink leaf), for a caller already on a blocking thread:
+/// a fresh cache and the same checks in the same order.
+#[cfg(not(windows))]
+fn reject_regular_destination_link_prefixes_sync(
+    base: &Path,
+    out_path: &Path,
+) -> Result<(), TransportError> {
+    let mut verified = BTreeSet::new();
+    let (pending, unsafe_component) =
+        collect_link_prefix_checks(base, out_path, &mut verified, true)?;
+    check_link_prefixes_sync(&pending)?;
     unsafe_component.map_or(Ok(()), Err)
+}
+
+/// One regular file's commit as a single blocking call (br-asupersync-dfdwyt):
+/// the destination's link-prefix walk, creating its parent, the walk again,
+/// the staged install, then the captured metadata. That is the order the
+/// general commit path runs them in, where each step was a blocking-pool
+/// handoff of its own: eight per received file, nine when it replaces an
+/// existing one. A metadata failure is traced and does not fail the commit,
+/// as before.
+#[cfg(not(windows))]
+async fn commit_regular_entry(
+    cx: &Cx,
+    base: &Path,
+    out_path: &Path,
+    staging_path: &Path,
+    metadata: Option<&EntryMetadata>,
+    parent_syncs: &mut DeferredParentSyncs,
+) -> Result<(), TransportError> {
+    let base_path = base.to_path_buf();
+    let out = out_path.to_path_buf();
+    let staged = staging_path.to_path_buf();
+    let metadata = metadata.cloned();
+    let applied = crate::runtime::spawn_blocking(move || {
+        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
+        install_staged_regular_file_sync(&staged, &out)?;
+        Ok::<_, TransportError>(metadata.map(|meta| apply_entry_metadata_sync(&out, &meta)))
+    })
+    .await?;
+    parent_syncs.record(out_path);
+    if let Some(applied) = applied {
+        trace_entry_metadata_result(cx, out_path, applied);
+    }
+    Ok(())
+}
+
+/// Whether `metadata` describes a plain regular file, the entries
+/// [`commit_regular_entry`] commits: not special, not a directory or a
+/// symlink, and not a hardlink to an earlier entry.
+#[cfg(not(windows))]
+fn is_plain_regular_entry(metadata: Option<&EntryMetadata>) -> bool {
+    metadata.is_none_or(|metadata| {
+        matches!(metadata.file_kind, FileKind::Regular) && metadata.hardlink_target.is_none()
+    })
 }
 
 async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {

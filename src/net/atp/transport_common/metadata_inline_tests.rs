@@ -1171,3 +1171,37 @@
         assert!(!js.contains("unix_mode"));
         assert!(!js.contains("symlink_target"));
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_staged_regular_file_sync_checks_both_leaves() {
+        let root = tempfile::tempdir().expect("temporary directory");
+        let out = root.path().join("out.bin");
+
+        let staged_link = root.path().join("staged-link.part");
+        std::os::unix::fs::symlink("elsewhere", &staged_link).expect("staged symlink");
+        let error = install_staged_regular_file_sync(&staged_link, &out)
+            .expect_err("a staged symlink is not a regular file");
+        assert!(
+            error.to_string().contains("wrong filesystem kind"),
+            "{error}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&out).is_err(),
+            "nothing installed"
+        );
+
+        let staged = root.path().join("staged.part");
+        std::fs::write(&staged, b"payload").expect("staged file");
+        let out_dir = root.path().join("out-dir");
+        std::fs::create_dir(&out_dir).expect("destination directory");
+        let error = install_staged_regular_file_sync(&staged, &out_dir)
+            .expect_err("a real directory is never replaced");
+        assert!(error.to_string().contains("real directory"), "{error}");
+        assert!(staged.exists(), "a refused install keeps the staged file");
+
+        std::fs::write(&out, b"old").expect("existing destination");
+        install_staged_regular_file_sync(&staged, &out).expect("replace the destination");
+        assert_eq!(std::fs::read(&out).expect("installed file"), b"payload");
+        assert!(!staged.exists(), "the staged file is renamed into place");
+    }

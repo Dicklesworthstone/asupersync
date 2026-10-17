@@ -1041,7 +1041,7 @@ impl DeferredParentSyncs {
         Ok(())
     }
 
-    fn record(&mut self, committed: &Path) {
+    pub(crate) fn record(&mut self, committed: &Path) {
         self.parents
             .entry(committed_parent(committed))
             .or_insert_with(|| committed.to_path_buf());
@@ -3177,6 +3177,74 @@ pub async fn recreate_fifo(_out_path: &Path, _mode: u32) -> Result<(), Streaming
     Err(StreamingError::new(
         "FIFO recreation unsupported on this platform",
     ))
+}
+
+/// Synchronous twin of [`replaceable_leaf_kind`], for a commit that runs a
+/// whole file's checks and rename in one blocking call (br-asupersync-dfdwyt).
+#[cfg(not(windows))]
+fn replaceable_leaf_kind_sync(path: &Path) -> Result<Option<ReplaceableLeafKind>, StreamingError> {
+    let link_kind = match classify_path_link_sync(path) {
+        Ok(kind) => kind,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(StreamingError::new(format!("{}: {error}", path.display())));
+        }
+    };
+    match link_kind {
+        PathLinkKind::Symlink(SymlinkTargetKind::File) => Ok(Some(ReplaceableLeafKind::Symlink(
+            crate::fs::SymlinkKind::File,
+        ))),
+        PathLinkKind::Symlink(SymlinkTargetKind::Directory) => Ok(Some(
+            ReplaceableLeafKind::Symlink(crate::fs::SymlinkKind::Directory),
+        )),
+        PathLinkKind::UnsupportedReparse => Err(StreamingError::new(format!(
+            "{}: destination leaf is an unsupported reparse point",
+            path.display()
+        ))),
+        PathLinkKind::NotLink => {
+            let metadata = std::fs::symlink_metadata(path)
+                .map_err(|error| StreamingError::new(format!("{}: {error}", path.display())))?;
+            if metadata.is_dir() {
+                Err(StreamingError::new(format!(
+                    "{}: refusing to replace a real directory with a symlink",
+                    path.display()
+                )))
+            } else {
+                Ok(Some(ReplaceableLeafKind::RegularFile))
+            }
+        }
+    }
+}
+
+/// [`DeferredParentSyncs::commit_staged_regular_file`] as synchronous steps,
+/// for a caller already on a blocking thread (br-asupersync-dfdwyt): the same
+/// staged-leaf and destination-leaf checks, then the rename, with the same
+/// errors. The caller then records the parent with
+/// [`DeferredParentSyncs::record`]. Not on Windows, where a refused
+/// replacement of a read-only destination takes the async path's retry.
+#[cfg(not(windows))]
+pub(crate) fn install_staged_regular_file_sync(
+    staging_path: &Path,
+    out_path: &Path,
+) -> Result<(), StreamingError> {
+    if !matches!(
+        replaceable_leaf_kind_sync(staging_path)?,
+        Some(ReplaceableLeafKind::RegularFile)
+    ) {
+        return Err(StreamingError::new(format!(
+            "{}: staged commit leaf has the wrong filesystem kind",
+            staging_path.display()
+        )));
+    }
+    // The async path inspects the destination too (only Windows uses the
+    // result), so a destination it cannot inspect is refused here as well.
+    replaceable_leaf_kind_sync(out_path)?;
+    std::fs::rename(staging_path, out_path).map_err(|error| {
+        StreamingError::new(format!(
+            "{}: atomic staged replacement: {error}",
+            out_path.display()
+        ))
+    })
 }
 
 #[cfg(test)]
