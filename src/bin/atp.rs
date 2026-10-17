@@ -68,13 +68,16 @@ use asupersync::net::atp::channel_bonding;
 use asupersync::net::atp::transport_common::metadata::{
     path_is_link_or_reparse, path_is_link_or_reparse_sync,
 };
-use asupersync::net::atp::transport_common::{FilterSet, TransferProgress, plan_transfer};
+use asupersync::net::atp::transport_common::{
+    CompressionMode, FilterSet, TransferProgress, plan_transfer,
+};
 use asupersync::net::atp::transport_rq::{
     self, DEFAULT_MAX_FEEDBACK_ROUNDS, DEFAULT_REPAIR_OVERHEAD, DEFAULT_ROUND_TAIL_DRAIN_MS,
     DEFAULT_SYMBOL_SIZE, DEFAULT_UDP_FANOUT, RqConfig, RqError,
 };
 use asupersync::net::atp::transport_tcp::{
-    self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendReport, TransferConfig, TransportError,
+    self, DEFAULT_MAX_TRANSFER_BYTES, ReceiveReport, SendOptions, SendReport, TransferConfig,
+    TransportError,
 };
 use asupersync::runtime::RuntimeBuilder;
 use asupersync::security::{AUTH_KEY_SIZE, AuthKey, SecretString, SecurityContext};
@@ -229,6 +232,39 @@ impl Transport {
     }
 }
 
+/// Bulk-data compression for `atp send` (br-asupersync-t1fblr.18).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum Compress {
+    /// Send every chunk raw.
+    Off,
+    /// Offer zstd, then send each chunk compressed whenever the receiver
+    /// accepted and compressing makes the chunk smaller (`on` is an alias).
+    #[value(alias = "on")]
+    Zstd,
+    /// Offer zstd like `zstd`, but send raw the files whose name or first
+    /// bytes mark an already-compressed format, and back off from data that
+    /// does not compress.
+    Auto,
+}
+
+impl Compress {
+    const fn mode(self) -> CompressionMode {
+        match self {
+            Self::Off => CompressionMode::Off,
+            Self::Zstd => CompressionMode::Zstd,
+            Self::Auto => CompressionMode::Auto,
+        }
+    }
+
+    const fn cli_arg(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Zstd => "zstd",
+            Self::Auto => "auto",
+        }
+    }
+}
+
 /// Preferred network path when SSH is used only as a bootstrap channel.
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
 enum PathPreference {
@@ -321,6 +357,15 @@ struct SendArgs {
     /// Sender bandwidth cap in bytes per second (quic/auto only).
     #[arg(long = "bwlimit", value_name = "BPS")]
     bwlimit_bps: Option<u64>,
+    /// Compress bulk data (tcp and quic; rq never compresses). With `zstd` the
+    /// sender offers zstd in its handshake, and a receiver that accepts gets
+    /// each chunk compressed whenever that makes it smaller; `auto` also sends
+    /// already-compressed files raw. A receiver that predates compression, or
+    /// was built without the codec, never accepts and gets every chunk raw,
+    /// exactly as before. The receiver still verifies the raw bytes' SHA-256
+    /// and merkle root. Needs an atp built with the `zstd` cargo feature.
+    #[arg(long, value_enum, default_value_t = Compress::Off)]
+    compress: Compress,
     /// Worker threads for the local runtime.
     #[arg(long, default_value_t = 4)]
     workers: usize,
@@ -1105,6 +1150,44 @@ fn validate_requested_bwlimit_transport(
     Ok(())
 }
 
+/// `--compress` is refused wherever it would be silently ignored: on rq,
+/// which has no codec path, and in an atp built without the `zstd` cargo
+/// feature, whose senders make no offer (br-asupersync-t1fblr.18). Under
+/// `--transport auto` the rq candidate is skipped instead (see
+/// `send_to_addr_with_transport`).
+fn validate_requested_compression(requested: Transport, compress: Compress) -> Result<(), String> {
+    if compress == Compress::Off {
+        return Ok(());
+    }
+    if requested == Transport::Rq {
+        return Err(format!(
+            "--compress {} is wired for --transport tcp, quic and auto; \
+             --transport rq would send every chunk raw",
+            compress.cli_arg()
+        ));
+    }
+    if !cfg!(feature = "zstd") {
+        return Err(format!(
+            "--compress {} needs an atp built with the zstd cargo feature \
+             (cargo build --release --features atp-cli,zstd --bin atp)",
+            compress.cli_arg()
+        ));
+    }
+    Ok(())
+}
+
+/// The note `atp send` prints when it offers compression: what the receiver
+/// gets depends on whether it accepts.
+fn print_compression_offer(compress: Compress) {
+    if compress != Compress::Off {
+        eprintln!(
+            "[atp] compression: zstd offered ({}); chunks go compressed only if the \
+             receiver accepts",
+            compress.cli_arg()
+        );
+    }
+}
+
 // ─── QUIC (`--transport quic`) TLS material + config ─────────────────────────
 
 // This binary keeps its existing PEM diagnostics without expanding the library API.
@@ -1863,6 +1946,7 @@ fn run_send(mut args: SendArgs) -> Result<(), String> {
         args.sparse_files,
     )?;
     validate_requested_bwlimit_transport(args.transport, args.bwlimit_bps)?;
+    validate_requested_compression(args.transport, args.compress)?;
     validate_user_transfer_namespace(&args.source)?;
     // `--dry-run` computes the transfer plan from the source and prints it
     // without resolving the target or opening any socket (rsync `--dry-run`).
@@ -3512,19 +3596,22 @@ fn send_to_addr_with_transport(
         )),
         Transport::Tcp => {
             let cfg = tcp_config(args.max_bytes, !args.no_delta);
+            let options = SendOptions::new().with_compression(args.compress.mode());
+            print_compression_offer(args.compress);
             // Monotonic progress + ETA on stderr (stdout stays the JSON report).
             let start = std::time::Instant::now();
             let report: SendReport = runtime
                 .block_on(runtime.handle().spawn(async move {
                     let cx = Cx::current().expect("sender cx");
                     let filter = FilterSet::new();
-                    transport_tcp::send_path_filtered(
+                    transport_tcp::send_path_with_options(
                         &cx,
                         addr,
                         &source,
                         cfg,
                         &peer_id,
                         &filter,
+                        options,
                         move |done, total| {
                             let mut progress = TransferProgress::new(total, 0);
                             progress.record_bytes(done);
@@ -3558,6 +3645,15 @@ fn send_to_addr_with_transport(
             Ok(tcp_send_json(&report, Some(elapsed)))
         }
         Transport::Rq => {
+            // rq has no codec path. `--transport rq --compress` is refused up
+            // front; under `--transport auto` the candidate is skipped, so the
+            // requested compression is never dropped silently.
+            if args.compress != Compress::Off {
+                return Err(SendTransportFailure::transport_fallback(format!(
+                    "rq skipped: --compress {} needs tcp or quic",
+                    args.compress.cli_arg()
+                )));
+            }
             let cfg = match rq_config_override {
                 Some(config) => config.clone(),
                 None => rq_send_config(args)?,
@@ -3590,12 +3686,15 @@ fn send_to_addr_with_transport(
             {
                 let cfg = quic_config_send(args, quic_auth_override)?;
                 let chosen_fanout = cfg.datagram_fanout.max(1);
+                let options = asupersync::net::atp::transport_quic::QuicSendOptions::new()
+                    .with_compression(args.compress.mode());
+                print_compression_offer(args.compress);
                 let start = Instant::now();
                 let outcome = runtime
                     .block_on(runtime.handle().spawn(async move {
                         let cx = Cx::current().expect("sender cx");
-                        asupersync::net::atp::transport_quic::send_path_with_limiter_report(
-                            &cx, addr, &source, cfg, &peer_id,
+                        asupersync::net::atp::transport_quic::send_path_with_options_and_limiter_report(
+                            &cx, addr, &source, cfg, &peer_id, options,
                         )
                         .await
                     }))
@@ -10782,6 +10881,70 @@ YuX2YYZ2gAU6aNU/up/PediXcN5u\n\
         };
         assert_eq!(args.transport, Transport::Quic);
         assert_eq!(args.bwlimit_bps, Some(262_144));
+    }
+
+    #[test]
+    fn compress_is_refused_where_it_would_be_ignored() {
+        let transports = [
+            Transport::Tcp,
+            Transport::Rq,
+            Transport::Quic,
+            Transport::Auto,
+        ];
+        for transport in transports {
+            assert_eq!(
+                validate_requested_compression(transport, Compress::Off),
+                Ok(())
+            );
+        }
+        for compress in [Compress::Zstd, Compress::Auto] {
+            assert!(
+                validate_requested_compression(Transport::Rq, compress)
+                    .expect_err("rq has no codec path")
+                    .contains("would send every chunk raw")
+            );
+            for transport in [Transport::Tcp, Transport::Quic, Transport::Auto] {
+                let verdict = validate_requested_compression(transport, compress);
+                if cfg!(feature = "zstd") {
+                    assert_eq!(verdict, Ok(()), "{transport:?} {compress:?}");
+                } else {
+                    assert!(
+                        verdict
+                            .expect_err("a build without the codec must not send raw silently")
+                            .contains("zstd cargo feature")
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn send_parser_takes_compress_with_an_on_alias_and_defaults_to_off() {
+        let parse = |extra: &[&str]| {
+            let mut argv = vec!["atp", "send", "./src", "127.0.0.1:8472"];
+            argv.extend_from_slice(extra);
+            Cli::try_parse_from(argv).map(|cli| {
+                let Command::Send(args) = cli.command else {
+                    panic!("expected send command");
+                };
+                args.compress
+            })
+        };
+        assert_eq!(parse(&[]).expect("default"), Compress::Off);
+        assert_eq!(parse(&["--compress", "off"]).expect("off"), Compress::Off);
+        assert_eq!(
+            parse(&["--compress", "zstd"]).expect("zstd"),
+            Compress::Zstd
+        );
+        assert_eq!(parse(&["--compress", "on"]).expect("on"), Compress::Zstd);
+        assert_eq!(
+            parse(&["--compress", "auto"]).expect("auto"),
+            Compress::Auto
+        );
+        assert!(parse(&["--compress", "gzip"]).is_err());
+        assert_eq!(Compress::Off.mode(), CompressionMode::Off);
+        assert_eq!(Compress::Zstd.mode(), CompressionMode::Zstd);
+        assert_eq!(Compress::Auto.mode(), CompressionMode::Auto);
     }
 
     #[test]

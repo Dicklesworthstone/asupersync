@@ -790,6 +790,11 @@ path = "tests/atp_checkpoint_recovery.rs"
 required-features = ["test-internals", "tls"]
 
 [[test]]
+name = "atp_cli_compress"
+path = "tests/atp_cli_compress.rs"
+required-features = ["atp-cli", "zstd"]
+
+[[test]]
 name = "atp_cli_dry_run"
 path = "tests/atp_cli_dry_run.rs"
 required-features = ["atp-cli"]

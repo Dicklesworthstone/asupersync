@@ -11111,6 +11111,20 @@ pub async fn send_path_with_limiter_report(
     send_path_outcome(cx, addr, source, config, peer_id, QuicSendOptions::new()).await
 }
 
+/// [`send_path_with_limiter_report`] with sender-only options, as
+/// [`send_path_with_options`] takes them: `atp send --transport quic
+/// --compress` sends through it (br-asupersync-t1fblr.18).
+pub async fn send_path_with_options_and_limiter_report(
+    cx: &Cx,
+    addr: SocketAddr,
+    source: &Path,
+    config: QuicConfig,
+    peer_id: &str,
+    options: QuicSendOptions,
+) -> Result<QuicSendOutcome, QuicTransportError> {
+    send_path_outcome(cx, addr, source, config, peer_id, options).await
+}
+
 /// [`send_path`] with sender-only options: with
 /// [`QuicSendOptions::with_compression`], a receiver that accepts gets the
 /// reliable source stream compressed (br-asupersync-t1fblr.29).
