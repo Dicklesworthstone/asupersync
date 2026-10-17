@@ -33,20 +33,24 @@
     /// Linux that default is already dual-stack, so the old code passes here;
     /// the bug showed where the default is IPv6-only (Windows, FreeBSD). The
     /// wildcard address is the one where the option matters: binding a
-    /// specific IPv6 address such as `[::1]` makes Linux set it.
-    #[cfg(unix)]
+    /// specific IPv6 address such as `[::1]` makes Linux set it. Only a host
+    /// without IPv6 skips; where a plain `[::]` bind works, both requests must
+    /// bind, so an option the builder fails to apply cannot pass as a skip.
+    /// OpenBSD has no dual-stack sockets and refuses `false`.
+    #[cfg(all(unix, not(target_os = "openbsd")))]
     #[test]
     fn only_v6_reaches_the_socket_in_both_directions() {
         futures_lite::future::block_on(async {
+            if TcpListenerBuilder::new("[::]:0").bind().await.is_err() {
+                // No IPv6 on this host.
+                return;
+            }
             for only_v6 in [true, false] {
-                let Ok(listener) = TcpListenerBuilder::new("[::]:0")
+                let listener = TcpListenerBuilder::new("[::]:0")
                     .only_v6(only_v6)
                     .bind()
                     .await
-                else {
-                    // No IPv6 on this host.
-                    return;
-                };
+                    .unwrap_or_else(|error| panic!("bind [::]:0 with only_v6({only_v6}): {error}"));
                 let socket = socket2::SockRef::from(&listener);
                 assert_eq!(socket.only_v6().expect("IPV6_V6ONLY"), only_v6);
             }
