@@ -2619,20 +2619,20 @@ impl ScramChannelBinding {
     }
 }
 
-/// Compute the `tls-server-end-point` channel-binding data per RFC 5929.
-///
-/// The hash is the one in the certificate's signature algorithm, with MD5
-/// and SHA-1 replaced by SHA-256 (RFC 5929 section 4.1), as libpq and the
-/// server compute it. An algorithm without its own hash (Ed25519, RSA-PSS)
-/// or a certificate that does not parse also gets SHA-256. Hashing every
-/// certificate with SHA-256 failed each `-PLUS` login to a server whose
-/// certificate is signed with SHA-384 or SHA-512 (such as the ECDSA P-384
-/// chains of Let's Encrypt and RDS).
+/// Compute the `tls-server-end-point` channel-binding data per RFC 5929 with
+/// the TLS module's selection, as libpq and the server do: RSASSA-PSS uses the
+/// hash in its parameters (SHA-256 for PSS failed SHA-384/512 `-PLUS` logins).
+/// A certificate it refuses keeps the earlier rule: the RSA or ECDSA signature
+/// hash, and SHA-256 for anything else (MD5, SHA-1, Ed25519, unparseable).
 #[cfg(feature = "tls")]
 fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
     use sha2::Digest;
     const RSA: [u8; 8] = [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01];
     const ECDSA: [u8; 7] = [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03];
+    let certificate = crate::tls::Certificate::from_der(cert_der);
+    if let Ok(binding) = certificate.tls_server_end_point_channel_binding() {
+        return binding;
+    }
     // The last arc of {sha224,sha384,sha512}WithRSAEncryption is 14, 12, 13
     // and of ecdsa-with-SHA{224,384,512} 1, 3, 4.
     let suffix = certificate_signature_algorithm(cert_der).and_then(|oid| match oid.split_last() {
