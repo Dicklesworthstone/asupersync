@@ -193,7 +193,11 @@
                 let _ = self.0.send(());
             }
         }
-        let cx = Cx::for_testing();
+        // A context with no blocking pool runs spawn_blocking's job inline on
+        // the polling thread (the deterministic no-pool fallback), so the first
+        // poll would block in the job itself. Submit to a real pool thread.
+        let pool = crate::runtime::BlockingPool::new(1, 1);
+        let cx = Cx::for_testing().with_blocking_pool_handle(Some(pool.handle()));
         let (started_tx, started_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let (retired_tx, retired_rx) = mpsc::channel();
