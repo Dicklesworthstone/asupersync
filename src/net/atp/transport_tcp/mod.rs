@@ -2864,27 +2864,45 @@ async fn commit_verified_staging(
     // Each committed file's directory is fsynced once, after the loop and
     // before the receipt, instead of after every rename (r02ssd).
     let mut parent_syncs = DeferredParentSyncs::default();
+    // Plain regular files commit in batches, one blocking call each (dfdwyt).
+    #[cfg(not(windows))]
+    let mut regular_batch = Vec::new();
     for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
         let out_path = if manifest.is_directory {
             join_relative(&base, &entry.rel_path)?
         } else {
             base.clone()
         };
-        // A plain regular file commits in one blocking call (dfdwyt).
         #[cfg(not(windows))]
         if is_plain_regular_entry(entry.metadata.as_ref()) {
-            commit_regular_entry(
-                cx,
-                &base,
-                &out_path,
-                staging_path,
-                entry.metadata.as_ref(),
-                &mut parent_syncs,
-            )
-            .await?;
-            committed_paths.push(out_path);
+            regular_batch.push(RegularCommit {
+                out_path,
+                staging_path: staging_path.clone(),
+                metadata: entry.metadata.clone(),
+            });
+            if regular_batch.len() == REGULAR_COMMIT_BATCH {
+                commit_regular_entries(
+                    cx,
+                    &base,
+                    std::mem::take(&mut regular_batch),
+                    &mut parent_syncs,
+                    &mut committed_paths,
+                )
+                .await?;
+            }
             continue;
         }
+        // Any other entry may depend on an earlier one (a hardlink's primary),
+        // so the files batched before it commit first.
+        #[cfg(not(windows))]
+        commit_regular_entries(
+            cx,
+            &base,
+            std::mem::take(&mut regular_batch),
+            &mut parent_syncs,
+            &mut committed_paths,
+        )
+        .await?;
         reject_entry_destination_link_prefixes(
             &base,
             &out_path,
@@ -2981,6 +2999,15 @@ async fn commit_verified_staging(
         }
         committed_paths.push(out_path);
     }
+    #[cfg(not(windows))]
+    commit_regular_entries(
+        cx,
+        &base,
+        regular_batch,
+        &mut parent_syncs,
+        &mut committed_paths,
+    )
+    .await?;
     parent_syncs.sync().await?;
     mirror_committed_manifest(cx, dest_dir, manifest, config.mirror_policy).await?;
     apply_directory_metadata_best_effort(cx, &base, manifest).await?;
@@ -4773,27 +4800,46 @@ where
             // Each committed file's directory is fsynced once, after the loop
             // and before the receipt, instead of after every rename (r02ssd).
             let mut parent_syncs = DeferredParentSyncs::default();
+            // Plain regular files commit in batches, one blocking call each
+            // (dfdwyt).
+            #[cfg(not(windows))]
+            let mut regular_batch = Vec::new();
             for (entry, staging_path) in manifest.entries.iter().zip(staging_paths.iter()) {
                 let out_path = if manifest.is_directory {
                     join_relative(&base, &entry.rel_path)?
                 } else {
                     base.clone()
                 };
-                // A plain regular file commits in one blocking call (dfdwyt).
                 #[cfg(not(windows))]
                 if is_plain_regular_entry(entry.metadata.as_ref()) {
-                    commit_regular_entry(
-                        cx,
-                        &base,
-                        &out_path,
-                        staging_path,
-                        entry.metadata.as_ref(),
-                        &mut parent_syncs,
-                    )
-                    .await?;
-                    committed_paths.push(out_path);
+                    regular_batch.push(RegularCommit {
+                        out_path,
+                        staging_path: staging_path.clone(),
+                        metadata: entry.metadata.clone(),
+                    });
+                    if regular_batch.len() == REGULAR_COMMIT_BATCH {
+                        commit_regular_entries(
+                            cx,
+                            &base,
+                            std::mem::take(&mut regular_batch),
+                            &mut parent_syncs,
+                            &mut committed_paths,
+                        )
+                        .await?;
+                    }
                     continue;
                 }
+                // Any other entry may depend on an earlier one (a hardlink's
+                // primary), so the files batched before it commit first.
+                #[cfg(not(windows))]
+                commit_regular_entries(
+                    cx,
+                    &base,
+                    std::mem::take(&mut regular_batch),
+                    &mut parent_syncs,
+                    &mut committed_paths,
+                )
+                .await?;
                 reject_entry_destination_link_prefixes(
                     &base,
                     &out_path,
@@ -4908,6 +4954,15 @@ where
                 }
                 committed_paths.push(out_path);
             }
+            #[cfg(not(windows))]
+            commit_regular_entries(
+                cx,
+                &base,
+                regular_batch,
+                &mut parent_syncs,
+                &mut committed_paths,
+            )
+            .await?;
             parent_syncs.sync().await?;
             mirror_committed_manifest(cx, dest_dir, &manifest, config.mirror_policy).await?;
             apply_directory_metadata_best_effort(cx, &base, &manifest).await?;
@@ -5199,14 +5254,82 @@ fn reject_regular_destination_link_prefixes_sync(
     unsafe_component.map_or(Ok(()), Err)
 }
 
-/// One regular file's commit as a single blocking call (br-asupersync-dfdwyt):
-/// the destination's link-prefix walk, creating its parent, the walk again,
-/// the staged install, then the captured metadata. That is the order the
-/// general commit path runs them in, where each step was a blocking-pool
-/// handoff of its own: eight per received file, nine when it replaces an
-/// existing one. A metadata failure is traced and does not fail the commit,
-/// as before.
+/// Plain regular files committed per blocking call (br-asupersync-dfdwyt).
 #[cfg(not(windows))]
+const REGULAR_COMMIT_BATCH: usize = 64;
+
+/// A plain regular entry waiting to commit with the others of its batch.
+#[cfg(not(windows))]
+struct RegularCommit {
+    out_path: PathBuf,
+    staging_path: PathBuf,
+    metadata: Option<EntryMetadata>,
+}
+
+/// One regular file's commit on a blocking thread: the destination's
+/// link-prefix walk, creating its parent, the walk again, the staged
+/// install, then the captured metadata. That is the order the general
+/// commit path runs them in. The metadata result is returned so the caller
+/// traces it; a metadata failure never fails the commit.
+#[cfg(not(windows))]
+fn commit_regular_entry_sync(
+    base: &Path,
+    file: &RegularCommit,
+) -> Result<Option<Result<MetadataApplyReport, StreamingError>>, TransportError> {
+    reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
+    if let Some(parent) = file.out_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    reject_regular_destination_link_prefixes_sync(base, &file.out_path)?;
+    install_staged_regular_file_sync(&file.staging_path, &file.out_path)?;
+    Ok(file
+        .metadata
+        .as_ref()
+        .map(|meta| apply_entry_metadata_sync(&file.out_path, meta)))
+}
+
+/// Commits a run of plain regular files in one blocking call
+/// (br-asupersync-dfdwyt). Each file was one call of its own, after eight
+/// separate handoffs per file before that. The files commit in order, and
+/// the first failure stops the run: the files before it stay committed, are
+/// recorded for the deferred parent sync and pushed to `committed_paths`,
+/// exactly as one-by-one commits leave them, and the error is returned. A
+/// receive dropped while the call runs lets the rest of its run commit.
+#[cfg(not(windows))]
+async fn commit_regular_entries(
+    cx: &Cx,
+    base: &Path,
+    files: Vec<RegularCommit>,
+    parent_syncs: &mut DeferredParentSyncs,
+    committed_paths: &mut Vec<PathBuf>,
+) -> Result<(), TransportError> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let base_path = base.to_path_buf();
+    let (committed, failure) = crate::runtime::spawn_blocking(move || {
+        let mut committed = Vec::with_capacity(files.len());
+        for file in files {
+            match commit_regular_entry_sync(&base_path, &file) {
+                Ok(applied) => committed.push((file.out_path, applied)),
+                Err(error) => return (committed, Some(error)),
+            }
+        }
+        (committed, None)
+    })
+    .await;
+    for (out_path, applied) in committed {
+        parent_syncs.record(&out_path);
+        if let Some(applied) = applied {
+            trace_entry_metadata_result(cx, &out_path, applied);
+        }
+        committed_paths.push(out_path);
+    }
+    failure.map_or(Ok(()), Err)
+}
+
+/// One regular file through [`commit_regular_entries`].
+#[cfg(all(test, not(windows)))]
 async fn commit_regular_entry(
     cx: &Cx,
     base: &Path,
@@ -5215,29 +5338,16 @@ async fn commit_regular_entry(
     metadata: Option<&EntryMetadata>,
     parent_syncs: &mut DeferredParentSyncs,
 ) -> Result<(), TransportError> {
-    let base_path = base.to_path_buf();
-    let out = out_path.to_path_buf();
-    let staged = staging_path.to_path_buf();
-    let metadata = metadata.cloned();
-    let applied = crate::runtime::spawn_blocking(move || {
-        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
-        if let Some(parent) = out.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        reject_regular_destination_link_prefixes_sync(&base_path, &out)?;
-        install_staged_regular_file_sync(&staged, &out)?;
-        Ok::<_, TransportError>(metadata.map(|meta| apply_entry_metadata_sync(&out, &meta)))
-    })
-    .await?;
-    parent_syncs.record(out_path);
-    if let Some(applied) = applied {
-        trace_entry_metadata_result(cx, out_path, applied);
-    }
-    Ok(())
+    let file = RegularCommit {
+        out_path: out_path.to_path_buf(),
+        staging_path: staging_path.to_path_buf(),
+        metadata: metadata.cloned(),
+    };
+    commit_regular_entries(cx, base, vec![file], parent_syncs, &mut Vec::new()).await
 }
 
 /// Whether `metadata` describes a plain regular file, the entries
-/// [`commit_regular_entry`] commits: not special, not a directory or a
+/// [`commit_regular_entries`] commits: not special, not a directory or a
 /// symlink, and not a hardlink to an earlier entry.
 #[cfg(not(windows))]
 fn is_plain_regular_entry(metadata: Option<&EntryMetadata>) -> bool {

@@ -1955,6 +1955,122 @@
         }
     }
 
+    /// dfdwyt DF4: plain regular files commit in batches across batch
+    /// boundaries, a hardlink to a batched file still finds its primary
+    /// committed, and every file lands with its own bytes.
+    #[cfg(unix)]
+    #[test]
+    fn batched_regular_commits_cross_batch_boundaries_and_flush_before_a_hardlink() {
+        use std::os::unix::fs::MetadataExt;
+
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical temp dir");
+        let dest_dir = root.join("dest");
+        let staging = root.join("staging");
+        std::fs::create_dir_all(&dest_dir).expect("create the destination");
+        std::fs::create_dir_all(&staging).expect("create the staging dir");
+        let count = 2 * REGULAR_COMMIT_BATCH + 2;
+        let rel = |index: usize| format!("d{}/f{index:03}.bin", index % 3);
+        let mut entries = Vec::new();
+        let mut staging_paths = Vec::new();
+        for index in 0..count {
+            let staged = staging.join(index.to_string());
+            std::fs::write(&staged, format!("file {index}")).expect("write a staged file");
+            entries.push(named_entry(
+                u32::try_from(index).expect("index"),
+                &rel(index),
+            ));
+            staging_paths.push(staged);
+        }
+        let mut alias = named_entry(u32::try_from(count).expect("index"), "zz_alias.bin");
+        alias.metadata = Some(EntryMetadata {
+            hardlink_target: Some(rel(0)),
+            ..EntryMetadata::default()
+        });
+        entries.push(alias);
+        staging_paths.push(staging.join("unused-alias-staging"));
+        let manifest = manifest_with(entries, 0);
+
+        let committed = futures_lite::future::block_on(commit_verified_staging(
+            &Cx::for_testing(),
+            &dest_dir,
+            &manifest,
+            &TransferConfig::default(),
+            &staging_paths,
+        ))
+        .expect("commit the tree");
+
+        assert_eq!(committed.len(), count + 1);
+        let base = dest_dir.join("r");
+        for index in 0..count {
+            assert_eq!(
+                std::fs::read_to_string(base.join(rel(index))).expect("read a committed file"),
+                format!("file {index}")
+            );
+        }
+        let primary = std::fs::metadata(base.join(rel(0))).expect("primary metadata");
+        let linked = std::fs::metadata(base.join("zz_alias.bin")).expect("alias metadata");
+        assert_eq!(
+            primary.ino(),
+            linked.ino(),
+            "the alias is a hardlink to the primary"
+        );
+    }
+
+    /// dfdwyt DF4: a commit batch stops at its first failure. The files
+    /// before it stay committed and recorded; the files after it are not
+    /// touched.
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_commit_batch_stops_at_its_first_failure() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let root = temp.path().canonicalize().expect("canonical temp dir");
+        let base = root.join("dest");
+        let file = |name: &str, staged: Option<&[u8]>| {
+            let staging_path = root.join(format!("{name}.part"));
+            if let Some(bytes) = staged {
+                std::fs::write(&staging_path, bytes).expect("write a staged file");
+            }
+            RegularCommit {
+                out_path: base.join(name),
+                staging_path,
+                metadata: None,
+            }
+        };
+        let files = vec![
+            file("a.bin", Some(b"a")),
+            file("b.bin", None),
+            file("c.bin", Some(b"c")),
+        ];
+        let mut parent_syncs = DeferredParentSyncs::default();
+        let mut committed = Vec::new();
+
+        let error = futures_lite::future::block_on(commit_regular_entries(
+            &Cx::for_testing(),
+            &base,
+            files,
+            &mut parent_syncs,
+            &mut committed,
+        ))
+        .expect_err("b.bin has no staged file");
+
+        assert!(
+            error.to_string().contains("wrong filesystem kind"),
+            "{error}"
+        );
+        assert_eq!(committed, vec![base.join("a.bin")]);
+        assert_eq!(std::fs::read(base.join("a.bin")).expect("read a.bin"), b"a");
+        assert!(
+            !base.join("c.bin").exists(),
+            "a file after the failure is not committed"
+        );
+        assert!(
+            root.join("c.bin.part").exists(),
+            "its staged file is untouched"
+        );
+        futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
+    }
+
     fn directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
         DirectoryMetadataEntry {
             rel_path: rel_path.to_string(),
