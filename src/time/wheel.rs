@@ -345,42 +345,30 @@ impl WheelLevel {
     /// forward from `cursor + 1` up to the end of the level (slot 255),
     /// and wrapping around if necessary.
     fn next_occupied_distance(&self) -> Option<usize> {
-        if self.occupied == [0, 0, 0, 0] {
+        self.next_occupied_offset(1)
+    }
+
+    /// Returns the smallest offset in `from..=SLOTS_PER_LEVEL` whose slot,
+    /// `(cursor + offset) % SLOTS_PER_LEVEL`, is occupied (offset
+    /// `SLOTS_PER_LEVEL` is the cursor's own slot), scanning the bitmap a
+    /// word at a time.
+    fn next_occupied_offset(&self, from: usize) -> Option<usize> {
+        if self.occupied == [0; BITMAP_WORDS] {
             return None;
         }
-
-        let start = self.cursor + 1;
-        let mut pos = start;
-
-        // Search up to end of array
-        while pos < SLOTS_PER_LEVEL {
-            let word_idx = pos / 64;
-            let bit_idx = pos % 64;
-            let masked = self.occupied[word_idx] >> bit_idx;
+        let mut offset = from;
+        while offset <= SLOTS_PER_LEVEL {
+            let slot = (self.cursor + offset) % SLOTS_PER_LEVEL;
+            // The slots from `slot` to the end of its word have consecutive
+            // offsets: the wrap from slot 255 to slot 0 is a word boundary.
+            let masked = self.occupied[slot / 64] >> (slot % 64);
             if masked != 0 {
-                let found = pos + masked.trailing_zeros() as usize;
-                if found < SLOTS_PER_LEVEL {
-                    return Some(found - self.cursor);
-                }
+                let found = offset + masked.trailing_zeros() as usize;
+                // Past SLOTS_PER_LEVEL lies beyond the cursor's own slot.
+                return (found <= SLOTS_PER_LEVEL).then_some(found);
             }
-            pos = (word_idx + 1) * 64;
+            offset += 64 - slot % 64;
         }
-
-        // Search from 0 up to cursor
-        pos = 0;
-        while pos <= self.cursor {
-            let word_idx = pos / 64;
-            let bit_idx = pos % 64;
-            let masked = self.occupied[word_idx] >> bit_idx;
-            if masked != 0 {
-                let found = pos + masked.trailing_zeros() as usize;
-                if found <= self.cursor {
-                    return Some(SLOTS_PER_LEVEL - self.cursor + found);
-                }
-            }
-            pos = (word_idx + 1) * 64;
-        }
-
         None
     }
 }
@@ -726,13 +714,14 @@ impl TimerWheel {
         // increasing ticks. The first slot there holding a live entry holds
         // the level's earliest deadline; later slots need not be scanned, and
         // slots holding only cancelled entries are skipped
-        // (br-asupersync-m85zfi).
+        // (br-asupersync-m85zfi). The bitmap yields the occupied slots a word
+        // at a time: testing every slot's bit, 4 x 256 tests per call on a
+        // sparse wheel, was most of this function's cost in a parking
+        // receiver (br-asupersync-dfdwyt).
         for level in &self.levels {
-            for offset in 1..=SLOTS_PER_LEVEL {
+            let mut from = 1;
+            while let Some(offset) = level.next_occupied_offset(from) {
                 let slot = (level.cursor + offset) % SLOTS_PER_LEVEL;
-                if !level.is_occupied(slot) {
-                    continue;
-                }
                 let earliest = level.slots[slot]
                     .iter()
                     .filter(|entry| self.is_live(entry))
@@ -742,6 +731,7 @@ impl TimerWheel {
                     min_deadline = Some(min_deadline.map_or(deadline, |c| c.min(deadline)));
                     break;
                 }
+                from = offset + 1;
             }
         }
 

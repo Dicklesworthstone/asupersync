@@ -1135,6 +1135,13 @@ pub fn validate_portable_relative_path(path: &str) -> Result<(), String> {
 /// destination file.
 #[must_use]
 pub fn portable_path_collision_key(path: &str) -> String {
+    // Every ASCII character is NFC-stable and `char::to_uppercase` maps it to
+    // its ASCII uppercase, so an ASCII path's key is exactly its ASCII
+    // uppercase. Most paths are ASCII, and the full fold, run for every path
+    // and every prefix, was a measurable share of a receive (dfdwyt).
+    if path.is_ascii() {
+        return path.to_ascii_uppercase();
+    }
     path.nfc()
         .flat_map(char::to_uppercase)
         .collect::<String>()
