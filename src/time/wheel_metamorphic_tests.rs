@@ -68,9 +68,14 @@ struct TestTimer {
     priority: u8,            // For potential priority testing
 }
 
+/// Timer ids are drawn from a small space so that a CancelTimer usually names
+/// a timer that was inserted, and ids repeat. Drawn from all of u32, a cancel
+/// almost never matched a timer, so the cancel path went untested.
+const TIMER_ID_SPACE: u32 = 8;
+
 /// Generate arbitrary test timers.
 fn arb_test_timer() -> impl Strategy<Value = TestTimer> {
-    (any::<u32>(), 1u64..10000, any::<u8>()).prop_map(|(id, offset_ms, priority)| TestTimer {
+    (0..TIMER_ID_SPACE, 1u64..10000, any::<u8>()).prop_map(|(id, offset_ms, priority)| TestTimer {
         id,
         deadline_offset_ms: offset_ms,
         priority,
@@ -91,7 +96,7 @@ enum WheelOperation {
 fn arb_wheel_operation() -> impl Strategy<Value = WheelOperation> {
     prop_oneof![
         arb_test_timer().prop_map(|timer| WheelOperation::InsertTimer { timer }),
-        any::<u32>().prop_map(|id| WheelOperation::CancelTimer { timer_id: id }),
+        (0..TIMER_ID_SPACE).prop_map(|id| WheelOperation::CancelTimer { timer_id: id }),
         (1u64..1000).prop_map(|advance| WheelOperation::AdvanceTime {
             advance_ms: advance
         }),
@@ -193,11 +198,16 @@ fn apply_operation(
             });
         }
         WheelOperation::CancelTimer { timer_id } => {
-            if let Some(handle) = timer_handle_map.get(timer_id) {
-                wheel.cancel(handle);
-                if let Some(timer) = tracked_timers.iter_mut().find(|t| t.id == *timer_id) {
-                    timer.cancelled = true;
-                }
+            // The id names the latest timer inserted under it. Only a cancel
+            // that removed a live timer counts: a timer that already fired or
+            // was cancelled stays as it is.
+            if let Some(handle) = timer_handle_map.get(timer_id)
+                && wheel.cancel(handle)
+                && let Some(timer) = tracked_timers
+                    .iter_mut()
+                    .find(|t| t.handle == Some(*handle))
+            {
+                timer.cancelled = true;
             }
         }
         WheelOperation::AdvanceTime { advance_ms } => {
@@ -683,5 +693,61 @@ mod composition_tests {
         let snapshot = WheelSnapshot::capture(&wheel, &tracked);
         assert!(tracked[0].fired, "fired at 275 ms");
         assert_eq!((snapshot.active_count, snapshot.ready_count), (0, 0));
+    }
+
+    /// A cancel names the latest timer inserted under its id, and only a
+    /// cancel that removed a live timer counts. The old model marked the first
+    /// timer with that id, and also marked a timer that had already fired, so
+    /// one timer counted as both cancelled and fired.
+    #[test]
+    fn cancel_counts_only_the_live_timer_it_removed() {
+        let config = TestWheelConfig {
+            max_wheel_duration_hours: 1,
+            max_timer_duration_hours: 25,
+            coalescing_enabled: false,
+            coalesce_window_ms: 5,
+            min_group_size: 1,
+        };
+        let mut wheel = TimerWheel::with_config(
+            Time::ZERO,
+            config.to_wheel_config(),
+            config.to_coalescing_config(),
+        );
+        let mut tracked = Vec::new();
+        let mut handles = HashMap::new();
+        let insert = |id, deadline_offset_ms| WheelOperation::InsertTimer {
+            timer: TestTimer {
+                id,
+                deadline_offset_ms,
+                priority: 0,
+            },
+        };
+        let cancel = |timer_id| WheelOperation::CancelTimer { timer_id };
+        let advance = |advance_ms| WheelOperation::AdvanceTime { advance_ms };
+        let operations = [
+            insert(0, 10),
+            insert(0, 20),
+            cancel(0),
+            advance(15),
+            insert(1, 5),
+            advance(10),
+            cancel(1),
+            cancel(0),
+        ];
+        for operation in &operations {
+            apply_operation(&mut wheel, operation, &mut tracked, &mut handles);
+        }
+
+        // Id 0: the first timer fired at 10 ms; the second was cancelled
+        // before its deadline. Id 1 fired at 20 ms, before its cancel came.
+        let flags: Vec<_> = tracked.iter().map(|t| (t.cancelled, t.fired)).collect();
+        assert_eq!(flags, [(false, true), (true, false), (false, true)]);
+        let snapshot = WheelSnapshot::capture(&wheel, &tracked);
+        let counts = (
+            snapshot.total_cancelled,
+            snapshot.total_fired,
+            snapshot.active_count,
+        );
+        assert_eq!(counts, (1, 2, 0));
     }
 }
