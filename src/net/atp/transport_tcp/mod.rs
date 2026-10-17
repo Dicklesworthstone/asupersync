@@ -4046,6 +4046,11 @@ impl StagingFileGuard {
         self.armed = false;
         crate::fs::File::from_std(file)
     }
+
+    /// Keeps the staging file, which the caller has already closed.
+    fn keep(mut self) {
+        self.armed = false;
+    }
 }
 
 impl Drop for StagingFileGuard {
@@ -4061,6 +4066,28 @@ async fn create_owned_staging_file(path: &Path) -> Result<crate::fs::File, Trans
     let path = path.to_owned();
     let guard = crate::runtime::spawn_blocking_io(move || StagingFileGuard::create(path)).await?;
     Ok(guard.into_async_file())
+}
+
+/// Creates the staging file at `path` holding `contents` in one blocking
+/// call: the same create as [`create_owned_staging_file`], then the write and
+/// the close, which were a blocking-pool handoff each (br-asupersync-dfdwyt).
+/// A failed write removes the file, and so does dropping this future before
+/// the call returns.
+async fn write_whole_staging_file(path: &Path, contents: &[u8]) -> Result<(), TransportError> {
+    use std::io::Write as _;
+
+    let path = path.to_owned();
+    let contents = contents.to_vec();
+    let guard = crate::runtime::spawn_blocking_io(move || {
+        let mut guard = StagingFileGuard::create(path)?;
+        if let Some(mut file) = guard.file.take() {
+            file.write_all(&contents)?;
+        }
+        Ok(guard)
+    })
+    .await?;
+    guard.keep();
+    Ok(())
 }
 
 async fn receive_delta_chunks_and_commit<S>(
@@ -4545,7 +4572,10 @@ where
         .enumerate()
         .map(|(i, _)| StagedEntryReceive::new(staging_dir.join(i.to_string())))
         .collect();
-    let mut active: Option<(usize, crate::fs::File)> = None;
+    // The entry being received and its open staging file. The file is `None`
+    // for an entry that arrived whole in one frame and is already written
+    // and closed.
+    let mut active: Option<(usize, Option<crate::fs::File>)> = None;
     let mut received: u64 = 0;
     // Holds one decompressed chunk at a time (at most MAX_COMPRESSED_CHUNK_RAW).
     let mut raw_scratch = Vec::new();
@@ -4582,10 +4612,11 @@ where
                     // begins (the sender streams entries in index order).
                     let switch = matches!(&active, Some((cur, _)) if *cur != idx);
                     if switch {
-                        if let Some((_, mut file)) = active.take() {
+                        if let Some((_, Some(mut file))) = active.take() {
                             file.flush().await?;
                         }
                     }
+                    let mut whole_file = false;
                     if active.is_none() {
                         let st = &mut states[idx];
                         if st.created {
@@ -4598,13 +4629,21 @@ where
                                 "ObjectData entry {index} starts at offset {offset}, expected 0"
                             )));
                         }
-                        let file = create_owned_staging_file(&st.staging_path).await?;
-                        // Pre-size a sparse file to the full length so holes
-                        // (seeked-over zero runs) and a trailing hole are
-                        // preserved without growing allocation.
-                        if config.sparse_files {
-                            file.set_len(entry.size).await?;
-                        }
+                        // A file whose whole content is this frame is created,
+                        // written and closed in one blocking call below.
+                        whole_file = !config.sparse_files && chunk.len() as u64 == entry.size;
+                        let file = if whole_file {
+                            None
+                        } else {
+                            let file = create_owned_staging_file(&st.staging_path).await?;
+                            // Pre-size a sparse file to the full length so holes
+                            // (seeked-over zero runs) and a trailing hole are
+                            // preserved without growing allocation.
+                            if config.sparse_files {
+                                file.set_len(entry.size).await?;
+                            }
+                            Some(file)
+                        };
                         st.mark_created();
                         active = Some((idx, file));
                     }
@@ -4637,10 +4676,23 @@ where
                             "internal: no active staging file for entry {index}"
                         )));
                     };
-                    if config.sparse_files {
-                        write_sparse_zero_runs(file, chunk).await?;
-                    } else {
-                        file.write_all(chunk).await?;
+                    match file {
+                        _ if whole_file => {
+                            write_whole_staging_file(&states[idx].staging_path, chunk).await?;
+                        }
+                        Some(file) if config.sparse_files => {
+                            write_sparse_zero_runs(file, chunk).await?;
+                        }
+                        Some(file) => file.write_all(chunk).await?,
+                        // An entry that arrived whole already holds all its
+                        // bytes; the size check above admits only an empty
+                        // chunk, and any other would be lost, so refuse it.
+                        None if chunk.is_empty() => {}
+                        None => {
+                            return Err(TransportError::Frame(format!(
+                                "internal: entry {index} was already staged whole"
+                            )));
+                        }
                     }
                     let st = &mut states[idx];
                     st.update_with_chunk(chunk);
@@ -4661,7 +4713,7 @@ where
                 }
             }
         }
-        if let Some((_, mut file)) = active.take() {
+        if let Some((_, Some(mut file))) = active.take() {
             file.flush().await?;
         }
         Ok(())

@@ -1910,6 +1910,51 @@
         futures_lite::future::block_on(parent_syncs.sync()).expect("sync the recorded parent");
     }
 
+    #[test]
+    fn a_whole_staging_file_is_written_by_one_call_and_never_replaces_a_file() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("0");
+        futures_lite::future::block_on(write_whole_staging_file(&path, b"payload"))
+            .expect("stage a whole file");
+        assert_eq!(
+            std::fs::read(&path).expect("read the staged file"),
+            b"payload"
+        );
+
+        let error = futures_lite::future::block_on(write_whole_staging_file(&path, b"other"))
+            .expect_err("a staging file is always created new");
+        assert!(
+            matches!(&error, TransportError::Io(io) if io.kind() == std::io::ErrorKind::AlreadyExists),
+            "{error:?}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("read the staged file"),
+            b"payload"
+        );
+    }
+
+    /// A file that fits one data frame is staged by one blocking call and a
+    /// longer one through its open staging file. Both commit the source's
+    /// bytes, on either side of the one-frame boundary.
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn files_on_both_sides_of_the_one_frame_boundary_commit_identical_bytes() {
+        for (name, len) in [
+            ("small", 1000),
+            ("one-frame", DEFAULT_CHUNK_SIZE),
+            ("two-frames", DEFAULT_CHUNK_SIZE + 1),
+        ] {
+            let payload = compressible_payload(7, len);
+            let run = transfer_with_options(
+                &canonical_test_root(&format!("atp-tcp-whole-{name}")),
+                &payload,
+                SendOptions::new(),
+                None,
+            );
+            assert_delivered(&run, &payload, name);
+        }
+    }
+
     fn directory_metadata_entry(rel_path: &str) -> DirectoryMetadataEntry {
         DirectoryMetadataEntry {
             rel_path: rel_path.to_string(),
