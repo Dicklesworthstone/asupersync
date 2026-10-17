@@ -23,11 +23,15 @@
 
     #[test]
     fn sdk_legacy_mod_examples_are_executable_assertions() {
+        // The examples live out of line (c5012547e); the module must still be
+        // declared, so they compile and run.
         let source = include_str!("sdk/mod.rs");
-        let examples = source
-            .split("mod examples")
-            .nth(1)
-            .expect("legacy SDK examples module exists");
+        assert!(
+            source.contains("#[path = \"mod_examples_inline_tests.rs\"]")
+                && source.contains("mod examples;"),
+            "legacy SDK examples module is declared"
+        );
+        let examples = include_str!("sdk/mod_examples_inline_tests.rs");
 
         for (forbidden, label) in [
             (concat!("#[", "ignore", "]"), "ignored test attribute"),
