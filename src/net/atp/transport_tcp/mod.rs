@@ -57,8 +57,9 @@ use crate::net::atp::transport_common::codec::{
 use crate::net::atp::transport_common::delta::ATP_DELTA_CHUNK_MANIFEST_SCHEMA;
 use crate::net::atp::transport_common::metadata::{
     DeferredParentSyncs, HardlinkIdentity, commit_hardlink_transactionally,
-    commit_symlink_transactionally, path_is_link_or_reparse, validate_entry_metadata_for_receive,
-    validate_symlink_metadata_for_receive, write_sparse_zero_runs,
+    commit_symlink_transactionally, path_is_link_or_reparse, path_is_link_or_reparse_sync,
+    validate_entry_metadata_for_receive, validate_symlink_metadata_for_receive,
+    write_sparse_zero_runs,
 };
 #[cfg(test)]
 use crate::net::atp::transport_common::metadata::{
@@ -5025,39 +5026,60 @@ async fn reject_destination_link_prefix_cached(
     // would then follow the substituted ancestor and see an apparently normal
     // tree. Per-entry guards use a fresh cache, so this revalidates the complete
     // outer chain immediately before each mutation.
+    let mut pending = Vec::new();
     for ancestor in base
         .ancestors()
         .skip(1)
         .filter(|path| !path.as_os_str().is_empty())
     {
         if verified.insert(ancestor.to_path_buf()) {
-            reject_existing_link_or_reparse(ancestor).await?;
+            pending.push(ancestor.to_path_buf());
         }
     }
 
     let components = rel.components().collect::<Vec<_>>();
     let mut current = base.to_path_buf();
     if (include_leaf || !components.is_empty()) && verified.insert(current.clone()) {
-        reject_existing_link_or_reparse(&current).await?;
+        pending.push(current.clone());
     }
     let component_count = components.len();
+    let mut unsafe_component = None;
     for (index, component) in components.into_iter().enumerate() {
         let Component::Normal(component) = component else {
-            return Err(TransportError::Source(format!(
+            unsafe_component = Some(TransportError::Source(format!(
                 "unsafe destination component in {}",
                 out_path.display()
             )));
+            break;
         };
         current.push(component);
         if (include_leaf || index + 1 < component_count) && verified.insert(current.clone()) {
-            reject_existing_link_or_reparse(&current).await?;
+            pending.push(current.clone());
         }
     }
-    Ok(())
+
+    // The whole chain is checked in one blocking call, in the same order as
+    // before. One call per component cost about 20 blocking-pool handoffs per
+    // received file (br-asupersync-dfdwyt). The components before an unsafe
+    // one are still checked first.
+    if !pending.is_empty() {
+        crate::runtime::spawn_blocking(move || {
+            pending
+                .iter()
+                .try_for_each(|path| reject_existing_link_or_reparse_sync(path))
+        })
+        .await?;
+    }
+    unsafe_component.map_or(Ok(()), Err)
 }
 
 async fn reject_existing_link_or_reparse(path: &Path) -> Result<(), TransportError> {
-    match path_is_link_or_reparse(path).await {
+    let path = path.to_path_buf();
+    crate::runtime::spawn_blocking(move || reject_existing_link_or_reparse_sync(&path)).await
+}
+
+fn reject_existing_link_or_reparse_sync(path: &Path) -> Result<(), TransportError> {
+    match path_is_link_or_reparse_sync(path) {
         Ok(true) => Err(TransportError::Source(format!(
             "destination path crosses existing symlink or reparse point: {}",
             path.display()
