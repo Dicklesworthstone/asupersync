@@ -121,6 +121,58 @@
         assert!(validate_portable_path_set(["Foo", "Foo/pwn"]).is_err());
     }
 
+    /// portable_path_collision_key's ASCII fast path equals the full
+    /// NFC / uppercase / NFC fold for every ASCII input (dfdwyt), and
+    /// non-ASCII input still takes the full fold.
+    #[test]
+    fn ascii_collision_keys_match_the_full_unicode_fold() {
+        use unicode_normalization::UnicodeNormalization;
+
+        fn full_fold(path: &str) -> String {
+            path.nfc()
+                .flat_map(char::to_uppercase)
+                .collect::<String>()
+                .nfc()
+                .collect()
+        }
+        let mut inputs: Vec<String> = (0_u8..128)
+            .map(|byte| char::from(byte).to_string())
+            .collect();
+        let mut state = 0x9e37_79b9_u32;
+        for _ in 0..2000 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = usize::try_from(state % 24).expect("small length");
+            let mut input = String::new();
+            for _ in 0..len {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                input.push(char::from(u8::try_from(state >> 25).expect("7-bit value")));
+            }
+            inputs.push(input);
+        }
+        for input in &inputs {
+            assert!(input.is_ascii());
+            assert_eq!(
+                portable_path_collision_key(input),
+                full_fold(input),
+                "{input:?}"
+            );
+        }
+        for input in [
+            "caf\u{e9}",
+            "cafe\u{301}",
+            "\u{df}",
+            "Stra\u{df}e",
+            "\u{130}x",
+            "a\u{345}",
+        ] {
+            assert_eq!(
+                portable_path_collision_key(input),
+                full_fold(input),
+                "{input:?}"
+            );
+        }
+    }
+
     #[test]
     fn default_policy_denies_before_materialization() {
         let (graph, root) = graph_with_file("ok.txt", b"hello");
