@@ -4691,8 +4691,9 @@ mod tests {
     #[test]
     fn test_command_not_found() {
         init_test("test_command_not_found");
-
-        let result = Command::new("nonexistent_command_that_does_not_exist_12345").spawn();
+        // An unsearchable PATH directory on the host turns ENOENT into EACCES.
+        let mut command = Command::new("nonexistent_command_that_does_not_exist_12345");
+        let result = command.env("PATH", "/nonexistent-dir").spawn();
 
         crate::assert_with_log!(
             matches!(result, Err(ProcessError::NotFound(_))),
