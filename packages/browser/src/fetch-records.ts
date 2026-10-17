@@ -1,4 +1,4 @@
-/** Internal pull-driven record owner. No connection, task or timer is created. */
+/** Internal pull-driven record owner. No connection or task-ABI owner is created. */
 import type { Outcome } from "@asupersync/browser-core";
 import { BROWSER_FETCH_LIMITS, type BrowserFetchResponse, type FetchStreamHandle } from "./fetch.js";
 
@@ -36,6 +36,14 @@ const BUFFER = Object.getOwnPropertyDescriptor(VIEW, "buffer")!.get!;
 const OFFSET = Object.getOwnPropertyDescriptor(VIEW, "byteOffset")!.get!;
 const LENGTH = Object.getOwnPropertyDescriptor(VIEW, "byteLength")!.get!;
 const VALUES = (VIEW as { values: () => unknown }).values;
+const SCHEDULE = typeof setTimeout === "function" ? setTimeout : undefined;
+const UNSCHEDULE = typeof clearTimeout === "function" ? clearTimeout : undefined;
+// Promise/reader awaits alone can run indefinitely in the microtask queue.
+// Keep budgets across pulls too: an eager consumer must not reset them by
+// asking for one already-buffered record in each promise continuation.
+const HOST_TURN_STEPS = 128;
+const HOST_TURN_BYTES = 65_536;
+type HostTurn = { timer: ReturnType<typeof setTimeout> | undefined; resume(): void };
 
 export function recordFailure(message: string, code: "decode_failure" | "compatibility_rejected" = "decode_failure"): Failure {
   return Object.freeze({ outcome: "err", failure: Object.freeze({ code, recoverability: "permanent", message }) });
@@ -118,6 +126,9 @@ export interface RecordConfig<T> {
  * Takes exclusive ownership only after validation and native construction.
  * Bounds retained input by one fetch chunk plus maxLineBytes; never queues an
  * array of parsed records. Parser-specific state has its own advertised bound.
+ * Ready-input work yields through one owned host timer when a native timer
+ * pair is available. Stop releases the scheduling wait before source cleanup;
+ * yielding never reads ahead or creates a task-ABI owner.
  */
 export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: RecordConfig<T>): Outcome<FetchRecordStream<T>> {
   if (!STREAM || !GET_READER || !READ || !CANCEL || !RELEASE || !READER_CLOSED || !DECODER || !DECODE) {
@@ -142,8 +153,51 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
   let lineBuffer = new Uint8Array(0);
   let lineLength = 0;
   let decoder: TextDecoder;
+  let workSteps = 0;
+  let workBytes = 0;
+  let hostTurn: HostTurn | undefined;
+  let schedulingFailure: Failure | undefined;
+
+  function clearHostTurn() {
+    const wait = hostTurn;
+    hostTurn = undefined;
+    if (!wait) return;
+    try {
+      if (wait.timer !== undefined) Reflect.apply(UNSCHEDULE!, globalThis, [wait.timer]);
+    } catch {
+      schedulingFailure = recordFailure("fetch record host scheduling cleanup failed", "compatibility_rejected");
+    } finally {
+      // A cleared callback will never run. Release its awaiting pull as well;
+      // stop has already been published, so it cannot parse or pull more data.
+      wait.resume();
+    }
+  }
+  function yieldToHost(): Promise<void> | undefined {
+    workSteps = 0;
+    workBytes = 0;
+    // Preserve minimal timer-free embedders; ordinary browsers supply both.
+    // Such embedders retain their previous microtask-only scheduling behavior.
+    if (!SCHEDULE || !UNSCHEDULE) return undefined;
+    return new Promise<void>((resolve, reject) => {
+      const wait: HostTurn = { timer: undefined, resume: resolve };
+      hostTurn = wait;
+      try {
+        const timer = Reflect.apply(SCHEDULE, globalThis, [() => {
+          if (hostTurn !== wait) return;
+          hostTurn = undefined;
+          resolve();
+        }, 0]) as ReturnType<typeof setTimeout>;
+        if (hostTurn === wait) wait.timer = timer;
+        else Reflect.apply(UNSCHEDULE, globalThis, [timer]);
+      } catch {
+        if (hostTurn === wait) hostTurn = undefined;
+        reject(recordError(recordFailure("fetch record host scheduling failed", "compatibility_rejected")));
+      }
+    });
+  }
 
   function clear() {
+    clearHostTurn();
     pending = null;
     lineBuffer = new Uint8Array(0);
     lineLength = 0;
@@ -153,6 +207,9 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
     if (ended) return;
     ended = true;
     clear();
+    if (schedulingFailure && (outcome.outcome === "ok" || severity(schedulingFailure) > severity(outcome))) {
+      outcome = schedulingFailure;
+    }
     // Releasing intentionally rejects reader.closed on an unfinished stream.
     // Publish ended first so that observer cannot start a second termination.
     try { Reflect.apply(release, reader, []); } catch { /* Already released. */ }
@@ -239,18 +296,30 @@ export function createFetchRecordStream<T>(fetch: FetchStreamHandle, config: Rec
   async function nextLine(): Promise<{ line: string } | { tail: string | undefined }> {
     for (;;) {
       if (stopping || ended) return { tail: undefined };
+      if (workSteps >= HOST_TURN_STEPS || workBytes >= HOST_TURN_BYTES) {
+        const pause = yieldToHost();
+        if (pause) await pause;
+        if (stopping || ended) return { tail: undefined };
+      }
+      workSteps += 1;
       if (pending && offset < pending.length) {
         if (skipLF) {
           skipLF = false;
-          if (pending[offset] === 10) offset += 1;
+          if (pending[offset] === 10) { offset += 1; workBytes += 1; }
         }
         const start = offset;
-        while (offset < pending.length && pending[offset] !== 10 && !(config.crLines && pending[offset] === 13)) offset += 1;
+        const scanEnd = Math.min(pending.length, offset + HOST_TURN_BYTES - workBytes);
+        while (offset < scanEnd && pending[offset] !== 10 && !(config.crLines && pending[offset] === 13)) offset += 1;
         const end = offset;
+        workBytes += end - start;
         append(pending.subarray(start, end));
+        // A scan-budget boundary is not a line delimiter. Keep this chunk and
+        // the partial line across the yield instead of discarding either.
+        if (workBytes >= HOST_TURN_BYTES) continue;
         if (offset < pending.length) {
           skipLF = config.crLines && pending[offset] === 13;
           offset += 1;
+          workBytes += 1;
           // LF-only protocols allow CRLF but do not split on bare CR.
           const length = !config.crLines && lineLength && lineBuffer[lineLength - 1] === 13 ? lineLength - 1 : lineLength;
           const line = text(lineBuffer.subarray(0, length));

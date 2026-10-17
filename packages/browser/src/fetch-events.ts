@@ -42,13 +42,19 @@ export interface ServerSentEventStream extends FetchRecordStream<ServerSentEvent
  * https://html.spec.whatwg.org/multipage/server-sent-events.html#parsing-an-event-stream
  *
  * This is NOT a browser EventSource: no ambient connection, automatic retry,
- * redirect, Last-Event-ID header, callback task or task-ABI owner is created.
+ * redirect, Last-Event-ID header, event callback or task-ABI owner is created.
  * GET/POST, credentials, request headers, deadlines, signals, total response
  * bytes and scope closure stay governed by the original fetch. A caller may
  * explicitly use lastEventId/retry for a separately authorized next request.
  *
  * At most one fetch chunk, one bounded line and one bounded event are retained.
  * There is no parsed-event backlog or read-ahead after producing one event.
+ * Ready input yields to the host after bounded scanning/line work, including
+ * comments and empty chunks, so it cannot indefinitely starve host cancellation.
+ * One zero-delay timer is owned only while yielding, and cleared on stop.
+ * This requires native setTimeout/clearTimeout; minimal timer-free embedders
+ * retain microtask-only scheduling. Timer throttling and a synchronous record
+ * decode are not preempted; this is not a wall-clock deadline guarantee.
  * Caller/downstream/tee buffers are outside that bound. Consumer cancellation
  * and parse/protocol errors await host cleanup; error.cause is the Outcome.
  * Await this handle's closed for parser completion, not just fetch.closed.
@@ -148,7 +154,9 @@ const PARSE_JSON = JSON.parse;
  * lossless-number codec. The caller owns validation and downstream buffering.
  *
  * Shares serverSentEvents' exclusive body ownership, cancellation and cleanup
- * barriers. It does not retry, issue another fetch or change fetch authority.
+ * barriers and bounded host yielding, even when every empty line is ignored or
+ * a consumer immediately requests each next record. It does not retry, issue
+ * another fetch or change fetch authority.
  * https://github.com/ndjson/ndjson-spec
  */
 export function jsonLines(fetch: FetchStreamHandle, options: JsonLinesOptions = {}): Outcome<FetchRecordStream<JsonLine>> {
