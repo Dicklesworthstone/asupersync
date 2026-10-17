@@ -12,7 +12,10 @@ use std::path::{Path, PathBuf};
 /// including the supplied directory prefix, without lossy UTF-8 conversion.
 /// Neither limit is allocated up front. These bound result size, not allocator
 /// overhead, operating-system buffers, or the one entry being inspected.
+/// Build it with [`DirectoryReadLimits::new`]: it is `#[non_exhaustive]`, so a
+/// later limit can be added without breaking callers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct DirectoryReadLimits {
     /// Maximum number of entries in the result.
     pub max_entries: usize,
