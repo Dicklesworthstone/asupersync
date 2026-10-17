@@ -151,10 +151,15 @@
         assert!(matches!(res, Poll::Ready(Ok(11))));
         assert_eq!(counter.load(Ordering::Relaxed), 11);
 
+        // DuplexStream gathers vectored writes (f48949393), so both slices fit
+        // in the pipe's free space and the counter must see all six bytes. A
+        // wrapper that fell back to the default poll_write_vectored would
+        // write only "foo".
+        assert!(counted.is_write_vectored());
         let slices = [io::IoSlice::new(b"foo"), io::IoSlice::new(b"bar")];
         let res2 = Pin::new(&mut counted).poll_write_vectored(&mut cx, &slices);
-        assert!(matches!(res2, Poll::Ready(Ok(3))));
-        assert_eq!(counter.load(Ordering::Relaxed), 14);
+        assert!(matches!(res2, Poll::Ready(Ok(6))));
+        assert_eq!(counter.load(Ordering::Relaxed), 17);
     }
 
     #[test]
