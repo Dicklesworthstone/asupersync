@@ -3092,6 +3092,50 @@ fn coordinator_wakes_the_reactor_only_when_no_worker_was_parked() {
     );
 }
 
+/// asupersync-olysw5 F2: a reactor handoff stops at a waiter whose wake is
+/// already pending, because that waiter takes the poll turn, instead of
+/// waking a second parked worker for nothing.
+#[test]
+fn promote_follower_counts_a_waiter_whose_wake_is_pending() {
+    let notified = Parker::new();
+    let parked = Parker::new();
+    let coordinator = WorkerCoordinator::new(vec![notified.clone(), parked.clone()].into(), None);
+    notified.simulate_notified_waiter_for_test(true);
+    let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+    let parked_thread = parked.clone();
+    let handle = thread::spawn(move || {
+        parked_thread.park();
+        woke_tx.send(()).expect("wake observer remains live");
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while parked.waiting_count_for_test() == 0 && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    let entered_wait = parked.waiting_count_for_test() != 0;
+
+    // The round-robin cursor starts at slot 0, the already-notified waiter.
+    let promoted = coordinator.promote_follower();
+    let second_woken = woke_rx.recv_timeout(Duration::from_millis(300)).is_ok();
+    if !second_woken {
+        parked.unpark();
+    }
+    handle.join().expect("parked worker exits");
+    notified.simulate_notified_waiter_for_test(false);
+
+    assert!(
+        entered_wait,
+        "worker did not enter Parker wait state before deadline"
+    );
+    assert!(
+        promoted,
+        "a waiter with a pending wake takes the reactor turn"
+    );
+    assert!(
+        !second_woken,
+        "the handoff must not wake a second parked worker"
+    );
+}
+
 #[test]
 fn deferred_cancel_enqueue_publishes_parker_permit() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));

@@ -1099,9 +1099,9 @@ impl WorkerCoordinator {
         }
     }
 
-    /// Hand reactor responsibility to one idle peer before executing a task.
-    /// No busy-worker fallback permit, reactor wake, or host callback: unlike
-    /// a queue wake, a handoff exists only to give a parked peer a poll turn.
+    /// Hand reactor responsibility to one idle peer before executing a task. A waiter whose
+    /// wake is already pending counts, so no second peer is woken (olysw5 F2). No fallback
+    /// permit, reactor wake or host callback: a handoff only gives a parked peer a poll turn.
     #[inline]
     fn promote_follower(&self) -> bool {
         let count = self.parkers.len();
@@ -1116,7 +1116,7 @@ impl WorkerCoordinator {
         let start = self.next_wake.fetch_add(1, Ordering::Relaxed);
         let mut slot = self.mask.map_or_else(|| start % count, |mask| start & mask);
         for _ in 0..count {
-            if self.parkers[slot].unpark_if_waiting() {
+            if self.parkers[slot].wake_waiter_or_pending() {
                 return true;
             }
             // Normalize before incrementing, also covering cursor wrap for

@@ -1233,6 +1233,48 @@ impl Parker {
         true
     }
 
+    /// Whether a live waiter will wake: this call published a new permit for
+    /// it, or it already holds one. A reactor handoff needs one waking peer,
+    /// so a pending permit counts and the coordinator stops there
+    /// (asupersync-olysw5 F2). A queue wake uses [`Self::unpark_if_waiting`],
+    /// which moves on to another worker instead.
+    #[inline]
+    pub(crate) fn wake_waiter_or_pending(&self) -> bool {
+        if self.inner.waiting.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+
+        let _guard = self.lock_unpoisoned();
+        if self.inner.waiting.load(Ordering::Acquire) == 0 {
+            return false;
+        }
+        if self
+            .inner
+            .notified
+            .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            crate::runtime::metrics::record_worker_unpark();
+            self.inner.cvar.notify_one();
+        }
+        true
+    }
+
+    /// Counts (`true`) or withdraws (`false`) a simulated waiter that holds a
+    /// pending permit but has not run yet, the state a reactor handoff can
+    /// race into.
+    #[cfg(test)]
+    pub(crate) fn simulate_notified_waiter_for_test(&self, active: bool) {
+        let _guard = self.lock_unpoisoned();
+        if active {
+            self.inner.waiting.fetch_add(1, Ordering::AcqRel);
+            self.inner.notified.store(true, Ordering::Release);
+        } else {
+            self.inner.waiting.fetch_sub(1, Ordering::AcqRel);
+            self.inner.notified.store(false, Ordering::Release);
+        }
+    }
+
     /// The waiter finished its readiness check. With no pending permit this
     /// witnesses the condvar handoff boundary, not just waiter publication.
     #[cfg(test)]
