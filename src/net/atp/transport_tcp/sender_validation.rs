@@ -8,6 +8,7 @@ use super::{
     DeltaObjectRequest, DeltaWireMode, MAX_FRAME_SIZE, ReceiveReceipt, TransferConfig,
     TransferManifest, TransportError,
 };
+use std::collections::BTreeSet;
 
 /// Refuse sender buffer sizes that cannot fit an uncompressed ObjectData frame.
 /// This runs before source discovery or the first data-sized allocation.
@@ -48,9 +49,42 @@ pub(super) fn validate_request(
             }
         }
         DeltaWireMode::DeltaChunks => {
-            if manifest.delta_manifest.is_none() {
+            let delta = manifest.delta_manifest.as_ref().ok_or_else(|| {
+                TransportError::Frame("receiver requested delta without sender manifest".into())
+            })?;
+            // The send loop and subsequent receipt check use missing_bytes.
+            // Bind it to payload lengths before either can repeat a peer's
+            // invented count as independent evidence of what was sent. Count
+            // each requested location, even when several have the same content.
+            let bytes = request.missing_chunks.iter().try_fold(0_u64, |bytes, chunk| {
+                bytes.checked_add(chunk.size_bytes).ok_or_else(|| {
+                    TransportError::Frame("delta ObjectRequest byte count overflows u64".into())
+                })
+            })?;
+            if bytes != request.missing_bytes {
+                return Err(TransportError::Frame(format!(
+                    "delta ObjectRequest declares {} missing bytes but requests {bytes}",
+                    request.missing_bytes,
+                )));
+            }
+            if request.missing_chunks.len() > delta.chunks.len() {
                 return Err(TransportError::Frame(
-                    "receiver requested delta without sender manifest".into(),
+                    "delta ObjectRequest contains more chunks than the sender manifest".into(),
+                ));
+            }
+            // Borrow complete wire descriptors instead of cloning peer paths
+            // and digests. Index/path/stream-offset edits must not authorize a
+            // different descriptor with a coincidentally matching payload key.
+            let advertised: BTreeSet<_> = delta.chunks.iter().collect();
+            let requested: BTreeSet<_> = request.missing_chunks.iter().collect();
+            if requested.len() != request.missing_chunks.len() {
+                return Err(TransportError::Frame(
+                    "delta ObjectRequest contains duplicate missing chunks".into(),
+                ));
+            }
+            if !requested.is_subset(&advertised) {
+                return Err(TransportError::Frame(
+                    "delta ObjectRequest asks for a chunk outside the sender manifest".into(),
                 ));
             }
         }
