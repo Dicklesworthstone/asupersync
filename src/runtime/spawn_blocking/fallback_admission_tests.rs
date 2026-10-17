@@ -187,3 +187,40 @@ fn release_invokes_task_waker_outside_queue_lock() {
     assert!(poll(&mut admission, Waker::noop()).is_ready());
     assert!(queue.lock().is_empty());
 }
+
+struct PanicWake;
+
+impl Wake for PanicWake {
+    fn wake(self: Arc<Self>) {
+        panic!("injected task waker panic");
+    }
+}
+
+#[test]
+fn a_panicking_task_waker_does_not_strand_the_rest_of_a_release() {
+    // A release takes every queued relay at once; the ones behind a task
+    // waker that panics are no longer queued, so they must still be woken.
+    let count = AtomicUsize::new(1);
+    let queue = Mutex::new(VecDeque::new());
+    let panicking = Waker::from(Arc::new(PanicWake));
+    let wakes = Arc::new(WakeCount::default());
+    let waker = Waker::from(Arc::clone(&wakes));
+    let mut first = FallbackAdmission::new(&count, 1, &queue);
+    let mut second = FallbackAdmission::new(&count, 1, &queue);
+    let mut third = FallbackAdmission::new(&count, 1, &queue);
+    assert!(poll(&mut first, &panicking).is_pending());
+    assert!(poll(&mut second, &waker).is_pending());
+    assert!(poll(&mut third, &waker).is_pending());
+    assert_eq!(queue.lock().len(), 3);
+    let released = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        release_fallback_slot(&count, &queue);
+    }));
+    assert!(
+        released.is_err(),
+        "the waker's panic is re-raised after the fanout"
+    );
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 2);
+    assert!(queue.lock().is_empty());
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert!(poll(&mut second, &waker).is_ready());
+}

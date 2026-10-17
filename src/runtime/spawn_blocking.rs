@@ -436,8 +436,25 @@ fn try_claim_fallback_slot(count: &AtomicUsize, cap: usize) -> bool {
 fn release_fallback_slot(count: &AtomicUsize, waiters: &Mutex<VecDeque<Waker>>) {
     count.fetch_sub(1, Ordering::Release);
     let woken = std::mem::take(&mut *waiters.lock());
+    // The taken waiters are no longer queued, so a panicking task waker must
+    // not drop the rest unwoken. Re-raise the first panic after the fanout,
+    // as OnceCell's and the semaphore's wakes do.
+    let already_unwinding = std::thread::panicking();
+    let mut first_panic = None;
     for waker in woken {
-        waker.wake();
+        if let Err(payload) =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
+        {
+            if !already_unwinding && first_panic.is_none() {
+                first_panic = Some(payload);
+            } else {
+                // An opaque payload can itself panic on drop.
+                std::mem::forget(payload);
+            }
+        }
+    }
+    if let Some(payload) = first_panic {
+        std::panic::resume_unwind(payload);
     }
 }
 
