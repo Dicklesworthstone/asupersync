@@ -926,6 +926,11 @@ path = "tests/cli_output_golden.rs"
 required-features = ["cli"]
 
 [[test]]
+name = "compression_zstd"
+path = "tests/compression_zstd.rs"
+required-features = ["zstd"]
+
+[[test]]
 name = "conformance_mysql_ssl_negotiation"
 path = "tests/conformance_mysql_ssl_negotiation.rs"
 required-features = ["mysql"]

@@ -256,6 +256,8 @@ mod task_inspector_wire_conformance;
 // ── Feature-gated modules ───────────────────────────────────────────────
 #[cfg(feature = "cli")]
 pub mod cli;
+#[cfg(feature = "zstd")]
+pub mod compression;
 #[cfg(any(feature = "sqlite", feature = "postgres", feature = "mysql"))]
 pub mod database;
 pub mod tls;
