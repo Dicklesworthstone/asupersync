@@ -225,7 +225,9 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/net/atp/transport_rq/adaptive.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/transport_rq/bonded.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/transport_rq/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_tcp/delta_manifest_validation.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/transport_tcp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/net/atp/transport_tcp/sender_validation.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/net/atp/udp/mod.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/adapter/integration_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/adapter/masque.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
@@ -279,6 +281,8 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 | `src/atp/journal/sparse_writer/scoped/receive_integrity_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/journal/sparse_writer/scoped/receive_resume.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/journal/sparse_writer/scoped/receive_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/journal/sparse_writer/scoped/restore.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
+| `src/atp/journal/sparse_writer/scoped/restore/tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/journal/sparse_writer/scoped/tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/journal/sparse_writer_durability_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
 | `src/atp/journal/sparse_writer_integrity_tests.rs` | PLANNED | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Discovered ATP module; detailed coverage pending |
@@ -379,10 +383,10 @@ This ledger maps every ATP module to required unit/property/metamorphic tests an
 
 ### Compliance Tracking
 
-Total Modules: 279
+Total Modules: 283
 - TESTED: 0 (0%)
 - PARTIAL: 0 (0%) 
-- PLANNED: 279 (100%)
+- PLANNED: 283 (100%)
 - MISSING: 0 (0%)
 
 **Critical Path Modules** (must be TESTED before any release):
