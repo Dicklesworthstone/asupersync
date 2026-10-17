@@ -1126,6 +1126,8 @@ impl WorkerCoordinator {
         false
     }
 
+    /// Wakes one worker. True when the reactor needs a wake too: only for the permit fallback,
+    /// which may reach a busy worker while the idle one is blocked in the reactor (kpmoy5.1).
     #[inline]
     fn wake_one_parker_prefer_waiter(&self) -> bool {
         let count = self.parkers.len();
@@ -1139,20 +1141,18 @@ impl WorkerCoordinator {
             self.mask.map_or_else(|| index % count, |mask| index & mask)
         };
 
-        // br-asupersync-ppdgkg: A permit sent to a busy worker can be absorbed
-        // while another worker sleeps indefinitely. Search from the
-        // round-robin cursor for a Parker that is actually waiting and has no
-        // permit yet.
+        // br-asupersync-ppdgkg: a permit sent to a busy worker can be absorbed
+        // while another sleeps indefinitely, so search from the round-robin
+        // cursor for a Parker that is actually waiting and has no permit yet.
         for offset in 0..count {
             let slot = slot_for(start.wrapping_add(offset));
             if self.parkers[slot].unpark_if_waiting() {
-                return true;
+                return false;
             }
         }
 
-        // Nobody is observably parked. Preserve the permit model and
-        // round-robin distribution so a worker racing into park consumes a
-        // wake instead of sleeping past newly published work.
+        // Nobody is observably parked: keep the permit model and round-robin, so
+        // a worker racing into park consumes this wake instead of missing work.
         self.parkers[slot_for(start)].unpark();
         true
     }
@@ -1201,10 +1201,10 @@ impl WorkerCoordinator {
             self.wake_all();
             return;
         }
-        for _ in 0..num_wakes {
-            self.wake_one_parker_prefer_waiter();
-        }
-        if let Some(io) = &self.io_driver {
+        let needs_reactor = (0..num_wakes).fold(false, |needs, _| {
+            self.wake_one_parker_prefer_waiter() || needs
+        });
+        if let Some(io) = self.io_driver.as_ref().filter(|_| needs_reactor) {
             let _ = io.wake();
         }
         self.notify_wake();

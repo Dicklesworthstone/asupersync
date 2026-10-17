@@ -3036,6 +3036,62 @@ fn coordinator_wake_one_prefers_an_actual_waiter() {
     );
 }
 
+/// kpmoy5.1: a wake taken by an actually parked worker leaves the reactor
+/// alone, because that worker re-checks the queues itself. With nobody parked,
+/// the permit fallback still wakes the reactor, where the only idle worker may
+/// be the leader blocked in it.
+#[test]
+fn coordinator_wakes_the_reactor_only_when_no_worker_was_parked() {
+    use crate::runtime::reactor::LabReactor;
+
+    let reactor = Arc::new(LabReactor::new());
+    let waiting = Parker::new();
+    let busy = Parker::new();
+    let coordinator = WorkerCoordinator::new(
+        vec![waiting.clone(), busy].into(),
+        Some(IoDriverHandle::new(reactor.clone())),
+    );
+    let (woke_tx, woke_rx) = std::sync::mpsc::channel();
+    let waiting_thread = waiting.clone();
+    let handle = thread::spawn(move || {
+        waiting_thread.park();
+        woke_tx.send(()).expect("wake observer remains live");
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while waiting.waiting_count_for_test() == 0 && Instant::now() < deadline {
+        thread::yield_now();
+    }
+    let entered_wait = waiting.waiting_count_for_test() != 0;
+
+    reactor.check_and_clear_wake();
+    coordinator.wake_one();
+    let woke = woke_rx.recv_timeout(Duration::from_secs(2));
+    if woke.is_err() {
+        waiting.unpark();
+    }
+    handle.join().expect("parked worker exits after its wake");
+    assert!(
+        entered_wait,
+        "worker did not enter Parker wait state before deadline"
+    );
+    assert!(woke.is_ok(), "wake_one must wake the parked worker");
+    assert!(
+        !reactor.check_and_clear_wake(),
+        "a wake taken by a parked worker must not also wake the reactor"
+    );
+
+    coordinator.wake_one();
+    assert!(
+        reactor.check_and_clear_wake(),
+        "with no worker parked, wake_one must wake the reactor"
+    );
+    coordinator.wake_many(1);
+    assert!(
+        reactor.check_and_clear_wake(),
+        "with no worker parked, wake_many must wake the reactor"
+    );
+}
+
 #[test]
 fn deferred_cancel_enqueue_publishes_parker_permit() {
     let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
