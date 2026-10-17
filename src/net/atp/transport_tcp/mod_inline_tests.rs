@@ -2906,3 +2906,48 @@
 
         let _ = std::fs::remove_dir_all(&base);
     }
+
+/// The sender picks the delta chunk size, so a receiver bounds how many chunks
+/// it splits its existing destination into: past its budget it falls back to
+/// a full transfer before building the chunks (asupersync-9avoui F1).
+#[test]
+fn a_baseline_finer_than_the_chunk_budget_falls_back_to_a_full_transfer() {
+    let root = canonical_test_root("delta-baseline-budget");
+    std::fs::write(root.join("data"), vec![7u8; 100]).expect("write the existing destination");
+    let manifest = TransferManifest {
+        transfer_id: "budget".to_string(),
+        root_name: "data".to_string(),
+        is_directory: false,
+        total_bytes: 100,
+        merkle_root_hex: "00".repeat(32),
+        metadata_root_hex: None,
+        directory_metadata: None,
+        entries: Vec::new(),
+        delta_manifest: None,
+    };
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("test runtime");
+    let scan = |chunk_size: usize| {
+        let (root, manifest) = (root.clone(), manifest.clone());
+        runtime.block_on(runtime.handle().spawn(async move {
+            let delta = DeltaManifestWire {
+                schema: ATP_DELTA_CHUNK_MANIFEST_SCHEMA.to_string(),
+                tree_id: "data".to_string(),
+                chunk_size,
+                total_size_bytes: 100,
+                merkle_root_hex: "11".repeat(32),
+                chunks: Vec::new(),
+            };
+            let config = TransferConfig::default();
+            build_receiver_delta_baseline(&root, &manifest, &delta, &config, 8)
+                .await
+                .expect("scan the existing destination")
+                .map(|baseline| baseline.manifest.chunks.len())
+        }))
+    };
+    // 100 one-byte chunks exceed a budget of 8: no baseline, a full transfer.
+    assert_eq!(scan(1), None);
+    // Two 64-byte chunks fit.
+    assert_eq!(scan(64), Some(2));
+}

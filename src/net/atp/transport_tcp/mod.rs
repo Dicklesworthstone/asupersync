@@ -2301,8 +2301,14 @@ async fn build_receiver_delta_state(
         });
     }
 
-    let Some(baseline) =
-        build_receiver_delta_baseline(dest_dir, manifest, delta_manifest, config).await?
+    let Some(baseline) = build_receiver_delta_baseline(
+        dest_dir,
+        manifest,
+        delta_manifest,
+        config,
+        MAX_RECEIVER_DELTA_BASELINE_CHUNKS,
+    )
+    .await?
     else {
         return Ok(ReceiverDeltaState {
             request: DeltaObjectRequest::full(
@@ -2551,11 +2557,18 @@ fn wire_missing_chunks(
         .collect()
 }
 
+/// Most chunks a receiver splits its existing destination into for a delta.
+/// The sender picks the chunk size, and each chunk costs the receiver a planner
+/// entry, a CAS insert and a read, so a finer baseline falls back to a full
+/// transfer. 4 Mi chunks are 1 TiB at the default chunk size.
+const MAX_RECEIVER_DELTA_BASELINE_CHUNKS: u64 = 1 << 22;
+
 async fn build_receiver_delta_baseline(
     dest_dir: &Path,
     manifest: &TransferManifest,
     delta_manifest: &DeltaManifestWire,
     config: &TransferConfig,
+    max_chunks: u64,
 ) -> Result<Option<ReceiverDeltaBaseline>, TransportError> {
     let base = safe_base_for_root_name(dest_dir, &manifest.root_name)?;
     if !base.exists() {
@@ -2595,6 +2608,11 @@ async fn build_receiver_delta_baseline(
             content_id,
             content_sha256,
         });
+        let chunk_size = u64::try_from(delta_manifest.chunk_size.max(1)).unwrap_or(u64::MAX);
+        let chunks = u64::try_from(planner_chunks.len()).unwrap_or(u64::MAX);
+        if chunks.saturating_add(size.div_ceil(chunk_size)) > max_chunks {
+            return Ok(None);
+        }
         append_receiver_delta_chunks(
             &entry.abs_path,
             delta_manifest.chunk_size.max(1),
