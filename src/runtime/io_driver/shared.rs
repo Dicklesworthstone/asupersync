@@ -201,7 +201,8 @@ impl Reactor for ParticipantReactor {
     }
 
     fn wake(&self) -> io::Result<()> {
-        self.woken.store(true, Ordering::Release);
+        // SeqCst: interrupt_waiters skips its mutex when it reads no waiter.
+        self.woken.store(true, Ordering::SeqCst);
         // Notify the gate before user/backend code, including a failed wake.
         self.poll_gate.interrupt_waiters();
         self.backend.wake()

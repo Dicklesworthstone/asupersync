@@ -16,7 +16,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -52,6 +52,10 @@ impl GateState {
 #[derive(Default)]
 pub(super) struct PollGate {
     claimed: Mutex<GateState>,
+    // The queue length, readable without the predicate mutex: a wake with no
+    // enrolled waiter (every single-runtime wake) skips that mutex.
+    #[cfg(not(target_arch = "wasm32"))]
+    waiting: AtomicUsize,
 }
 
 /// Removes this exact enrollment on wake, timeout or unwind. Declare it before
@@ -76,6 +80,7 @@ impl Drop for QueuedPoll<'_> {
             .position(|waiter| Arc::ptr_eq(waiter, &self.changed))
         {
             let _ = state.queue.remove(index);
+            self.gate.waiting.fetch_sub(1, Ordering::SeqCst);
             if index == 0 && !state.held {
                 // A cancelled head must pass a free gate to its successor.
                 state.notify_front();
@@ -150,7 +155,7 @@ impl PollGate {
                 changed: Arc::new(Condvar::new()),
                 enrolled: false,
             };
-            claimed.queue.push_back(Arc::clone(&queued.changed));
+            self.enroll(&mut claimed, &queued.changed);
             queued.enrolled = true;
 
             loop {
@@ -161,13 +166,14 @@ impl PollGate {
                     .is_some_and(|waiter| Arc::ptr_eq(waiter, &queued.changed));
                 if !claimed.held && at_front {
                     let _ = claimed.queue.pop_front();
+                    self.waiting.fetch_sub(1, Ordering::SeqCst);
                     queued.enrolled = false;
                     claimed.held = true;
                     // Preserve a crossing wake: the participant consumes it
                     // before its backend poll and selects a zero timeout.
                     return Some((PollPermit(self), remaining));
                 }
-                if woken.swap(false, Ordering::AcqRel) {
+                if woken.swap(false, Ordering::SeqCst) {
                     return None;
                 }
                 match remaining {
@@ -181,13 +187,27 @@ impl PollGate {
         }
     }
 
-    /// The caller publishes its wake bit BEFORE calling this method. Holding
-    /// the predicate mutex pairs that publication with each waiter's check and
-    /// atomic unlock-and-wait. All participants recheck their own wake bit;
-    /// ordinary ownership release notifies only the oldest enrollment.
+    /// Enrolls a waiter; interrupt_waiters documents the count's ordering.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn enroll(&self, state: &mut GateState, waiter: &Arc<Condvar>) {
+        state.queue.push_back(Arc::clone(waiter));
+        self.waiting.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// The caller publishes its wake bit (SeqCst) BEFORE calling this method.
+    /// Holding the predicate mutex pairs that publication with each waiter's
+    /// check and atomic unlock-and-wait. All participants recheck their own
+    /// wake bit; ordinary ownership release notifies only the oldest enrollment.
     pub(super) fn interrupt_waiters(&self) {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            // Dekker pairing: the caller's SeqCst store, then this SeqCst load;
+            // a waiter's SeqCst enrollment, then its SeqCst wake-bit check. If
+            // this load reads zero, a later enrollee observes the bit before it
+            // waits, so no enrolled waiter can be left to sleep.
+            if self.waiting.load(Ordering::SeqCst) == 0 {
+                return;
+            }
             let state = self.claimed.lock();
             for waiter in &state.queue {
                 waiter.notify_one();
@@ -204,7 +224,9 @@ impl PollGate {
 
     #[cfg(all(test, unix, not(target_arch = "wasm32")))]
     pub(super) fn waiting_count(&self) -> usize {
-        self.claimed.lock().queue.len()
+        let state = self.claimed.lock();
+        assert_eq!(self.waiting.load(Ordering::SeqCst), state.queue.len());
+        state.queue.len()
     }
 }
 
@@ -367,10 +389,7 @@ mod ordered_tests {
             changed: Arc::new(Condvar::new()),
             enrolled: true,
         };
-        gate.claimed
-            .lock()
-            .queue
-            .push_back(Arc::clone(&abandoned.changed));
+        gate.enroll(&mut gate.claimed.lock(), &abandoned.changed);
         let worker_gate = Arc::clone(&gate);
         let (sent, received) = mpsc::channel();
         let worker = thread::spawn(move || {

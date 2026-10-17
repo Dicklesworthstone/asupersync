@@ -305,3 +305,61 @@ fn zero_timeout_does_not_wait_for_the_predicate_mutex_either() {
     worker.join().unwrap();
     assert_eq!(result, Ok(true));
 }
+
+#[test]
+fn a_wake_with_no_enrolled_waiter_skips_the_predicate_mutex() {
+    // Every single-runtime reactor wake: nobody waits in the gate, so the wake
+    // reaches its backend without the predicate mutex (held here throughout).
+    let backend = Arc::new(Probe::default());
+    let handle = IoDriverHandle::new(backend.clone());
+    let predicate = handle._shared_owner.poll_gate.claimed.lock();
+    let waker = handle.clone();
+    let (sent, received) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        let _ = sent.send(waker.wake().is_ok());
+    });
+    let result = received.recv_timeout(WATCHDOG);
+    drop(predicate);
+    worker.join().unwrap();
+    assert_eq!(result, Ok(true));
+    assert_eq!(backend.wakes.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_wake_racing_enrollment_is_never_lost() {
+    // The wake lands before, during or after the unbounded waiter's
+    // enrollment; every fourth round waits for the enrollment first, so the
+    // locked notification path is exercised as well as the skipped one.
+    let gate = Arc::new(PollGate::default());
+    for round in 0..256_u32 {
+        let held = gate.lock();
+        let woken = Arc::new(AtomicBool::new(false));
+        let (worker_gate, worker_woken) = (Arc::clone(&gate), Arc::clone(&woken));
+        let (sent, received) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let _ = sent.send(worker_gate.acquire(&worker_woken, None).is_none());
+        });
+        match round % 4 {
+            0 => {}
+            1 => {
+                for _ in 0..round % 32 {
+                    thread::yield_now();
+                }
+            }
+            2 => {
+                for spin in 0..round * 64 {
+                    std::hint::black_box(spin);
+                }
+            }
+            _ => assert!(eventually(|| gate.waiting_count() == 1)),
+        }
+        woken.store(true, Ordering::SeqCst);
+        gate.interrupt_waiters();
+        let result = received.recv_timeout(WATCHDOG);
+        // Release also rescues a lost wake, so the join cannot hang.
+        drop(held);
+        worker.join().unwrap();
+        assert_eq!(result, Ok(true), "round {round}");
+    }
+    assert_eq!(gate.waiting_count(), 0);
+}

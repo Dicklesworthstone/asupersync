@@ -621,8 +621,8 @@ impl IoDriver {
 ///
 /// This wrapper provides interior mutability for registering and updating
 /// wakers from async I/O types while keeping the driver single-threaded.
-/// Independently constructed handles of the same reactor `Arc` share one
-/// token namespace, dispatcher and poll-leader flag, just like cloned handles.
+/// Independently constructed handles of the same reactor `Arc` share one token
+/// namespace and dispatcher; only clones share a poll-leader flag.
 /// Statistics and event callbacks describe that shared physical dispatcher.
 /// Distinct reactor allocations remain independent. Raw reactor polling or a
 /// separately constructed [`IoDriver`] must not compete with this dispatcher.
