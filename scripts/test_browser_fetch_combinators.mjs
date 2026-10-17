@@ -306,7 +306,12 @@ test("join cancellation/publication refusal cannot publish a partial result", { 
   const f = await fixture(t, { fetch: (_url, _init, index) => index ? undefined : new Response(body()),
     cancel: (request) => request.task.toJSON().slot === 2 ? error("join cancellation refused") : undefined });
   const joined = f.join([f.start(), f.start()]); const result = await joined.cancel();
-  assert.equal(result.outcome, "err"); assert.match(result.failure.message, /join cancellation refused/); assert.equal(f.calls.join.length, 2);
+  // The caller's cancellation outranks the member's cleanup refusal (the
+  // Outcome lattice, Panicked > Cancelled > Err), but the join still drains
+  // both members and publishes no partial result.
+  assert.equal(result.outcome, "cancelled"); assert.equal(result.cancellation.kind, "fetch_join_cancel");
+  assert.equal(result.cancellation.message, "fetch join cancelled by caller");
+  assert.ok(f.calls.cancel.some((request) => request.task.toJSON().slot === 2)); assert.equal(f.calls.join.length, 2);
 });
 test("join live HTTP headers overlap and both bodies remain independently consumable", { timeout: 5000 }, async (t) => {
   const arrivals = []; let requests = 0;
