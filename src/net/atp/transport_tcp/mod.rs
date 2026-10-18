@@ -4183,7 +4183,16 @@ where
         ));
     }
 
-    let mut received_chunks = BTreeMap::<DeltaContentKey, Vec<u8>>::new();
+    // Own staging before accepting payload bytes. The spool is declared
+    // after its directory guard so it closes first on a hard future drop.
+    let mut staging_guard = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
+    let staging_dir = staging_guard.path().to_owned();
+    let mut received_chunks = delta_storage::DeltaChunkSpool::create(
+        cx,
+        &staging_dir.join("delta-chunks"),
+        config.max_transfer_bytes,
+    )
+    .await?;
     let mut received_keys = BTreeSet::<DeltaChunkKey>::new();
     let mut received = 0u64;
     // No requested chunk is larger than this, so neither is a decompressed one.
@@ -4238,8 +4247,8 @@ where
                         });
                     }
                     received_chunks
-                        .entry(delta_content_key(content_id_hex, size_bytes))
-                        .or_insert_with(|| chunk.to_vec());
+                        .insert(cx, delta_content_key(content_id_hex, size_bytes), chunk)
+                        .await?;
                 }
                 FrameType::ObjectComplete => break,
                 FrameType::Close => break,
@@ -4262,13 +4271,15 @@ where
                 "delta sender did not provide every requested chunk".to_string(),
             ));
         }
+        received_chunks.seal(cx).await?;
         Ok(())
     }
     .await;
-    recv_result?;
-
-    let mut staging_guard = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
-    let staging_dir = staging_guard.path().to_owned();
+    if let Err(error) = recv_result {
+        drop(received_chunks);
+        let _ = crate::fs::remove_dir_all(&staging_dir).await;
+        return Err(error);
+    }
 
     let mut chunks_by_entry = BTreeMap::<u32, Vec<&DeltaChunkWire>>::new();
     for chunk in &delta_manifest.chunks {
@@ -4303,9 +4314,10 @@ where
                     }
                     let content_key =
                         delta_content_key(chunk.content_id_hex.clone(), chunk.size_bytes);
-                    let bytes = if let Some(bytes) = received_chunks.get(&content_key) {
-                        delta_storage::verify_bytes(&content_key, bytes)?;
-                        bytes.as_slice()
+                    if received_chunks.contains(&content_key) {
+                        received_chunks
+                            .read_verified(cx, &content_key, &mut chunk_scratch)
+                            .await?;
                     } else {
                         let source = baseline.chunks_by_content.get(&content_key).ok_or_else(|| {
                             TransportError::Frame(format!(
@@ -4316,8 +4328,8 @@ where
                         source
                             .read_verified(cx, &content_key, &mut chunk_scratch)
                             .await?;
-                        chunk_scratch.as_slice()
-                    };
+                    }
+                    let bytes = chunk_scratch.as_slice();
                     file.write_all(bytes).await?;
                     state.update_with_chunk(bytes);
                     expected_offset = expected_offset.checked_add(chunk.size_bytes).ok_or_else(|| {
@@ -4346,6 +4358,7 @@ where
     }
     .await;
 
+    drop(received_chunks);
     if let Err(err) = reassemble_result {
         let _ = crate::fs::remove_dir_all(&staging_dir).await;
         return Err(err);
