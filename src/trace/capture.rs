@@ -18,10 +18,13 @@
 //! projection leaves their observations out: in a replay, the harness plays
 //! the caller's part, as it supplies any other external input.
 
-use super::buffer::TraceBufferHandle;
+use super::buffer::{CancellationPublicationSnapshot, TraceBufferHandle};
 use super::event::{TraceData, TraceEvent, TraceEventKind};
-use super::replay::{CompactTaskId, ProductionSchedule, ProjectionError};
-use crate::types::{Severity, TaskId};
+use super::replay::{
+    CompactRegionId, CompactTaskId, ProductionCancellationEvent, ProductionCancellationPhase,
+    ProductionSchedule, ProjectionError,
+};
+use crate::types::{Budget, CancelReason, Severity, TaskId};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -52,6 +55,7 @@ pub struct ScheduleCaptureSnapshot {
     completion_outcomes: BTreeMap<u64, Severity>,
     /// [`Self::completion_outcomes`] by task, without caller tasks.
     terminal_outcomes: Vec<(TaskId, Severity)>,
+    cancellation_publications: CancellationPublicationSnapshot,
     total_events: u64,
     capacity: usize,
     worker_count: usize,
@@ -228,6 +232,39 @@ impl ScheduleCaptureSnapshot {
             .map(|schedule| schedule.with_completion_outcomes(&outcomes))
             .map_err(ScheduleCaptureError::Projection)
     }
+
+    /// Builds a checked task-order projection that also injects witnessed task
+    /// cancellation requests and checks checkpoint acknowledgements on replay.
+    ///
+    /// The native runtime currently witnesses region and sibling cancellation
+    /// publication. A request is admitted only when its entire publication span
+    /// lies between all worker polls; recording a Request after publishing a Cx
+    /// flag is insufficient evidence on its own. Acknowledgements retain their
+    /// originating task-poll ordinal through their worker context, even if the
+    /// same task has already been polled again by another worker.
+    ///
+    /// This captures task cancellation, with its full reason and effective
+    /// cleanup budget. The harness still reconstructs region lifecycle effects,
+    /// external inputs, and user effects. Direct Cx cancellation, task-handle
+    /// aborts, deadline publication, and unrecorded reason/budget strengthening
+    /// are not covered: missing or inconsistent evidence is refused. Every
+    /// completion must also carry an authoritative terminal task-Cx witness, so
+    /// a silent cancellation followed by an Ok result cannot attest absence of
+    /// cancellation. Caller tasks remain external harness work, as in
+    /// [`Self::production_schedule`].
+    ///
+    /// # Errors
+    /// Includes all [`Self::production_schedule`] refusals, plus incomplete or
+    /// evicted publication witnesses, publication overlapping a native poll,
+    /// unrecorded cancellation, reason drift, and acknowledgement order that a
+    /// serial Lab execution cannot reproduce.
+    pub fn production_schedule_with_cancellation(
+        &self,
+    ) -> Result<ProductionSchedule, ScheduleCaptureError> {
+        let schedule = self.production_schedule()?;
+        let cancellations = project_cancellation_events(self)?;
+        Ok(schedule.with_cancellation_events(cancellations))
+    }
 }
 
 /// Why a native capture cannot authorize strict task-order replay.
@@ -280,6 +317,56 @@ pub enum ScheduleCaptureError {
         /// Affected task identity.
         task: TaskId,
     },
+    /// Publication witnesses were evicted independently of canonical events.
+    #[error("native cancellation capture evicted {dropped_spans} publication witnesses")]
+    CancellationWitnessesTruncated {
+        /// Number of publication spans whose evidence was lost.
+        dropped_spans: u64,
+    },
+    /// A request lacks a complete, supported publication witness.
+    #[error("native task {task:?} has unsupported cancellation publication at sequence {seq}: {reason}")]
+    CancellationPublication {
+        /// Request or publication-start sequence.
+        seq: u64,
+        /// Target task.
+        task: TaskId,
+        /// The missing or unsupported evidence.
+        reason: &'static str,
+    },
+    /// Cancellation became visible while a worker could execute user code.
+    #[error("native task {task:?} cancellation at sequence {seq} overlaps a poll of {polling_task:?}")]
+    CancellationDuringPoll {
+        /// Request sequence.
+        seq: u64,
+        /// Target task.
+        task: TaskId,
+        /// Task whose poll intersects the publication span.
+        polling_task: TaskId,
+    },
+    /// Cancellation observations cannot be reproduced in captured poll order.
+    #[error("native task {task:?} has invalid cancellation order at sequence {seq}: {reason}")]
+    CancellationOrder {
+        /// Unsupported observation sequence.
+        seq: u64,
+        /// Target task.
+        task: TaskId,
+        /// The lifecycle, attribution, or serial-order inconsistency.
+        reason: &'static str,
+    },
+    /// An acknowledgement or cancelled completion has no captured request.
+    #[error("native task {task:?} has cancellation at sequence {seq} without a witnessed request")]
+    MissingCancellationRequest {
+        /// Acknowledgement or completion sequence.
+        seq: u64,
+        /// Target task.
+        task: TaskId,
+    },
+    /// A canonical cancellation kind carries an incompatible payload.
+    #[error("native cancellation event at sequence {seq} has no cancellation payload")]
+    InvalidCancellationEvent {
+        /// Malformed event sequence.
+        seq: u64,
+    },
     /// The retained source cannot be projected into spawn/poll order.
     #[error(transparent)]
     Projection(#[from] ProjectionError),
@@ -294,6 +381,336 @@ fn is_scheduler_observation(kind: TraceEventKind) -> bool {
             | TraceEventKind::Yield
             | TraceEventKind::CancelAck
     )
+}
+
+/// Source intervals are closed by Yield or Complete. Keeping their full extent
+/// catches a poll that both starts and finishes before Request is finally
+/// recorded, while the cancellation publisher is between its flag write and
+/// trace insertion.
+fn captured_poll_intervals(
+    snapshot: &ScheduleCaptureSnapshot,
+) -> Result<Vec<(u64, u64, TaskId)>, ScheduleCaptureError> {
+    let mut active = BTreeMap::new();
+    let mut intervals = Vec::new();
+    for event in &snapshot.events {
+        let TraceData::Task { task, .. } = &event.data else {
+            continue;
+        };
+        if snapshot.caller_tasks.binary_search(task).is_ok() {
+            continue;
+        }
+        match event.kind {
+            TraceEventKind::Poll => {
+                if active.insert(*task, event.seq).is_some() {
+                    return Err(ScheduleCaptureError::CancellationOrder {
+                        seq: event.seq,
+                        task: *task,
+                        reason: "task entered another poll before its previous poll ended",
+                    });
+                }
+            }
+            TraceEventKind::Yield | TraceEventKind::Complete => {
+                if let Some(start) = active.remove(task) {
+                    intervals.push((start, event.seq, *task));
+                } else if event.kind == TraceEventKind::Yield {
+                    return Err(ScheduleCaptureError::CancellationOrder {
+                        seq: event.seq,
+                        task: *task,
+                        reason: "task yielded without a captured poll",
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    intervals.sort_unstable_by_key(|interval| interval.0);
+    Ok(intervals)
+}
+
+fn witnessed_request_budgets(
+    snapshot: &ScheduleCaptureSnapshot,
+) -> Result<BTreeMap<u64, Budget>, ScheduleCaptureError> {
+    if snapshot.cancellation_publications.dropped_spans != 0 {
+        return Err(ScheduleCaptureError::CancellationWitnessesTruncated {
+            dropped_spans: snapshot.cancellation_publications.dropped_spans,
+        });
+    }
+    let intervals = captured_poll_intervals(snapshot)?;
+    // Prefix maxima make each overlap check logarithmic even when many
+    // workers' polls overlap, rather than rescanning every poll per request.
+    let mut maximum_end = None;
+    let mut prefix_ends = Vec::with_capacity(intervals.len());
+    for &(_, end, task) in &intervals {
+        if maximum_end.is_none_or(|(previous, _)| end > previous) {
+            maximum_end = Some((end, task));
+        }
+        prefix_ends.push(maximum_end.expect("a poll interval supplies its end"));
+    }
+    let mut budgets = BTreeMap::new();
+    for span in &snapshot.cancellation_publications.spans {
+        if snapshot.caller_tasks.binary_search(&span.task).is_ok() {
+            continue;
+        }
+        let refuse = |reason| ScheduleCaptureError::CancellationPublication {
+            seq: span.request_sequence.unwrap_or(span.start_sequence),
+            task: span.task,
+            reason,
+        };
+        let Some(end) = span.end_sequence else {
+            return Err(refuse("publication is unfinished or interrupted"));
+        };
+        if span.unsupported_mutation {
+            return Err(refuse(
+                "cancellation was already visible or changed without a supported request",
+            ));
+        }
+        let Some(request_sequence) = span.request_sequence else {
+            return Err(refuse("publication has no canonical request"));
+        };
+        if !(span.start_sequence < request_sequence && request_sequence < end) {
+            return Err(refuse("request is outside its publication span"));
+        }
+        let Some(budget) = span.cleanup_budget else {
+            return Err(refuse("effective cleanup budget was not captured"));
+        };
+        let Ok(event_index) = snapshot
+            .events
+            .binary_search_by_key(&request_sequence, |event| event.seq)
+        else {
+            return Err(refuse("canonical request is missing"));
+        };
+        let event = &snapshot.events[event_index];
+        if event.kind != TraceEventKind::CancelRequest
+            || !matches!(&event.data, TraceData::Cancel { task, .. } if *task == span.task)
+        {
+            return Err(refuse("publication identifies a different canonical event"));
+        }
+        let preceding = intervals.partition_point(|interval| interval.0 < end);
+        if preceding > 0 {
+            let (poll_end, polling_task) = prefix_ends[preceding - 1];
+            if poll_end > span.start_sequence {
+                return Err(ScheduleCaptureError::CancellationDuringPoll {
+                    seq: request_sequence,
+                    task: span.task,
+                    polling_task,
+                });
+            }
+        }
+        if budgets.insert(request_sequence, budget).is_some() {
+            return Err(refuse(
+                "canonical request has duplicate publication witnesses",
+            ));
+        }
+    }
+    Ok(budgets)
+}
+
+fn captured_worker(
+    snapshot: &ScheduleCaptureSnapshot,
+    seq: u64,
+    task: TaskId,
+) -> Result<usize, ScheduleCaptureError> {
+    let context = snapshot
+        .contexts
+        .binary_search_by_key(&seq, |context| context.event_sequence)
+        .ok()
+        .and_then(|index| snapshot.contexts.get(index));
+    context
+        .and_then(|context| context.worker_id)
+        .ok_or(ScheduleCaptureError::CancellationOrder {
+            seq,
+            task,
+            reason: "scheduler observation has no native worker identity",
+        })
+}
+
+struct CapturedCancellationRequest {
+    reason: CancelReason,
+    cleanup_budget: Budget,
+    last_acknowledged_poll: usize,
+}
+
+#[allow(clippy::too_many_lines)]
+fn project_cancellation_events(
+    snapshot: &ScheduleCaptureSnapshot,
+) -> Result<Vec<ProductionCancellationEvent>, ScheduleCaptureError> {
+    let budgets = witnessed_request_budgets(snapshot)?;
+    let terminals: BTreeMap<_, _> = snapshot
+        .cancellation_publications
+        .terminals
+        .iter()
+        .filter_map(|(seq, terminal)| terminal.as_ref().map(|terminal| (*seq, terminal)))
+        .collect();
+    let mut live = BTreeMap::new();
+    let mut last_polls: BTreeMap<TaskId, (usize, usize)> = BTreeMap::new();
+    let mut worker_polls: BTreeMap<usize, (TaskId, usize, usize)> = BTreeMap::new();
+    let mut requests: BTreeMap<TaskId, CapturedCancellationRequest> = BTreeMap::new();
+    let mut dispatches = 0usize;
+    let mut last_boundary = None;
+    let mut projected = Vec::new();
+    for event in &snapshot.events {
+        if let TraceData::Task { task, region } = &event.data {
+            if snapshot.caller_tasks.binary_search(task).is_ok() {
+                continue;
+            }
+            match event.kind {
+                TraceEventKind::Spawn => {
+                    live.insert(*task, *region);
+                }
+                TraceEventKind::Poll => {
+                    dispatches += 1;
+                    let ordinal = last_polls.get(task).map_or(1, |(ordinal, _)| ordinal + 1);
+                    last_polls.insert(*task, (ordinal, dispatches));
+                    let worker = captured_worker(snapshot, event.seq, *task)?;
+                    worker_polls.insert(worker, (*task, ordinal, dispatches));
+                }
+                TraceEventKind::Complete => {
+                    let Some(terminal) = terminals.get(&event.seq) else {
+                        return Err(ScheduleCaptureError::CancellationPublication {
+                            seq: event.seq,
+                            task: *task,
+                            reason: "completion has no authoritative terminal task-Cx witness",
+                        });
+                    };
+                    if terminal.requested {
+                        let Some(request) = requests.get(task) else {
+                            return Err(ScheduleCaptureError::MissingCancellationRequest {
+                                seq: event.seq,
+                                task: *task,
+                            });
+                        };
+                        if terminal.reason.as_ref() != Some(&request.reason) {
+                            return Err(ScheduleCaptureError::CancellationOrder {
+                                seq: event.seq,
+                                task: *task,
+                                reason: "terminal cancellation reason is missing or differs from the witnessed request",
+                            });
+                        }
+                    } else if terminal.reason.is_some() || requests.contains_key(task) {
+                        return Err(ScheduleCaptureError::CancellationOrder {
+                            seq: event.seq,
+                            task: *task,
+                            reason: "terminal cancellation flag disagrees with the captured request or reason",
+                        });
+                    }
+                    if snapshot.completion_outcomes.get(&event.seq) == Some(&Severity::Cancelled)
+                        && !requests.contains_key(task)
+                    {
+                        return Err(ScheduleCaptureError::MissingCancellationRequest {
+                            seq: event.seq,
+                            task: *task,
+                        });
+                    }
+                    live.remove(task);
+                }
+                _ => {}
+            }
+        }
+        let phase = match event.kind {
+            TraceEventKind::CancelRequest => ProductionCancellationPhase::Request,
+            TraceEventKind::CancelAck => ProductionCancellationPhase::Acknowledgement,
+            _ => continue,
+        };
+        let TraceData::Cancel {
+            task,
+            region,
+            reason,
+        } = &event.data
+        else {
+            return Err(ScheduleCaptureError::InvalidCancellationEvent { seq: event.seq });
+        };
+        if snapshot.caller_tasks.binary_search(task).is_ok() {
+            continue;
+        }
+        let refuse_order = |reason| ScheduleCaptureError::CancellationOrder {
+            seq: event.seq,
+            task: *task,
+            reason,
+        };
+        if live.get(task) != Some(region) {
+            return Err(refuse_order("target is not live in its captured owner region"));
+        }
+        let preceding_task_polls = last_polls.get(task).map_or(0, |(ordinal, _)| *ordinal);
+        let (cleanup_budget, boundary, task_poll_ordinal) = match phase {
+            ProductionCancellationPhase::Request => {
+                let Some(&cleanup_budget) = budgets.get(&event.seq) else {
+                    return Err(ScheduleCaptureError::CancellationPublication {
+                        seq: event.seq,
+                        task: *task,
+                        reason: "request has no witnessed publication span",
+                    });
+                };
+                if requests.contains_key(task) {
+                    return Err(refuse_order("repeated or strengthened requests are not supported"));
+                }
+                requests.insert(
+                    *task,
+                    CapturedCancellationRequest {
+                        reason: reason.clone(),
+                        cleanup_budget,
+                        last_acknowledged_poll: preceding_task_polls,
+                    },
+                );
+                (cleanup_budget, (dispatches, 1u8), preceding_task_polls)
+            }
+            ProductionCancellationPhase::Acknowledgement => {
+                // Pending futures are restored before their Ack is traced;
+                // another worker can already have polled the same task again.
+                // This worker's last Poll identifies the actual receipt.
+                let worker = captured_worker(snapshot, event.seq, *task)?;
+                let Some(&(polling_task, task_poll_ordinal, poll_dispatch)) =
+                    worker_polls.get(&worker)
+                else {
+                    return Err(refuse_order("acknowledgement has no originating worker poll"));
+                };
+                if polling_task != *task {
+                    return Err(refuse_order("acknowledgement does not belong to its worker's latest poll"));
+                }
+                let Some(request) = requests.get_mut(task) else {
+                    return Err(ScheduleCaptureError::MissingCancellationRequest {
+                        seq: event.seq,
+                        task: *task,
+                    });
+                };
+                if request.reason != *reason {
+                    return Err(refuse_order(
+                        "acknowledgement reason differs from the witnessed request",
+                    ));
+                }
+                if task_poll_ordinal <= request.last_acknowledged_poll {
+                    return Err(refuse_order(
+                        "acknowledgement has no new poll after its request or previous acknowledgement",
+                    ));
+                }
+                request.last_acknowledged_poll = task_poll_ordinal;
+                (
+                    request.cleanup_budget,
+                    (poll_dispatch, 0u8),
+                    task_poll_ordinal,
+                )
+            }
+        };
+        // Native bookkeeping may lag unrelated polls, but it must not cross
+        // another cancellation observation in a way serial replay would invert.
+        // A poll's Ack precedes a request injected after that same dispatch.
+        if last_boundary.is_some_and(|previous| boundary < previous) {
+            return Err(refuse_order(
+                "cancellation observations invert their originating poll boundaries",
+            ));
+        }
+        last_boundary = Some(boundary);
+        projected.push(ProductionCancellationEvent::new(
+            event.seq,
+            dispatches,
+            CompactTaskId::from(*task),
+            CompactRegionId::from(*region),
+            reason.clone(),
+            phase,
+            task_poll_ordinal,
+            cleanup_budget,
+        ));
+    }
+    Ok(projected)
 }
 
 #[derive(Debug)]
@@ -320,6 +737,7 @@ pub(crate) struct ScheduleCaptureRecorder {
 impl ScheduleCaptureRecorder {
     pub(crate) fn new(trace: TraceBufferHandle, worker_count: usize) -> Self {
         trace.enable_completion_outcomes();
+        trace.enable_cancellation_publications();
         Self {
             capacity: trace.capacity(),
             trace,
@@ -372,7 +790,8 @@ impl ScheduleCaptureRecorder {
 
     pub(crate) fn snapshot(&self) -> ScheduleCaptureSnapshot {
         let context = self.context.lock();
-        let (events, total_events, kept_outcomes) = self.trace.snapshot_with_outcomes();
+        let (events, total_events, kept_outcomes, cancellation_publications) =
+            self.trace.snapshot_with_cancellation_publications();
         let contexts = context
             .events
             .iter()
@@ -414,6 +833,7 @@ impl ScheduleCaptureRecorder {
             caller_tasks,
             completion_outcomes,
             terminal_outcomes,
+            cancellation_publications,
             total_events,
             capacity: self.capacity,
             worker_count: self.worker_count,

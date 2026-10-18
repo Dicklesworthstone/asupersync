@@ -18,6 +18,10 @@
 //! a task returns are never compared. A source projection has no trustworthy
 //! terminal capture watermark: matching it is not proof that the production
 //! capture was complete.
+//! Cancellation injection and acknowledgement matching are additionally enabled
+//! by [`crate::trace::ScheduleCaptureSnapshot::production_schedule_with_cancellation`].
+//! That capture rejects requests without publication evidence and requests that
+//! overlap native polls. Legacy task-order projections keep their old behavior.
 //! Effects must remain Lab-controlled for deterministic interpretation. Driver
 //! step quotas cannot bound a user poll or callback that does not return.
 
@@ -26,7 +30,10 @@ use super::{
     ReplayReport,
 };
 use crate::trace::event::{TraceData, TraceEventKind};
-use crate::trace::replay::{CompactTaskId, ProductionSchedule, ReplayEvent};
+use crate::trace::replay::{
+    CompactTaskId, ProductionCancellationEvent, ProductionCancellationPhase, ProductionSchedule,
+    ReplayEvent,
+};
 use crate::types::Severity;
 
 /// Authority granted to a production task-order projection.
@@ -60,13 +67,13 @@ pub struct ProductionReplayBoundary {
 /// Source admission and driver work limits; no implicit unbounded defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StrictProductionReplayLimits {
-    /// Maximum projected events scanned during admission, including non-polls.
+    /// Maximum projected events plus cancellation annex observations admitted.
     pub max_events: usize,
     /// Maximum source spawn identities retained for ordinal binding.
     pub max_spawns: usize,
     /// Maximum recorded task choices retained by the driver.
     pub max_dispatches: usize,
-    /// Maximum driver steps, including waits and post-prefix command pumps.
+    /// Maximum driver steps, cancellation requests, waits and command pumps.
     /// A zero budget admits the source but does not advance the runtime.
     pub max_work_units: u64,
     /// Maximum virtual-time waits for each recorded task to become runnable.
@@ -117,6 +124,13 @@ pub enum StrictProductionReplayTermination {
     WorkLimit,
     /// The Lab configuration's step limit was reached; it was not overridden.
     ConfiguredStepLimit,
+    /// A captured request or actual checkpoint acknowledgement did not match.
+    CancellationMismatch {
+        /// Index of the next expected cancellation observation in the annex.
+        event_index: usize,
+        /// Typed difference, without exposing captured task data in diagnostics.
+        reason: CancellationReplayDivergence,
+    },
     /// Order and quiescence matched, but a task's terminal outcome differs
     /// from the outcome captured for it (br-asupersync-bi2462.8). Reported
     /// only for a schedule that [`ProductionSchedule::carries_outcomes`].
@@ -129,6 +143,116 @@ pub enum StrictProductionReplayTermination {
         /// in the Lab's trace ring.
         observed: Option<Severity>,
     },
+}
+
+/// Cancellation observation that prevented a strict replay match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CancellationReplayDivergence {
+    /// The recorded task was not admitted or was already terminal.
+    TargetUnavailable,
+    /// A request was not applied at its recorded dispatch boundary.
+    RequestBoundary,
+    /// The workload had already requested cancellation before the captured request.
+    UnexpectedRequest,
+    /// The acknowledging source poll did not acknowledge cancellation in the Lab.
+    MissingAcknowledgement,
+    /// The Lab acknowledged cancellation without a matching source observation.
+    UnexpectedAcknowledgement,
+    /// The acknowledgement named a different task or originating poll.
+    AcknowledgementOrder,
+    /// The effective cancellation reason or cleanup budget differed.
+    RequestMismatch,
+    /// The acknowledgement carried a different effective cancellation reason.
+    ReasonMismatch,
+}
+
+#[derive(Debug)]
+struct BoundCancellationEvent {
+    source: ProductionCancellationEvent,
+    ordinal: usize,
+    // ACK bookkeeping can follow another worker's Poll. Its semantic boundary
+    // is the end of its own originating poll, whose ordinal the capture proves.
+    boundary: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct CancellationReplay {
+    events: Vec<BoundCancellationEvent>,
+    next: usize,
+    task_polls: Vec<usize>,
+    requested: Vec<Option<usize>>,
+    current_poll: Option<usize>,
+}
+
+impl CancellationReplay {
+    pub(super) fn record_poll(&mut self, ordinal: usize) {
+        self.task_polls[ordinal] += 1;
+        self.current_poll = Some(ordinal);
+    }
+
+    fn mismatch(&self, reason: CancellationReplayDivergence) -> StrictProductionReplayTermination {
+        StrictProductionReplayTermination::CancellationMismatch {
+            event_index: self.next,
+            reason,
+        }
+    }
+
+    pub(super) fn observe_ack(
+        &mut self,
+        receipt: Option<&crate::record::task::CheckpointCancelAck>,
+        consumed_dispatches: usize,
+        context: Option<&(bool, Option<crate::types::CancelReason>)>,
+    ) -> Option<StrictProductionReplayTermination> {
+        use CancellationReplayDivergence as Why;
+        let ordinal = self.current_poll.take();
+        let expected = self.events.get(self.next);
+        if let Some(receipt) = receipt {
+            let Some(expected) = expected else {
+                return Some(self.mismatch(Why::UnexpectedAcknowledgement));
+            };
+            if expected.source.phase() != ProductionCancellationPhase::Acknowledgement {
+                return Some(self.mismatch(Why::UnexpectedAcknowledgement));
+            }
+            if ordinal != Some(expected.ordinal)
+                || expected.boundary != consumed_dispatches
+                || self.task_polls[expected.ordinal] != expected.source.task_poll_ordinal()
+            {
+                return Some(self.mismatch(Why::AcknowledgementOrder));
+            }
+            if &receipt.effective_reason != expected.source.reason() {
+                return Some(self.mismatch(Why::ReasonMismatch));
+            }
+            self.next += 1;
+        } else if expected.is_some_and(|event| {
+            event.source.phase() == ProductionCancellationPhase::Acknowledgement
+                && event.boundary <= consumed_dispatches
+        }) {
+            return Some(self.mismatch(Why::MissingAcknowledgement));
+        }
+
+        // Reading cancellation without checkpointing is observable too. A
+        // checked source must not accept a silent Cx request or reason change.
+        let Some(ordinal) = ordinal else {
+            return Some(self.mismatch(Why::RequestBoundary));
+        };
+        let Some((requested, reason)) = context else {
+            return Some(self.mismatch(Why::RequestMismatch));
+        };
+        if let Some(index) = self.requested[ordinal] {
+            let source = &self.events[index].source;
+            if !requested || reason.as_ref() != Some(source.reason()) {
+                return Some(self.mismatch(Why::RequestMismatch));
+            }
+        } else if *requested || reason.is_some() {
+            return Some(self.mismatch(Why::UnexpectedRequest));
+        }
+        None
+    }
+
+    fn complete(&self) -> bool {
+        self.next == self.events.len()
+    }
 }
 
 /// Actual observations at the strict replay boundary, not a universal replay proof.
@@ -182,6 +306,9 @@ pub enum StrictProductionReplayError {
     /// Pre-poll chaos can consume a selected choice without polling its task.
     #[error("strict production replay refuses active chaos injection")]
     ChaosActive,
+    /// Cancellation annexes require the bounded driver that injects requests.
+    #[error("captured cancellation requires run_production_schedule_strict")]
+    CancellationRequiresStrictDriver,
     /// Caller-owned source admission was exceeded before allocation/scanning.
     #[error("strict production replay {resource} limit exceeded: {found} > {limit}")]
     SourceLimit {
@@ -247,7 +374,11 @@ impl LabRuntime {
     /// the Lab, or the receipt is
     /// [`StrictProductionReplayTermination::OutcomeMismatch`]. An incomplete
     /// receipt is not a successful replay, even if some or all recorded
-    /// choices matched.
+    /// choices matched. A cancellation annex additionally authorizes requests
+    /// at its recorded dispatch boundaries and requires the matching actual
+    /// checkpoint receipts, including acknowledgements on later cleanup polls.
+    /// Each request consumes one work unit; missing or extra acknowledgements
+    /// stop replay before the next task poll.
     ///
     /// Normal dispatch stays paused on every exit after admission, including an
     /// unwind. The caller retains `self`; cleanup is neither run implicitly nor
@@ -481,7 +612,13 @@ pub(super) fn prepare_source(
 ) -> Result<ProductionReplayState, StrictProductionReplayError> {
     let events = &schedule.trace().events;
     let spawns = schedule.spawn_order();
-    admit("events", events.len(), limits.max_events)?;
+    let event_count = events
+        .len()
+        .checked_add(schedule.cancellation_events().map_or(0, <[ProductionCancellationEvent]>::len))
+        .ok_or(StrictProductionReplayError::InvalidProjection {
+            reason: "combined source event count overflow",
+        })?;
+    admit("events", event_count, limits.max_events)?;
     admit("spawns", spawns.len(), limits.max_spawns)?;
     if let Some((previous, next)) = schedule.source_sequence_disorder() {
         return Err(StrictProductionReplayError::SourceOrder { previous, next });
@@ -510,6 +647,7 @@ pub(super) fn prepare_source(
 
     // Avoid ProductionSchedule::steps' per-poll linear spawn lookup. Admission
     // uses O(events + spawns log spawns + dispatches log spawns) bounded work.
+    // A cancellation annex also sorts its bounded dispatch-location index.
     let mut lookup = reserve::<(u64, usize)>("spawn lookup entries", spawns.len())?;
     lookup.extend(
         spawns
@@ -542,6 +680,7 @@ pub(super) fn prepare_source(
         steps.push((lookup[index].1, *at_tick));
         previous_tick = Some(*at_tick);
     }
+    let cancellation = prepare_cancellation(schedule, &lookup, &steps)?;
     let mut spawn_order = reserve::<CompactTaskId>("spawn identities", spawns.len())?;
     spawn_order.extend_from_slice(spawns);
     Ok(ProductionReplayState {
@@ -558,6 +697,7 @@ pub(super) fn prepare_source(
         termination: None,
         source_error: None,
         selected: None,
+        cancellation,
         report: ReplayReport {
             steps_total: count,
             ..ReplayReport::default()
@@ -565,11 +705,142 @@ pub(super) fn prepare_source(
     })
 }
 
+fn prepare_cancellation(
+    schedule: &ProductionSchedule,
+    lookup: &[(u64, usize)],
+    steps: &[(usize, u64)],
+) -> Result<Option<CancellationReplay>, StrictProductionReplayError> {
+    let Some(source) = schedule.cancellation_events() else {
+        return Ok(None);
+    };
+    let spawns = schedule.spawn_order().len();
+    let mut task_polls = reserve("cancellation poll counters", spawns)?;
+    task_polls.resize(spawns, 0_usize);
+    let mut poll_locations = reserve("cancellation poll locations", steps.len())?;
+    for (index, &(ordinal, _)) in steps.iter().enumerate() {
+        task_polls[ordinal] += 1;
+        poll_locations.push((ordinal, task_polls[ordinal], index + 1));
+    }
+    poll_locations.sort_unstable_by_key(|&(ordinal, poll, _)| (ordinal, poll));
+    let mut events = reserve("cancellation observations", source.len())?;
+    let mut previous_sequence = None;
+    let mut previous_boundary = None;
+    for event in source {
+        if previous_sequence.is_some_and(|previous| event.source_sequence() <= previous) {
+            return Err(StrictProductionReplayError::InvalidProjection {
+                reason: "cancellation sequence is not strictly increasing",
+            });
+        }
+        let index = lookup
+            .binary_search_by_key(&event.task().0, |entry| entry.0)
+            .map_err(|_| StrictProductionReplayError::InvalidProjection {
+                reason: "cancellation has no spawn identity",
+            })?;
+        let ordinal = lookup[index].1;
+        let (boundary, phase_order) = match event.phase() {
+            ProductionCancellationPhase::Request => (event.after_dispatches(), 1_u8),
+            ProductionCancellationPhase::Acknowledgement => {
+                let index = poll_locations
+                    .binary_search_by_key(&(ordinal, event.task_poll_ordinal()), |entry| {
+                        (entry.0, entry.1)
+                    })
+                    .map_err(|_| StrictProductionReplayError::InvalidProjection {
+                        reason: "cancellation acknowledgement has no originating poll",
+                    })?;
+                (poll_locations[index].2, 0_u8)
+            }
+        };
+        if boundary > steps.len() || boundary > event.after_dispatches() {
+            return Err(StrictProductionReplayError::InvalidProjection {
+                reason: "cancellation observation exceeds its dispatch boundary",
+            });
+        }
+        if previous_boundary.is_some_and(|previous| (boundary, phase_order) < previous) {
+            return Err(StrictProductionReplayError::InvalidProjection {
+                reason: "cancellation observations cannot be serialized between polls",
+            });
+        }
+        events.push(BoundCancellationEvent {
+            source: event.clone(),
+            ordinal,
+            boundary,
+        });
+        previous_sequence = Some(event.source_sequence());
+        previous_boundary = Some((boundary, phase_order));
+    }
+    task_polls.fill(0);
+    let mut requested = reserve("cancellation request counters", spawns)?;
+    requested.resize(spawns, None);
+    Ok(Some(CancellationReplay {
+        events,
+        next: 0,
+        task_polls,
+        requested,
+        current_poll: None,
+    }))
+}
+
+/// Apply only a source-authorized task request. The source's reason remains
+/// intact, including native provenance; only the target binds by spawn ordinal.
+fn inject_cancellation(
+    runtime: &mut LabRuntime,
+    task_id: crate::types::TaskId,
+    source: &ProductionCancellationEvent,
+    already_requested: bool,
+) -> Result<(), CancellationReplayDivergence> {
+    use CancellationReplayDivergence as Why;
+    let record = runtime
+        .state
+        .task(task_id)
+        .filter(|record| !record.state.is_terminal())
+        .ok_or(Why::TargetUnavailable)?;
+    if !already_requested
+        && (record.cancel_reason().is_some() || record.context_cancel_requested() == Some(true))
+    {
+        return Err(Why::UnexpectedRequest);
+    }
+    let old_state = record.state.clone();
+    let (publish, wakes) = runtime
+        .state
+        .cancel_task_with_budget(task_id, source.reason(), source.cleanup_budget())
+        .into_parts();
+    let observed = runtime.state.task(task_id).map(|record| {
+        (
+            record.state.clone(),
+            record.cancel_reason().cloned(),
+            record.cleanup_budget(),
+        )
+    });
+    if publish {
+        let priority = observed
+            .as_ref()
+            .and_then(|(_, _, budget)| *budget)
+            .map_or(source.cleanup_budget().priority, |budget| budget.priority);
+        runtime.scheduler.lock().schedule_cancel(task_id, priority);
+    }
+    // Every queue/state guard is gone. A waking callback can now observe the
+    // published cancellation lane, including for an already runnable target.
+    wakes.dispatch();
+    let Some((new_state, Some(reason), Some(budget))) = observed else {
+        return Err(Why::RequestMismatch);
+    };
+    if runtime.config.has_cancellation_oracle() {
+        runtime.notify_cancellation_oracle_cancel_request(task_id, reason.clone());
+        runtime.notify_cancellation_oracle_task_transition(task_id, &old_state, &new_state);
+    }
+    if &reason != source.reason() || budget != source.cleanup_budget() {
+        return Err(Why::RequestMismatch);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
 fn drive(
     runtime: &mut LabRuntime,
     limits: StrictProductionReplayLimits,
     work_units: &mut u64,
 ) -> StrictProductionReplayTermination {
+    use CancellationReplayDivergence as Why;
     use StrictProductionReplayTermination as End;
     loop {
         let replay = runtime
@@ -593,7 +864,70 @@ fn drive(
         }
         let pending_commands =
             runtime.has_pending_dispatch_commands() || runtime.state.has_pending_obligation_posts();
+        let due_request = if let Some(cancellation) = replay.cancellation.as_ref()
+            && let Some(event) = cancellation.events.get(cancellation.next)
+            && event.boundary <= replay.next
+        {
+            if event.source.phase() == ProductionCancellationPhase::Acknowledgement {
+                return cancellation.mismatch(Why::MissingAcknowledgement);
+            }
+            if event.boundary != replay.next {
+                return cancellation.mismatch(Why::RequestBoundary);
+            }
+            Some((
+                cancellation.next,
+                event.ordinal,
+                event.source.clone(),
+                cancellation.requested[event.ordinal].is_some(),
+            ))
+        } else {
+            None
+        };
+        if let Some((event_index, ordinal, source, already_requested)) = due_request {
+            // Injection is driver work. Neither a request nor a preparatory
+            // admission pump may escape the caller's/configured work budget.
+            if let Some(end) = work_boundary(runtime, limits, *work_units) {
+                return end;
+            }
+            let target = runtime.scheduler.lock().first_entry(ordinal);
+            let Some(target) = target else {
+                if pending_commands {
+                    *work_units += 1;
+                    let dispatched = runtime
+                        .step_with_candidate_dispatch(None)
+                        .expect("cancellation admission pump has no candidate dispatch");
+                    debug_assert!(!dispatched, "cancellation admission cannot poll work");
+                    continue;
+                }
+                return End::CancellationMismatch {
+                    event_index,
+                    reason: Why::TargetUnavailable,
+                };
+            };
+            *work_units += 1;
+            if let Err(reason) = inject_cancellation(runtime, target, &source, already_requested) {
+                return End::CancellationMismatch {
+                    event_index,
+                    reason,
+                };
+            }
+            let cancellation = runtime
+                .production_replay
+                .as_mut()
+                .expect("strict source installed")
+                .cancellation
+                .as_mut()
+                .expect("captured request installed");
+            cancellation.requested[ordinal] = Some(event_index);
+            cancellation.next += 1;
+            continue;
+        }
         if exhausted && !pending_commands {
+            if let Some(cancellation) = replay.cancellation.as_ref()
+                && !cancellation.complete()
+            {
+                return cancellation.mismatch(Why::MissingAcknowledgement);
+            }
             if !runtime.is_quiescent() || !runtime.scheduler.lock().is_empty() {
                 return End::SourceExhausted;
             }
@@ -609,15 +943,8 @@ fn drive(
         if !exhausted && runtime.is_quiescent() && runtime.scheduler.lock().is_empty() {
             return End::SourceRemaining;
         }
-        if runtime
-            .config
-            .max_steps
-            .is_some_and(|max| runtime.steps >= max)
-        {
-            return End::ConfiguredStepLimit;
-        }
-        if *work_units >= limits.max_work_units {
-            return End::WorkLimit;
+        if let Some(end) = work_boundary(runtime, limits, *work_units) {
+            return end;
         }
         *work_units += 1;
         if exhausted {
@@ -631,6 +958,21 @@ fn drive(
             runtime.step();
         }
     }
+}
+
+fn work_boundary(
+    runtime: &LabRuntime,
+    limits: StrictProductionReplayLimits,
+    work_units: u64,
+) -> Option<StrictProductionReplayTermination> {
+    if runtime
+        .config
+        .max_steps
+        .is_some_and(|max| runtime.steps >= max)
+    {
+        return Some(StrictProductionReplayTermination::ConfiguredStepLimit);
+    }
+    (work_units >= limits.max_work_units).then_some(StrictProductionReplayTermination::WorkLimit)
 }
 
 #[cfg(test)]

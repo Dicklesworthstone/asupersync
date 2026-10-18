@@ -1253,6 +1253,7 @@ struct ProductionReplayState {
     termination: Option<StrictProductionReplayTermination>,
     source_error: Option<StrictProductionReplayError>,
     selected: Option<usize>,
+    cancellation: Option<production_strict::CancellationReplay>,
 }
 
 /// What the oracle decided for one lab step.
@@ -1287,6 +1288,7 @@ impl ProductionReplayState {
             termination: None,
             source_error: None,
             selected: None,
+            cancellation: None,
         }
     }
 
@@ -4285,6 +4287,8 @@ impl LabRuntime {
         );
         let admission = if self.has_chaos() {
             Err(StrictProductionReplayError::ChaosActive)
+        } else if schedule.cancellation_events().is_some() {
+            Err(StrictProductionReplayError::CancellationRequiresStrictDriver)
         } else {
             production_strict::prepare_source(schedule, limits)
         };
@@ -4311,6 +4315,8 @@ impl LabRuntime {
     /// always says [`ProductionReplayMode::Prefix`], so a matched prefix cannot
     /// be mistaken for a complete strict replay. Source completeness and
     /// quiescence are not admission conditions for this exploratory mode.
+    /// Cancellation annexes are not injected or validated by this task-order
+    /// prefix; use [`Self::run_production_schedule_strict`] to replay them.
     ///
     /// # Errors
     /// Returns the same configuration errors as [`Self::replay_production_schedule`].
@@ -4768,8 +4774,11 @@ impl LabRuntime {
 
         let result = if let Some(stored) = self.state.get_stored_future(task_id) {
             if let Some(replay) = self.production_replay.as_mut()
-                && replay.selected.take().is_some()
+                && let Some(ordinal) = replay.selected.take()
             {
+                if let Some(cancellation) = replay.cancellation.as_mut() {
+                    cancellation.record_poll(ordinal);
+                }
                 replay.next = replay.next.saturating_add(1);
                 replay.report.steps_matched = replay.report.steps_matched.saturating_add(1);
             }
@@ -4812,6 +4821,32 @@ impl LabRuntime {
         });
 
         let (cancel_ack, cancel_wakes) = self.consume_cancel_ack(task_id).into_parts();
+
+        // Sample only the admitted task's primary Cx. A derived fiber context
+        // can share its TaskId without cancelling this task.
+        let observed_cancellation = self
+            .production_replay
+            .as_ref()
+            .and_then(|replay| replay.cancellation.as_ref())
+            .and_then(|_| self.state.task(task_id))
+            .and_then(|record| record.cx_inner.as_ref())
+            .map(|inner| {
+                let inner = inner.read();
+                (inner.is_cancel_requested(), inner.cancel_reason.clone())
+            });
+        // Compare the actual checkpoint receipt at this poll boundary. A task
+        // may acknowledge again on later cleanup polls; completion alone is
+        // not evidence that the captured acknowledgement happened.
+        if let Some(replay) = self.production_replay.as_mut()
+            && let Some(cancellation) = replay.cancellation.as_mut()
+            && let Some(termination) = cancellation.observe_ack(
+                cancel_ack.as_ref(),
+                replay.next,
+                observed_cancellation.as_ref(),
+            )
+        {
+            replay.termination = Some(termination);
+        }
 
         // A checkpoint can win the race with the runtime-owned handle command.
         // Replay the logical RequestCancel -> acknowledgement ordering into the

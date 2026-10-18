@@ -994,3 +994,336 @@ fn chaos_cannot_make_selected_but_unpolled_work_look_replayed() {
     assert!(runtime.replay_report().is_none());
     assert!(runtime.is_quiescent());
 }
+
+fn cancel_observation(
+    phase: ProductionCancellationPhase,
+    after_dispatches: usize,
+    ordinal: usize,
+    task_poll_ordinal: usize,
+    sequence: u64,
+) -> ProductionCancellationEvent {
+    let reason = crate::types::CancelReason::user("captured cancellation provenance");
+    let mut budget = reason.cleanup_budget();
+    budget.poll_quota = 9;
+    budget.priority = 87;
+    ProductionCancellationEvent::new(
+        sequence,
+        after_dispatches,
+        source_task(ordinal).into(),
+        RegionId::from_arena(ArenaIndex::new(31, 2)).into(),
+        reason,
+        phase,
+        task_poll_ordinal,
+        budget,
+    )
+}
+
+fn source_with_cancel(spawns: usize, order: &[usize]) -> ProductionSchedule {
+    source(spawns, order).with_cancellation_events(vec![
+        cancel_observation(ProductionCancellationPhase::Request, 1, 0, 1, 100),
+        cancel_observation(ProductionCancellationPhase::Acknowledgement, 2, 0, 2, 101),
+    ])
+}
+
+#[test]
+fn due_cancellation_cannot_escape_driver_or_configured_step_limits() {
+    for configured in [false, true] {
+        let mut fx = Fixture::new(
+            &[2],
+            LabConfig::new(71).max_steps(if configured { 1 } else { 128 }),
+        );
+        let report = fx
+            .runtime
+            .run_production_schedule_strict(
+                &source_with_cancel(1, &[0, 0]),
+                StrictProductionReplayLimits {
+                    max_work_units: if configured { 64 } else { 1 },
+                    ..limits()
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            report.termination,
+            if configured {
+                StrictProductionReplayTermination::ConfiguredStepLimit
+            } else {
+                StrictProductionReplayTermination::WorkLimit
+            }
+        );
+        assert_eq!(report.work_units, 1);
+        assert_eq!(report.replay.steps_matched, 1);
+        let task = fx.runtime.scheduler.lock().first_entry(0).unwrap();
+        let record = fx.runtime.state.task(task).unwrap();
+        assert_eq!(record.context_cancel_requested(), Some(false));
+        assert!(record.cancel_reason().is_none());
+        fx.runtime.step_for_test();
+        assert_eq!(fx.counts(), [1], "a stopped replay remains paused");
+        fx.drain();
+    }
+}
+
+#[test]
+fn injected_cancellation_keeps_native_provenance_and_effective_cleanup_budget() {
+    let source = source_with_cancel(1, &[0, 0]);
+    let request = &source.cancellation_events().unwrap()[0];
+    let mut fx = fixture(&[2]);
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(
+            &source,
+            StrictProductionReplayLimits {
+                max_work_units: 2,
+                ..limits()
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::WorkLimit
+    );
+    assert_eq!(report.work_units, 2, "one poll plus one request");
+    assert_eq!(fx.counts(), [1], "injection does not poll the target");
+    let task = fx.runtime.scheduler.lock().first_entry(0).unwrap();
+    assert_ne!(CompactTaskId::from(task), request.task());
+    let record = fx.runtime.state.task(task).unwrap();
+    assert_eq!(record.context_cancel_requested(), Some(true));
+    assert_eq!(record.cancel_reason(), Some(request.reason()));
+    assert_eq!(record.cleanup_budget(), Some(request.cleanup_budget()));
+    fx.drain();
+}
+
+#[test]
+fn missing_acknowledgement_stops_before_the_next_recorded_task() {
+    // This workload observes no checkpoint: its second poll just returns.
+    // Matching terminal task order alone must not hide the missing receipt.
+    let mut fx = fixture(&[2, 1]);
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(&source_with_cancel(2, &[0, 0, 1]), limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::CancellationMismatch {
+            event_index: 1,
+            reason: CancellationReplayDivergence::MissingAcknowledgement,
+        }
+    );
+    assert_eq!(report.replay.steps_matched, 2);
+    assert_eq!(fx.counts(), [2, 0]);
+    assert_eq!(fx.drop_counts(), [1, 0]);
+    assert!(!report.passed());
+    fx.runtime.step_for_test();
+    assert_eq!(fx.counts(), [2, 0]);
+    fx.drain();
+}
+
+#[test]
+fn unbound_cancellation_target_is_not_replaced_with_an_existing_task() {
+    let source = source(2, &[0, 1]).with_cancellation_events(vec![cancel_observation(
+        ProductionCancellationPhase::Request,
+        1,
+        1,
+        0,
+        100,
+    )]);
+    let mut fx = fixture(&[2]);
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(&source, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::CancellationMismatch {
+            event_index: 0,
+            reason: CancellationReplayDivergence::TargetUnavailable,
+        }
+    );
+    let task = fx.runtime.scheduler.lock().first_entry(0).unwrap();
+    assert_eq!(
+        fx.runtime.state.task(task).unwrap().context_cancel_requested(),
+        Some(false)
+    );
+    assert_eq!(fx.counts(), [1]);
+    fx.drain();
+}
+
+#[test]
+fn cancellation_annex_shares_source_admission_budget_without_running_work() {
+    let schedule = source_with_cancel(1, &[0, 0]);
+    let max_events = schedule.trace().events.len();
+    let mut fx = fixture(&[2]);
+    let error = fx
+        .runtime
+        .run_production_schedule_strict(
+            &schedule,
+            StrictProductionReplayLimits {
+                max_events,
+                ..limits()
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        error,
+        StrictProductionReplayError::SourceLimit {
+            resource: "events",
+            found: max_events + 2,
+            limit: max_events,
+        }
+    );
+    assert!(fx.runtime.replay_report().is_none());
+    assert_eq!(fx.counts(), [0]);
+    fx.drain();
+}
+
+#[test]
+fn legacy_configurator_refuses_to_silently_ignore_cancellation_annex() {
+    let mut fx = fixture(&[2]);
+    fx.runtime
+        .replay_production_schedule(
+            &source_with_cancel(1, &[0, 0]),
+            ProductionReplayOptions::default(),
+        )
+        .unwrap();
+    let boundary = fx.runtime.production_replay_boundary().unwrap();
+    assert_eq!(
+        boundary.source_error,
+        Some(StrictProductionReplayError::CancellationRequiresStrictDriver)
+    );
+    fx.runtime.step_for_test();
+    assert_eq!(fx.counts(), [0]);
+    fx.drain();
+}
+
+#[test]
+fn checked_empty_annex_rejects_an_unexpected_checkpoint_acknowledgement() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task, handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async {
+            let cx = crate::Cx::current().unwrap();
+            cx.cancel_with(crate::types::CancelKind::User, Some("unrecorded request"));
+            assert!(cx.checkpoint().is_err());
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(task, 0);
+    let schedule = source(1, &[0]).with_cancellation_events(Vec::new());
+    let report = runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::CancellationMismatch {
+            event_index: 0,
+            reason: CancellationReplayDivergence::UnexpectedAcknowledgement,
+        }
+    );
+    assert!(!report.passed());
+    assert!(handle.is_finished());
+    assert!(runtime.is_quiescent());
+    let _ = runtime.discard_production_replay();
+}
+
+#[test]
+fn checked_empty_annex_rejects_silent_cancellation_without_a_checkpoint() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let (task, handle) = runtime
+        .state
+        .create_task(root, Budget::INFINITE, async {
+            let cx = crate::Cx::current().unwrap();
+            cx.cancel_with(crate::types::CancelKind::User, Some("silent request"));
+            assert!(cx.is_cancel_requested());
+            // Deliberately return without checkpointing or acknowledging.
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(task, 0);
+    let schedule = source(1, &[0]).with_cancellation_events(Vec::new());
+    let report = runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::CancellationMismatch {
+            event_index: 0,
+            reason: CancellationReplayDivergence::UnexpectedRequest,
+        }
+    );
+    assert!(!report.passed());
+    assert!(handle.is_finished());
+    assert!(runtime.is_quiescent());
+    let _ = runtime.discard_production_replay();
+}
+
+#[test]
+fn checked_empty_annex_matches_an_uncancelled_workload() {
+    let mut fx = fixture(&[2, 1]);
+    let schedule = source(2, &[0, 1, 0]).with_cancellation_events(Vec::new());
+    let report = fx
+        .runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Matched
+    );
+    assert!(report.passed());
+    assert_eq!(fx.counts(), [2, 1]);
+    fx.drain();
+}
+
+#[test]
+fn delayed_native_acknowledgement_binds_to_its_originating_lab_poll() {
+    let mut runtime = LabRuntime::new(LabConfig::new(71).max_steps(128));
+    let region = runtime.state.create_root_region(Budget::INFINITE);
+    let (task, handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {
+            let cx = crate::Cx::current().unwrap();
+            let mut polls = 0;
+            poll_fn(|task| {
+                polls += 1;
+                if polls > 1 {
+                    assert!(cx.checkpoint().is_err());
+                }
+                if polls == 3 {
+                    Poll::Ready(())
+                } else {
+                    task.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })
+            .await;
+        })
+        .unwrap();
+    runtime.scheduler.lock().schedule(task, 0);
+    let (other, other_handle) = runtime
+        .state
+        .create_task(region, Budget::INFINITE, async {})
+        .unwrap();
+    runtime.scheduler.lock().schedule(other, 0);
+
+    // The first ACK was logged after the other task entered source Poll 3.
+    // Its worker still witnessed it as the target's second poll, so the Lab
+    // must check it after dispatch 2 rather than shift it onto the bystander.
+    let schedule = source(2, &[0, 0, 1, 0]).with_cancellation_events(vec![
+        cancel_observation(ProductionCancellationPhase::Request, 1, 0, 1, 100),
+        cancel_observation(ProductionCancellationPhase::Acknowledgement, 3, 0, 2, 101),
+        cancel_observation(ProductionCancellationPhase::Acknowledgement, 4, 0, 3, 102),
+    ]);
+    let report = runtime
+        .run_production_schedule_strict(&schedule, limits())
+        .unwrap();
+    assert_eq!(
+        report.termination,
+        StrictProductionReplayTermination::Matched,
+        "{report:?}"
+    );
+    assert!(report.passed(), "{report:?}");
+    assert_eq!(report.replay.steps_matched, 4);
+    assert_eq!(report.work_units, 5);
+    assert!(handle.is_finished());
+    assert!(other_handle.is_finished());
+    assert!(runtime.is_quiescent());
+    let _ = runtime.discard_production_replay();
+}

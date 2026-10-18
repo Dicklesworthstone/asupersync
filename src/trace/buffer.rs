@@ -4,7 +4,7 @@
 //! allowing efficient capture without unbounded memory growth.
 
 use super::event::TraceEvent;
-use crate::types::Severity;
+use crate::types::{Budget, CancelReason, Severity, TaskId};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -148,6 +148,42 @@ struct TraceBufferInner {
     /// (br-asupersync-bi2462.8), written under the `buffer` lock and bounded
     /// like the ring.
     completion_outcomes: OnceLock<Mutex<VecDeque<(u64, Severity)>>>,
+    /// Capture-only witnesses bracketing task cancellation publication. The
+    /// flag can become visible before its canonical Request event is pushed,
+    /// so the event's sequence alone is not a safe replay boundary.
+    cancellation_publications: OnceLock<Mutex<CancellationPublications>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CancellationPublication {
+    pub(crate) task: TaskId,
+    pub(crate) start_sequence: u64,
+    pub(crate) end_sequence: Option<u64>,
+    pub(crate) request_sequence: Option<u64>,
+    pub(crate) cleanup_budget: Option<Budget>,
+    pub(crate) unsupported_mutation: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TerminalCancellationState {
+    pub(crate) requested: bool,
+    pub(crate) reason: Option<CancelReason>,
+}
+
+#[derive(Debug, Default)]
+struct CancellationPublications {
+    spans: VecDeque<CancellationPublication>,
+    dropped_spans: u64,
+    /// Every entry is atomically paired with its canonical Complete event.
+    /// None records that no authoritative task-Cx witness was supplied.
+    terminals: VecDeque<(u64, Option<TerminalCancellationState>)>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CancellationPublicationSnapshot {
+    pub(crate) spans: Vec<CancellationPublication>,
+    pub(crate) dropped_spans: u64,
+    pub(crate) terminals: Vec<(u64, Option<TerminalCancellationState>)>,
 }
 
 impl TraceBufferHandle {
@@ -160,6 +196,7 @@ impl TraceBufferHandle {
                 next_seq: AtomicU64::new(0),
                 total_pushed: AtomicU64::new(0),
                 completion_outcomes: OnceLock::new(),
+                cancellation_publications: OnceLock::new(),
             }),
         }
     }
@@ -170,11 +207,99 @@ impl TraceBufferHandle {
         let _ = self.inner.completion_outcomes.get_or_init(Default::default);
     }
 
+    pub(crate) fn enable_cancellation_publications(&self) {
+        let _ = self
+            .inner
+            .cancellation_publications
+            .get_or_init(Default::default);
+    }
+
+    pub(crate) fn cancellation_capture_enabled(&self) -> bool {
+        self.inner.cancellation_publications.get().is_some()
+    }
+
+    /// Starts a witness before either the task record or its Cx is mutated.
+    /// Disabled captures do not acquire a lock, reserve a sequence, or allocate.
+    /// An interrupted publisher leaves an unfinished witness, which a checked
+    /// cancellation projection refuses. All witness access uses buffer -> spans
+    /// lock order, shared with the snapshot boundary.
+    pub(crate) fn begin_cancellation_publication(&self, task: TaskId) -> Option<u64> {
+        let publications = self.inner.cancellation_publications.get()?;
+        let buffer = self.inner.buffer.lock();
+        let mut publications = publications.lock();
+        let start_sequence = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
+        if publications.spans.len() >= buffer.capacity() {
+            publications.spans.pop_front();
+            publications.dropped_spans = publications.dropped_spans.saturating_add(1);
+        }
+        publications.spans.push_back(CancellationPublication {
+            task,
+            start_sequence,
+            end_sequence: None,
+            request_sequence: None,
+            cleanup_budget: None,
+            unsupported_mutation: false,
+        });
+        Some(start_sequence)
+    }
+
+    /// Finishes after the canonical request has been recorded. A no-op request
+    /// needs no retained witness; strengthening without a new canonical request
+    /// remains explicit unsupported evidence rather than silently disappearing.
+    pub(crate) fn finish_cancellation_publication(
+        &self,
+        start_sequence: Option<u64>,
+        request_sequence: Option<u64>,
+        cleanup_budget: Option<Budget>,
+        unsupported_mutation: bool,
+    ) {
+        let (Some(start_sequence), Some(publications)) = (
+            start_sequence,
+            self.inner.cancellation_publications.get(),
+        ) else {
+            return;
+        };
+        let _buffer = self.inner.buffer.lock();
+        let mut publications = publications.lock();
+        let Some(index) = publications
+            .spans
+            .iter()
+            .position(|span| span.start_sequence == start_sequence)
+        else {
+            // The bounded witness store already counted this eviction.
+            return;
+        };
+        if request_sequence.is_none() && !unsupported_mutation {
+            publications.spans.remove(index);
+            return;
+        }
+        let end_sequence = self.inner.next_seq.fetch_add(1, Ordering::Relaxed);
+        let span = &mut publications.spans[index];
+        span.end_sequence = Some(end_sequence);
+        span.request_sequence = request_sequence;
+        span.cleanup_budget = cleanup_budget;
+        span.unsupported_mutation = unsupported_mutation;
+    }
+
     /// [`Self::record_event`] for a task's Complete event. While completion
     /// outcomes are kept, `outcome` is recorded under the same sequence and
     /// the same lock, so a snapshot never sees one without the other.
     pub(crate) fn record_completion_event<F>(&self, outcome: Severity, build: F)
     where
+        F: FnOnce(u64) -> TraceEvent,
+    {
+        self.record_completion_event_with_cancellation(outcome, None, build);
+    }
+
+    /// Pairs an authoritative terminal task-Cx witness with Complete. The
+    /// caller samples the Cx before taking the trace lock; neither sampling
+    /// nor reason cloning occurs when cancellation capture is disabled.
+    pub(crate) fn record_completion_event_with_cancellation<F>(
+        &self,
+        outcome: Severity,
+        cancellation: Option<TerminalCancellationState>,
+        build: F,
+    ) where
         F: FnOnce(u64) -> TraceEvent,
     {
         let mut buffer = self.inner.buffer.lock();
@@ -189,6 +314,13 @@ impl TraceBufferHandle {
                 outcomes.pop_front();
             }
             outcomes.push_back((seq, outcome));
+        }
+        if let Some(publications) = self.inner.cancellation_publications.get() {
+            let mut publications = publications.lock();
+            if publications.terminals.len() >= buffer.capacity() {
+                publications.terminals.pop_front();
+            }
+            publications.terminals.push_back((seq, cancellation));
         }
     }
 
@@ -207,6 +339,44 @@ impl TraceBufferHandle {
         drop(buffer);
         events.sort_by_key(|event| event.seq);
         (events, total_pushed, outcomes)
+    }
+
+    /// A coherent capture boundary for events, outcomes, and publication spans.
+    /// A publisher cannot finish its witness between the event snapshot and
+    /// the metadata snapshot, nor hide an in-flight mutation from this receipt.
+    pub(crate) fn snapshot_with_cancellation_publications(
+        &self,
+    ) -> (
+        Vec<TraceEvent>,
+        u64,
+        Vec<(u64, Severity)>,
+        CancellationPublicationSnapshot,
+    ) {
+        let buffer = self.inner.buffer.lock();
+        let mut events: Vec<TraceEvent> = buffer.iter().cloned().collect();
+        let total_pushed = self.inner.total_pushed.load(Ordering::Relaxed);
+        let outcomes = self
+            .inner
+            .completion_outcomes
+            .get()
+            .map(|outcomes| outcomes.lock().iter().copied().collect())
+            .unwrap_or_default();
+        let publications = self
+            .inner
+            .cancellation_publications
+            .get()
+            .map(|publications| {
+                let publications = publications.lock();
+                CancellationPublicationSnapshot {
+                    spans: publications.spans.iter().cloned().collect(),
+                    dropped_spans: publications.dropped_spans,
+                    terminals: publications.terminals.iter().cloned().collect(),
+                }
+            })
+            .unwrap_or_default();
+        drop(buffer);
+        events.sort_by_key(|event| event.seq);
+        (events, total_pushed, outcomes, publications)
     }
 
     /// Allocates and returns the next trace sequence number.
