@@ -1,4 +1,4 @@
-//! Native unary gRPC-Web service dispatch for HTTP/1.x and HTTP/2 listeners.
+//! Native gRPC-Web dispatch with buffered unary and HTTP/1.1 server streaming.
 //!
 //! This is a protocol adapter, not a second RPC executor: registered services,
 //! interceptors, compression, decoded-message limits, and deadlines still run
@@ -6,11 +6,13 @@
 //! install its request-region `Cx` and enforce its host policy and body limit.
 //! No task, runtime, or network connection is created by the adapter.
 //!
-//! Only protobuf unary RPCs are admitted. Streaming methods retain the native
-//! dispatcher's `UNIMPLEMENTED` result. Cross-origin policy belongs to the
-//! caller; this adapter does not implicitly grant CORS access.
+//! The unary adapter retains its existing admission policy. The separately
+//! selected produced-response adapter admits protobuf unary and server-streaming
+//! methods; client streaming and bidirectional methods remain unsupported.
+//! Cross-origin policy belongs to the caller; this adapter does not implicitly
+//! grant CORS access.
 
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,8 +20,13 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
 
-use crate::bytes::BytesMut;
+use crate::bytes::{Buf, BytesMut};
+use crate::cx::Cx;
+use crate::http::body::{Body, Frame, HeaderMap};
 use crate::http::h1::types::{Method, Request as HttpRequest, Response as HttpResponse, Version};
+use crate::http::h1::{Http1ProducedResponse, HttpError, OutgoingBodySender, StreamingServerRequest};
+
+use super::server::server_streaming::{ServerStreamSink, ServerStreamingConfig};
 
 use super::Server;
 use super::status::Status;
@@ -40,7 +47,9 @@ pub struct GrpcWebConfig {
     /// independently padded base64 chunks without unbounded amplification.
     pub max_request_bytes: usize,
     /// Maximum native response framing bytes, before adding the trailer frame
-    /// or expanding the complete response into base64.
+    /// or expanding the complete response into base64. The separately selected
+    /// streaming handler applies this limit to each complete gRPC message frame,
+    /// so an unbounded number of bounded messages can be delivered incrementally.
     pub max_response_bytes: usize,
     /// Maximum serialized terminal trailer block, excluding its five-byte prefix.
     pub max_trailer_bytes: usize,
@@ -58,6 +67,10 @@ impl Default for GrpcWebConfig {
 
 /// Owned response future returned by the native gRPC-Web unary handler.
 pub type GrpcWebHandlerFuture = Pin<Box<dyn Future<Output = HttpResponse> + Send>>;
+
+/// Owned future returned by the HTTP/1.1 gRPC-Web produced-response handler.
+pub type GrpcWebStreamingHandlerFuture =
+    Pin<Box<dyn Future<Output = Http1ProducedResponse> + Send>>;
 
 impl Server {
     /// Adapt registered protobuf unary RPCs to binary and text gRPC-Web.
@@ -98,6 +111,276 @@ impl Server {
                 }
             })
         })
+    }
+}
+
+impl Server {
+    /// Adapt registered unary and server-streaming protobuf RPCs to HTTP/1.1.
+    ///
+    /// Install this handler with
+    /// [`Http1Listener::bind_produced`](crate::http::h1::Http1Listener::bind_produced)
+    /// and drive the listener with `run_produced`. The explicit request `Cx`
+    /// and the later producer `Cx` come from that listener's request region.
+    /// The listener remains responsible for host/origin admission, request-body
+    /// limits, transport deadlines, and disconnect/shutdown cleanup.
+    ///
+    /// A single bounded request message is collected before dispatch. Unary
+    /// methods use the established unary pipeline. Server streams use the same
+    /// service resolution, interceptors, codec, absolute deadline, cancellation,
+    /// and source destruction as the native HTTP/2 streaming lane. Application
+    /// code starts only when the listener admits the response producer.
+    ///
+    /// Binary responses carry incremental gRPC DATA frames followed by exactly
+    /// one `0x80` trailer frame in the body. Text responses encode bounded
+    /// chunks independently; base64 padding can occur before the body ends.
+    /// A client must decode the stream incrementally rather than treating the
+    /// complete response as a single base64 entity. No HTTP trailers are needed.
+    ///
+    /// `wire.max_response_bytes` bounds each complete encoded message before
+    /// its prefix is queued; it does not cap the total stream length. Native
+    /// decoded-message limits still apply. Both native trailer-field limits
+    /// and `wire.max_trailer_bytes` (including colon/CRLF syntax) are enforced.
+    /// Oversize terminal metadata becomes a bounded RESOURCE_EXHAUSTED trailer.
+    ///
+    /// The HTTP body channel retains `streaming.frame_capacity` frames, each
+    /// at most `streaming.max_frame_bytes` after text expansion. In addition to
+    /// the transport's own bound, the producer retains one encoded gRPC message
+    /// and one text-encoding chunk. Slow readers therefore stop source polling
+    /// after bounded prefetch. Application-owned backing memory is excluded.
+    /// Cancellation during a partly queued message fails the HTTP producer;
+    /// it cannot append apparently successful trailers to truncated framing.
+    ///
+    /// # Errors
+    /// Refuses invalid native streaming/transport settings, an empty server,
+    /// unavailable configured compression, or a trailer-byte cap below 17
+    /// (the space needed for a bare two-digit terminal status).
+    pub fn registered_grpc_web_streaming_handler(
+        self: &Arc<Self>,
+        wire: GrpcWebConfig,
+        streaming: ServerStreamingConfig,
+    ) -> io::Result<
+        impl Fn(Cx, StreamingServerRequest) -> GrpcWebStreamingHandlerFuture
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    > {
+        self.validate_registered_streaming(streaming)?;
+        if wire.max_trailer_bytes < 17 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "gRPC-Web streaming trailer limit must be at least 17 bytes",
+            ));
+        }
+        let native_unary = self.registered_unary_handler()?;
+        let server = Arc::clone(self);
+        Ok(move |cx, request| -> GrpcWebStreamingHandlerFuture {
+            let server = Arc::clone(&server);
+            let native_unary = native_unary.clone();
+            let wire = wire.clone();
+            Box::pin(async move {
+                let request = match collect_streaming_request(&cx, request, &wire).await {
+                    Ok(request) => request,
+                    Err(response) => return produced_buffered(response, streaming),
+                };
+                let version = request.version;
+                let (request, mode) = match prepare_request(request, &wire) {
+                    Ok(prepared) => prepared,
+                    Err(response) => return produced_buffered(response, streaming),
+                };
+                if !server.is_registered_server_stream(&request.uri) {
+                    // The explicit request context also makes direct handler
+                    // invocation obey the same unary authority as a listener.
+                    let mut call = std::pin::pin!(native_unary(request));
+                    let response = poll_fn(|task| {
+                        let _current = Cx::set_current(Some(cx.clone()));
+                        call.as_mut().poll(task)
+                    })
+                    .await;
+                    let response = encode_response(response, mode, version, &wire)
+                        .unwrap_or_else(|status| error_response(&status, mode, version));
+                    return produced_buffered(response, streaming);
+                }
+                let prepared = match server.prepare_registered_server_stream(request, Some(&cx)) {
+                    Ok(prepared) => prepared,
+                    Err(status) => {
+                        return produced_buffered(error_response(&status, mode, version), streaming);
+                    }
+                };
+                let mut head = prepared.head();
+                strip_transport_headers(&mut head.headers);
+                let mut response = Http1ProducedResponse::chunked_with_max_frame_bytes(
+                    streaming.frame_capacity,
+                    streaming.max_frame_bytes,
+                    head.status,
+                    head.reason,
+                    move |producer_cx, sender| async move {
+                        let sender = WebBodySender {
+                            sender,
+                            mode,
+                            max_frame_bytes: streaming.max_frame_bytes.get(),
+                            max_message_bytes: wire.max_response_bytes,
+                            max_trailer_bytes: wire.max_trailer_bytes,
+                        };
+                        prepared
+                            .run(producer_cx, sender, streaming)
+                            .await
+                            .map(|sender| sender.sender)
+                    },
+                )
+                .with_header("content-type", mode.as_header_value())
+                .with_header("vary", "Accept");
+                for (name, value) in head.headers {
+                    response = response.with_header(name, value);
+                }
+                response
+            })
+        })
+    }
+}
+
+async fn collect_streaming_request(
+    cx: &Cx,
+    request: StreamingServerRequest,
+    config: &GrpcWebConfig,
+) -> Result<HttpRequest, HttpResponse> {
+    let StreamingServerRequest { head, peer_addr, mut body } = request;
+    let mut request = HttpRequest {
+        method: head.method,
+        uri: head.uri,
+        version: head.version,
+        headers: head.headers,
+        body: Vec::new(),
+        trailers: Vec::new(),
+        peer_addr,
+    };
+    let input_mode = request
+        .header_value("content-type")
+        .and_then(media_type)
+        .unwrap_or(ContentType::GrpcWeb);
+    let output_mode = negotiate(&request, input_mode).unwrap_or(input_mode);
+    let limit = if input_mode.is_text_mode() {
+        config.max_request_bytes.saturating_mul(4)
+    } else {
+        config.max_request_bytes
+    };
+    let reject = |status| error_response(&status, output_mode, request.version);
+    loop {
+        let frame = poll_fn(|task| Pin::new(&mut body).poll_frame(task)).await;
+        let Some(frame) = frame else {
+            break;
+        };
+        let frame = frame.map_err(|_| {
+            let status = if cx.is_cancel_requested() {
+                match cx.cancel_reason().map(|reason| reason.kind) {
+                    Some(crate::types::CancelKind::Timeout | crate::types::CancelKind::Deadline) => {
+                        Status::deadline_exceeded("gRPC-Web request deadline exceeded")
+                    }
+                    _ => Status::cancelled("gRPC-Web request cancelled"),
+                }
+            } else {
+                Status::invalid_argument("invalid gRPC-Web request body")
+            };
+            reject(status)
+        })?;
+        match frame {
+            Frame::Data(data) => {
+                if data.remaining() > limit.saturating_sub(request.body.len()) {
+                    return Err(reject(Status::resource_exhausted(
+                        "gRPC-Web request exceeds wire limit",
+                    )));
+                }
+                request.body.extend_from_slice(data.chunk());
+            }
+            Frame::Trailers(_) => {
+                return Err(reject(Status::invalid_argument(
+                    "gRPC-Web unary request trailers are unsupported",
+                )));
+            }
+        }
+    }
+    Ok(request)
+}
+
+fn produced_buffered(
+    response: HttpResponse,
+    config: ServerStreamingConfig,
+) -> Http1ProducedResponse {
+    let HttpResponse { status, reason, headers, body, .. } = response;
+    let mut produced = Http1ProducedResponse::with_content_length_and_max_frame_bytes(
+        config.frame_capacity,
+        config.max_frame_bytes,
+        status,
+        reason,
+        u64::try_from(body.len()).unwrap_or(u64::MAX),
+        move |cx, mut sender| async move {
+            for chunk in body.chunks(config.max_frame_bytes.get()) {
+                sender.send_chunk(&cx, chunk).await?;
+            }
+            sender.finish(&cx)?;
+            Ok(sender)
+        },
+    );
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("content-length") && !hop_by_hop(&name) {
+            produced = produced.with_header(name, value);
+        }
+    }
+    produced
+}
+
+struct WebBodySender {
+    sender: OutgoingBodySender,
+    mode: ContentType,
+    max_frame_bytes: usize,
+    max_message_bytes: usize,
+    max_trailer_bytes: usize,
+}
+
+impl ServerStreamSink for WebBodySender {
+    const REGION_NAME: &'static str = "h1-grpc-web-stream";
+
+    fn message_limit(&self) -> Option<usize> {
+        Some(self.max_message_bytes)
+    }
+
+    async fn send_chunk(&mut self, cx: &Cx, data: &[u8]) -> Result<(), HttpError> {
+        if self.mode.is_text_mode() {
+            data.len()
+                .checked_add(2)
+                .and_then(|length| (length / 3).checked_mul(4))
+                .ok_or(HttpError::BodyTooLarge)?;
+            let encoded = STANDARD.encode(data);
+            for chunk in encoded.as_bytes().chunks(self.max_frame_bytes) {
+                self.sender.send_chunk(cx, chunk).await?;
+            }
+        } else {
+            for chunk in data.chunks(self.max_frame_bytes) {
+                self.sender.send_chunk(cx, chunk).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn send_trailers(&mut self, cx: &Cx, trailers: HeaderMap) -> Result<(), HttpError> {
+        let mut response = HttpResponse::new(200, "OK", Vec::new());
+        for (name, value) in trailers.iter() {
+            let value = value.to_str().map_err(|_| HttpError::InvalidHeaderValue)?;
+            response.trailers.push((name.as_str().to_owned(), value.to_owned()));
+        }
+        let block = trailer_block(&response, self.max_trailer_bytes).unwrap_or_else(|status| {
+            // Preserve a clean, bounded terminal frame after complete messages.
+            // The constructor reserves enough room for every bare status code.
+            format!("grpc-status: {}\r\n", status.code().as_i32()).into_bytes()
+        });
+        let length = u32::try_from(block.len()).map_err(|_| HttpError::BodyTooLarge)?;
+        let capacity = block.len().checked_add(5).ok_or(HttpError::BodyTooLarge)?;
+        let mut frame = Vec::with_capacity(capacity);
+        frame.push(0x80);
+        frame.extend_from_slice(&length.to_be_bytes());
+        frame.extend_from_slice(&block);
+        self.send_chunk(cx, &frame).await?;
+        self.sender.finish(cx)
     }
 }
 
