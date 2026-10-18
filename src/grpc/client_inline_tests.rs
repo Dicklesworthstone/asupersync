@@ -1730,6 +1730,50 @@
 
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
+    fn native_connect_policy_is_opt_in_and_retained_by_channel_clones() {
+        let uri = "http://service.invalid:50051";
+        let direct = futures_lite::future::block_on(Channel::connect_with_config(
+            uri,
+            ChannelConfig::default(),
+        ))
+        .unwrap();
+        assert_eq!(direct.connect_policy(), ConnectPolicy::Sequential);
+
+        for (builder, expected) in [
+            (Channel::builder(uri), ConnectPolicy::Sequential),
+            (
+                Channel::builder(uri).happy_eyeballs(),
+                ConnectPolicy::HappyEyeballs,
+            ),
+            (
+                Channel::builder(uri).connect_policy(ConnectPolicy::HappyEyeballs),
+                ConnectPolicy::HappyEyeballs,
+            ),
+            (
+                Channel::builder(uri)
+                    .happy_eyeballs()
+                    .connect_policy(ConnectPolicy::Sequential),
+                ConnectPolicy::Sequential,
+            ),
+        ] {
+            // An unresolvable name with no runtime Cx must stay lazy even
+            // when connection racing is enabled (br-asupersync-1aqha7).
+            let channel = futures_lite::future::block_on(builder.connect()).unwrap();
+            let cloned = channel.clone();
+            assert_eq!(cloned.connect_policy(), expected);
+            let target = NativeH2Target::from_channel(&cloned).unwrap();
+            assert_eq!(target.connect_policy, expected);
+            assert_eq!(target.authority, "service.invalid:50051");
+            assert_eq!(target.server_name, "service.invalid");
+            assert_eq!(
+                target.destination,
+                NativeH2Destination::Host("service.invalid".to_owned(), 50051)
+            );
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
     fn native_h2_targets_preserve_authority_and_tls_identity() {
         let host = NativeH2Target::parse("http://GRPC.Service.invalid", false, None, None)
             .expect("DNS target");
@@ -1972,6 +2016,7 @@
             let calls = Arc::new(AtomicUsize::new(0));
             let channel = futures_lite::future::block_on(
                 Channel::builder("http://service.invalid:50051")
+                    .happy_eyeballs()
                     .timeout(Duration::from_secs(20))
                     .max_send_message_size(1024)
                     .max_recv_message_size(2048)
@@ -1985,6 +2030,8 @@
             let mut request = Request::new(());
             assert!(request.metadata_mut().insert("x-request", "kept"));
             let setup = client.prepare_native_stream(&cx, "/svc/Upload", &request).unwrap();
+            assert_eq!(setup.target.connect_policy, ConnectPolicy::HappyEyeballs);
+            assert_eq!(setup.endpoint.connect_policy(), ConnectPolicy::HappyEyeballs);
             assert_eq!(setup.config.max_send_message_size, 1024);
             assert_eq!(setup.config.max_recv_message_size, 2048);
             assert_eq!(setup.config.timeout, Some(Duration::from_secs(20)));
@@ -2033,6 +2080,7 @@
             let channel = futures_lite::future::block_on(Channel::connect("http://service.invalid")).unwrap();
             let setup = GrpcClient::new(channel)
                 .prepare_native_stream(&cx, "/svc/Upload", &Request::new(())).unwrap();
+            assert_eq!(setup.endpoint.connect_policy(), ConnectPolicy::Sequential);
             assert!(setup.keepalive.is_none());
 
             for (interval, timeout) in [

@@ -63,8 +63,8 @@ expression: inventory
 1	Io	distributed/symbol_service/durable/tests.rs	std::fs::OpenOptions
 2	Io	grpc/client.rs	TcpStream::
 1	Io	grpc/health_rpc/tests/native.rs	TcpStream::
-2	Io	grpc/native_stream/connect.rs	TcpStream::
-1	Io	grpc/native_stream/connect/tests.rs	std::net::TcpListener
+1	Io	grpc/native_stream/connect.rs	TcpStream::
+2	Io	grpc/native_stream/connect/tests.rs	std::net::TcpListener
 2	Io	grpc/native_stream/duplex/tests.rs	TcpListener::
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::
 2	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream
@@ -401,11 +401,11 @@ expression: inventory
 1	Io	distributed/membership/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	distributed/symbol_service/durable/tests.rs	std::fs::OpenOptions	use std::fs::OpenOptions;
 1	Io	grpc/client.rs	TcpStream::	NativeH2Destination::Address(address) => TcpStream::connect_timeout(*address, timeout)
-1	Io	grpc/client.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), timeout)
+1	Io	grpc/client.rs	TcpStream::	Self::Sequential => TcpStream::connect_timeout((host, port), timeout).await,
 1	Io	grpc/health_rpc/tests/native.rs	TcpStream::	let socket = TcpStream::connect_timeout(&address, Duration::from_secs(3)).unwrap();
-1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout((host.clone(), *port), remaining)
 1	Io	grpc/native_stream/connect.rs	TcpStream::	TcpStream::connect_timeout(*address, remaining)
 1	Io	grpc/native_stream/connect/tests.rs	std::net::TcpListener	let listener = std::net::TcpListener::bind().unwrap();
+1	Io	grpc/native_stream/connect/tests.rs	std::net::TcpListener	listener: std::net::TcpListener,
 2	Io	grpc/native_stream/duplex/tests.rs	TcpListener::	let listener = TcpListener::bind().unwrap();
 1	Io	grpc/native_stream/duplex/tests.rs	TcpStream::	let io = TcpStream::connect_timeout(address, LIMIT).await.unwrap();
 1	Io	grpc/native_stream/duplex/tests.rs	std::net::TcpStream	fn write_pending(socket: &mut std::net::TcpStream, connection: &mut Connection) {

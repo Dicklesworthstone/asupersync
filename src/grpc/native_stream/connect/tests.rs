@@ -405,6 +405,25 @@ fn hostname_endpoint_rejects_invalid_names_before_resolution() {
         NativeStreamEndpoint::from_host("localhost", 0, "service", Duration::from_secs(1)).is_err()
     );
     assert!(NativeStreamEndpoint::from_host("localhost", 80, "service", Duration::ZERO).is_err());
+
+    let endpoint = NativeStreamEndpoint::from_host(
+        "service.invalid",
+        80,
+        "logical.service",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(endpoint.connect_policy(), ConnectPolicy::Sequential);
+    let racing = endpoint.clone().with_happy_eyeballs();
+    assert_eq!(racing.connect_policy(), ConnectPolicy::HappyEyeballs);
+    assert_eq!(racing.authority, endpoint.authority);
+    assert_eq!(racing.setup_timeout, endpoint.setup_timeout);
+    assert_eq!(
+        racing
+            .with_connect_policy(ConnectPolicy::Sequential)
+            .connect_policy(),
+        ConnectPolicy::Sequential
+    );
 }
 
 #[test]
@@ -691,8 +710,15 @@ fn peer_frame(kind: u8, flags: u8, fields: &[(&str, &str)], data: &[u8]) -> Vec<
 // The atomic witness is set when the preface has been read, BEFORE any peer
 // bytes can wake the client, so a Pending seen after it belongs to setup.
 fn scripted_peer(script: PeerScript) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
-    use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    scripted_peer_on(listener, script)
+}
+
+fn scripted_peer_on(
+    listener: std::net::TcpListener,
+    script: PeerScript,
+) -> (SocketAddr, Arc<AtomicBool>, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
     listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
     let reached = Arc::new(AtomicBool::new(false));
@@ -752,6 +778,228 @@ fn scripted_peer(script: PeerScript) -> (SocketAddr, Arc<AtomicBool>, std::threa
         panic!("bounded setup peer did not observe transport closure");
     });
     (address, reached, peer)
+}
+
+/// br-asupersync-1aqha7: real Linux SYN black hole followed by a live address
+/// for the same hostname and port. No DNS override or simulated connector is
+/// involved. This fixture is unsupported when localhost has only one family.
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+fn blackholed_localhost() -> Option<(
+    socket2::Socket,
+    Vec<std::net::TcpStream>,
+    std::net::TcpListener,
+)> {
+    use std::net::ToSocketAddrs;
+
+    let resolved: Vec<_> = ("localhost", 0)
+        .to_socket_addrs()
+        .expect("resolve localhost fixture")
+        .collect();
+    let Some((first, second)) = resolved.first().and_then(|first| {
+        resolved
+            .iter()
+            .find(|address| address.is_ipv4() != first.is_ipv4())
+            .map(|second| (*first, *second))
+    }) else {
+        eprintln!("unsupported gRPC hostname race fixture: localhost resolves to {resolved:?}");
+        return None;
+    };
+    assert!(resolved.iter().all(|address| address.ip().is_loopback()));
+    let blackhole = socket2::Socket::new(
+        socket2::Domain::for_address(first),
+        socket2::Type::STREAM,
+        None,
+    )
+    .unwrap();
+    if first.is_ipv6() {
+        blackhole.set_only_v6(true).unwrap();
+    }
+    blackhole
+        .bind(&SocketAddr::new(first.ip(), 0).into())
+        .unwrap();
+    blackhole.listen(0).unwrap();
+    let address = blackhole.local_addr().unwrap().as_socket().unwrap();
+    let live = std::net::TcpListener::bind(SocketAddr::new(second.ip(), address.port()))
+        .expect("bind live peer on the other loopback family");
+    live.set_nonblocking(true).unwrap();
+    let queued = (0..4)
+        .filter_map(|_| {
+            std::net::TcpStream::connect_timeout(&address, Duration::from_millis(100)).ok()
+        })
+        .collect();
+    // A refused connect is not this failure mode. Witness that the full
+    // accept queue actually drops SYNs before exercising either gRPC dialer.
+    let probe = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300));
+    assert!(
+        matches!(&probe, Err(error) if matches!(error.kind(), io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock)),
+        "first resolved address must black-hole connections: {probe:?}"
+    );
+    Some((blackhole, queued, live))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn hostname_connect_policy_keeps_sequential_native_defaults() {
+    use crate::grpc::{Channel, GrpcClient};
+
+    for unary in [true, false] {
+        let Some((_blackhole, _queued, listener)) = blackholed_localhost() else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        // More than one stagger interval: a silently enabled race would
+        // reach the live listener, so the accept assertion catches it.
+        let limit = Duration::from_millis(750);
+        runtime_case(false, move |cx| async move {
+            if unary {
+                let channel = Channel::builder(format!("http://localhost:{port}"))
+                    .connect_timeout(limit)
+                    .timeout(Duration::from_secs(2))
+                    .connect()
+                    .await
+                    .unwrap();
+                let status = GrpcClient::new(channel)
+                    .unary::<Bytes, Bytes>("/test.Service/Watch", Request::new(Bytes::new()))
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.code(), Code::Unavailable, "{status:?}");
+            } else {
+                let endpoint =
+                    NativeStreamEndpoint::from_host("localhost", port, "service", limit).unwrap();
+                let status = endpoint
+                    .connect_tcp(
+                        &cx,
+                        "/test.Service/Watch",
+                        Request::new(Bytes::new()),
+                        IdentityCodec,
+                        NativeStreamConfig::default(),
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(status.code(), Code::DeadlineExceeded, "{status:?}");
+            }
+            assert!(!cx.is_cancel_requested());
+        });
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock),
+            "the default policy must not race the second address (unary={unary})"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn happy_eyeballs_native_hostname_calls_bypass_stalled_first_address() {
+    use crate::grpc::{Channel, GrpcClient, NativeDuplexEvent};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Call {
+        Unary,
+        Endpoint,
+        ChannelServerStream,
+        ChannelDuplex,
+    }
+
+    for call in [
+        Call::Unary,
+        Call::Endpoint,
+        Call::ChannelServerStream,
+        Call::ChannelDuplex,
+    ] {
+        let Some((_blackhole, _queued, listener)) = blackholed_localhost() else {
+            return;
+        };
+        let (address, reached, peer) =
+            scripted_peer_on(listener, PeerScript::LazyResponse(Duration::ZERO));
+        let observed = Arc::clone(&reached);
+        runtime_case(false, move |cx| async move {
+            let limit = Duration::from_secs(3);
+            let channel = Channel::builder(format!("http://localhost:{}", address.port()))
+                .connect_timeout(limit)
+                .timeout(limit)
+                .happy_eyeballs()
+                .connect()
+                .await
+                .unwrap();
+            match call {
+                Call::Unary => {
+                    let response = GrpcClient::new(channel)
+                        .unary::<Bytes, Bytes>("/test.Service/Watch", Request::new(Bytes::new()))
+                        .await
+                        .expect("unary call connects past the stalled first address");
+                    assert_eq!(response.into_inner().as_ref(), b"hi");
+                }
+                Call::Endpoint => {
+                    let endpoint = NativeStreamEndpoint::from_host(
+                        "localhost",
+                        address.port(),
+                        "logical.service",
+                        limit,
+                    )
+                    .unwrap()
+                    .with_happy_eyeballs();
+                    let mut stream = endpoint
+                        .connect_tcp(
+                            &cx,
+                            "/test.Service/Watch",
+                            Request::new(Bytes::new()),
+                            IdentityCodec,
+                            NativeStreamConfig {
+                                timeout: Some(limit),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .expect("endpoint connects past the stalled first address");
+                    assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"hi");
+                    assert!(stream.message().await.unwrap().is_none());
+                    assert_eq!(stream.status().unwrap().code(), Code::Ok);
+                }
+                Call::ChannelServerStream => {
+                    let mut stream = GrpcClient::new(channel)
+                        .into_native_server_streaming(
+                            &cx,
+                            "/test.Service/Watch",
+                            Request::new(Bytes::new()),
+                        )
+                        .await
+                        .expect("channel streaming carries the racing policy");
+                    assert_eq!(stream.message().await.unwrap().unwrap().as_ref(), b"hi");
+                    assert!(stream.message().await.unwrap().is_none());
+                    assert_eq!(stream.status().unwrap().code(), Code::Ok);
+                }
+                Call::ChannelDuplex => {
+                    let mut stream = GrpcClient::new(channel)
+                        .into_native_duplex(&cx, "/test.Service/Watch", Request::new(()))
+                        .await
+                        .expect("channel duplex carries the racing policy");
+                    let mut messages = Vec::new();
+                    let mut closed = false;
+                    while let Some(event) = stream.next_event().await.unwrap() {
+                        match event {
+                            NativeDuplexEvent::Message(message) => messages.push(message),
+                            NativeDuplexEvent::RequestFlushed if !closed => {
+                                stream.close_requests().unwrap();
+                                closed = true;
+                            }
+                            NativeDuplexEvent::RequestFlushed => {}
+                        }
+                    }
+                    assert_eq!(messages, [Bytes::from_static(b"hi")]);
+                    assert_eq!(stream.status().unwrap().code(), Code::Ok);
+                }
+            }
+            assert!(
+                reached.load(Ordering::Acquire),
+                "real peer received HTTP/2 preface"
+            );
+            assert!(!cx.is_cancel_requested());
+        });
+        peer.join()
+            .expect("real HTTP/2 peer observed connection retirement");
+        assert!(observed.load(Ordering::Acquire), "{call:?}");
+    }
 }
 
 #[test]
@@ -862,12 +1110,29 @@ fn native_call_deadline_not_setup_bounds_the_wait_for_response_headers() {
 #[test]
 fn native_cancel_and_dropped_setup_retire_a_witnessed_pending_handshake_wait() {
     for multithread in [false, true] {
-        for cancel in [false, true] {
+        for (cancel, policy) in [
+            (false, ConnectPolicy::Sequential),
+            (true, ConnectPolicy::Sequential),
+            (false, ConnectPolicy::HappyEyeballs),
+            (true, ConnectPolicy::HappyEyeballs),
+        ] {
             let (address, reached, peer) = scripted_peer(PeerScript::Silent);
             runtime_case(multithread, move |cx| async move {
-                let endpoint =
-                    NativeStreamEndpoint::new(address, "localhost", Duration::from_secs(3))
-                        .unwrap();
+                let endpoint = match policy {
+                    ConnectPolicy::Sequential => NativeStreamEndpoint::new(
+                        address,
+                        "localhost",
+                        Duration::from_secs(3),
+                    ),
+                    ConnectPolicy::HappyEyeballs => NativeStreamEndpoint::from_host(
+                        "localhost",
+                        address.port(),
+                        "localhost",
+                        Duration::from_secs(3),
+                    ),
+                }
+                .unwrap()
+                .with_connect_policy(policy);
                 let mut future = Box::pin(endpoint.connect_tcp(
                     &cx,
                     "/test.Service/Watch",

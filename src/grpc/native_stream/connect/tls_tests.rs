@@ -292,7 +292,12 @@ fn native_tls_endpoint_authenticates_streams_and_retains_metadata() {
 #[test]
 fn native_tls_duplex_hostname_uploads_before_any_response_headers() {
     use super::super::NativeDuplexEvent;
-    for multithread in [false, true] {
+    for (multithread, policy) in [
+        (false, ConnectPolicy::Sequential),
+        (true, ConnectPolicy::Sequential),
+        (false, ConnectPolicy::HappyEyeballs),
+        (true, ConnectPolicy::HappyEyeballs),
+    ] {
         let (listener, address) = listener();
         let (consumed, consumed_rx) = sync_channel(1);
         let peer = std::thread::spawn(move || {
@@ -314,7 +319,8 @@ fn native_tls_duplex_hostname_uploads_before_any_response_headers() {
                 "logical.service",
                 Duration::from_secs(3),
             )
-            .unwrap();
+            .unwrap()
+            .with_connect_policy(policy);
             let connector = connector(true);
             let mut stream = endpoint
                 .connect_duplex_tls(

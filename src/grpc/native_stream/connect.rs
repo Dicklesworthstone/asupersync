@@ -5,6 +5,7 @@ use super::{
     check_cancellation, io_status, request_headers,
 };
 use crate::cx::{CancelWakerToken, Cx};
+use crate::grpc::client::ConnectPolicy;
 use crate::grpc::codec::Codec;
 use crate::grpc::{Request, Status};
 use crate::io::{AsyncRead, AsyncWrite};
@@ -41,6 +42,7 @@ pub struct NativeStreamEndpoint {
     destination: Destination,
     authority: String,
     setup_timeout: Duration,
+    connect_policy: ConnectPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +104,7 @@ impl NativeStreamEndpoint {
             destination: Destination::Address(address),
             authority,
             setup_timeout,
+            connect_policy: ConnectPolicy::default(),
         })
     }
 
@@ -115,9 +118,10 @@ impl NativeStreamEndpoint {
     /// its result; an OS lookup already running on a blocking worker can finish
     /// afterward. No socket is opened from that abandoned result.
     ///
-    /// Resolved addresses are attempted in order under one absolute deadline.
-    /// An unreachable first address may consume the budget; this method does
-    /// not promise Happy Eyeballs or retry a started RPC.
+    /// Resolved addresses are attempted in order under one absolute deadline
+    /// by default. An unreachable first address may consume the budget. Use
+    /// [`Self::with_connect_policy`] to opt into [`ConnectPolicy::HappyEyeballs`]
+    /// while retaining that deadline. Neither policy retries a started RPC.
     ///
     /// # Errors
     /// Rejects invalid host syntax, port zero, an invalid HTTP authority, or a
@@ -156,6 +160,30 @@ impl NativeStreamEndpoint {
         Ok(endpoint)
     }
 
+    /// Select how each call connects to a hostname's resolved addresses.
+    ///
+    /// The default is [`ConnectPolicy::Sequential`]. Happy Eyeballs starts
+    /// staggered attempts under the existing setup deadline. HTTP authority
+    /// and the explicit TLS server name are independent of the winning socket.
+    /// Resolved-address and Unix-socket endpoints retain their single dial.
+    #[must_use]
+    pub fn with_connect_policy(mut self, policy: ConnectPolicy) -> Self {
+        self.connect_policy = policy;
+        self
+    }
+
+    /// Opt into staggered Happy Eyeballs connection attempts for hostnames.
+    #[must_use]
+    pub fn with_happy_eyeballs(self) -> Self {
+        self.with_connect_policy(ConnectPolicy::HappyEyeballs)
+    }
+
+    /// Get the policy used for hostname connection attempts.
+    #[must_use]
+    pub fn connect_policy(&self) -> ConnectPolicy {
+        self.connect_policy
+    }
+
     /// An endpoint on a Unix-domain socket (`unix:` channel targets). The
     /// setup deadline bounds the connect like a TCP dial.
     #[cfg(unix)]
@@ -184,7 +212,8 @@ impl NativeStreamEndpoint {
                             .map(DialedStream::Tcp)
                     }
                     Destination::Host(host, port) => {
-                        TcpStream::connect_timeout((host.clone(), *port), remaining)
+                        self.connect_policy
+                            .connect_host(host.clone(), *port, remaining)
                             .await
                             .map(DialedStream::Tcp)
                     }

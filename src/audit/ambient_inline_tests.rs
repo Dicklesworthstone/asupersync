@@ -592,6 +592,15 @@ fn test_function() {
     // moved from runtime/io_driver/shared.rs to io_driver/poll_gate.rs
     // (e262b3d87, d2010484b) with the same std::time::Instant::now(). No
     // scanner exemption or detection pattern changed.
+    // 810 -> 810 (br-asupersync-1aqha7, gRPC opt-in policy): the two
+    // hostname connect_timeout sites in grpc/client.rs and native_stream/
+    // connect.rs now share ConnectPolicy::connect_host. Its default keeps the
+    // same ordered dial; the opt-in uses the already inventoried Happy
+    // Eyeballs connector. Deduplication removes one production TCP site.
+    // The scripted H2 peer's extracted helper adds one TcpListener parameter
+    // occurrence in native_stream/connect/tests.rs, offsetting that removal.
+    // The new black-hole fixture is explicitly cfg(test); no scanner
+    // exemption, detection pattern, or numerical threshold changed.
     const AMBIENT_VIOLATION_BASELINE_COUNT: usize = 810;
 
     fn src_root() -> PathBuf {

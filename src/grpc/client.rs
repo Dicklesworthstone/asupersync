@@ -218,6 +218,47 @@ fn client_framed_codec<C: Codec>(channel: &Channel, codec: C) -> FramedCodec<C> 
     .with_frame_hooks(compressor, decompressor)
 }
 
+/// Connection policy for native gRPC hostname destinations.
+///
+/// The policy controls TCP connection attempts only. It does not change DNS
+/// resolution, HTTP/2 authority, TLS authentication, or RPC retry behavior.
+/// A literal IP or explicit dial address still opens only one TCP connection.
+/// Unix sockets and deterministic loopback channels keep their existing paths.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ConnectPolicy {
+    /// Try resolved addresses in order under the existing connection deadline.
+    ///
+    /// This is the compatibility default. An unreachable first address can
+    /// consume the entire connection budget before another address is tried.
+    #[default]
+    Sequential,
+    /// Stagger connection attempts using the shared Happy Eyeballs connector.
+    ///
+    /// The resolver's first address family keeps its lead, with families then
+    /// interleaved and attempts normally staggered by 250 milliseconds. The
+    /// first successful TCP connection wins; pending attempts are dropped.
+    /// All attempts remain bounded by the original connection/setup deadline,
+    /// including the time spent resolving the hostname.
+    HappyEyeballs,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl ConnectPolicy {
+    pub(crate) async fn connect_host(
+        self,
+        host: String,
+        port: u16,
+        timeout: Duration,
+    ) -> io::Result<TcpStream> {
+        match self {
+            Self::Sequential => TcpStream::connect_timeout((host, port), timeout).await,
+            Self::HappyEyeballs => {
+                crate::net::happy_eyeballs::connect_resolved((host, port), Some(timeout)).await
+            }
+        }
+    }
+}
+
 /// gRPC channel configuration.
 #[derive(Debug, Clone)]
 pub struct ChannelConfig {
@@ -281,6 +322,9 @@ pub struct ChannelBuilder {
     /// Explicit native TCP destination, separate from the logical authority.
     #[cfg(not(target_arch = "wasm32"))]
     dial_addr: Option<SocketAddr>,
+    /// Policy for native hostname connection attempts.
+    #[cfg(not(target_arch = "wasm32"))]
+    connect_policy: ConnectPolicy,
     /// Idle unary connections to keep for reuse; 0 keeps none.
     #[cfg(not(target_arch = "wasm32"))]
     reuse_connections: usize,
@@ -304,6 +348,8 @@ impl ChannelBuilder {
             #[cfg(not(target_arch = "wasm32"))]
             dial_addr: None,
             #[cfg(not(target_arch = "wasm32"))]
+            connect_policy: ConnectPolicy::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             reuse_connections: 0,
         }
     }
@@ -313,6 +359,29 @@ impl ChannelBuilder {
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.config.connect_timeout = timeout;
         self
+    }
+
+    /// Select how native RPCs connect to a hostname's resolved addresses.
+    ///
+    /// [`ConnectPolicy::Sequential`] is the default. Opting into
+    /// [`ConnectPolicy::HappyEyeballs`] lets another address connect while an
+    /// earlier attempt is still waiting. The policy applies to unary and all
+    /// native streaming calls, including fresh connections after pool reuse.
+    /// It preserves the configured timeout, HTTP authority, and TLS identity.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn connect_policy(mut self, policy: ConnectPolicy) -> Self {
+        self.connect_policy = policy;
+        self
+    }
+
+    /// Opt into staggered Happy Eyeballs connection attempts for hostnames.
+    ///
+    /// Equivalent to `connect_policy(ConnectPolicy::HappyEyeballs)`.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn happy_eyeballs(self) -> Self {
+        self.connect_policy(ConnectPolicy::HappyEyeballs)
     }
 
     /// Set the request timeout (deadline).
@@ -476,8 +545,11 @@ impl ChannelBuilder {
         )
         .await?;
         #[cfg(not(target_arch = "wasm32"))]
-        if self.reuse_connections > 0 {
-            channel.unary_pool = Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
+        {
+            channel.connect_policy = self.connect_policy;
+            if self.reuse_connections > 0 {
+                channel.unary_pool = Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
+            }
         }
         Ok(channel)
     }
@@ -493,7 +565,8 @@ impl ChannelBuilder {
 /// does not resolve a hostname or open a socket. Each native unary call owns
 /// its connection. Hostname resolution uses the runtime's offloaded system
 /// resolver under the caller's I/O capability and connection deadline. Resolved
-/// addresses are tried in order; this channel does not race connection attempts.
+/// addresses are tried in order by default. `ChannelBuilder::happy_eyeballs`
+/// opts native hostname calls into staggered connection attempts.
 #[derive(Debug, Clone)]
 pub struct Channel {
     /// The target URI.
@@ -509,6 +582,9 @@ pub struct Channel {
     /// Explicit native TCP destination distinct from the logical authority.
     #[cfg(not(target_arch = "wasm32"))]
     dial_addr: Option<SocketAddr>,
+    /// Policy for native hostname connection attempts.
+    #[cfg(not(target_arch = "wasm32"))]
+    connect_policy: ConnectPolicy,
     /// Idle unary connections kept for reuse, shared by clones
     /// ([`ChannelBuilder::reuse_connections`]).
     #[cfg(not(target_arch = "wasm32"))]
@@ -591,6 +667,8 @@ impl Channel {
             #[cfg(not(target_arch = "wasm32"))]
             dial_addr,
             #[cfg(not(target_arch = "wasm32"))]
+            connect_policy: ConnectPolicy::default(),
+            #[cfg(not(target_arch = "wasm32"))]
             unary_pool: None,
         })
     }
@@ -605,6 +683,13 @@ impl Channel {
     #[must_use]
     pub fn config(&self) -> &ChannelConfig {
         &self.config
+    }
+
+    /// Get the policy used for native hostname connection attempts.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn connect_policy(&self) -> ConnectPolicy {
+        self.connect_policy
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1032,10 +1117,7 @@ impl<C: Codec> GrpcClient<C> {
             )),
             (None, None) => None,
         };
-        let target = NativeH2Target::parse(
-            self.channel.uri(), config.use_tls, self.channel.tls_server_name(),
-            self.channel.dial_addr(),
-        )?;
+        let target = NativeH2Target::from_channel(&self.channel)?;
         #[cfg(not(feature = "tls"))]
         if target.use_tls {
             return Err(Status::unavailable(
@@ -1055,7 +1137,8 @@ impl<C: Codec> GrpcClient<C> {
                 target.authority.clone(),
                 config.connect_timeout,
             )?,
-        };
+        }
+        .with_connect_policy(target.connect_policy);
         let stream_config = NativeStreamConfig {
             max_send_message_size: config.max_send_message_size,
             max_recv_message_size: config.max_recv_message_size,
@@ -1477,6 +1560,7 @@ struct NativeH2Target {
     server_name: String,
     scheme: &'static str,
     use_tls: bool,
+    connect_policy: ConnectPolicy,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1501,6 +1585,17 @@ enum NativeH2Destination {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeH2Target {
+    fn from_channel(channel: &Channel) -> Result<Self, Status> {
+        let mut target = Self::parse(
+            channel.uri(),
+            channel.config().use_tls,
+            channel.tls_server_name(),
+            channel.dial_addr(),
+        )?;
+        target.connect_policy = channel.connect_policy();
+        Ok(target)
+    }
+
     fn parse(
         uri: &str,
         use_tls: bool,
@@ -1541,6 +1636,7 @@ impl NativeH2Target {
             ),
             scheme: if use_tls { "https" } else { "http" },
             use_tls,
+            connect_policy: ConnectPolicy::default(),
         })
     }
 
@@ -1559,6 +1655,7 @@ impl NativeH2Target {
                 server_name: "localhost".to_owned(),
                 scheme: "http",
                 use_tls: false,
+                connect_policy: ConnectPolicy::default(),
             })
         }
         #[cfg(not(unix))]
@@ -1579,7 +1676,8 @@ impl NativeH2Target {
                 .await
                 .map(DialedStream::Tcp),
             NativeH2Destination::Host(host, port) => {
-                TcpStream::connect_timeout((host.clone(), *port), timeout)
+                self.connect_policy
+                    .connect_host(host.clone(), *port, timeout)
                     .await
                     .map(DialedStream::Tcp)
             }
@@ -1688,12 +1786,7 @@ async fn native_h2_unary(
     // its reads are interrupted, so each connection it took would be dropped
     // as broken, until the pool was empty.
     super::native_stream::check_cancellation(&cx)?;
-    let target = NativeH2Target::parse(
-        channel.uri(),
-        channel.config().use_tls,
-        channel.tls_server_name(),
-        channel.dial_addr(),
-    )?;
+    let target = NativeH2Target::from_channel(channel)?;
     let config = channel.config().clone();
     let tls_connector = channel.tls_connector().cloned();
     let pool = channel.unary_pool.clone();
