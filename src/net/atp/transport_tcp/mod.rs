@@ -4437,6 +4437,11 @@ async fn receive_on_transport<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    // Reject invalid chunk geometry before the receiver starts accepting a
+    // transfer or allocating its delta baseline scratch buffer.
+    cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+    sender_validation::validate_config(&config)?;
+
     // Handshake.
     let hello_frame = with_transport_timeout(
         cx,
