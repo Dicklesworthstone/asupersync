@@ -28,6 +28,11 @@ use crate::types::{Budget, CancelReason, Severity, TaskId};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod archive;
+pub use archive::{
+    ScheduleCaptureArchive, ScheduleCaptureArchiveError, ScheduleCaptureArchiveLimits,
+};
+
 /// Worker context attached to one canonical scheduler observation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SchedulerEventContext {

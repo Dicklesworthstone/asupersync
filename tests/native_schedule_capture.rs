@@ -11,6 +11,7 @@ use asupersync::lab::runtime::production_strict::{
 };
 use asupersync::lab::{LabConfig, LabRuntime};
 use asupersync::runtime::{RootDrainOutcome, Runtime, RuntimeBuilder};
+use asupersync::trace::capture::ScheduleCaptureArchiveLimits;
 use asupersync::trace::replay::ProductionCancellationPhase;
 use asupersync::trace::{
     CompactTaskId, ProductionSchedule, ProjectionError, ProjectionOptions, ScheduleCaptureError,
@@ -49,6 +50,39 @@ fn completed_capture(runtime: &Runtime) -> ScheduleCaptureSnapshot {
             Err(error) => panic!("capture did not reach a complete boundary: {error:?}"),
         }
     }
+}
+
+/// Saves all native capture evidence, opens an independent file handle, and
+/// reconstructs a snapshot before a fresh Lab consumes it. The same bounded
+/// codec must preserve diagnostic refusals as well as replayable workloads.
+fn archive_roundtrip(snapshot: &ScheduleCaptureSnapshot) -> ScheduleCaptureSnapshot {
+    let limits = ScheduleCaptureArchiveLimits::default();
+    let encoded = snapshot.to_bytes(limits).expect("encode native capture");
+    let mut file = tempfile::NamedTempFile::new().expect("native capture archive");
+    snapshot
+        .write_to(file.as_file_mut(), limits)
+        .expect("persist native capture");
+    file.as_file_mut()
+        .sync_all()
+        .expect("flush native capture archive");
+    let mut reopened = file.reopen().expect("reopen native capture archive");
+    let restored = ScheduleCaptureSnapshot::read_from(&mut reopened, limits)
+        .expect("decode native capture from independent file handle");
+
+    assert_eq!(restored.events(), snapshot.events());
+    assert_eq!(restored.contexts(), snapshot.contexts());
+    assert_eq!(restored.caller_tasks(), snapshot.caller_tasks());
+    assert_eq!(restored.terminal_outcomes(), snapshot.terminal_outcomes());
+    assert_eq!(restored.total_events(), snapshot.total_events());
+    assert_eq!(restored.dropped_events(), snapshot.dropped_events());
+    assert_eq!(restored.capacity(), snapshot.capacity());
+    assert_eq!(restored.worker_count(), snapshot.worker_count());
+    assert_eq!(
+        restored.to_bytes(limits).unwrap().as_bytes(),
+        encoded.as_bytes(),
+        "reopening must preserve the complete canonical archive"
+    );
+    restored
 }
 
 /// Each `join_native` call runs one `block_on`, whose caller-polled root is
@@ -157,6 +191,8 @@ fn native_parked_wakes_replay_with_identical_terminal_values() {
                     (first.max(second), Severity::Ok)
                 ]
             );
+            assert!(snapshot.production_schedule().unwrap().carries_outcomes());
+            let snapshot = archive_roundtrip(&snapshot);
             let schedule = snapshot.production_schedule().unwrap();
             assert!(schedule.carries_outcomes());
             assert_eq!(schedule.summary().spawned, 2);
@@ -283,6 +319,7 @@ fn native_capture_outcomes_refuse_terminal_outcome_drift() {
         .map(|(_, outcome)| *outcome)
         .collect();
     assert_eq!(outcomes, [Severity::Ok, Severity::Ok]);
+    let snapshot = archive_roundtrip(&snapshot);
     let schedule = snapshot.production_schedule().unwrap();
     assert!(schedule.carries_outcomes());
     let by_ordinal: Vec<_> = schedule
@@ -516,6 +553,19 @@ fn native_region_cancellation_replays_request_and_cleanup_acknowledgements() {
             assert!(legacy.cancellation_events().is_none());
             assert_eq!(legacy.summary().spawned, 1);
 
+            assert_eq!(
+                snapshot
+                    .production_schedule_with_cancellation()
+                    .unwrap()
+                    .cancellation_events()
+                    .unwrap()
+                    .len(),
+                3
+            );
+            // Reconstruct from disk before injecting the request into a new
+            // Lab: the private reason/budget/publication/terminal witnesses
+            // must survive independently of the original native runtime.
+            let snapshot = archive_roundtrip(&snapshot);
             let schedule = snapshot.production_schedule_with_cancellation().unwrap();
             assert!(schedule.carries_outcomes());
             assert_eq!(schedule.summary().spawned, 1);
@@ -642,6 +692,11 @@ fn native_cancellation_capture_contains_ack_before_completion() {
             let reason = join_native(&runtime, join);
             assert_eq!(reason.kind, CancelKind::User);
             let snapshot = completed_capture(&runtime);
+            assert!(
+                snapshot.production_schedule_with_cancellation().is_err(),
+                "the original direct Cx cancellation is unsupported"
+            );
+            let snapshot = archive_roundtrip(&snapshot);
             assert!(
                 snapshot
                     .production_schedule()
@@ -824,6 +879,15 @@ fn native_capture_overflow_is_bounded_and_rejected() {
         snapshot.production_schedule(),
         Err(ScheduleCaptureError::Truncated { .. })
     ));
+    let snapshot = archive_roundtrip(&snapshot);
+    assert!(matches!(
+        snapshot.production_schedule(),
+        Err(ScheduleCaptureError::Truncated { .. })
+    ));
+    assert!(
+        snapshot.production_schedule_with_cancellation().is_err(),
+        "saving an evicted trace cannot make it a complete cancellation source"
+    );
     eprintln!(
         "{}",
         serde_json::json!({"bead": "asupersync-bi2462.95", "case": "overflow", "total": snapshot.total_events(), "dropped": snapshot.dropped_events(), "capacity": snapshot.capacity()})
