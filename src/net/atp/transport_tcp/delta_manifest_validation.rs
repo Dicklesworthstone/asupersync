@@ -12,6 +12,14 @@ pub(super) fn validate(
     manifest: &TransferManifest,
     delta: &DeltaManifestWire,
 ) -> Result<(), TransportError> {
+    // The planner commits to tree_id, not to the enclosing transfer's root.
+    // Native TCP senders use the content root as tree_id. Without this binding,
+    // a valid old delta plan can select AlreadyInSync for different new content.
+    if delta.tree_id != manifest.merkle_root_hex {
+        return Err(TransportError::Frame(
+            "delta manifest tree id does not match transfer content root".into(),
+        ));
+    }
     if delta.chunk_size == 0
         || u64::try_from(delta.chunk_size).unwrap_or(u64::MAX) > u64::from(MAX_COMPRESSED_CHUNK_RAW)
     {

@@ -13,7 +13,7 @@
         };
         let delta = DeltaManifestWire {
             schema: "schema".into(),
-            tree_id: "tree".into(),
+            tree_id: "33".repeat(32),
             chunk_size: 4096,
             total_size_bytes: size,
             merkle_root_hex: "11".repeat(32),
@@ -99,3 +99,152 @@
         });
         assert!(validate(&manifest, &delta).is_err());
     }
+
+// These fixtures use the same independent content and planner commitments as
+// the native TCP sender, not invented roots or a substitute delta planner.
+fn committed_single_file(bytes: &[u8]) -> TransferManifest {
+    use crate::atp::delta::{CasChunkRef, PersistentChunkManifest};
+    use crate::atp::object::{ContentId, ObjectId};
+    use crate::net::atp::transport_common::{EntryDigest, flat_merkle_root_from_digests};
+    use sha2::{Digest, Sha256};
+
+    let size = u64::try_from(bytes.len()).expect("test payload size");
+    assert!(size <= 16, "one-chunk test fixture");
+    let content_sha256: [u8; 32] = Sha256::digest(bytes).into();
+    let content_id = ContentId::from_bytes(bytes);
+    let root = flat_merkle_root_from_digests(&[EntryDigest {
+        rel_path: "payload".into(),
+        size,
+        content_id: ObjectId::content(content_id.clone()),
+        content_sha256,
+    }]);
+    let chunks = if bytes.is_empty() {
+        Vec::new()
+    } else {
+        vec![CasChunkRef {
+            index: 0,
+            byte_offset: 0,
+            size_bytes: size,
+            content_id: content_id.clone(),
+        }]
+    };
+    let planner = PersistentChunkManifest::new(root.clone(), chunks)
+        .expect("real canonical planner manifest");
+    TransferManifest {
+        transfer_id: "bindingtest".into(),
+        root_name: "payload".into(),
+        is_directory: false,
+        total_bytes: size,
+        merkle_root_hex: root.clone(),
+        metadata_root_hex: None,
+        directory_metadata: None,
+        entries: vec![ManifestEntry {
+            index: 0,
+            rel_path: "payload".into(),
+            size,
+            sha256_hex: crate::net::atp::transport_common::hex_encode(&content_sha256),
+            metadata: None,
+            members: Vec::new(),
+        }],
+        delta_manifest: Some(DeltaManifestWire {
+            schema: super::super::ATP_DELTA_CHUNK_MANIFEST_SCHEMA.into(),
+            tree_id: root,
+            chunk_size: 16,
+            total_size_bytes: size,
+            merkle_root_hex: planner.merkle_root.to_hex(),
+            chunks: if bytes.is_empty() {
+                Vec::new()
+            } else {
+                vec![DeltaChunkWire {
+                    index: 0,
+                    entry_index: 0,
+                    rel_path: "payload".into(),
+                    entry_offset: 0,
+                    stream_offset: 0,
+                    size_bytes: size,
+                    content_id_hex: content_id.to_hex(),
+                }]
+            },
+        }),
+    }
+}
+
+#[test]
+fn a_self_consistent_delta_plan_must_commit_to_the_enclosing_content_root() {
+    let old = committed_single_file(b"old payload");
+    let mut wanted = committed_single_file(b"new payload");
+    assert_eq!(old.total_bytes, wanted.total_bytes);
+    assert_ne!(old.merkle_root_hex, wanted.merkle_root_hex);
+    wanted.delta_manifest = old.delta_manifest;
+    let delta = wanted.delta_manifest.as_ref().expect("replayed delta plan");
+
+    // This is not a corrupt delta root: the real planner accepts it. The
+    // missing gate was the link between two individually valid commitments.
+    super::super::planner_manifest_from_wire(delta).expect("self-consistent old plan");
+    assert!(matches!(
+        validate(&wanted, delta),
+        Err(TransportError::Frame(message)) if message.contains("transfer content root")
+    ));
+}
+
+#[test]
+fn receiver_negotiation_cannot_noop_new_content_with_a_replayed_old_delta_plan() {
+    use super::super::{DeltaWireMode, TransferConfig, build_receiver_delta_state};
+    use crate::atp::object::MetadataPolicy;
+
+    let directory = tempfile::tempdir().expect("receiver destination");
+    let destination = directory.path().canonicalize().expect("canonical destination");
+    std::fs::write(destination.join("payload"), b"old payload").expect("existing file");
+    let old = committed_single_file(b"old payload");
+    let wanted = committed_single_file(b"new payload");
+    let runtime = crate::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("native runtime");
+    runtime.block_on(runtime.handle().spawn(async move {
+        let config = TransferConfig {
+            chunk_size: 16,
+            metadata_policy: MetadataPolicy::portable(),
+            ..TransferConfig::default()
+        };
+        let unchanged = build_receiver_delta_state(&destination, &old, &config)
+            .await
+            .expect("real unchanged-file baseline");
+        assert_eq!(unchanged.request.mode, DeltaWireMode::AlreadyInSync);
+        let changed = build_receiver_delta_state(&destination, &wanted, &config)
+            .await
+            .expect("real changed-file baseline");
+        assert_ne!(changed.request.mode, DeltaWireMode::AlreadyInSync);
+
+        let mut replayed = wanted;
+        replayed.delta_manifest = old.delta_manifest;
+        let rejected = build_receiver_delta_state(&destination, &replayed, &config).await;
+        assert!(matches!(
+            rejected,
+            Err(TransportError::Frame(message)) if message.contains("transfer content root")
+        ));
+        assert_eq!(std::fs::read(destination.join("payload")).unwrap(), b"old payload");
+    }));
+}
+
+#[test]
+fn commitment_mismatch_is_rejected_even_when_delta_reuse_is_disabled() {
+    use super::super::{TransferConfig, build_receiver_delta_state};
+
+    let directory = tempfile::tempdir().expect("test root");
+    let missing = directory.path().join("not-created");
+    let old = committed_single_file(b"old payload");
+    let mut wanted = committed_single_file(b"new payload");
+    wanted.delta_manifest = old.delta_manifest;
+    let config = TransferConfig {
+        enable_delta: false,
+        ..TransferConfig::default()
+    };
+    let refused = futures_lite::future::block_on(build_receiver_delta_state(
+        &missing, &wanted, &config,
+    ));
+    assert!(matches!(
+        refused,
+        Err(TransportError::Frame(message)) if message.contains("transfer content root")
+    ));
+    assert!(!missing.exists(), "preflight must not create a destination");
+}
