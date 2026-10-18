@@ -1947,7 +1947,7 @@ struct DeltaContentKey {
 struct ReceiverDeltaBaseline {
     manifest: PersistentChunkManifest,
     store: DeltaPlannerStore,
-    chunks_by_content: BTreeMap<DeltaContentKey, Vec<u8>>,
+    chunks_by_content: BTreeMap<DeltaContentKey, delta_storage::BaselineChunk>,
     metadata_matches_sender: bool,
 }
 
@@ -2613,7 +2613,7 @@ async fn build_receiver_delta_baseline(
         if chunks.saturating_add(size.div_ceil(chunk_size)) > max_chunks {
             return Ok(None);
         }
-        append_receiver_delta_chunks(
+        if !append_receiver_delta_chunks(
             &entry.abs_path,
             delta_manifest.chunk_size.max(1),
             &mut index,
@@ -2621,8 +2621,11 @@ async fn build_receiver_delta_baseline(
             &mut store,
             &mut chunks_by_content,
             &mut planner_chunks,
+            max_chunks,
         )
-        .await?;
+        .await? {
+            return Ok(None);
+        }
     }
 
     let receiver_tree_id = flat_merkle_root_from_digests(&digests);
@@ -2648,46 +2651,61 @@ async fn append_receiver_delta_chunks(
     next_index: &mut u32,
     stream_offset: &mut u64,
     store: &mut DeltaPlannerStore,
-    chunks_by_content: &mut BTreeMap<DeltaContentKey, Vec<u8>>,
+    chunks_by_content: &mut BTreeMap<DeltaContentKey, delta_storage::BaselineChunk>,
     planner_chunks: &mut Vec<CasChunkRef>,
-) -> Result<(), TransportError> {
+    max_chunks: u64,
+) -> Result<bool, TransportError> {
+    let max_chunk_size = usize::try_from(MAX_COMPRESSED_CHUNK_RAW).unwrap_or(usize::MAX);
+    if chunk_size == 0 || chunk_size > max_chunk_size {
+        return Err(TransportError::Frame("invalid delta baseline chunk size".into()));
+    }
     let mut file = crate::fs::File::open(path)
         .await
         .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
-    let mut buf = vec![0u8; chunk_size.max(1)];
+    let path = std::sync::Arc::new(path.to_path_buf());
+    let mut entry_offset = 0u64;
+    let mut buf = vec![0u8; chunk_size];
     loop {
-        // A whole `chunk_size` chunk per iteration (asupersync-u4j7sr): one
-        // read of `crate::fs::File` returns at most 128 KiB.
+        if let Some(cx) = Cx::current() {
+            cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+        }
         let n = crate::net::atp::transport_common::delta::read_full_chunk(&mut file, &mut buf)
             .await
             .map_err(|err| TransportError::Source(format!("{}: {err}", path.display())))?;
         if n == 0 {
-            break;
+            return Ok(true);
         }
-        let bytes = &buf[..n];
-        let insert = store
-            .insert(bytes)
-            .map_err(|err| TransportError::Frame(format!("receiver delta CAS insert: {err}")))?;
+        if u64::try_from(planner_chunks.len()).unwrap_or(u64::MAX) >= max_chunks {
+            return Ok(false);
+        }
         let size_bytes = u64::try_from(n)
-            .map_err(|_| TransportError::Frame("delta chunk length overflow".to_string()))?;
-        let content_id_hex = insert.content_id.to_hex();
+            .map_err(|_| TransportError::Frame("delta chunk length overflow".into()))?;
+        let after_index = (*next_index)
+            .checked_add(1)
+            .ok_or_else(|| TransportError::Frame("delta chunk index overflow".into()))?;
+        let after_stream = (*stream_offset)
+            .checked_add(size_bytes)
+            .ok_or_else(|| TransportError::Frame("delta stream offset overflow".into()))?;
+        let after_entry = entry_offset
+            .checked_add(size_bytes)
+            .ok_or_else(|| TransportError::Frame("delta entry offset overflow".into()))?;
+        let content_id = ContentId::from_bytes(&buf[..n]);
+        store.insert_verified_coverage(content_id.clone(), size_bytes);
         chunks_by_content
-            .entry(delta_content_key(content_id_hex.clone(), size_bytes))
-            .or_insert_with(|| bytes.to_vec());
+            .entry(delta_content_key(content_id.to_hex(), size_bytes))
+            .or_insert_with(|| {
+                delta_storage::BaselineChunk::new(std::sync::Arc::clone(&path), entry_offset)
+            });
         planner_chunks.push(CasChunkRef {
             index: *next_index,
             byte_offset: *stream_offset,
             size_bytes,
-            content_id: insert.content_id,
+            content_id,
         });
-        *next_index = (*next_index)
-            .checked_add(1)
-            .ok_or_else(|| TransportError::Frame("delta chunk index overflow".to_string()))?;
-        *stream_offset = (*stream_offset)
-            .checked_add(size_bytes)
-            .ok_or_else(|| TransportError::Frame("delta stream offset overflow".to_string()))?;
+        *next_index = after_index;
+        *stream_offset = after_stream;
+        entry_offset = after_entry;
     }
-    Ok(())
 }
 
 /// Polls of a receipt send that keep the receive's cancellation masked.
@@ -3986,6 +4004,7 @@ pub async fn send_path_with_options(
 }
 
 mod delta_manifest_validation;
+mod delta_storage;
 mod sender_validation;
 
 fn transfer_id_hex(merkle_root_hex: &str, total_bytes: u64, file_count: usize) -> String {
@@ -4164,7 +4183,16 @@ where
         ));
     }
 
-    let mut received_chunks = BTreeMap::<DeltaContentKey, Vec<u8>>::new();
+    // Own staging before accepting payload bytes. The spool is declared
+    // after its directory guard so it closes first on a hard future drop.
+    let mut staging_guard = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
+    let staging_dir = staging_guard.path().to_owned();
+    let mut received_chunks = delta_storage::DeltaChunkSpool::create(
+        cx,
+        &staging_dir.join("delta-chunks"),
+        config.max_transfer_bytes,
+    )
+    .await?;
     let mut received_keys = BTreeSet::<DeltaChunkKey>::new();
     let mut received = 0u64;
     // No requested chunk is larger than this, so neither is a decompressed one.
@@ -4219,8 +4247,8 @@ where
                         });
                     }
                     received_chunks
-                        .entry(delta_content_key(content_id_hex, size_bytes))
-                        .or_insert_with(|| chunk.to_vec());
+                        .insert(cx, delta_content_key(content_id_hex, size_bytes), chunk)
+                        .await?;
                 }
                 FrameType::ObjectComplete => break,
                 FrameType::Close => break,
@@ -4243,13 +4271,15 @@ where
                 "delta sender did not provide every requested chunk".to_string(),
             ));
         }
+        received_chunks.seal(cx).await?;
         Ok(())
     }
     .await;
-    recv_result?;
-
-    let mut staging_guard = create_owned_staging_dir(dest_dir, &manifest.transfer_id).await?;
-    let staging_dir = staging_guard.path().to_owned();
+    if let Err(error) = recv_result {
+        drop(received_chunks);
+        let _ = crate::fs::remove_dir_all(&staging_dir).await;
+        return Err(error);
+    }
 
     let mut chunks_by_entry = BTreeMap::<u32, Vec<&DeltaChunkWire>>::new();
     for chunk in &delta_manifest.chunks {
@@ -4264,6 +4294,7 @@ where
 
     let mut digests = Vec::with_capacity(manifest.entries.len());
     let mut staging_paths = Vec::with_capacity(manifest.entries.len());
+    let mut chunk_scratch = Vec::new();
     let reassemble_result: Result<(), TransportError> = async {
         for entry in &manifest.entries {
             let idx = entry.index;
@@ -4283,21 +4314,22 @@ where
                     }
                     let content_key =
                         delta_content_key(chunk.content_id_hex.clone(), chunk.size_bytes);
-                    let bytes = received_chunks
-                        .get(&content_key)
-                        .or_else(|| baseline.chunks_by_content.get(&content_key))
-                        .ok_or_else(|| {
+                    if received_chunks.contains(&content_key) {
+                        received_chunks
+                            .read_verified(cx, &content_key, &mut chunk_scratch)
+                            .await?;
+                    } else {
+                        let source = baseline.chunks_by_content.get(&content_key).ok_or_else(|| {
                             TransportError::Frame(format!(
                                 "delta reassembly missing chunk for {} at offset {}",
                                 chunk.rel_path, chunk.entry_offset
                             ))
                         })?;
-                    if ContentId::from_bytes(bytes).to_hex() != chunk.content_id_hex {
-                        return Err(TransportError::Integrity(format!(
-                            "delta reassembly content id mismatch for {} at offset {}",
-                            chunk.rel_path, chunk.entry_offset
-                        )));
+                        source
+                            .read_verified(cx, &content_key, &mut chunk_scratch)
+                            .await?;
                     }
+                    let bytes = chunk_scratch.as_slice();
                     file.write_all(bytes).await?;
                     state.update_with_chunk(bytes);
                     expected_offset = expected_offset.checked_add(chunk.size_bytes).ok_or_else(|| {
@@ -4326,6 +4358,7 @@ where
     }
     .await;
 
+    drop(received_chunks);
     if let Err(err) = reassemble_result {
         let _ = crate::fs::remove_dir_all(&staging_dir).await;
         return Err(err);
@@ -4437,6 +4470,11 @@ async fn receive_on_transport<S>(
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin,
 {
+    // Reject invalid chunk geometry before the receiver starts accepting a
+    // transfer or allocating its delta baseline scratch buffer.
+    cx.checkpoint().map_err(|_| TransportError::Cancelled)?;
+    sender_validation::validate_config(&config)?;
+
     // Handshake.
     let hello_frame = with_transport_timeout(
         cx,
