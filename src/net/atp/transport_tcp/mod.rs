@@ -2665,12 +2665,14 @@ async fn append_receiver_delta_chunks(
             break;
         }
         let bytes = &buf[..n];
-        let insert = store
-            .insert(bytes)
-            .map_err(|err| TransportError::Frame(format!("receiver delta CAS insert: {err}")))?;
         let size_bytes = u64::try_from(n)
             .map_err(|_| TransportError::Frame("delta chunk length overflow".to_string()))?;
-        let content_id_hex = insert.content_id.to_hex();
+        let content_id = ContentId::from_bytes(bytes);
+        let content_id_hex = content_id.to_hex();
+        // The planner needs verified hash/size coverage, while reconstruction
+        // already owns one payload copy in chunks_by_content. Keeping another
+        // Vec in DeltaPlannerStore duplicates baseline payload memory.
+        store.insert_verified_coverage(content_id.clone(), size_bytes);
         chunks_by_content
             .entry(delta_content_key(content_id_hex.clone(), size_bytes))
             .or_insert_with(|| bytes.to_vec());
@@ -2678,7 +2680,7 @@ async fn append_receiver_delta_chunks(
             index: *next_index,
             byte_offset: *stream_offset,
             size_bytes,
-            content_id: insert.content_id,
+            content_id,
         });
         *next_index = (*next_index)
             .checked_add(1)
