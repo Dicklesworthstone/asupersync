@@ -218,3 +218,56 @@ pub struct JournalCancelReport {
     /// observations; drain and reconcile retained evidence rather than guessing.
     pub outcome: crate::types::Outcome<(), sparse_writer::SparseWriterError>,
 }
+
+/// Trusted recovery inputs for settling an existing destination, without publication.
+///
+/// Drain the previous writer and reopen any uncertain journal first. The caller
+/// must exclusively own the journal, destination and its ancestry throughout the
+/// operation. In particular, CommitIntent does not encode a destination: this
+/// path MUST come from the application's trusted transfer-to-path catalog.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCommitRecoveryRequest {
+    /// Sole journal owner opened with the trusted record-authentication key.
+    pub journal: AppendJournal,
+    /// Existing offered transfer with a matching commit intent.
+    pub transfer_id: String,
+    /// Independently selected regular-file identity, not selected by disk records.
+    pub object_id: crate::atp::object::ObjectId,
+    /// Trusted expected graph. Recovery authenticates the selected file's bytes.
+    pub manifest: std::sync::Arc<crate::atp::manifest::Manifest>,
+    /// Independent pin required for chunk-only manifest-addressed files.
+    pub expected_chunk_commitment: Option<crate::atp::manifest_chunk_commitment::ManifestChunkCommitment>,
+    /// Absolute, UTF-8 application path; no parent traversal or final symlink.
+    /// Recovery never chooses this from CommitComplete or ChunkWritten strings.
+    pub destination: std::path::PathBuf,
+    /// Maximum selected file length admitted before opening the destination.
+    pub max_bytes: u64,
+    /// Maximum selected manifest chunk descriptors checked before file I/O.
+    /// These limits do not bound memory already occupied by graph/journal history.
+    pub max_manifest_chunks: u32,
+    /// Application timestamp for a newly synchronized matching CommitComplete.
+    pub timestamp: u64,
+}
+
+/// Fresh destination observations, separate from terminal journal persistence.
+///
+/// Recovery does not invoke a publisher, so it cannot truthfully manufacture a
+/// JournalPublication::Confirmed result for the previous invocation. Success
+/// means the authorized destination is now verified and synchronized, and a new
+/// matching completion record was synchronized. It is not evidence of peer Proof
+/// delivery or of which earlier process created those bytes.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCommitRecoveryReport {
+    /// Original journal returned after ordinary validation/storage outcomes.
+    /// Outer gateway failure or abandonment requires reopening after region drain.
+    pub journal: AppendJournal,
+    /// This invocation authenticated the entire selected destination's content.
+    pub content_verified: bool,
+    /// The open file and, on Unix, its parent directory passed their sync barriers.
+    pub destination_synced: bool,
+    /// A fresh CommitComplete append and journal sync both returned successfully.
+    /// False never proves that a completion record is absent from disk.
+    pub completion_persisted: bool,
+    /// No error rolls back existing files or records. No payload is ever rewritten.
+    pub outcome: crate::types::Outcome<std::path::PathBuf, sparse_writer::SparseWriterError>,
+}
