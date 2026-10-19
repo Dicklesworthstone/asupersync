@@ -3045,12 +3045,11 @@ fn coordinator_wakes_the_reactor_only_when_no_worker_was_parked() {
     use crate::runtime::reactor::LabReactor;
 
     let reactor = Arc::new(LabReactor::new());
+    let driver = IoDriverHandle::new(reactor.clone());
     let waiting = Parker::new();
     let busy = Parker::new();
-    let coordinator = WorkerCoordinator::new(
-        vec![waiting.clone(), busy].into(),
-        Some(IoDriverHandle::new(reactor.clone())),
-    );
+    let coordinator =
+        WorkerCoordinator::new(vec![waiting.clone(), busy].into(), Some(driver.clone()));
     let (woke_tx, woke_rx) = std::sync::mpsc::channel();
     let waiting_thread = waiting.clone();
     let handle = thread::spawn(move || {
@@ -3167,6 +3166,122 @@ fn deferred_cancel_enqueue_publishes_parker_permit() {
         assert!(tasks.is_empty());
         wakes.dispatch();
     }
+}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn assert_registered_task_waker_releases_driver(local: bool) {
+    use crate::runtime::RuntimeBuilder;
+    use crate::runtime::reactor::{Interest, LabReactor, Reactor};
+
+    let reactor = Arc::new(LabReactor::new());
+    let reactor_lifetime = Arc::downgrade(&reactor);
+    let builder = if local {
+        RuntimeBuilder::current_thread()
+    } else {
+        RuntimeBuilder::new().worker_threads(2)
+    };
+    let runtime = builder
+        .with_reactor(reactor.clone())
+        .build()
+        .expect("runtime");
+    let (source, _peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+    source.set_nonblocking(true).expect("nonblocking source");
+    let source = Arc::new(source);
+    let task_source = Arc::clone(&source);
+    let capture = std::future::poll_fn(move |task_cx| {
+        let driver = crate::Cx::current()
+            .and_then(|cx| cx.io_driver_handle())
+            .expect("the task has its runtime's driver");
+        let registration = driver
+            .register(&*task_source, Interest::READABLE, task_cx.waker().clone())
+            .expect("register the actual scheduler task waker");
+        Poll::Ready((registration, task_cx.waker().clone()))
+    });
+    let (registration, stale_waker) = if local {
+        runtime.block_on(async {
+            let local_marker = std::rc::Rc::new(());
+            runtime
+                .spawn_local(async move {
+                    let result = capture.await;
+                    drop(local_marker);
+                    result
+                })
+                .await
+        })
+    } else {
+        runtime.block_on(runtime.handle().spawn(capture))
+    };
+    assert!(
+        registration.is_active(),
+        "the task left a live registered waker"
+    );
+    assert_eq!(reactor.registration_count(), 1);
+
+    drop(runtime);
+    assert!(
+        !registration.is_active(),
+        "the task waker's coordinator must not retain the retired driver (local={local})"
+    );
+    assert_eq!(
+        reactor.registration_count(),
+        0,
+        "shutdown removes the backend token"
+    );
+    stale_waker.wake_by_ref();
+    drop(registration);
+    drop(reactor);
+    assert!(
+        reactor_lifetime.upgrade().is_none(),
+        "a stale task waker must not retain the backend"
+    );
+    stale_waker.wake_by_ref();
+}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[test]
+fn registered_worker_task_waker_does_not_keep_the_driver_alive() {
+    assert_registered_task_waker_releases_driver(false);
+}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+#[test]
+fn registered_local_task_waker_does_not_keep_the_driver_alive() {
+    assert_registered_task_waker_releases_driver(true);
+}
+
+#[test]
+fn coordinator_wake_routes_survive_driver_retirement() {
+    use crate::runtime::reactor::LabReactor;
+
+    let reactor = Arc::new(LabReactor::new());
+    let reactor_lifetime = Arc::downgrade(&reactor);
+    let driver = IoDriverHandle::new(reactor.clone());
+    let parkers = vec![Parker::new(), Parker::new()];
+    let coordinator = WorkerCoordinator::new(parkers.clone().into(), Some(driver.clone()));
+
+    coordinator.wake_io_driver();
+    assert!(reactor.check_and_clear_wake());
+    coordinator.wake_one();
+    assert!(reactor.check_and_clear_wake());
+    coordinator.wake_many(1);
+    assert!(reactor.check_and_clear_wake());
+    coordinator.wake_worker(0);
+    assert!(reactor.check_and_clear_wake());
+    coordinator.wake_all();
+    assert!(reactor.check_and_clear_wake());
+
+    drop(driver);
+    drop(reactor);
+    assert!(
+        reactor_lifetime.upgrade().is_none(),
+        "wake coordination must not own a stopped reactor"
+    );
+    coordinator.wake_io_driver();
+    coordinator.wake_one();
+    coordinator.wake_many(1);
+    coordinator.wake_worker(0);
+    coordinator.wake_all();
+    assert!(parkers.iter().all(Parker::notification_pending_for_test));
 }
 
 // ========== WorkerCoordinator non-power-of-two tests (br-3narc.2.1) ==========

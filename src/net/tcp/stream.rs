@@ -1109,10 +1109,10 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
         return Ok(None);
     }
 
-    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+    if !crate::net::udp::ambient_io_driver_present() {
         wait_for_connect_fallback(socket).await?;
         return Ok(None);
-    };
+    }
 
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
@@ -1136,6 +1136,13 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                 }
 
                 if registration.is_none() {
+                    // Resolve the polling executor's driver here. A connect
+                    // future must not retain its original dispatcher across
+                    // await or register on a live but idle old runtime (GH#85).
+                    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+                        fallback = true;
+                        return Poll::Ready(Ok(()));
+                    };
                     match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
                         Ok(new_reg) => {
                             registration = Some(new_reg);
@@ -1197,6 +1204,13 @@ fn rearm_connect_registration(
     registration: &mut Option<IoRegistration>,
     cx: &Context<'_>,
 ) -> io::Result<()> {
+    if registration
+        .as_ref()
+        .is_some_and(|existing| crate::net::udp::registration_needs_migration(existing, false))
+    {
+        *registration = None;
+        return Ok(());
+    }
     let Some(existing) = registration.as_mut() else {
         return Ok(());
     };

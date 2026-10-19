@@ -609,6 +609,69 @@
     }
 
     #[test]
+    fn connect_waiter_migrates_between_live_dispatchers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let client = net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+
+        let old_reactor = CountingReactor::new();
+        let new_reactor = CountingReactor::new();
+        let old_driver = IoDriverHandle::new(old_reactor.clone());
+        let new_driver = IoDriverHandle::new(new_reactor.clone());
+        let mut registration = Some(
+            old_driver
+                .register(&client, Interest::WRITABLE, noop_waker())
+                .expect("old connect registration"),
+        );
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let task = Context::from_waker(&waker);
+        let ambient = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(new_driver.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(ambient));
+
+        // Both drivers remain alive. The next connect poll must retire A
+        // instead of rearming it and then parking on an unserviced executor.
+        rearm_connect_registration(&mut registration, &task).expect("handoff");
+        assert!(registration.is_none());
+        assert_eq!(old_reactor.registration_count(), 0);
+        assert_eq!(old_reactor.modify_calls(), 0);
+        assert!(old_driver.is_empty());
+
+        registration = Some(
+            new_driver
+                .register(&client, Interest::WRITABLE, waker.clone())
+                .expect("replacement connect registration"),
+        );
+        let token = registration.as_ref().unwrap().token();
+        rearm_connect_registration(&mut registration, &task).expect("same owner");
+        assert_eq!(registration.as_ref().unwrap().token(), token);
+        assert!(registration.as_ref().unwrap().belongs_to(&new_driver));
+        assert_eq!(new_reactor.modify_calls(), 1);
+
+        // Service only B: A remains alive and deliberately unpolled.
+        new_reactor
+            .inner
+            .set_ready(token, crate::runtime::reactor::Event::writable(token));
+        new_driver
+            .turn_with(Some(Duration::ZERO), |_, _| {})
+            .expect("B services connect readiness");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        drop(registration);
+        assert!(new_driver.is_empty());
+        assert_eq!(new_reactor.registration_count(), 0);
+    }
+
+    #[test]
     fn connect_waiter_rearms_existing_registration_with_unchanged_interest() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");

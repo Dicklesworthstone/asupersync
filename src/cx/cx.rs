@@ -1312,6 +1312,14 @@ impl<Caps> Cx<Caps> {
         self.handles.io_driver.clone()
     }
 
+    /// Borrow the dispatcher for socket-affinity checks without cloning this
+    /// context or its driver's ownership handles on every blocked I/O poll.
+    #[inline]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn io_driver_ref(&self) -> Option<&IoDriverHandle> {
+        self.handles.io_driver.as_ref()
+    }
+
     /// Returns a clone of this context's inherited blocking-pool handle, if present.
     ///
     /// Runtime-created contexts and child scopes inherit their owner's pool.

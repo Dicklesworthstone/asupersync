@@ -109,6 +109,76 @@
     }
 
     #[test]
+    fn owner_departure_wakes_survivors_outside_the_waiter_lock() {
+        struct Retired {
+            waiters: std::sync::Weak<AcceptWaiters>,
+            dropped: Arc<AtomicUsize>,
+        }
+        impl Wake for Retired {
+            fn wake(self: Arc<Self>) {
+                panic!("a departed accept owner must not be woken");
+            }
+        }
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                if let Some(waiters) = self.waiters.upgrade() {
+                    assert!(waiters.waiters.try_lock().is_some(), "drop outside gate");
+                }
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Survivor {
+            waiters: std::sync::Weak<AcceptWaiters>,
+            hits: Arc<AtomicUsize>,
+        }
+        impl Wake for Survivor {
+            fn wake(self: Arc<Self>) {
+                let waiters = self.waiters.upgrade().expect("live waiter list");
+                assert!(waiters.waiters.try_lock().is_some(), "wake outside gate");
+                // A callback may synchronously re-register; the departure
+                // must not drain this newly published entry afterwards.
+                waiters.register(Some(100), Waker::noop());
+                self.hits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let waiters = Arc::new(AcceptWaiters::default());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let retired_owner = waiters.next_owner();
+        let survivor_owner = waiters.next_owner();
+        let retired = Waker::from(Arc::new(Retired {
+            waiters: Arc::downgrade(&waiters),
+            dropped: Arc::clone(&dropped),
+        }));
+        let survivor = Waker::from(Arc::new(Survivor {
+            waiters: Arc::downgrade(&waiters),
+            hits: Arc::clone(&hits),
+        }));
+        waiters.register(Some(retired_owner), &retired);
+        waiters.register(Some(survivor_owner), &survivor);
+        drop(retired);
+        waiters.remove(retired_owner);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(waiters.waiters.lock()[0].owner, Some(100));
+
+        waiters.remove(retired_owner);
+        waiters.remove(survivor_owner);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "stale departures do not wake");
+        assert_eq!(waiters.waiters.lock().len(), 1);
+        waiters.wake_all();
+        let late_hits = Arc::new(AtomicUsize::new(0));
+        let late = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&late_hits),
+        }));
+        waiters.register(Some(101), &late);
+        waiters.remove(100);
+        assert_eq!(late_hits.load(Ordering::SeqCst), 0, "fired ticket is a no-op");
+        assert_eq!(waiters.waiters.lock()[0].owner, Some(101));
+    }
+
+    #[test]
     fn listener_registers_on_wouldblock() {
         let raw = net::TcpListener::bind("127.0.0.1:0").expect("bind");
         raw.set_nonblocking(true).expect("nonblocking");

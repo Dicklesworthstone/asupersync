@@ -662,6 +662,43 @@ where
         self.run_with(runtime, spawn_streaming_connection::<F, Fut>)
             .await
     }
+
+    /// Serve live incoming bodies in actual request tasks and child regions.
+    ///
+    /// Connections are owned by `cx`. Each admitted request owns its handler
+    /// and incoming-body driver under a separate child region; bounded body
+    /// queues still let the handler process uploads before body EOF. Response
+    /// writes, keep-alive reuse, and listener drain wait for task retirement
+    /// and the complete request subtree's cleanup.
+    ///
+    /// This entry point serves buffered responses over the listener's TCP,
+    /// Unix, or handed-off transports. The existing [`Self::run_streaming`]
+    /// entry point retains its established execution contract.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_streaming_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_streaming_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F, Fut, S> Http1Listener<F>
@@ -832,6 +869,47 @@ where
         .await
     }
 
+    /// Serve buffered requests in actual child regions owned by this listener.
+    ///
+    /// Connections belong to `cx`, and each accepted request gets a separate
+    /// task and child region under its connection. A handler's descendants and
+    /// finalizers finish before its response is written or keep-alive is reused.
+    /// Request timeouts and force-close initiate cancellation while the listener
+    /// continues to join admitted cleanup. Non-cooperative descendants can delay
+    /// quiescence; elapsed drain timers alone never certify their retirement.
+    ///
+    /// This explicit opt-in preserves the established `run` and `run_in`
+    /// behavior. It supports the existing TCP, Unix and handed-off connection
+    /// sources. Upgrade sessions retain their separate connection-owned lifetime
+    /// after the HTTP request closes. Streaming handlers use their existing
+    /// serving APIs and are not implicitly changed by this method.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        // Refuse a detached owner before accepting a connection.
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_stream_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown_signal,
+                            in_flight_requests,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
     /// Run the accept loop over TLS until shutdown.
     ///
     /// This is the HTTPS/1.1 counterpart to [`Self::run`]. The supplied
@@ -879,6 +957,50 @@ where
                     acceptor.clone(),
                     runtime,
                 )
+            },
+        )
+        .await
+    }
+
+    /// Serve HTTPS/1.1 with region-owned connections and buffered requests.
+    ///
+    /// This combines [`Self::run_owned_in`]'s request ownership with
+    /// [`Self::run_tls`]'s TLS handshake bounds, HTTP/1.1 ALPN admission, and
+    /// transport-generic upgrades. The handler runs in a real request task;
+    /// its descendants and finalizers retire before the response is written,
+    /// the TLS connection is reused, or an upgrade session begins.
+    ///
+    /// The supplied `cx` must admit child regions. Cancellation also wakes
+    /// an incomplete handshake, drops its transport, and releases its
+    /// connection slot. Admitted request cleanup is still joined through the
+    /// normal listener drain, even when a drain deadline has elapsed.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_tls_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                            acceptor,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
             },
         )
         .await
@@ -1417,6 +1539,72 @@ where
     }
 }
 
+/// Opt-in request ownership on every accepted native transport.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_stream_connection<F, Fut, R>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    use crate::http::h1::server::{OwnedRequests, UpgradeAdmission};
+
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let admission = match &stream {
+        H1Stream::Tcp(_) => UpgradeAdmission::Any,
+        #[cfg(unix)]
+        H1Stream::Unix(_) => UpgradeAdmission::TransportGeneric,
+        H1Stream::Handoff(_, _) => UpgradeAdmission::TransportGeneric,
+    };
+    let executor = match OwnedRequests::new(cx.clone()) {
+        Ok(executor) => executor,
+        Err(error) => {
+            cx.trace(&format!("h1_owned_connection_refused: {error}"));
+            return;
+        }
+    };
+    let server = Http1Server::with_config_upgradeable(move |request| handler(request), config)
+        .with_shutdown_signal(shutdown_signal.clone())
+        .with_in_flight_requests(in_flight_requests);
+    match server
+        .serve_connection_using(
+            stream,
+            peer_addr,
+            admission,
+            Some(cx.clone()),
+            move |handler, request, config| executor.clone().execute(handler, request, config),
+        )
+        .await
+    {
+        Ok(Http1ServeOutcome::Closed(_)) => {}
+        Ok(Http1ServeOutcome::Upgraded { io, read_ahead, upgrade }) => {
+            match io {
+                H1Stream::Tcp(stream) => {
+                    let session = upgrade.run(cx.clone(), stream, read_ahead);
+                    run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+                }
+                stream => {
+                    if let Some(session) = upgrade.run_on(cx.clone(), stream, read_ahead) {
+                        run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+                    }
+                }
+            }
+        }
+        Err(error) => cx.trace(&format!("h1_owned_connection_failed: {error}")),
+    }
+    // Preserve terminal bookkeeping through ordinary Cx::spawn after the
+    // connection has completed its protocol and request-subtree cleanup.
+    let _ = cx.checkpoint();
+}
+
 /// [`serve_connection`] for a connection of either transport.
 async fn serve_stream_connection<F, Fut, R>(
     stream: H1Stream,
@@ -1611,58 +1799,17 @@ where
     let handle = runtime.try_spawn(async move {
         let _guard = guard;
         let peer_addr = stream.peer_addr();
-        // asupersync-hylbr1: `TlsAcceptor` defaults to no handshake timeout, so
-        // a peer that never finishes TLS would pin this registered connection
-        // slot until listener shutdown. Bound the handshake by the acceptor's
-        // own timeout when it has one (the acceptor enforces it internally),
-        // otherwise by the connection idle timeout, the same bound the
-        // plain-TCP path applies to reading the first request.
-        let handshake_bound = match acceptor.handshake_timeout() {
-            Some(_) => None,
-            None => config.idle_timeout,
-        };
-        let handshake = acceptor.accept(stream);
-        let mut handshake = core::pin::pin!(async move {
-            match handshake_bound {
-                Some(bound) => {
-                    match crate::time::timeout(transient_accept_now(), bound, handshake).await {
-                        Ok(result) => result,
-                        Err(_elapsed) => Err(crate::tls::TlsError::Timeout(bound)),
-                    }
-                }
-                None => handshake.await,
-            }
-        });
-        let mut force_closing =
-            core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
-
-        let tls_stream = std::future::poll_fn(|task_cx| {
-            if shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
-                || force_closing.as_mut().poll(task_cx).is_ready()
-            {
-                return Poll::Ready(None);
-            }
-            handshake.as_mut().poll(task_cx).map(Some)
-        })
-        .await;
-        let mut tls_stream = match tls_stream {
-            Some(Ok(tls_stream)) => tls_stream,
-            Some(Err(crate::tls::TlsError::Timeout(bound))) => {
-                crate::tracing_compat::warn!(
-                    peer = ?peer_addr,
-                    bound = ?bound,
-                    "TLS handshake did not complete within its bound; dropping the connection"
-                );
-                let _ = bound; // Suppress unused warning when tracing is disabled
-                return;
-            }
-            Some(Err(_)) | None => return,
-        };
-
-        if !matches!(tls_stream.alpn_protocol(), None | Some(b"http/1.1")) {
-            let _ = tls_stream.shutdown().await;
+        let Some(tls_stream) = accept_http1_tls(
+            stream,
+            acceptor,
+            config.idle_timeout,
+            &shutdown_signal,
+            None,
+        )
+        .await
+        else {
             return;
-        }
+        };
 
         let server = Http1Server::with_config_upgradeable(move |req| handler(req), config)
             .with_shutdown_signal(shutdown_signal.clone())
@@ -1672,6 +1819,161 @@ where
         serve_with_transport_upgrades(server, tls_stream, peer_addr, &shutdown_signal).await;
     })?;
     Ok(handle)
+}
+
+/// One handshake policy for both legacy and region-owned HTTPS listeners.
+#[cfg(feature = "tls")]
+async fn accept_http1_tls(
+    stream: H1Stream,
+    acceptor: TlsAcceptor,
+    idle_timeout: Option<Duration>,
+    shutdown_signal: &ShutdownSignal,
+    owner: Option<Cx>,
+) -> Option<crate::tls::TlsStream<H1Stream>> {
+    let peer_addr = stream.peer_addr();
+    // asupersync-hylbr1: the acceptor enforces its own timeout, if any.
+    // Otherwise a silent TLS peer has the same bound as the first HTTP head.
+    let handshake_bound = match acceptor.handshake_timeout() {
+        Some(_) => None,
+        None => idle_timeout,
+    };
+    let handshake = acceptor.accept(stream);
+    let mut handshake = core::pin::pin!(async move {
+        match handshake_bound {
+            Some(bound) => {
+                match crate::time::timeout(transient_accept_now(), bound, handshake).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => Err(crate::tls::TlsError::Timeout(bound)),
+                }
+            }
+            None => handshake.await,
+        }
+    });
+    let mut force_closing =
+        core::pin::pin!(shutdown_signal.wait_for_phase(ShutdownPhase::ForceClosing));
+    let mut cancellation = ListenerCancellation::new(owner);
+    let tls_stream = std::future::poll_fn(|task_cx| {
+        if cancellation.poll_cancelled(task_cx)
+            || shutdown_signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8
+            || force_closing.as_mut().poll(task_cx).is_ready()
+        {
+            return Poll::Ready(None);
+        }
+        handshake.as_mut().poll(task_cx).map(Some)
+    })
+    .await;
+    let mut tls_stream = match tls_stream {
+        Some(Ok(tls_stream)) => tls_stream,
+        Some(Err(crate::tls::TlsError::Timeout(bound))) => {
+            crate::tracing_compat::warn!(
+                peer = ?peer_addr,
+                bound = ?bound,
+                "TLS handshake did not complete within its bound; dropping the connection"
+            );
+            let _ = (peer_addr, bound);
+            return None;
+        }
+        Some(Err(_)) | None => return None,
+    };
+
+    if !matches!(tls_stream.alpn_protocol(), None | Some(b"http/1.1")) {
+        let _ = tls_stream.shutdown().await;
+        return None;
+    }
+    Some(tls_stream)
+}
+
+#[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+async fn serve_owned_tls_connection<F, Fut, R>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+    acceptor: TlsAcceptor,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    use crate::http::h1::server::{OwnedRequests, UpgradeAdmission};
+
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let Some(tls_stream) = accept_http1_tls(
+        stream,
+        acceptor,
+        config.idle_timeout,
+        &shutdown_signal,
+        Some(cx.clone()),
+    )
+    .await
+    else {
+        return;
+    };
+    let executor = match OwnedRequests::new(cx.clone()) {
+        Ok(executor) => executor,
+        Err(error) => {
+            cx.trace(&format!("h1_owned_tls_connection_refused: {error}"));
+            return;
+        }
+    };
+    let server = Http1Server::with_config_upgradeable(move |request| handler(request), config)
+        .with_shutdown_signal(shutdown_signal.clone())
+        .with_in_flight_requests(in_flight_requests);
+    match server
+        .serve_connection_using(
+            tls_stream,
+            peer_addr,
+            UpgradeAdmission::TransportGeneric,
+            Some(cx.clone()),
+            move |handler, request, config| executor.clone().execute(handler, request, config),
+        )
+        .await
+    {
+        Ok(Http1ServeOutcome::Closed(_)) => {}
+        Ok(Http1ServeOutcome::Upgraded {
+            io,
+            read_ahead,
+            upgrade,
+        }) => {
+            if let Some(session) = upgrade.run_on(cx.clone(), io, read_ahead) {
+                run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+            }
+        }
+        Err(error) => cx.trace(&format!("h1_owned_tls_connection_failed: {error}")),
+    }
+    let _ = cx.checkpoint();
+}
+
+/// Serve a native connection with owned incoming streaming requests.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_streaming_connection<F, Fut>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server.serve_owned_with_peer_addr(&cx, stream, peer_addr).await {
+        cx.trace(&format!("h1_owned_streaming_connection_failed: {error}"));
+    }
+    let _ = cx.checkpoint();
 }
 
 /// Spawn a connection whose request heads are dispatched before body EOF.

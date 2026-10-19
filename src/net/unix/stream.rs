@@ -46,10 +46,10 @@ fn cancelled_poll<T>() -> Poll<io::Result<T>> {
 }
 
 async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
-    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+    if !crate::net::udp::ambient_io_driver_present() {
         wait_for_connect_fallback(socket).await?;
         return Ok(None);
-    };
+    }
 
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
@@ -70,6 +70,13 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
                 }
 
                 if registration.is_none() {
+                    // Resolve the polling executor's driver here. A connect
+                    // future must not retain its original dispatcher across
+                    // await or register on a live but idle old runtime (GH#85).
+                    let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
+                        fallback = true;
+                        return Poll::Ready(Ok(()));
+                    };
                     match driver.register(socket, Interest::WRITABLE, cx.waker().clone()) {
                         Ok(new_reg) => registration = Some(new_reg),
                         Err(err) if err.kind() == io::ErrorKind::Unsupported => {
@@ -103,6 +110,13 @@ fn rearm_connect_registration(
     registration: &mut Option<IoRegistration>,
     cx: &Context<'_>,
 ) -> io::Result<()> {
+    if registration
+        .as_ref()
+        .is_some_and(|existing| crate::net::udp::registration_needs_migration(existing, false))
+    {
+        *registration = None;
+        return Ok(());
+    }
     let Some(existing) = registration.as_mut() else {
         return Ok(());
     };
@@ -1002,9 +1016,14 @@ impl<'a> SharedWaiterEntry<'a> {
 
 impl Drop for SharedWaiterEntry<'_> {
     fn drop(&mut self) {
-        // The removed waker drops after the registration lock is released.
-        let removed = self.stream.registration.lock().forget_shared(self.owner);
+        // A surviving call may need to move the registration away from this
+        // call's now-idle runtime. Drop and wake only after both the waiter
+        // list and registration locks are released (GH#85).
+        let (removed, survivors) = self.stream.registration.lock().forget_shared(self.owner);
         drop(removed);
+        for waiter in survivors {
+            waiter.wake();
+        }
     }
 }
 

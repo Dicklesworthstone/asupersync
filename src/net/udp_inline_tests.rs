@@ -1810,6 +1810,390 @@
         });
     }
 
+    /// GH#85: deterministic registration ownership checks complement the
+    /// native loopback regressions; model readiness does not supply UDP data.
+    #[cfg(unix)]
+    mod gh85_runtime_handoff {
+        use super::*;
+        use crate::runtime::reactor::Reactor;
+        use crate::runtime::reactor_model::{LabReactorModel, ReactorOperation};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::task::Wake;
+        use std::time::Duration;
+
+        #[derive(Default)]
+        struct WakeCount(AtomicUsize);
+
+        impl Wake for WakeCount {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        fn counted_waker() -> (Arc<WakeCount>, Waker) {
+            let count = Arc::new(WakeCount::default());
+            let waker = Waker::from(Arc::clone(&count));
+            (count, waker)
+        }
+
+        fn source() -> StdUdpSocket {
+            let source = StdUdpSocket::bind("127.0.0.1:0").unwrap();
+            source.set_nonblocking(true).unwrap();
+            assert_eq!(
+                source.recv_from(&mut [0u8; 1]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
+            source
+        }
+
+        fn with_driver<T>(driver: &IoDriverHandle, poll: impl FnOnce() -> T) -> T {
+            let ambient = Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, 0),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            );
+            let _guard = Cx::set_current(Some(ambient));
+            poll()
+        }
+
+        fn arm_on(
+            registration: &mut ReactorRegistration,
+            source: &StdUdpSocket,
+            driver: &IoDriverHandle,
+            waker: &Waker,
+        ) -> io::Result<Armed> {
+            with_driver(driver, || {
+                registration.arm(source, Interest::READABLE, waker)
+            })
+        }
+
+        fn arm_shared_on(
+            registration: &parking_lot::Mutex<ReactorRegistration>,
+            source: &StdUdpSocket,
+            driver: &IoDriverHandle,
+            owner: u64,
+            waker: &Waker,
+        ) {
+            with_driver(driver, || {
+                let (armed, stranded, displaced) =
+                    registration
+                        .lock()
+                        .arm_shared(source, Interest::READABLE, owner, waker);
+                drop(displaced);
+                assert_eq!(armed.unwrap(), Armed::Parked);
+                assert!(stranded.is_empty());
+            });
+        }
+
+        struct SharedWake {
+            registration: std::sync::Weak<parking_lot::Mutex<ReactorRegistration>>,
+            count: Arc<WakeCount>,
+        }
+
+        impl Wake for SharedWake {
+            fn wake(self: Arc<Self>) {
+                let registration = self.registration.upgrade().unwrap();
+                let registration = registration
+                    .try_lock()
+                    .expect("shared wake must not hold the registration lock");
+                let waiters = registration.shared_waiters.as_ref().unwrap();
+                assert!(
+                    waiters.waiters.try_lock().is_some(),
+                    "shared wake must not hold the waiter list lock"
+                );
+                self.count.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        #[test]
+        fn departing_shared_waiter_notifies_survivor_to_rebind() {
+            let old_model = Arc::new(LabReactorModel::new());
+            let idle_model = Arc::new(LabReactorModel::new());
+            let old_driver = IoDriverHandle::new(old_model.clone());
+            let idle_driver = IoDriverHandle::new(idle_model.clone());
+            let source = source();
+            let registration = Arc::new(parking_lot::Mutex::new(ReactorRegistration::new()));
+            let survivor = next_shared_waiter_owner();
+            let departing = next_shared_waiter_owner();
+            let survivor_count = Arc::new(WakeCount::default());
+            let survivor_waker = Waker::from(Arc::new(SharedWake {
+                registration: Arc::downgrade(&registration),
+                count: Arc::clone(&survivor_count),
+            }));
+            let (departing_count, departing_waker) = counted_waker();
+
+            arm_shared_on(
+                &registration,
+                &source,
+                &old_driver,
+                survivor,
+                &survivor_waker,
+            );
+            arm_shared_on(
+                &registration,
+                &source,
+                &idle_driver,
+                departing,
+                &departing_waker,
+            );
+            assert_eq!(registration.lock().shared_waiter_count(), 2);
+            assert!(
+                registration
+                    .lock()
+                    .as_ref()
+                    .unwrap()
+                    .belongs_to(&idle_driver)
+            );
+            assert_eq!(survivor_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(departing_count.0.load(Ordering::SeqCst), 0);
+
+            // Completing or cancelling the latest caller leaves its runtime
+            // alive but idle. Departure must notify its peer without a turn
+            // of that runtime; migration itself must not bounce peer wakes.
+            let (removed, survivors) = registration.lock().forget_shared(departing);
+            assert!(removed.is_some());
+            drop(removed);
+            assert_eq!(survivors.len(), 1);
+            assert_eq!(registration.lock().shared_waiter_count(), 0);
+            assert_eq!(survivor_count.0.load(Ordering::SeqCst), 0);
+            for waiter in survivors {
+                waiter.wake();
+            }
+            assert_eq!(survivor_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(departing_count.0.load(Ordering::SeqCst), 0);
+            let (removed, survivors) = registration.lock().forget_shared(departing);
+            assert!(removed.is_none() && survivors.is_empty());
+
+            arm_shared_on(
+                &registration,
+                &source,
+                &old_driver,
+                survivor,
+                &survivor_waker,
+            );
+            let token = registration.lock().as_ref().unwrap().token();
+            assert!(
+                registration
+                    .lock()
+                    .as_ref()
+                    .unwrap()
+                    .belongs_to(&old_driver)
+            );
+            assert_eq!(idle_model.registration_count(), 0);
+            assert!(idle_driver.is_empty());
+            assert_eq!(survivor_count.0.load(Ordering::SeqCst), 1);
+            old_model.set_ready(token, Interest::READABLE).unwrap();
+            assert_eq!(
+                old_driver
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                1
+            );
+            assert_eq!(survivor_count.0.load(Ordering::SeqCst), 2);
+            assert_eq!(departing_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(registration.lock().shared_waiter_count(), 0);
+            registration.lock().clear();
+            assert_eq!(old_model.registration_count(), 0);
+            assert!(old_driver.is_empty());
+        }
+
+        #[test]
+        fn repeated_live_handoffs_discard_queued_old_readiness() {
+            let models = [
+                Arc::new(LabReactorModel::new()),
+                Arc::new(LabReactorModel::new()),
+            ];
+            let drivers = [
+                IoDriverHandle::new(models[0].clone()),
+                IoDriverHandle::new(models[1].clone()),
+            ];
+            let source = source();
+            let mut registration = ReactorRegistration::new();
+            let (mut previous_count, first_waker) = counted_waker();
+            assert_eq!(
+                arm_on(&mut registration, &source, &drivers[0], &first_waker).unwrap(),
+                Armed::Parked
+            );
+            let mut current = 0;
+
+            // Both owners remain alive throughout every transfer. No turn of
+            // the previous owner is needed to establish the new registration.
+            for _ in 0..6 {
+                let next = 1 - current;
+                let old_token = registration.as_ref().unwrap().token();
+                let old_wakes = previous_count.0.load(Ordering::SeqCst);
+                models[current]
+                    .schedule_ready(old_token, Interest::READABLE, Duration::ZERO)
+                    .unwrap();
+                assert_eq!(
+                    models[current].next_event_time(),
+                    Some(models[current].now())
+                );
+                let (next_count, next_waker) = counted_waker();
+                assert_eq!(
+                    arm_on(&mut registration, &source, &drivers[next], &next_waker).unwrap(),
+                    Armed::Parked
+                );
+                let live = registration.as_ref().unwrap();
+                assert!(live.belongs_to(&drivers[next]));
+                assert!(!registration.on_fallback());
+                assert_eq!(models[current].registration_count(), 0);
+                assert_eq!(drivers[current].waker_count(), 0);
+                assert_eq!(
+                    models[current].is_armed(old_token).unwrap_err().kind(),
+                    io::ErrorKind::NotFound
+                );
+                assert_eq!(
+                    drivers[current]
+                        .turn_with(Some(Duration::ZERO), |_, _| {})
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(previous_count.0.load(Ordering::SeqCst), old_wakes);
+                assert_eq!(next_count.0.load(Ordering::SeqCst), 0);
+                let token = live.token();
+                assert!(models[next].is_armed(token).unwrap());
+                models[next].set_ready(token, Interest::READABLE).unwrap();
+                assert_eq!(
+                    drivers[next]
+                        .turn_with(Some(Duration::ZERO), |_, _| {})
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(next_count.0.load(Ordering::SeqCst), 1);
+                assert_eq!(previous_count.0.load(Ordering::SeqCst), old_wakes);
+                models[next].clear_ready(token, Interest::READABLE).unwrap();
+                previous_count = next_count;
+                current = next;
+            }
+            registration.clear();
+            assert!(models.iter().all(|model| model.registration_count() == 0));
+            assert!(drivers.iter().all(IoDriverHandle::is_empty));
+        }
+
+        #[test]
+        fn shared_runtime_participants_rearm_without_replacing_the_token() {
+            let model = Arc::new(LabReactorModel::new());
+            let first = IoDriverHandle::new(model.clone());
+            let second = first.for_runtime();
+            let source = source();
+            let mut registration = ReactorRegistration::new();
+            let (old_count, old_waker) = counted_waker();
+            let (new_count, new_waker) = counted_waker();
+            assert_eq!(
+                arm_on(&mut registration, &source, &first, &old_waker).unwrap(),
+                Armed::Parked
+            );
+            let token = registration.as_ref().unwrap().token();
+            assert_eq!(
+                arm_on(&mut registration, &source, &second, &new_waker).unwrap(),
+                Armed::Parked
+            );
+            let live = registration.as_ref().unwrap();
+            assert_eq!(live.token(), token);
+            assert!(live.belongs_to(&first) && live.belongs_to(&second));
+            assert_eq!(model.fault_stats(ReactorOperation::Register).attempts, 1);
+            assert_eq!(model.fault_stats(ReactorOperation::Deregister).attempts, 0);
+            assert_eq!(model.registration_count(), 1);
+            model.set_ready(token, Interest::READABLE).unwrap();
+            assert_eq!(
+                second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(),
+                1
+            );
+            assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(new_count.0.load(Ordering::SeqCst), 1);
+            registration.clear();
+            assert_eq!(model.registration_count(), 0);
+            assert!(first.is_empty() && second.is_empty());
+        }
+
+        #[test]
+        fn failed_replacement_leaves_no_old_registration_and_retries_new_driver() {
+            let old_model = Arc::new(LabReactorModel::new());
+            let new_model = Arc::new(LabReactorModel::new());
+            let old_driver = IoDriverHandle::new(old_model.clone());
+            let new_driver = IoDriverHandle::new(new_model.clone());
+            let source = source();
+            let mut registration = ReactorRegistration::new();
+            let (old_count, old_waker) = counted_waker();
+            let (new_count, new_waker) = counted_waker();
+            assert_eq!(
+                arm_on(&mut registration, &source, &old_driver, &old_waker).unwrap(),
+                Armed::Parked
+            );
+            let old_token = registration.as_ref().unwrap().token();
+            old_model
+                .schedule_ready(old_token, Interest::READABLE, Duration::ZERO)
+                .unwrap();
+            new_model
+                .fail_next(
+                    ReactorOperation::Register,
+                    None,
+                    io::ErrorKind::PermissionDenied,
+                )
+                .unwrap();
+
+            assert_eq!(
+                arm_on(&mut registration, &source, &new_driver, &new_waker)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(registration.is_none());
+            assert_eq!(old_model.registration_count(), 0);
+            assert_eq!(new_model.registration_count(), 0);
+            assert!(old_driver.is_empty() && new_driver.is_empty());
+            assert_eq!(
+                old_model.fault_stats(ReactorOperation::Deregister).attempts,
+                1
+            );
+            assert_eq!(
+                new_model
+                    .fault_stats(ReactorOperation::Register)
+                    .injected_failures,
+                1
+            );
+            assert_eq!(
+                old_driver
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                0
+            );
+            assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(new_count.0.load(Ordering::SeqCst), 0);
+            let failed_token = new_model.last_failure().unwrap().token.unwrap();
+
+            assert_eq!(
+                arm_on(&mut registration, &source, &new_driver, &new_waker).unwrap(),
+                Armed::Parked
+            );
+            let live = registration.as_ref().unwrap();
+            assert!(live.belongs_to(&new_driver));
+            assert_ne!(live.token(), failed_token);
+            assert_eq!(
+                new_model.fault_stats(ReactorOperation::Register).attempts,
+                2
+            );
+            new_model
+                .set_ready(live.token(), Interest::READABLE)
+                .unwrap();
+            assert_eq!(
+                new_driver
+                    .turn_with(Some(Duration::ZERO), |_, _| {})
+                    .unwrap(),
+                1
+            );
+            assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+            assert_eq!(new_count.0.load(Ordering::SeqCst), 1);
+            registration.clear();
+            assert_eq!(new_model.registration_count(), 0);
+            assert!(old_driver.is_empty() && new_driver.is_empty());
+        }
+    }
+
     /// GH#67 (asupersync-t64ggs): driverless UDP polls park on the
     /// process-global fallback I/O driver instead of self-waking.
     #[cfg(not(target_arch = "wasm32"))]

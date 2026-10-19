@@ -132,6 +132,7 @@ use crate::obligation::lyapunov::{
 use crate::observability::spectral_health::{SpectralHealthMonitor, SpectralThresholds};
 use crate::runtime::config::SchedulerPlacementMode;
 use crate::runtime::io_driver::IoDriverHandle;
+use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::global_injector::{GlobalInjector, PriorityTask};
 use crate::runtime::scheduler::local_queue::{self, LocalQueue};
 use crate::runtime::scheduler::priority::Scheduler as PriorityScheduler;
@@ -1077,8 +1078,10 @@ pub(crate) struct WorkerCoordinator {
     /// Bitmask for power-of-two worker counts (replaces IDIV with AND).
     /// `None` when the count is zero or non-power-of-two.
     mask: Option<usize>,
-    /// I/O driver handle for waking the reactor.
-    io_driver: Option<IoDriverHandle>,
+    /// Wake the runtime's polling participant without owning its dispatcher.
+    /// Registered task wakers retain this coordinator; a strong driver here
+    /// would keep the driver and its waker table alive through each other.
+    io_reactor: Option<Weak<dyn Reactor>>,
     wake_notifier: WakeNotifier,
 }
 
@@ -1094,7 +1097,7 @@ impl WorkerCoordinator {
             parkers,
             next_wake: CachePadded::new(AtomicUsize::new(0)),
             mask,
-            io_driver,
+            io_reactor: io_driver.map(|driver| driver.downgrade_reactor()),
             wake_notifier: WakeNotifier::new(),
         }
     }
@@ -1163,9 +1166,7 @@ impl WorkerCoordinator {
             self.notify_wake();
             return;
         }
-        if let Some(io) = &self.io_driver {
-            let _ = io.wake();
-        }
+        self.wake_io_driver();
         self.notify_wake();
     }
 
@@ -1173,7 +1174,7 @@ impl WorkerCoordinator {
     /// leader returns and re-checks its queues.
     #[inline]
     pub(crate) fn wake_io_driver(&self) {
-        if let Some(io) = &self.io_driver {
+        if let Some(io) = self.io_reactor.as_ref().and_then(Weak::upgrade) {
             let _ = io.wake();
         }
     }
@@ -1204,8 +1205,8 @@ impl WorkerCoordinator {
         let needs_reactor = (0..num_wakes).fold(false, |needs, _| {
             self.wake_one_parker_prefer_waiter() || needs
         });
-        if let Some(io) = self.io_driver.as_ref().filter(|_| needs_reactor) {
-            let _ = io.wake();
+        if needs_reactor {
+            self.wake_io_driver();
         }
         self.notify_wake();
     }
@@ -1215,9 +1216,7 @@ impl WorkerCoordinator {
         if let Some(parker) = self.parkers.get(worker_id) {
             parker.unpark();
         }
-        if let Some(io) = &self.io_driver {
-            let _ = io.wake();
-        }
+        self.wake_io_driver();
         self.notify_wake();
     }
 
@@ -1226,9 +1225,7 @@ impl WorkerCoordinator {
         for parker in &self.parkers {
             parker.unpark();
         }
-        if let Some(io) = &self.io_driver {
-            let _ = io.wake();
-        }
+        self.wake_io_driver();
         self.notify_wake();
     }
 

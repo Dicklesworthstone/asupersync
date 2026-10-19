@@ -10,6 +10,219 @@
     use crate::cx::Cx;
     use crate::io::AsyncReadVectored;
 
+    /// GH#85: a departing half cannot leave another runtime's waiter parked
+    /// behind the registration it adopted. Driver ownership and waiter
+    /// generations are explicit; retirement is the only possible wake source.
+    #[cfg(unix)]
+    mod gh85_runtime_handoff {
+        use super::*;
+        use crate::runtime::LabReactor;
+
+        fn split_pair() -> (OwnedReadHalf, OwnedWriteHalf, std::net::TcpStream) {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+            let peer = std::net::TcpStream::connect(listener.local_addr().expect("address"))
+                .expect("connect peer");
+            let (stream, _) = listener.accept().expect("accept peer");
+            stream.set_nonblocking(true).expect("nonblocking");
+            let (read, write) = OwnedReadHalf::new_pair(Arc::new(stream), None);
+            (read, write, peer)
+        }
+
+        fn ambient(driver: &IoDriverHandle, task: u32) -> Cx {
+            Cx::new_with_observability(
+                RegionId::new_for_test(0, 1),
+                TaskId::new_for_test(0, task),
+                Budget::INFINITE,
+                None,
+                Some(driver.clone()),
+                None,
+            )
+        }
+
+        fn assert_survivor_reclaims_driver(departing_read: bool, cancelled: bool) {
+            let (mut read_half, mut write_half, peer) = split_pair();
+            let inner = Arc::clone(&read_half.inner);
+            let backend_a = Arc::new(LabReactor::new());
+            let backend_b = Arc::new(LabReactor::new());
+            let driver_a = IoDriverHandle::new(backend_a.clone());
+            let driver_b = IoDriverHandle::new(backend_b.clone());
+            let ambient_a = ambient(&driver_a, 0);
+            let ambient_b = ambient(&driver_b, 1);
+            let survivor_interest = if departing_read {
+                Interest::WRITABLE
+            } else {
+                Interest::READABLE
+            };
+            let departing_interest = if departing_read {
+                Interest::READABLE
+            } else {
+                Interest::WRITABLE
+            };
+            let survivor_hits = Arc::new(AtomicUsize::new(0));
+            let observed_unlocked = Arc::new(AtomicBool::new(false));
+            let survivor_waker = Waker::from(Arc::new(LockProbeWaker {
+                state: Arc::downgrade(&inner.state),
+                observed_unlocked: Arc::clone(&observed_unlocked),
+                hits: Arc::clone(&survivor_hits),
+            }));
+            let (departing_waker, departing_hits) = counting_waker();
+            let survivor_tokens = {
+                let _current = Cx::set_current(Some(ambient_a.clone()));
+                inner
+                    .register_interest(&Context::from_waker(&survivor_waker), survivor_interest)
+                    .expect("runtime A registers the survivor")
+            };
+            assert_eq!(backend_a.registration_count(), 1);
+
+            // Both drivers remain alive, and no readiness is injected or
+            // dispatched. B adopts the union while A's waiter stays parked.
+            let _current = Cx::set_current(Some(ambient_b.clone()));
+            let departing_tokens = inner
+                .register_interest(&Context::from_waker(&departing_waker), departing_interest)
+                .expect("runtime B adopts the combined registration");
+            let old_token = {
+                let state = inner.state.lock();
+                let registration = state.registration.as_ref().expect("registered union");
+                assert!(registration.belongs_to(&driver_b));
+                assert_eq!(
+                    registration.interest(),
+                    Interest::READABLE | Interest::WRITABLE
+                );
+                assert_eq!(
+                    state.read_waiter.as_ref().map(|waiter| waiter.token),
+                    if departing_read {
+                        departing_tokens.read
+                    } else {
+                        survivor_tokens.read
+                    }
+                );
+                assert_eq!(
+                    state.write_waiter.as_ref().map(|waiter| waiter.token),
+                    if departing_read {
+                        survivor_tokens.write
+                    } else {
+                        departing_tokens.write
+                    }
+                );
+                registration.token()
+            };
+            assert_eq!(backend_a.registration_count(), 0);
+            assert_eq!(backend_b.registration_count(), 1);
+            assert_eq!(survivor_hits.load(Ordering::SeqCst), 0);
+            assert_eq!(departing_hits.load(Ordering::SeqCst), 0);
+            read_half.last_waiter = if departing_read {
+                departing_tokens.read
+            } else {
+                survivor_tokens.read
+            };
+            write_half.last_waiter = if departing_read {
+                survivor_tokens.write
+            } else {
+                departing_tokens.write
+            };
+
+            // Empty reads and flushes finish synchronously. Cancellation is
+            // checked first by each public poll path, before the socket call.
+            ambient_b.set_cancel_requested(cancelled);
+            let mut task_cx = Context::from_waker(&departing_waker);
+            let terminal = if departing_read {
+                let mut empty = [];
+                let mut read_buf = ReadBuf::new(&mut empty);
+                Pin::new(&mut read_half).poll_read(&mut task_cx, &mut read_buf)
+            } else {
+                Pin::new(&mut write_half).poll_flush(&mut task_cx)
+            };
+            if cancelled {
+                assert!(matches!(
+                    terminal,
+                    Poll::Ready(Err(ref error)) if error.kind() == io::ErrorKind::Interrupted
+                ));
+            } else {
+                assert!(matches!(terminal, Poll::Ready(Ok(()))));
+            }
+            assert_eq!(survivor_hits.load(Ordering::SeqCst), 1);
+            assert!(observed_unlocked.load(Ordering::SeqCst));
+            assert_eq!(departing_hits.load(Ordering::SeqCst), 0);
+            {
+                let state = inner.state.lock();
+                let registration = state.registration.as_ref().expect("surviving registration");
+                assert!(registration.belongs_to(&driver_b));
+                assert_eq!(registration.token(), old_token);
+                assert_eq!(registration.interest(), survivor_interest);
+                assert!(state.read_waiter.is_none());
+                assert!(state.write_waiter.is_none());
+            }
+
+            // The notification lets the survivor re-poll under its own Cx.
+            // Finishing or cancelling B did not choose a driver on its behalf.
+            let latest = {
+                let _current = Cx::set_current(Some(ambient_a));
+                inner
+                    .register_interest(&Context::from_waker(&survivor_waker), survivor_interest)
+                    .expect("the notified survivor rebinds to runtime A")
+            };
+            if departing_read {
+                write_half.last_waiter = latest.write;
+            } else {
+                read_half.last_waiter = latest.read;
+            }
+            assert_eq!(backend_a.registration_count(), 1);
+            assert_eq!(backend_b.registration_count(), 0);
+            {
+                let state = inner.state.lock();
+                let registration = state.registration.as_ref().expect("A owns the survivor");
+                assert!(registration.belongs_to(&driver_a));
+                assert_eq!(registration.interest(), survivor_interest);
+            }
+
+            // A late retirement ticket and ordinary survivor rearm cannot
+            // create a cross-runtime wake loop or consume a newer generation.
+            inner.retire_waiter(
+                departing_interest,
+                if departing_read {
+                    departing_tokens.read
+                } else {
+                    departing_tokens.write
+                },
+            );
+            assert_eq!(survivor_hits.load(Ordering::SeqCst), 1);
+            let state = inner.state.lock();
+            assert_eq!(waiter_tokens(&state).read, latest.read);
+            assert_eq!(waiter_tokens(&state).write, latest.write);
+            assert!(
+                state
+                    .registration
+                    .as_ref()
+                    .expect("registration")
+                    .belongs_to(&driver_a)
+            );
+            drop(state);
+
+            drop(read_half);
+            drop(write_half);
+            drop(inner);
+            drop(peer);
+            assert_eq!(backend_a.registration_count(), 0);
+            assert_eq!(backend_b.registration_count(), 0);
+            assert_eq!(survivor_hits.load(Ordering::SeqCst), 1);
+            assert_eq!(departing_hits.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn completed_migrated_half_notifies_its_surviving_direction() {
+            for departing_read in [false, true] {
+                assert_survivor_reclaims_driver(departing_read, false);
+            }
+        }
+
+        #[test]
+        fn cancelled_migrated_half_notifies_its_surviving_direction() {
+            for departing_read in [false, true] {
+                assert_survivor_reclaims_driver(departing_read, true);
+            }
+        }
+    }
+
     /// GH#67 follow-up (asupersync-9e6a28): an owned TCP split half polled
     /// with no I/O driver on the current `Cx` parks on the process-global
     /// fallback driver instead of re-waking itself into a hot loop.
@@ -133,6 +346,55 @@
                 1,
                 "the ambient driver now owns the halves' combined waker"
             );
+        }
+
+        #[test]
+        fn runtime_migration_keeps_the_opposite_direction_waiter() {
+            let (read, write, _peer) = split_pair();
+            let first = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            let reactor = Arc::new(LabReactor::new());
+            let second = IoDriverHandle::new(reactor.clone());
+            let (read_signal, read_waker, _) = signal_waker();
+            let (write_signal, write_waker, _) = signal_waker();
+            let read_cx = Context::from_waker(&read_waker);
+            let write_cx = Context::from_waker(&write_waker);
+            let ambient = |driver| {
+                Cx::new_with_observability(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(0, 0),
+                    Budget::INFINITE,
+                    None,
+                    Some(driver),
+                    None,
+                )
+            };
+            let first_cx = Cx::set_current(Some(ambient(first.clone())));
+            read.inner.register_interest(&read_cx, Interest::READABLE).unwrap();
+            write.inner.register_interest(&write_cx, Interest::WRITABLE).unwrap();
+            let write_token = read.inner.state.lock().write_waiter.as_ref().unwrap().token;
+            assert_eq!(first.waker_count(), 1);
+            drop(first_cx);
+
+            let _second_cx = Cx::set_current(Some(ambient(second.clone())));
+            read.inner.register_interest(&read_cx, Interest::READABLE).unwrap();
+            let token = {
+                let state = read.inner.state.lock();
+                assert_eq!(state.write_waiter.as_ref().unwrap().token, write_token);
+                let registration = state.registration.as_ref().unwrap();
+                assert!(registration.belongs_to(&second));
+                assert!(registration.interest().is_readable());
+                assert!(registration.interest().is_writable());
+                registration.token()
+            };
+            assert_eq!(first.waker_count(), 0);
+            assert_eq!(second.waker_count(), 1);
+            reactor.set_ready(token, Interest::READABLE | Interest::WRITABLE);
+            second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+            assert_eq!(read_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(write_signal.hits.load(Ordering::SeqCst), 1);
+            drop(read);
+            drop(write);
+            assert_eq!(second.waker_count(), 0);
         }
 
         /// Reuniting halves parked on the fallback driver keeps that fact, so

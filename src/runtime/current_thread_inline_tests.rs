@@ -1,6 +1,73 @@
     use super::*;
     use crate::evidence_sink::{CollectorSink, EvidenceSink};
 
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    fn assert_root_io_registration_releases_runtime(retain_stale_waker: bool) {
+        use crate::runtime::RuntimeBuilder;
+        use crate::runtime::reactor::{Interest, LabReactor, Reactor};
+
+        let reactor = Arc::new(LabReactor::new());
+        let reactor_lifetime = Arc::downgrade(&reactor);
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor.clone())
+            .build()
+            .expect("current-thread runtime");
+        let (source, _peer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        source.set_nonblocking(true).expect("nonblocking source");
+
+        // Capture the real in-place root waker. Returning the registration
+        // models a socket escaping block_on while its waker stays in the slab.
+        let (registration, stale_waker) = runtime.block_on(std::future::poll_fn(|task_cx| {
+            let driver = Cx::current()
+                .and_then(|cx| cx.io_driver_handle())
+                .expect("the root has its runtime's I/O driver");
+            let registration = driver
+                .register(&source, Interest::READABLE, task_cx.waker().clone())
+                .expect("register the actual root waker");
+            Poll::Ready((
+                registration,
+                retain_stale_waker.then(|| task_cx.waker().clone()),
+            ))
+        }));
+        assert!(registration.is_active(), "the escaped registration is live");
+        assert_eq!(reactor.registration_count(), 1);
+
+        drop(runtime);
+        assert!(
+            !registration.is_active(),
+            "a registered root waker must not retain a dropped runtime's dispatcher"
+        );
+        assert_eq!(
+            reactor.registration_count(),
+            0,
+            "shutdown deregisters the source"
+        );
+        if let Some(waker) = &stale_waker {
+            waker.wake_by_ref();
+        }
+        drop(registration);
+        drop(reactor);
+        assert!(
+            reactor_lifetime.upgrade().is_none(),
+            "a retained root waker must not own the abandoned reactor"
+        );
+        if let Some(waker) = &stale_waker {
+            waker.wake_by_ref();
+        }
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn registered_root_waker_does_not_keep_the_runtime_driver_alive() {
+        assert_root_io_registration_releases_runtime(false);
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn retained_root_waker_is_safe_after_runtime_and_reactor_retirement() {
+        assert_root_io_registration_releases_runtime(true);
+    }
+
     #[derive(Debug)]
     struct ReentrantWorkerSink {
         driver: std::sync::Weak<CurrentThreadDriver>,

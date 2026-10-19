@@ -95,7 +95,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant};
@@ -103,6 +103,7 @@ use std::time::{Duration, Instant};
 use crate::cx::Cx;
 use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::local::ScopedLocalStoreKey;
+use crate::runtime::reactor::Reactor;
 use crate::runtime::scheduler::three_lane::{ScopedWorkerId, ThreeLaneScheduler, ThreeLaneWorker};
 use crate::runtime::scheduler::worker::Parker;
 use crate::runtime::spawn_mailbox::{self, ScopedLocalSpawnLaneOwner, SpawnGateway, SpawnMailbox};
@@ -657,7 +658,10 @@ fn drive_root_on<F: Future>(
         Arc::new(RootWaker {
             woken: AtomicBool::new(true),
             parker: worker.parker.clone(),
-            io: worker.io_driver.clone(),
+            io: worker
+                .io_driver
+                .as_ref()
+                .map(IoDriverHandle::downgrade_reactor),
         })
     };
     let waker = Waker::from(Arc::clone(&root_waker));
@@ -787,7 +791,11 @@ fn drive_root_after_shutdown<F: Future>(
 struct RootWaker {
     woken: AtomicBool,
     parker: Parker,
-    io: Option<IoDriverHandle>,
+    // A parked socket can retain this waker after block_on and its runtime
+    // have returned. Keeping a driver handle here would form the cycle
+    // driver -> slab waker -> driver, so later polls can arm an undriven
+    // reactor instead of adopting the new runtime (GH#85).
+    io: Option<Weak<dyn Reactor>>,
 }
 
 impl RootWaker {
@@ -810,7 +818,7 @@ impl Wake for RootWaker {
             return;
         }
         self.parker.unpark();
-        if let Some(io) = self.io.as_ref() {
+        if let Some(io) = self.io.as_ref().and_then(Weak::upgrade) {
             let _ = io.wake();
         }
     }

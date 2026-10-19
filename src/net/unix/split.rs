@@ -473,14 +473,15 @@ impl UnixStreamInner {
             return Ok(installed);
         }
 
-        // A registration parked on the fallback driver retires through the
-        // ordinary transition path once an ambient driver is present, so the
-        // fresh registration below lands on that driver (GH#67,
-        // asupersync-9e6a28).
-        let rearm_result = if guard.registration.is_some()
-            && guard.registration_on_fallback
-            && crate::net::udp::ambient_io_driver_present()
-        {
+        // Retire a fallback or foreign-runtime registration through the
+        // ordinary transition. Preserve both direction generations while the
+        // socket moves to the runtime that is actually polling it (GH#85).
+        let rearm_result = if guard.registration.as_ref().is_some_and(|registration| {
+            crate::net::udp::registration_needs_migration(
+                registration,
+                guard.registration_on_fallback,
+            )
+        }) {
             Some(Ok(false))
         } else if guard.registration.is_some() {
             let desired_interest = registration_interest(
@@ -664,8 +665,15 @@ impl UnixStreamInner {
             matches!(registration.rearm(desired_interest, &combined), Ok(true))
         });
         if rearm_ok {
+            let notify_survivor = retired_waiters.0.is_some() || retired_waiters.1.is_some();
             drop(guard);
             drop(retired_waiters);
+            if notify_survivor {
+                // This half may have moved the registration to a runtime that
+                // is about to become idle. Only departure notifies the surviving
+                // generation; its own poll chooses the driver, not Drop's Cx.
+                combined.wake();
+            }
             return;
         }
 

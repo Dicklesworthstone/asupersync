@@ -2017,3 +2017,390 @@ fn dropping_the_runtime_retires_the_caller_thread_local_store() {
         "the runtime's local store must be retired when the runtime is dropped"
     );
 }
+
+/// GH#85 / asupersync-8ynh18: an established descriptor must follow the
+/// runtime polling it. Every peer waits for an actual Pending poll in the
+/// receiving runtime before producing readiness. The outer watchdog only
+/// bounds a broken test; no timer or self-wake can rescue the blocked read.
+#[cfg(not(target_arch = "wasm32"))]
+mod reactor_handoff {
+    // block_on deliberately accepts caller-polled futures without Send bounds.
+    #![allow(clippy::future_not_send)]
+
+    use super::{Cx, RootDrainOutcome, Runtime, RuntimeBuilder};
+    use asupersync::io::{AsyncReadExt, AsyncWriteExt};
+    use asupersync::net::{TcpStream, UdpSocket};
+    use std::future::{Future, poll_fn};
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpListener};
+    use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+    use std::pin::pin;
+    use std::sync::mpsc;
+    use std::task::Poll;
+    use std::thread;
+    use std::time::Duration;
+
+    const LIMIT: Duration = Duration::from_secs(10);
+
+    fn bounded(scenario: impl FnOnce() + Send + 'static) {
+        let (send, receive) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = catch_unwind(AssertUnwindSafe(scenario));
+            let _ = send.send(result);
+        });
+        let result = receive
+            .recv_timeout(LIMIT)
+            .expect("native reactor handoff did not finish within ten seconds");
+        worker.join().expect("handoff thread");
+        if let Err(payload) = result {
+            resume_unwind(payload);
+        }
+    }
+
+    fn matrix(scenario: fn(bool, bool)) {
+        for current_thread in [true, false] {
+            for sharded in [false, true] {
+                bounded(move || scenario(current_thread, sharded));
+            }
+        }
+    }
+
+    fn build(current_thread: bool, sharded: bool) -> Runtime {
+        let builder = if current_thread {
+            RuntimeBuilder::current_thread()
+        } else {
+            RuntimeBuilder::new().worker_threads(2)
+        };
+        builder.with_sharded_state(sharded).build().unwrap()
+    }
+
+    fn retire(runtime: Runtime) {
+        let report = runtime.shutdown_drained(LIMIT);
+        assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+        assert_eq!(report.live_tasks, 0);
+        assert_eq!(report.pending_spawns, 0);
+        assert_eq!(report.pending_obligations, 0);
+    }
+
+    async fn park_once(future: impl Future) {
+        let mut future = pin!(future);
+        poll_fn(|cx| {
+            assert!(
+                future.as_mut().poll(cx).is_pending(),
+                "the silent peer must make the first operation park"
+            );
+            Poll::Ready(())
+        })
+        .await;
+    }
+
+    async fn after_pending<F: Future>(future: F, go: mpsc::Sender<()>) -> F::Output {
+        let mut future = pin!(future);
+        let mut go = Some(go);
+        poll_fn(|cx| {
+            let result = future.as_mut().poll(cx);
+            if let Some(go) = go.take() {
+                assert!(result.is_pending(), "the receiving runtime must park first");
+                go.send(()).expect("release peer after reactor registration");
+            }
+            result
+        })
+        .await
+    }
+
+    fn peer_exchange(mut peer: impl Read + Write, go: mpsc::Receiver<()>) {
+        go.recv_timeout(LIMIT).expect("readiness release");
+        peer.write_all(b"pong").expect("peer payload");
+        let mut reply = [0_u8; 4];
+        peer.read_exact(&mut reply).expect("client acknowledgement");
+        assert_eq!(&reply, b"ack!");
+        let mut byte = [0_u8; 1];
+        assert_eq!(peer.read(&mut byte).unwrap(), 0, "client descriptor closed");
+    }
+
+    fn tcp_peer() -> (SocketAddr, mpsc::Sender<()>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (send, receive) = mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (peer, _) = listener.accept().unwrap();
+            peer.set_read_timeout(Some(LIMIT)).unwrap();
+            peer.set_write_timeout(Some(LIMIT)).unwrap();
+            peer_exchange(peer, receive);
+        });
+        (address, send, peer)
+    }
+
+    async fn tcp_exchange(mut stream: TcpStream, go: mpsc::Sender<()>) {
+        let mut bytes = [0_u8; 4];
+        after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+        assert_eq!(&bytes, b"pong");
+        stream.write_all(b"ack!").await.unwrap();
+    }
+
+    #[test]
+    fn established_tcp_stream_reads_after_its_first_runtime_is_dropped() {
+        matrix(|current_thread, sharded| {
+            let (address, go, peer) = tcp_peer();
+            let stream = thread::spawn(move || {
+                let first = build(current_thread, sharded);
+                let stream = first.block_on(async {
+                    let mut stream = TcpStream::connect(address).await.unwrap();
+                    let mut byte = [0_u8; 1];
+                    park_once(stream.read(&mut byte)).await;
+                    stream
+                });
+                assert!(first.is_quiescent());
+                drop(first);
+                stream
+            })
+            .join()
+            .expect("first runtime was dropped before the handoff");
+            let second = build(current_thread, sharded);
+            second.block_on(tcp_exchange(stream, go));
+            retire(second);
+            peer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn established_tcp_stream_follows_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            let (address, go, peer) = tcp_peer();
+            let first = build(true, sharded);
+            first.block_on(async {
+                let mut stream = TcpStream::connect(address).await.unwrap();
+                let mut byte = [0_u8; 1];
+                park_once(stream.read(&mut byte)).await;
+                let first_task = Cx::current().unwrap().task_id();
+                let second = build(current_thread, sharded);
+                // A's worker is on loan to this outer root. It cannot poll
+                // A's reactor while the synchronous nested drive runs B.
+                second.block_on(tcp_exchange(stream, go));
+                assert_eq!(Cx::current().unwrap().task_id(), first_task);
+                retire(second);
+            });
+            retire(first);
+            peer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn owned_and_reunited_tcp_halves_follow_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            for reunite in [false, true] {
+                let (address, go, peer) = tcp_peer();
+                let first = build(true, sharded);
+                first.block_on(async {
+                    let stream = TcpStream::connect(address).await.unwrap();
+                    let (mut read, mut write) = stream.into_split();
+                    let mut byte = [0_u8; 1];
+                    park_once(read.read(&mut byte)).await;
+                    let second = build(current_thread, sharded);
+                    if reunite {
+                        second.block_on(tcp_exchange(read.reunite(write).unwrap(), go));
+                    } else {
+                        second.block_on(async move {
+                            let mut bytes = [0_u8; 4];
+                            after_pending(read.read_exact(&mut bytes), go).await.unwrap();
+                            assert_eq!(&bytes, b"pong");
+                            write.write_all(b"ack!").await.unwrap();
+                        });
+                    }
+                    retire(second);
+                });
+                retire(first);
+                peer.join().unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn udp_socket_follows_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            let raw = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let address = raw.local_addr().unwrap();
+            let peer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            peer.set_read_timeout(Some(LIMIT)).unwrap();
+            let peer_address = peer.local_addr().unwrap();
+            let (send, receive) = mpsc::channel();
+            let peer = thread::spawn(move || {
+                receive.recv_timeout(LIMIT).unwrap();
+                peer.send_to(b"pong", address).unwrap();
+                let mut reply = [0_u8; 4];
+                assert_eq!(peer.recv_from(&mut reply).unwrap(), (4, address));
+                assert_eq!(&reply, b"ack!");
+            });
+            let first = build(true, sharded);
+            first.block_on(async {
+                let mut socket = UdpSocket::from_std(raw).unwrap();
+                let mut bytes = [0_u8; 4];
+                park_once(socket.recv_from(&mut bytes)).await;
+                let second = build(current_thread, sharded);
+                second.block_on(async move {
+                    let received = after_pending(socket.recv_from(&mut bytes), send)
+                        .await
+                        .unwrap();
+                    assert_eq!(received, (4, peer_address));
+                    assert_eq!(&bytes, b"pong");
+                    assert_eq!(socket.send_to(b"ack!", peer_address).await.unwrap(), 4);
+                });
+                retire(second);
+            });
+            retire(first);
+            peer.join().unwrap();
+        });
+    }
+
+    #[test]
+    fn tcp_listener_follows_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let listener = asupersync::net::TcpListener::from_std(listener).unwrap();
+            let (send, receive) = mpsc::channel();
+            let peer = thread::spawn(move || {
+                receive.recv_timeout(LIMIT).unwrap();
+                let mut peer = std::net::TcpStream::connect(address).unwrap();
+                peer.set_read_timeout(Some(LIMIT)).unwrap();
+                peer.write_all(b"pong").unwrap();
+                let mut reply = [0_u8; 4];
+                peer.read_exact(&mut reply).unwrap();
+                assert_eq!(&reply, b"ack!");
+                assert_eq!(peer.read(&mut reply).unwrap(), 0);
+            });
+            let first = build(true, sharded);
+            first.block_on(async {
+                park_once(listener.accept()).await;
+                let second = build(current_thread, sharded);
+                second.block_on(async move {
+                    let (mut stream, _) = after_pending(listener.accept(), send).await.unwrap();
+                    let mut bytes = [0_u8; 4];
+                    stream.read_exact(&mut bytes).await.unwrap();
+                    assert_eq!(&bytes, b"pong");
+                    stream.write_all(b"ack!").await.unwrap();
+                });
+                retire(second);
+            });
+            retire(first);
+            peer.join().unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    fn unix_peer() -> (
+        asupersync::net::unix::UnixStream,
+        mpsc::Sender<()>,
+        thread::JoinHandle<()>,
+    ) {
+        let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(LIMIT)).unwrap();
+        peer.set_write_timeout(Some(LIMIT)).unwrap();
+        let (send, receive) = mpsc::channel();
+        let peer = thread::spawn(move || peer_exchange(peer, receive));
+        (asupersync::net::unix::UnixStream::from_std(stream).unwrap(), send, peer)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_stream_follows_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            let (mut stream, go, peer) = unix_peer();
+            let first = build(true, sharded);
+            first.block_on(async {
+                let mut byte = [0_u8; 1];
+                park_once(stream.read(&mut byte)).await;
+                let second = build(current_thread, sharded);
+                second.block_on(async move {
+                    let mut bytes = [0_u8; 4];
+                    after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+                    assert_eq!(&bytes, b"pong");
+                    stream.write_all(b"ack!").await.unwrap();
+                });
+                retire(second);
+            });
+            retire(first);
+            peer.join().unwrap();
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn owned_and_reunited_unix_halves_follow_a_nested_polling_runtime() {
+        matrix(|current_thread, sharded| {
+            for reunite in [false, true] {
+                let (stream, go, peer) = unix_peer();
+                let first = build(true, sharded);
+                first.block_on(async {
+                    let (mut read, mut write) = stream.into_split();
+                    let mut byte = [0_u8; 1];
+                    park_once(read.read(&mut byte)).await;
+                    let second = build(current_thread, sharded);
+                    second.block_on(async move {
+                        let mut bytes = [0_u8; 4];
+                        if reunite {
+                            let mut stream = read.reunite(write).unwrap();
+                            after_pending(stream.read_exact(&mut bytes), go).await.unwrap();
+                            assert_eq!(&bytes, b"pong");
+                            stream.write_all(b"ack!").await.unwrap();
+                        } else {
+                            after_pending(read.read_exact(&mut bytes), go).await.unwrap();
+                            assert_eq!(&bytes, b"pong");
+                            write.write_all(b"ack!").await.unwrap();
+                        }
+                    });
+                    retire(second);
+                });
+                retire(first);
+                peer.join().unwrap();
+            }
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn async_fd_follows_a_nested_polling_runtime() {
+        use asupersync::io::unix::AsyncFd;
+        use asupersync::runtime::reactor::Interest;
+
+        matrix(|current_thread, sharded| {
+            let (stream, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            peer.set_read_timeout(Some(LIMIT)).unwrap();
+            let (go, receive) = mpsc::channel();
+            let peer = thread::spawn(move || peer_exchange(peer, receive));
+            let fd = AsyncFd::new(stream).unwrap();
+            let first = build(true, sharded);
+            first.block_on(async {
+                park_once(fd.readable()).await;
+                let second = build(current_thread, sharded);
+                second.block_on(async move {
+                    let mut bytes = [0_u8; 4];
+                    let mut read = 0;
+                    after_pending(fd.readable(), go).await.unwrap();
+                    while read < bytes.len() {
+                        let n = fd
+                            .async_io(Interest::READABLE, |mut stream| stream.read(&mut bytes[read..]))
+                            .await
+                            .unwrap();
+                        assert_ne!(n, 0, "peer must deliver the complete payload");
+                        read += n;
+                    }
+                    assert_eq!(&bytes, b"pong");
+                    let mut written = 0;
+                    while written < 4 {
+                        let n = fd
+                            .async_io(Interest::WRITABLE, |mut stream| stream.write(&b"ack!"[written..]))
+                            .await
+                            .unwrap();
+                        assert_ne!(n, 0, "acknowledgement must make progress");
+                        written += n;
+                    }
+                });
+                retire(second);
+            });
+            retire(first);
+            peer.join().unwrap();
+        });
+    }
+}

@@ -1822,9 +1822,10 @@ pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
 /// `Option<IoRegistration>`. [`arm`](Self::arm) is the single authoritative
 /// implementation of the registration dance:
 ///
-/// 1. a registration parked on the fallback driver is dropped as soon as the
-///    socket is polled under a `Cx` that carries an ambient driver, so the
-///    fallback never captures a socket that a runtime later adopts;
+/// 1. a registration parked on the fallback driver or another runtime's
+///    dispatcher is retired when the socket is polled under a new ambient
+///    driver. A live but undriven runtime must not capture its successor's
+///    readiness;
 /// 2. an existing registration is re-armed in place (oneshot reactor
 ///    interest is re-armed per poll; the `will_wake` guard skips the clone).
 ///    The socket has one waiter, so a read wait and a write wait in the same
@@ -1891,12 +1892,21 @@ impl SharedWaiters {
         }
     }
 
-    /// Removes `owner`'s entry, returning its waker for the caller to drop
-    /// after releasing its own locks.
-    fn forget(&self, owner: u64) -> Option<std::task::Waker> {
+    /// Removes `owner`'s entry and takes the surviving waiters. The
+    /// caller drops the removed waker and wakes the survivors after releasing
+    /// its own locks. A departing task may have moved the registration to a
+    /// runtime that will now become idle; its peers must re-poll to rebind
+    /// (GH#85). Ordinary registration changes never notify peers this way.
+    fn forget(&self, owner: u64) -> (Option<std::task::Waker>, Vec<std::task::Waker>) {
         let mut waiters = self.waiters.lock();
-        let position = waiters.iter().position(|(id, _)| *id == owner)?;
-        Some(waiters.swap_remove(position).1)
+        let Some(position) = waiters.iter().position(|(id, _)| *id == owner) else {
+            return (None, Vec::new());
+        };
+        let removed = waiters.swap_remove(position).1;
+        let survivors = std::mem::take(&mut *waiters);
+        drop(waiters);
+        let survivors = survivors.into_iter().map(|(_, waker)| waker).collect();
+        (Some(removed), survivors)
     }
 
     /// Removes every waiter and returns all but `current`'s.
@@ -1957,9 +1967,9 @@ impl ReactorRegistration {
     }
 
     /// Adopts a registration handed over by another owner of the same fd (a
-    /// completed connect). It is treated as living on an ambient driver: it is
-    /// re-armed in place and never migrated. Only Unix stream sockets hand a
-    /// registration over this way since TCP reunite moved to `from_parts`, so
+    /// completed connect). It is treated as living on an ambient driver and
+    /// follows later polling-runtime changes through `arm`. Only Unix stream
+    /// sockets hand a registration over this way since TCP reunite moved to `from_parts`, so
     /// it is Unix-only (it was dead code that broke the wasm32 build).
     #[cfg(unix)]
     pub(crate) const fn from_registration(registration: Option<IoRegistration>) -> Self {
@@ -2024,16 +2034,14 @@ impl ReactorRegistration {
         interest: Interest,
         waker: &std::task::Waker,
     ) -> io::Result<Armed> {
-        // Step 1: migrate a fallback registration to a newly present ambient
-        // driver. Dropping it deregisters the fd from the fallback reactor
-        // before the ambient one registers it.
-        if self.on_fallback
-            && Cx::current()
-                .and_then(|current| current.io_driver_handle())
-                .is_some()
-        {
+        // Step 1: follow the polling runtime, including when the previous
+        // runtime is still alive but its worker is suspended in a nested
+        // block_on. Retire the old registration before the new reactor ADD.
+        if self.registration.as_ref().is_some_and(|registration| {
+            registration_needs_migration(registration, self.on_fallback)
+        }) {
             #[cfg(any(test, feature = "test-internals"))]
-            fallback_io_probe::bump(&fallback_io_probe::MIGRATIONS);
+            fallback_io_probe::bump_if(self.on_fallback, &fallback_io_probe::MIGRATIONS);
             self.clear();
         }
 
@@ -2106,13 +2114,18 @@ impl ReactorRegistration {
         (armed, stranded, displaced)
     }
 
-    /// Removes `owner`'s entry from the shared waiter list, returning its
-    /// waker for the caller to drop after releasing the lock guarding `self`.
+    /// Removes `owner`'s entry from the shared waiter list. The caller drops
+    /// the first value and wakes the surviving waiters in the second value
+    /// after releasing the lock guarding `self`. Departure may leave the
+    /// registration on an idle runtime, so survivors must be able to rebind.
     #[cfg(unix)]
-    pub(crate) fn forget_shared(&self, owner: u64) -> Option<std::task::Waker> {
+    pub(crate) fn forget_shared(
+        &self,
+        owner: u64,
+    ) -> (Option<std::task::Waker>, Vec<std::task::Waker>) {
         self.shared_waiters
             .as_ref()
-            .and_then(|waiters| waiters.forget(owner))
+            .map_or_else(|| (None, Vec::new()), |waiters| waiters.forget(owner))
     }
 
     /// How many call futures are listed as shared waiters.
@@ -2149,9 +2162,26 @@ pub enum FreshRegistration {
 /// fallback registration to migrate).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn ambient_io_driver_present() -> bool {
-    Cx::current()
-        .and_then(|current| current.io_driver_handle())
-        .is_some()
+    Cx::with_current(|current| current.io_driver_ref().is_some()).unwrap_or(false)
+}
+
+/// Whether a live polling context has adopted a registration from another
+/// dispatcher. Shared reactor participants keep the same dispatcher identity;
+/// switching workers or participants must not force a new backend token.
+///
+/// This check belongs in the socket poll path, not `IoRegistration::rearm`:
+/// cancellation also rearms surviving waiters and must keep their owner.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn registration_needs_migration(
+    registration: &IoRegistration,
+    on_fallback: bool,
+) -> bool {
+    Cx::with_current(|current| {
+        current
+            .io_driver_ref()
+            .is_some_and(|driver| on_fallback || !registration.belongs_to(driver))
+    })
+    .unwrap_or(false)
 }
 
 /// Test-only switch that makes the process-global fallback driver look absent
