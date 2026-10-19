@@ -4,12 +4,15 @@
 //! ([`Policy::on_child_outcome`]) and a way to aggregate several outcomes
 //! ([`Policy::aggregate_outcomes`], used by the join combinators).
 //!
-//! The runtime does not consult a region's policy when a child task
-//! completes yet: `Scope::region` records no policy, so a failing child does
-//! not cancel its siblings (br-asupersync-mfqmcs). For fail-fast sibling
-//! cancellation, use `JoinSet::try_join_all`, which cancels and drains the
-//! unfinished members on the first error, or fibers, where a panicking fiber
-//! cancels its siblings.
+//! [`PolicyRegion`](crate::cx::PolicyRegion) is the opt-in typed owner that
+//! consults the policy when each admitted member completes. It freezes the
+//! member's outcome before applying cancellation and retains every result
+//! through quiescent close. `Escalate` explicitly cancels its admitted parent.
+//!
+//! The legacy `Scope::region` path still records no policy, so merely naming
+//! `Scope<FailFast>` does not cancel siblings when a child fails
+//! (br-asupersync-mfqmcs). `JoinSet::try_join_all` also provides fail-fast
+//! collection with sibling drain, and a panicking fiber cancels its siblings.
 
 use super::cancel::CancelReason;
 use super::id::TaskId;
@@ -71,8 +74,9 @@ pub trait Policy: Clone + Send + Sync + 'static {
 ///
 /// This is the default policy for most use cases. Its
 /// [`on_child_outcome`](Policy::on_child_outcome) answers
-/// [`PolicyAction::CancelSiblings`] for an error or panic, but the runtime does
-/// not apply that answer to a region's tasks yet (see the module docs).
+/// [`PolicyAction::CancelSiblings`] for an error or panic. The typed
+/// [`PolicyRegion`](crate::cx::PolicyRegion) owner applies that answer at
+/// member completion; the legacy `Scope<FailFast>` marker does not.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FailFast;
 

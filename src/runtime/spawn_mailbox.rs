@@ -1680,6 +1680,8 @@ impl RegisterRegionFinalizer {
 /// context, and the shared close-state handle quiescence awaits poll.
 pub struct AdmittedRegion {
     pub(crate) region_id: RegionId,
+    /// Authoritative parent, including a sealed-region fallback chosen at mint.
+    pub(crate) parent: RegionId,
     pub(crate) cx: crate::cx::Cx,
     pub(crate) close_notify: Arc<Mutex<crate::record::region::RegionCloseState>>,
     pub(crate) close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,

@@ -5461,6 +5461,7 @@ impl RuntimeState {
             .expect("child region record was minted above");
         Ok(crate::runtime::spawn_mailbox::AdmittedRegion {
             region_id: child_region,
+            parent,
             cx: principal_cx,
             close_notify,
             close_receipt: self

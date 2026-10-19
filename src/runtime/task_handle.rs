@@ -268,6 +268,39 @@ impl<T> ObservedSpawnCompletion<T> {
     }
 }
 
+/// Optional typed observation at the immutable terminal-publication boundary.
+///
+/// The ordinary spawn path uses a zero-sized no-op implementation. Structured
+/// owners may contain classification or policy panics without imposing those
+/// catches or allocations on existing spawn callers. No observer is invoked
+/// for a task that admission never minted.
+pub(crate) trait SpawnTerminalObserver<T>: Send + 'static {
+    fn classify(
+        &self,
+        completion: ObservedSpawnCompletion<T>,
+    ) -> std::thread::Result<Result<T, JoinError>> {
+        Ok(completion.classify())
+    }
+
+    fn panic_payload(&self, payload: Box<dyn std::any::Any + Send>) -> PanicPayload {
+        let message = crate::cx::scope::payload_to_string(&payload);
+        drop(payload);
+        PanicPayload::new(message)
+    }
+
+    /// Runs outside runtime and result-sender locks, after classification.
+    /// Implementations must contain their user callbacks' panics so observing
+    /// a terminal result cannot erase it before publication.
+    fn on_terminal(&self, child: TaskId, result: &Result<T, JoinError>);
+}
+
+#[derive(Debug)]
+pub(crate) struct NoopSpawnTerminalObserver;
+
+impl<T> SpawnTerminalObserver<T> for NoopSpawnTerminalObserver {
+    fn on_terminal(&self, _child: TaskId, _result: &Result<T, JoinError>) {}
+}
+
 /// Polls one spawned user future while retaining its cancellation receipt.
 ///
 /// This helper deliberately does not catch panics or publish a result. Each

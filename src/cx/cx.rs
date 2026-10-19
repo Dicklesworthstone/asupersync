@@ -4872,6 +4872,39 @@ where
         )
     }
 
+    /// Spawn one typed structured member with terminal observation after the
+    /// ordinary cancellation decision, using the same admission and retirement
+    /// path as `spawn`. Only the admitted factory invokes the observer.
+    pub(crate) fn spawn_with_terminal_observer<F, Fut, Observer>(
+        &self,
+        f: F,
+        observer: Observer,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+        Observer: crate::runtime::task_handle::SpawnTerminalObserver<Fut::Output>,
+    {
+        let Some(gateway) = self.spawn_gateway_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        let Some(pending) = self.pending_spawn_counter_handle() else {
+            return Err(crate::runtime::state::SpawnError::RuntimeUnavailable);
+        };
+        self.spawn_via_gateway_in_branch_observed(
+            self.region_id(),
+            self.inherited_budget(),
+            self.capability_budget(),
+            &gateway,
+            &pending,
+            crate::runtime::task_handle::SpawnCompletionPolicy::PreserveAcknowledgedCancellationResult,
+            None,
+            f,
+            observer,
+        )
+    }
+
     /// Internal own-region variant for wrappers whose documented contract
     /// discards a value produced after cancellation (for example,
     /// [`Self::spawn_blocking`]).
@@ -5621,6 +5654,38 @@ where
         Fut: Future + Send + 'static,
         Fut::Output: Send + 'static,
     {
+        self.spawn_via_gateway_in_branch_observed(
+            region,
+            budget,
+            capability_budget,
+            gateway,
+            pending,
+            completion_policy,
+            branch_region,
+            f,
+            crate::runtime::task_handle::NoopSpawnTerminalObserver,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_via_gateway_in_branch_observed<F, Fut, Observer>(
+        &self,
+        region: RegionId,
+        budget: Budget,
+        capability_budget: crate::types::CapabilityBudget,
+        gateway: &Arc<crate::runtime::spawn_mailbox::SpawnGateway>,
+        pending: &Arc<crate::record::region::PendingSpawnCounter>,
+        completion_policy: crate::runtime::task_handle::SpawnCompletionPolicy,
+        branch_region: Option<Arc<crate::runtime::spawn_mailbox::BranchRegionSlot>>,
+        f: F,
+        observer: Observer,
+    ) -> Result<crate::runtime::TaskHandle<Fut::Output>, crate::runtime::state::SpawnError>
+    where
+        F: FnOnce(Cx<Caps>) -> Fut + Send + 'static,
+        Fut: Future + Send + 'static,
+        Fut::Output: Send + 'static,
+        Observer: crate::runtime::task_handle::SpawnTerminalObserver<Fut::Output>,
+    {
         use crate::runtime::spawn_mailbox::{AdmittedTaskSlot, SpawnFactoryFn, SpawnRequest};
         use crate::runtime::task_handle::JoinError;
 
@@ -5667,9 +5732,11 @@ where
         let factory_barrier = Arc::clone(&barrier);
         let factory: SpawnFactoryFn = Box::new(move |admission_cx: Cx| {
             Box::pin(async move {
-                match (crate::cx::scope::CatchUnwind {
+                // Retain the admitted identity even if inheritance or factory
+                // construction panics before the user future starts.
+                let task_id = admission_cx.task_id();
+                let polled = (crate::cx::scope::CatchUnwind {
                     inner: async move {
-                        let task_id = admission_cx.task_id();
                         let child: Cx<Caps> = admission_cx.overlay_parent_inheritance::<_, Caps>(
                             &parent,
                             task_id,
@@ -5688,27 +5755,31 @@ where
                         .await
                     },
                 })
-                .await
-                {
-                    Ok(observed) => {
+                .await;
+                // Ordinary spawns use the original direct classification.
+                // An opted-in typed owner can also contain a destructor panic
+                // from a value suppressed by cancellation, before observing it.
+                let classified = match polled {
+                    Ok(observed) => observer.classify(observed),
+                    Err(payload) => Err(payload),
+                };
+                match classified {
+                    Ok(result) => {
+                        // User policy runs only after the result is immutable,
+                        // outside both runtime and result-sender locks. A policy
+                        // cancel request therefore cannot rewrite this value.
+                        observer.on_terminal(task_id, &result);
                         if let Some(tx) = take_spawn_result_sender(&factory_tx) {
-                            // See the local-spawn mirror above: once the user
-                            // future returns, result publication must not be
-                            // cancelled by the same Cx it just observed.
-                            let result = observed.classify();
                             crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Ok(())
                     }
                     Err(payload) => {
-                        let message = crate::cx::scope::payload_to_string(&payload);
-                        drop(payload);
-                        let panic_payload = crate::types::outcome::PanicPayload::new(message);
+                        let panic_payload = observer.panic_payload(payload);
+                        let result = Err(JoinError::Panicked(panic_payload.clone()));
+                        observer.on_terminal(task_id, &result);
                         if let Some(tx) = take_spawn_result_sender(&factory_tx) {
-                            crate::runtime::task_handle::publish_terminal_result(
-                                tx,
-                                Err(JoinError::Panicked(panic_payload.clone())),
-                            );
+                            crate::runtime::task_handle::publish_terminal_result(tx, result);
                         }
                         crate::types::Outcome::Panicked(panic_payload)
                     }
