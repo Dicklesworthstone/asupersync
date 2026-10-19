@@ -284,6 +284,8 @@ impl TraceBufferHandle {
     /// [`Self::record_event`] for a task's Complete event. While completion
     /// outcomes are kept, `outcome` is recorded under the same sequence and
     /// the same lock, so a snapshot never sees one without the other.
+    /// The runtime always records the cancellation witness; only tests omit it.
+    #[cfg(test)]
     pub(crate) fn record_completion_event<F>(&self, outcome: Severity, build: F)
     where
         F: FnOnce(u64) -> TraceEvent,
