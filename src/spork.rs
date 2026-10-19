@@ -54,7 +54,7 @@
 //! | `spork::supervisor` | Failed children are drained before restart/escalation | `SUP-START` / `SUP-STOP` ordering in deterministic docs | Child lifecycle transitions remain monotone |
 //! | `spork::gen_server` | Request -> drain -> `on_stop` under terminate budget | Mailbox FIFO + `SYS-ORDER` for shutdown messages | Calls create reply obligations that must resolve |
 //! | `spork::registry` | Name ownership ends on task/region close | `REG-FIRST` and deterministic collision tie-breaks | Name leases are obligations |
-//! | `spork::process_group` | Membership will be lease-backed by the runtime join surface | Snapshots sort by `(join_sequence, node, task)` | Join handles will own name/permit obligations |
+//! | `spork::process_group` | Managed memberships end on leave, actual task DOWN or owner close | Snapshots sort by `(join_sequence, node, task)` | The controller owns checked leases; broadcast owns checked send permits |
 //! | `spork::monitor` | Monitor scope ends with owner region | `DOWN-ORDER`: `(vt, tid)` for batched down notifications | N/A |
 //! | `spork::link` | Exit propagation participates in cancel protocol | `SYS-LINK-MONITOR` for `Down`/`Exit` ordering | N/A |
 //! | `spork::crash` | Crash artifacts emitted on terminal failure paths | Replay certificates detect ordering divergence | Artifact manifest must remain internally consistent |
@@ -102,6 +102,9 @@
 //! # Bead
 //!
 //! bd-2td4e | Parent: bd-1f3nn
+
+#[path = "spork/managed_process_group.rs"]
+mod managed_process_group;
 
 /// Application lifecycle: build, compile, start, stop.
 ///
@@ -156,12 +159,19 @@ pub mod registry {
     };
 }
 
-/// Node-local process-group model.
+/// Node-local process groups and their stable value model.
 ///
-/// This module is the stable value layer for Spork process groups. The runtime
-/// join/broadcast surface is built on top of these identifiers, deterministic
-/// snapshots, and membership events.
+/// [`ManagedProcessGroup`] provides real monitored membership, bounded mailboxes
+/// and checked broadcast through an owned runtime region. The value types remain
+/// usable independently for deterministic modeling and replay.
 pub mod process_group {
+    pub use super::managed_process_group::{
+        ManagedGroupBroadcastReport, ManagedGroupClose, ManagedGroupError,
+        ManagedGroupEventBatch, ManagedGroupMembership, ManagedGroupRecipient,
+        ManagedGroupRecipientStatus, ManagedGroupRecvError, ManagedGroupReport,
+        ManagedProcessGroup, ManagedProcessGroupConfig, ManagedProcessGroupExit,
+        ProcessGroupClient,
+    };
     use crate::channel::mpsc;
     use crate::cx::Cx;
     use crate::monitor::DownReason;
@@ -621,6 +631,12 @@ pub mod process_group {
         #[must_use]
         pub fn event_log(&self) -> &[GroupEvent] {
             &self.events
+        }
+
+        // The live owner retains the returned canonical events in its own
+        // bounded ring. Keep legacy value-layer history behavior unchanged.
+        pub(crate) fn discard_managed_events(&mut self) {
+            self.events.clear();
         }
 
         /// Replays events at or after `cursor` and advances it past the replay.
@@ -1697,7 +1713,11 @@ pub mod prelude {
         GroupBroadcastRecipientStatus, GroupBroadcastReport, GroupBroadcastSummary, GroupEvent,
         GroupEventBatch, GroupEventCursor, GroupEventKind, GroupEventSubscriber, GroupMember,
         GroupMemberId, GroupMembership, GroupMonitorDelivery, GroupMonitorDeliveryError, GroupName,
-        GroupNameError, GroupSnapshot, ProcessGroupError, ProcessGroupState, execute_broadcast,
+        GroupNameError, GroupSnapshot, ManagedGroupBroadcastReport, ManagedGroupClose,
+        ManagedGroupError, ManagedGroupEventBatch, ManagedGroupMembership, ManagedGroupRecipient,
+        ManagedGroupRecipientStatus, ManagedGroupRecvError, ManagedGroupReport,
+        ManagedProcessGroup, ManagedProcessGroupConfig, ManagedProcessGroupExit,
+        ProcessGroupClient, ProcessGroupError, ProcessGroupState, execute_broadcast,
     };
 
     // -- Monitor --
