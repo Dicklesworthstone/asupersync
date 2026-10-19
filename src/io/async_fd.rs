@@ -136,9 +136,22 @@ impl FdReadiness {
     }
 
     fn remove(&self, owner: u64) {
-        self.waiters
-            .lock()
-            .retain(|entry| entry.owner != Some(owner));
+        let (retired, survivors) = {
+            let mut waiters = self.waiters.lock();
+            let Some(index) = waiters.iter().position(|entry| entry.owner == Some(owner)) else {
+                return;
+            };
+            let retired = waiters.remove(index);
+            (retired, std::mem::take(&mut *waiters))
+        };
+        // A shared registration can have moved to this owner's runtime.
+        // Wake survivors so they rehome it if that runtime becomes idle.
+        // This is a scheduling hint, not an I/O event: do not modify ready or
+        // armed bits, and run all user waker hooks outside the list lock.
+        drop(retired);
+        for survivor in survivors {
+            survivor.waker.wake();
+        }
     }
 
     /// Wakes every listed waiter but `current`, for a wait the reactor will
@@ -662,5 +675,85 @@ impl<T: AsRawFd + fmt::Debug> fmt::Debug for AsyncFdReadyMutGuard<'_, T> {
             .field("readable", &self.is_readable())
             .field("writable", &self.is_writable())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn owner_departure_rehomes_survivors_without_fabricating_readiness() {
+        struct Retired {
+            readiness: std::sync::Weak<FdReadiness>,
+            dropped: Arc<AtomicUsize>,
+        }
+        impl Wake for Retired {
+            fn wake(self: Arc<Self>) {
+                panic!("a departed descriptor owner must not be woken");
+            }
+        }
+        impl Drop for Retired {
+            fn drop(&mut self) {
+                if let Some(readiness) = self.readiness.upgrade() {
+                    assert!(readiness.waiters.try_lock().is_some(), "drop outside gate");
+                }
+                self.dropped.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        struct Survivor {
+            readiness: std::sync::Weak<FdReadiness>,
+            hits: Arc<AtomicUsize>,
+        }
+        impl Wake for Survivor {
+            fn wake(self: Arc<Self>) {
+                let readiness = self.readiness.upgrade().expect("live waiter list");
+                assert!(readiness.waiters.try_lock().is_some(), "wake outside gate");
+                readiness.register(Some(100), Waker::noop());
+                self.hits.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let readiness = Arc::new(FdReadiness::default());
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let retired_owner = readiness.next_owner();
+        let survivor_owner = readiness.next_owner();
+        let retired = Waker::from(Arc::new(Retired {
+            readiness: Arc::downgrade(&readiness),
+            dropped: Arc::clone(&dropped),
+        }));
+        let survivor = Waker::from(Arc::new(Survivor {
+            readiness: Arc::downgrade(&readiness),
+            hits: Arc::clone(&hits),
+        }));
+        readiness.register(Some(retired_owner), &retired);
+        readiness.register(Some(survivor_owner), &survivor);
+        readiness.ready.store(WRITE, Ordering::SeqCst);
+        readiness.armed.store(READ, Ordering::SeqCst);
+        drop(retired);
+        readiness.remove(retired_owner);
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(readiness.waiters.lock()[0].owner, Some(100));
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);
+
+        readiness.remove(retired_owner);
+        readiness.remove(survivor_owner);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "stale departures do not wake");
+        assert_eq!(readiness.waiters.lock().len(), 1);
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);
+        readiness.fire();
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), READ | WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), 0);
+        readiness.register(Some(101), &survivor);
+        readiness.remove(100);
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "fired ticket is a no-op");
+        assert_eq!(readiness.waiters.lock()[0].owner, Some(101));
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), READ | WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), 0);
     }
 }

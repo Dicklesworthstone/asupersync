@@ -42,6 +42,9 @@ enum SlotState {
 
 /// Lifetime shared by independently constructed handles of the same reactor.
 /// The handle's ordinary fields preserve its existing hot paths and lock API.
+/// When its last owner leaves, backend registrations are retired before their
+/// waiters are notified. A socket retained by another executor can then re-poll
+/// and bind to a live driver instead of remaining parked forever (GH#85).
 pub(super) struct DriverOwner {
     inner: Arc<Mutex<IoDriver>>,
     reactor: Arc<dyn Reactor>,
@@ -104,7 +107,7 @@ pub(super) fn handle(reactor: Arc<dyn Reactor>, capacity: Option<usize>) -> IoDr
                     // The last Arc can be gone before its destructor starts.
                     // Do not reset the token namespace in that window. Drop
                     // finishes backend cleanup, then publishes the vacant
-                    // slab before destroying wakers and releases this waiter.
+                    // slab before notifying wakers and releases this waiter.
                     slot.retired.wait(&mut state);
                 }
             }
@@ -233,9 +236,9 @@ impl Drop for DriverOwner {
         // Keep constructors waiting until backend cleanup finishes. Publishing
         // first would let a new driver's poll consume a cleanup wake and block
         // in io_uring again before deregister acquires the ring. There are no
-        // live handle polls now, so cleanup needs no wake. Backend calls run
-        // outside registry, slot and driver mutexes. As with ordinary backend
-        // mutations, they must not recursively construct the same dispatcher.
+        // live handle polls now, so cleanup needs no backend wake. Backend
+        // calls run outside registry, slot and driver mutexes. As with ordinary
+        // backend mutations, they must not recursively construct the same dispatcher.
         let mut first_panic = None;
         for token in tokens {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -259,11 +262,15 @@ impl Drop for DriverOwner {
 
         // remove(), not clear(), advanced each occupied generation and kept
         // permanently retired slots. Delayed events still cannot alias the new
-        // driver even after cleanup failures. Publish before dropping wakers:
-        // their destructors may re-enter the constructor without deadlocking.
+        // driver even after cleanup failures. Publish before notifying wakers:
+        // their callbacks or destructors may construct a new dispatcher. The
+        // registration's weak owner already reports this driver as inactive,
+        // even though self.inner remains alive until this destructor returns.
+        // Merely dropping the wakers would strand operations that can rebind
+        // when polled by another executor (GH#85).
         for waker in wakers.drain(..) {
             if let Err(payload) =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(waker)))
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| waker.wake()))
             {
                 first_panic.get_or_insert(payload);
             }
@@ -373,6 +380,7 @@ mod tests {
         drop(first);
         assert!(weak.upgrade().is_none());
         assert_eq!(reactor.registration_count(), 0);
+        assert_eq!(old_count.0.load(Ordering::SeqCst), 1);
         let second = IoDriverHandle::new(reactor.clone());
         let (fresh, fresh_count) = register(&second, &source);
         assert_ne!(old_token, fresh.token());
@@ -380,7 +388,11 @@ mod tests {
         assert_eq!(reactor.registration_count(), 1);
         reactor.set_ready(fresh.token(), Interest::READABLE).unwrap();
         second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
-        assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            old_count.0.load(Ordering::SeqCst),
+            1,
+            "fresh readiness must not wake the retired registration again"
+        );
         assert_eq!(fresh_count.0.load(Ordering::SeqCst), 1);
     }
 
@@ -396,6 +408,7 @@ mod tests {
             reactor.fail_next(ReactorOperation::Deregister, Some(token), io::ErrorKind::Other).unwrap();
         }
         drop(first);
+        assert_eq!(old_count.0.load(Ordering::SeqCst), 1);
         assert_eq!(reactor.registration_count(), 1, "injected cleanup failure retained the old backend token");
         let second = IoDriverHandle::new(reactor.clone());
         let (fresh, fresh_count) = register(&second, &source);
@@ -403,13 +416,126 @@ mod tests {
         reactor.set_ready(token, Interest::READABLE).unwrap();
         reactor.set_ready(fresh.token(), Interest::READABLE).unwrap();
         second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
-        assert_eq!(old_count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            old_count.0.load(Ordering::SeqCst),
+            1,
+            "a delayed old token must not dispatch after the retirement wake"
+        );
         assert_eq!(fresh_count.0.load(Ordering::SeqCst), 1);
         assert_eq!(second.stats().unknown_tokens, 1);
         reactor.deregister(token).unwrap();
         drop(old);
         drop(fresh);
         assert_eq!(reactor.registration_count(), 0);
+    }
+
+    #[test]
+    fn retirement_notifies_external_waiters_and_cleans_every_registration() {
+        let backend = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(backend.clone());
+        let (source_a, _peer_a) = UnixStream::pair().unwrap();
+        let (source_b, _peer_b) = UnixStream::pair().unwrap();
+        let (a, count_a) = register(&driver, &source_a);
+        let (b, count_b) = register(&driver, &source_b);
+        let weak = Arc::downgrade(&driver.inner);
+        assert_eq!(backend.registration_count(), 2);
+        assert_eq!(count_a.0.load(Ordering::SeqCst), 0);
+        assert_eq!(count_b.0.load(Ordering::SeqCst), 0);
+
+        // No readiness event or reactor turn occurs. Final-owner retirement
+        // itself must notify each parked external waiter so it can rebind.
+        drop(driver);
+
+        assert_eq!(count_a.0.load(Ordering::SeqCst), 1);
+        assert_eq!(count_b.0.load(Ordering::SeqCst), 1);
+        assert!(!a.is_active());
+        assert!(!b.is_active());
+        assert!(weak.upgrade().is_none());
+        assert_eq!(backend.registration_count(), 0);
+        drop(a);
+        drop(b);
+        assert_eq!(count_a.0.load(Ordering::SeqCst), 1);
+        assert_eq!(count_b.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retirement_waits_for_the_final_shared_dispatcher_participant() {
+        for independent_constructor in [false, true] {
+            let backend = Arc::new(LabReactorModel::new());
+            let first = IoDriverHandle::new(backend.clone());
+            let second = if independent_constructor {
+                IoDriverHandle::new(backend.clone())
+            } else {
+                first.for_runtime()
+            };
+            let cloned = first.clone();
+            let (source, _peer) = UnixStream::pair().unwrap();
+            let (registration, count) = register(&first, &source);
+            assert!(Arc::ptr_eq(&first.inner, &second.inner));
+
+            drop(first);
+            drop(cloned);
+            assert_eq!(count.0.load(Ordering::SeqCst), 0);
+            assert!(registration.is_active());
+            assert_eq!(second.waker_count(), 1);
+            assert_eq!(backend.registration_count(), 1);
+
+            drop(second);
+            assert_eq!(count.0.load(Ordering::SeqCst), 1);
+            assert!(!registration.is_active());
+            assert_eq!(backend.registration_count(), 0);
+        }
+    }
+
+    struct PanicFirstRetirementWake {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Wake for PanicFirstRetirementWake {
+        fn wake(self: Arc<Self>) {
+            let previous = self.calls.fetch_add(1, Ordering::SeqCst);
+            assert_ne!(previous, 0, "injected retirement wake panic");
+        }
+    }
+
+    #[test]
+    fn retirement_continues_notifying_after_a_waker_panics() {
+        let backend = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(backend.clone());
+        let weak = Arc::downgrade(&driver.inner);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (a, _peer_a) = UnixStream::pair().unwrap();
+        let (b, _peer_b) = UnixStream::pair().unwrap();
+        let (c, _peer_c) = UnixStream::pair().unwrap();
+        let sources = [a, b, c];
+        let registrations: Vec<_> = sources
+            .iter()
+            .map(|source| {
+                driver
+                    .register(
+                        source,
+                        Interest::READABLE,
+                        Waker::from(Arc::new(PanicFirstRetirementWake {
+                            calls: Arc::clone(&calls),
+                        })),
+                    )
+                    .unwrap()
+            })
+            .collect();
+
+        // Whichever detached waker runs first panics. Every later distinct
+        // waiter must still be notified before that panic is propagated.
+        let retired = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(driver)));
+        assert!(retired.is_err(), "retirement must preserve the callback panic");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(backend.registration_count(), 0);
+        assert!(weak.upgrade().is_none());
+        assert!(registrations.iter().all(|registration| !registration.is_active()));
+        let next = IoDriverHandle::new(backend.clone());
+        assert!(next.is_empty(), "a wake panic must not strand the namespace");
+        drop(registrations);
+        assert_eq!(backend.registration_count(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -537,6 +663,103 @@ mod tests {
             drop(a);
             drop(b);
         }
+    }
+
+    struct ReenterOnRetirementWake {
+        backend: Arc<LabReactorModel>,
+        slot: Weak<ReactorSlot>,
+        old_registration: Arc<Mutex<Option<IoRegistration>>>,
+        replacement: Arc<Mutex<Option<IoDriverHandle>>>,
+    }
+
+    impl Wake for ReenterOnRetirementWake {
+        fn wake(self: Arc<Self>) {
+            assert_eq!(self.backend.registration_count(), 0);
+            let slot = self.slot.upgrade().expect("retiring slot still exists");
+            let state = slot
+                .state
+                .try_lock()
+                .expect("retirement must release the slot lock before waking");
+            assert!(matches!(*state, SlotState::Vacant(_)));
+            drop(state);
+
+            {
+                let mut old = self.old_registration.lock();
+                let old = old.as_mut().expect("external registration remains owned");
+                let driver = old
+                    .driver
+                    .upgrade()
+                    .expect("the retiring destructor still holds its inner driver");
+                assert!(
+                    driver.try_lock().is_some(),
+                    "wake callback holds no driver lock"
+                );
+                assert!(
+                    !old.is_active(),
+                    "an inner Arc alone is not a live dispatcher"
+                );
+                assert_eq!(
+                    old.rearm(Interest::READABLE, Waker::noop())
+                        .unwrap_err()
+                        .kind(),
+                    io::ErrorKind::NotConnected
+                );
+                assert_eq!(
+                    old.set_interest(Interest::WRITABLE).unwrap_err().kind(),
+                    io::ErrorKind::NotConnected
+                );
+                assert!(!old.update_waker(Waker::noop().clone()));
+            }
+
+            // The namespace must already be published: constructing a new
+            // participant for this backend cannot wait for our own callback.
+            let replacement = IoDriverHandle::new(self.backend.clone());
+            assert!(replacement.is_empty());
+            *self.replacement.lock() = Some(replacement);
+        }
+    }
+
+    #[test]
+    fn retirement_wake_can_reenter_with_an_inactive_old_registration() {
+        let backend = Arc::new(LabReactorModel::new());
+        let driver = IoDriverHandle::new(backend.clone());
+        let weak = Arc::downgrade(&driver.inner);
+        let old_registration = Arc::new(Mutex::new(None));
+        let replacement = Arc::new(Mutex::new(None));
+        let (source, _peer) = UnixStream::pair().unwrap();
+        let old = driver
+            .register(
+                &source,
+                Interest::READABLE,
+                Waker::from(Arc::new(ReenterOnRetirementWake {
+                    backend: backend.clone(),
+                    slot: Arc::downgrade(&driver._shared_owner.slot),
+                    old_registration: Arc::clone(&old_registration),
+                    replacement: Arc::clone(&replacement),
+                })),
+            )
+            .unwrap();
+        let old_token = old.token();
+        *old_registration.lock() = Some(old);
+
+        drop(driver);
+
+        assert!(weak.upgrade().is_none());
+        let next = replacement
+            .lock()
+            .take()
+            .expect("the retirement wake constructed a replacement dispatcher");
+        let (fresh, count) = register(&next, &source);
+        assert_ne!(fresh.token(), old_token);
+        let old = old_registration.lock().take();
+        drop(old);
+        assert_eq!(backend.registration_count(), 1);
+        backend.set_ready(fresh.token(), Interest::READABLE).unwrap();
+        assert_eq!(next.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap(), 1);
+        assert_eq!(count.0.load(Ordering::SeqCst), 1);
+        drop(fresh);
+        drop(next);
+        assert_eq!(backend.registration_count(), 0);
     }
 
     struct ReenterOnDrop {

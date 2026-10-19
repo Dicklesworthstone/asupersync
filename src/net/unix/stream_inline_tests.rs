@@ -13,6 +13,53 @@
     use std::pin::Pin;
     use std::task::{Context, Poll, Waker};
 
+    #[test]
+    fn connect_waiter_migrates_between_live_dispatchers() {
+        use crate::runtime::reactor::Reactor;
+        use crate::runtime::{IoDriverHandle, LabReactor};
+        use crate::types::{Budget, RegionId, TaskId};
+
+        let (socket, _peer) = net::UnixStream::pair().expect("socket pair");
+        let old_reactor = Arc::new(LabReactor::new());
+        let new_reactor = Arc::new(LabReactor::new());
+        let old_driver = IoDriverHandle::new(old_reactor.clone());
+        let new_driver = IoDriverHandle::new(new_reactor.clone());
+        let waker = Waker::noop();
+        let task = Context::from_waker(waker);
+        let mut registration = Some(
+            old_driver
+                .register(&socket, Interest::WRITABLE, waker.clone())
+                .expect("old connect registration"),
+        );
+        let ambient = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(new_driver.clone()),
+            None,
+        );
+        let _guard = Cx::set_current(Some(ambient));
+
+        rearm_connect_registration(&mut registration, &task).expect("handoff");
+        assert!(registration.is_none());
+        assert!(old_driver.is_empty());
+        assert_eq!(old_reactor.registration_count(), 0);
+
+        registration = Some(
+            new_driver
+                .register(&socket, Interest::WRITABLE, waker.clone())
+                .expect("replacement connect registration"),
+        );
+        let token = registration.as_ref().unwrap().token();
+        rearm_connect_registration(&mut registration, &task).expect("same owner");
+        assert_eq!(registration.as_ref().unwrap().token(), token);
+        assert!(registration.as_ref().unwrap().belongs_to(&new_driver));
+        drop(registration);
+        assert!(new_driver.is_empty());
+        assert_eq!(new_reactor.registration_count(), 0);
+    }
+
     /// GH#67 follow-up (asupersync-tx9j0f): a `UnixStream` polled with no
     /// I/O driver on the current `Cx` parks on the process-global fallback
     /// driver instead of re-waking itself into a hot loop.

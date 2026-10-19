@@ -124,9 +124,22 @@ impl AcceptWaiters {
     }
 
     fn remove(&self, owner: u64) {
-        self.waiters
-            .lock()
-            .retain(|entry| entry.owner != Some(owner));
+        let (retired, survivors) = {
+            let mut waiters = self.waiters.lock();
+            let Some(index) = waiters.iter().position(|entry| entry.owner == Some(owner)) else {
+                return;
+            };
+            let retired = waiters.remove(index);
+            (retired, std::mem::take(&mut *waiters))
+        };
+        // This owner may have moved the shared registration onto its reactor.
+        // Survivors must re-poll on their own runtimes if that reactor stops
+        // being serviced. Move entries out: user waker clone/drop/wake hooks
+        // can re-enter this list and must never run under its lock.
+        drop(retired);
+        for survivor in survivors {
+            survivor.waker.wake();
+        }
     }
 
     fn wake_all(&self) {

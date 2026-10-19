@@ -782,6 +782,7 @@ impl TcpStreamInner {
             Interest::empty(),
         );
         let mut surviving_waiters = (None, None);
+        let mut survivor_notification = None;
         let mut started_transition = false;
         let dropped_reg = if desired_interest.is_empty() {
             let registration = guard.registration.take();
@@ -796,6 +797,13 @@ impl TcpStreamInner {
                 matches!(registration.rearm(desired_interest, &combined), Ok(true))
             });
             if rearm_ok {
+                if retired_waiters.0.is_some() || retired_waiters.1.is_some() {
+                    // This half may have moved the shared registration to a
+                    // runtime that is about to become idle. Notify the surviving
+                    // generation once so its own poll can reclaim ownership.
+                    // Ordinary re-arms do not notify, avoiding migration loops.
+                    survivor_notification = Some(combined);
+                }
                 None
             } else {
                 surviving_waiters = take_all_waiters(&mut guard);
@@ -818,6 +826,9 @@ impl TcpStreamInner {
         };
         wake_waiters(surviving_waiters);
         wake_waiters(concurrent_waiters);
+        if let Some(notification) = survivor_notification {
+            notification.wake();
+        }
     }
 }
 

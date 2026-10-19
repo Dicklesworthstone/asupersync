@@ -665,8 +665,15 @@ impl UnixStreamInner {
             matches!(registration.rearm(desired_interest, &combined), Ok(true))
         });
         if rearm_ok {
+            let notify_survivor = retired_waiters.0.is_some() || retired_waiters.1.is_some();
             drop(guard);
             drop(retired_waiters);
+            if notify_survivor {
+                // This half may have moved the registration to a runtime that
+                // is about to become idle. Only departure notifies the surviving
+                // generation; its own poll chooses the driver, not Drop's Cx.
+                combined.wake();
+            }
             return;
         }
 

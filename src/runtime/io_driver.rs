@@ -741,6 +741,7 @@ impl IoDriverHandle {
         Ok(IoRegistration::new(
             token,
             Arc::downgrade(&self.inner),
+            Arc::downgrade(&self._shared_owner),
             interest,
             self.reactor.clone(),
             !matches!(self.capabilities.backend(), IoReactorBackend::Epoll),
@@ -898,6 +899,10 @@ pub struct IoRegistration {
     token: Token,
     interest: Interest,
     driver: Weak<Mutex<IoDriver>>,
+    // The dispatcher mutex survives while its owner's destructor runs. Its
+    // strong count alone therefore cannot distinguish live I/O from retirement
+    // callbacks after the token slab has already been emptied (GH#85).
+    owner: Weak<shared::DriverOwner>,
     reactor: Arc<dyn Reactor>,
     /// Tracks whether this registration has already been successfully deregistered.
     ///
@@ -919,6 +924,7 @@ impl IoRegistration {
     fn new(
         token: Token,
         driver: Weak<Mutex<IoDriver>>,
+        owner: Weak<shared::DriverOwner>,
         interest: Interest,
         reactor: Arc<dyn Reactor>,
         interest_change_wakes_reactor: bool,
@@ -927,6 +933,7 @@ impl IoRegistration {
             token,
             interest,
             driver,
+            owner,
             reactor,
             deregistered: false,
             interest_change_wakes_reactor,
@@ -968,16 +975,21 @@ impl IoRegistration {
     /// same dispatcher; moving between them does not require a new token.
     /// Comparing the weak allocation identity neither retains a dead driver
     /// nor locks its registration table.
+    #[inline]
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn belongs_to(&self, driver: &IoDriverHandle) -> bool {
         std::ptr::eq(self.driver.as_ptr(), Arc::as_ptr(&driver.inner))
     }
 
-    /// Returns true if the driver is still alive.
+    /// Returns true while a handle still owns this dispatcher.
+    ///
+    /// Retirement callbacks may run while the driver's allocation still
+    /// exists; they must observe the registration as inactive so they can
+    /// register their pending operation with another runtime.
     #[inline]
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.driver.strong_count() > 0
+        self.owner.strong_count() > 0
     }
 
     /// Updates the interest set for this registration.
@@ -990,6 +1002,12 @@ impl IoRegistration {
         };
         {
             let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
+            if !self.is_active() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "I/O driver has been dropped",
+                ));
+            }
             self.wake_polling_reactor_for_interest_change();
             guard.modify_interest(self.token, interest)?;
         }
@@ -1001,8 +1019,16 @@ impl IoRegistration {
     #[must_use]
     pub fn update_waker(&self, waker: Waker) -> bool {
         self.driver.upgrade().is_some_and(|driver| {
-            // The displaced waker drops after this statement releases the lock.
-            let (updated, _displaced) = driver.lock().replace_waker(self.token, waker);
+            // Retirement and replacement serialize on the same gate. Drop
+            // both refused and displaced wakers after releasing that gate.
+            let mut guard = driver.lock();
+            if !self.is_active() {
+                drop(guard);
+                return false;
+            }
+            let (updated, displaced) = guard.replace_waker(self.token, waker);
+            drop(guard);
+            drop(displaced);
             updated
         })
     }
@@ -1049,6 +1075,12 @@ impl IoRegistration {
             ));
         };
         let mut guard = lock_for_mutation(&driver, self.reactor.as_ref());
+        if !self.is_active() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "I/O driver has been dropped",
+            ));
+        }
         self.wake_polling_reactor_for_interest_change();
 
         // Re-arm reactor (oneshot semantics require this on every poll).
@@ -1082,6 +1114,12 @@ impl IoRegistration {
 
     /// Explicitly deregisters without waiting for drop.
     pub fn deregister(mut self) -> io::Result<()> {
+        if !self.is_active() {
+            // The final owner is responsible for backend cleanup before it
+            // publishes the next dispatcher's token namespace.
+            self.deregistered = true;
+            return Ok(());
+        }
         if let Some(driver) = self.driver.upgrade() {
             // Each removed waker drops after its lock is released; see Drop.
             let (first, _removed) = {
@@ -1127,7 +1165,7 @@ impl IoRegistration {
 
 impl Drop for IoRegistration {
     fn drop(&mut self) {
-        if self.deregistered {
+        if self.deregistered || !self.is_active() {
             return;
         }
         if let Some(driver) = self.driver.upgrade() {
