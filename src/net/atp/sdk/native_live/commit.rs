@@ -238,6 +238,7 @@ pub mod resume;
 
 /// Manifest-authorized publication through the canonical ATP sparse writer.
 pub use manifest_sink::{
+    ManifestFileCancellation, ManifestFileCancellationError,
     ManifestFileJournalConfig, ManifestFileJournalError, ManifestFileSink, ManifestFileSinkConfig,
 };
 
@@ -248,7 +249,8 @@ mod manifest_sink {
     use super::super::MAX_LIVE_EPOCH_BYTES;
     use crate::atp::journal::sparse_writer::{ScopedSparseWriter, ScopedWriterResult, SparseWriterError};
     use crate::atp::journal::{
-        AppendJournal, FsyncPolicy, JournalCheckpoint, JournalCheckpointReport,
+        AppendJournal, FsyncPolicy, JournalCancelReport, JournalCancelRequest,
+        JournalCheckpoint, JournalCheckpointReport,
         JournalCheckpointRequest, JournalCommitReport, JournalCommitRequest,
         JournalPublication, JournalRestoreLimits, SparseWriterConfig, TransferResumeStatus,
         WriteOptions,
@@ -326,6 +328,43 @@ mod manifest_sink {
         pub source: io::Error,
     }
 
+    /// Observations from one completed journaled cancellation attempt.
+    ///
+    /// Neither a false flag nor an absent observation proves that no record or
+    /// filesystem effect occurred. Reopen uncertain storage after region drain.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ManifestFileCancellation {
+        /// The canonical operation observed its terminal append/sync barrier.
+        pub cancellation_persisted: bool,
+        /// The canonical cleanup policy was invoked, not necessarily successful.
+        pub cleanup_attempted: bool,
+    }
+
+    /// Cancellation failure with any observation returned by the file owner.
+    ///
+    /// Preserved in the I/O error source chain after the sink itself is dropped.
+    /// This is independent of any preceding receive or publication failure.
+    #[derive(Debug, thiserror::Error)]
+    #[error("journaled manifest cancellation failed: {source}")]
+    pub struct ManifestFileCancellationError {
+        /// None means no cancellation report was observed, not rollback.
+        pub observation: Option<ManifestFileCancellation>,
+        /// Last journaled publisher observation, including publication drained
+        /// before refusing cancellation. None is not evidence of rollback.
+        pub publication: Option<JournalPublication>,
+        /// Original admission, storage, validation, or cleanup failure.
+        #[source]
+        pub source: io::Error,
+    }
+
+    struct Cancellation {
+        reason: String,
+        timestamp: u64,
+        started: bool,
+        observation: Option<ManifestFileCancellation>,
+        result: Option<Result<(), Failure>>,
+    }
+
     struct JournalState {
         // None while a job owns the journal, or after an outer gateway error.
         // Keep the mode installed: absence MUST NOT select unjournaled fallback.
@@ -346,6 +385,7 @@ mod manifest_sink {
         Committed(PathBuf),
         Checkpoint { bytes: u64, report: Box<JournalCheckpointReport> },
         JournalCommitted(Box<JournalCommitReport>),
+        JournalCancelled(Box<JournalCancelReport>),
     }
 
     #[derive(Clone, Copy)]
@@ -440,6 +480,10 @@ mod manifest_sink {
                 .and_then(|error| error.downcast_ref::<ManifestFileJournalError>())
             {
                 Some(error)
+            } else if let Some(error) = self.0.get_ref()
+                .and_then(|error| error.downcast_ref::<ManifestFileCancellationError>())
+            {
+                Some(error)
             } else {
                 Some(self.0.as_ref())
             }
@@ -509,6 +553,7 @@ mod manifest_sink {
         receipt: Option<LiveStreamReceipt>,
         published: Option<PathBuf>,
         journal: Option<JournalState>,
+        cancellation: Option<Cancellation>,
         failure: Option<Failure>,
         shutdown: bool,
         poisoned: bool,
@@ -544,7 +589,8 @@ mod manifest_sink {
                 writer, object_id, manifest: config.manifest, expected: config.expected_chunk_commitment,
                 expected_bytes, max_chunks: config.max_chunks, written: 0, chunks: 0,
                 hash: Sha256::new(), checks: ChunkChecks::default(), flushed: None, pending: None, unreported: None,
-                receipt: None, published: None, journal: None, failure: None, shutdown: false, poisoned: false,
+                receipt: None, published: None, journal: None, cancellation: None,
+                failure: None, shutdown: false, poisoned: false,
             })
         }
 
@@ -631,7 +677,20 @@ mod manifest_sink {
         /// A finished write still requires its original byte prefix to consume
         /// its write receipt. Errors remain sticky and inspectable independently.
         pub async fn drain_pending(&mut self, _cx: &Cx) -> io::Result<()> {
-            std::future::poll_fn(|task| self.drive(task)).await
+            std::future::poll_fn(|task| {
+                if self.cancellation.is_none() {
+                    return self.drive(task);
+                }
+                // Retire an existing job only. A cancellation waiting behind a
+                // previous write/checkpoint is NOT submitted by this method.
+                match self.drive_pending(task) {
+                    Poll::Ready(Ok(())) => match self.cancellation_result() {
+                        Some(result) => Poll::Ready(result.map(|_| ())),
+                        None => Poll::Ready(Ok(())),
+                    },
+                    other => other,
+                }
+            }).await
         }
 
         /// Permanently stop this sink and return its quiescent journal owner.
@@ -717,6 +776,227 @@ mod manifest_sink {
             domain(writer.cancel(cx).await)
         }
 
+        /// Stop this journaled sink, persist cancellation, then clean up staging.
+        ///
+        /// The first poll seals stream ingress. An already retained write or
+        /// checkpoint is drained with its original context before the journal is
+        /// handed to `ScopedSparseWriter::cancel_to_journal`. Earlier receive
+        /// errors do not prevent disposing of corrupt, uncommitted staging.
+        /// Admitted finalization is drained but never converted into cancellation.
+        /// Its publisher observation and original error remain available.
+        ///
+        /// This is explicit cleanup, not a task-cancellation signal. Fresh work
+        /// uses this live, authorized context. A dropped borrowing wait retains
+        /// the operation, immutable reason/timestamp, and journal ownership in
+        /// the sink. Repeating the same request observes it without another
+        /// terminal append; different parameters refuse without polling it.
+        /// Dropping the sink instead requires region drain and storage recovery.
+        ///
+        /// Success requires both confirmed cancellation persistence and canonical
+        /// cleanup. Ordinary failures retain the journal for `release_journal`.
+        /// A gateway failure can lose that owner. `journal_cancellation` and the
+        /// error source chain distinguish cleanup failure from unknown persistence.
+        /// A confirmed cleanup failure may be retried explicitly with
+        /// `retry_journaled_cancellation`; uncertain persistence may not.
+        ///
+        /// Unjournaled sinks, released ownership, and empty/oversized reasons
+        /// refuse before sealing or changing pending work. Existing `cancel`
+        /// keeps its historical behavior. No ACK or final Proof is emitted here.
+        /// A fresh request also checks the supplied context before changing sink
+        /// state or taking its journal. Already-denied authority or cancellation
+        /// leaves the owner and earlier pending work available for another live
+        /// context. Once installed, a retained request is drained without this
+        /// preliminary check; later gateway refusal can still lose its owner.
+        pub async fn cancel_journaled(
+            &mut self,
+            cx: &Cx,
+            reason: &str,
+            timestamp: u64,
+        ) -> io::Result<ManifestFileCancellation> {
+            if reason.is_empty() || reason.len() > 4096 {
+                return Err(invalid("cancellation reason must contain 1..=4096 UTF-8 bytes"));
+            }
+            let journal = self.journal.as_ref().ok_or_else(|| invalid("sink is not journaled"))?;
+            if journal.released {
+                return Err(invalid("journal ownership was released"));
+            }
+            if self.poisoned {
+                return Err(io::Error::other("manifest sink cannot cancel after an unobserved panic"));
+            }
+            if let Some(cancellation) = &self.cancellation {
+                if cancellation.reason != reason || cancellation.timestamp != timestamp {
+                    return Err(invalid("cancellation differs from the retained request"));
+                }
+            } else {
+                self.check_cancellation_admission(cx)?;
+                self.cancellation = Some(Cancellation {
+                    reason: reason.to_owned(), timestamp, started: false,
+                    observation: None, result: None,
+                });
+                self.shutdown = true;
+            }
+            std::future::poll_fn(|task| self.poll_cancellation(task, cx)).await
+        }
+
+        /// Last actual report observed from the cancellation job.
+        /// None also covers a still-running job or lost gateway result.
+        #[must_use]
+        pub fn journal_cancellation(&self) -> Option<ManifestFileCancellation> {
+            self.cancellation.as_ref().and_then(|state| state.observation)
+        }
+
+        /// Retry only a cleanup failure whose cancellation barrier was confirmed.
+        ///
+        /// This is a new canonical cancellation attempt with the SAME reason and
+        /// timestamp, including a new terminal append/sync before cleanup. It is
+        /// not an unjournaled shortcut. Uncertain storage, pending work, success,
+        /// released ownership, and pre-cleanup refusals cannot authorize a retry.
+        /// Dropping this borrowing wait retains the new attempt in the sink;
+        /// use `cancel_journaled` with the original parameters to observe it.
+        pub async fn retry_journaled_cancellation(
+            &mut self,
+            cx: &Cx,
+        ) -> io::Result<ManifestFileCancellation> {
+            let has_owner = self.journal.as_ref()
+                .is_some_and(|state| !state.released && state.owner.is_some());
+            let retryable = self.cancellation.as_ref().is_some_and(|state| {
+                matches!(&state.result, Some(Err(_)))
+                    && state.observation == Some(ManifestFileCancellation {
+                        cancellation_persisted: true, cleanup_attempted: true,
+                    })
+            });
+            if self.poisoned || self.pending.is_some() || !has_owner || !retryable {
+                return Err(invalid("only confirmed journaled cleanup failure can be retried"));
+            }
+            // Preserve the preceding confirmed cancellation and its cleanup
+            // failure when this retry is already inadmissible. The actual
+            // gateway checks again at dispatch, so this is not a reservation.
+            self.check_cancellation_admission(cx)?;
+            let state = self.cancellation.as_mut().expect("retry checked cancellation state");
+            state.started = false;
+            state.observation = None;
+            state.result = None;
+            std::future::poll_fn(|task| self.poll_cancellation(task, cx)).await
+        }
+
+        fn check_cancellation_admission(&self, cx: &Cx) -> io::Result<()> {
+            use crate::fs::scoped::ScopedFsError;
+
+            let admission = if cx.capabilities().io {
+                cx.checkpoint().map_err(ScopedFsError::Checkpoint)
+            } else {
+                Err(ScopedFsError::CapabilityDenied)
+            };
+            admission.map_err(|source| io::Error::other(ManifestFileCancellationError {
+                // This invocation has not started a cancellation attempt. In
+                // particular, do not relabel a previous attempt's observation
+                // as the result of this rejected retry.
+                observation: None,
+                publication: self.journal_publication().cloned(),
+                source: io::Error::other(source),
+            }))
+        }
+
+        fn cancellation_result(&self) -> Option<io::Result<ManifestFileCancellation>> {
+            let state = self.cancellation.as_ref()?;
+            match state.result.as_ref()? {
+                Ok(()) => Some(state.observation.ok_or_else(|| {
+                    io::Error::other("successful cancellation lacks its observation")
+                })),
+                Err(error) => Some(Err(error.repeat())),
+            }
+        }
+
+        fn fail_cancellation(&mut self, source: io::Error) -> io::Error {
+            let publication = self.journal_publication().cloned();
+            let state = self.cancellation.as_mut().expect("cancellation owns its result");
+            let failure = Failure(Arc::new(io::Error::other(ManifestFileCancellationError {
+                observation: state.observation, publication, source,
+            })));
+            let reported = failure.repeat();
+            state.result = Some(Err(failure));
+            reported
+        }
+
+        fn observe_cancellation(&mut self, report: JournalCancelReport) -> io::Result<()> {
+            self.journal.as_mut().expect("cancellation retains its journal mode")
+                .owner = Some(report.journal);
+            let observation = ManifestFileCancellation {
+                cancellation_persisted: report.cancellation_persisted,
+                cleanup_attempted: report.cleanup_attempted,
+            };
+            self.cancellation.as_mut().expect("cancellation owns its observation")
+                .observation = Some(observation);
+            if let Err(error) = domain(Ok(report.outcome)) {
+                return Err(self.fail_cancellation(error));
+            }
+            if !observation.cancellation_persisted || !observation.cleanup_attempted {
+                return Err(self.fail_cancellation(io::Error::other(
+                    "successful cancellation lacks its terminal and cleanup barriers",
+                )));
+            }
+            self.cancellation.as_mut().expect("cancellation owns its result")
+                .result = Some(Ok(()));
+            Ok(())
+        }
+
+        fn poll_cancellation(
+            &mut self,
+            task: &mut Context<'_>,
+            cx: &Cx,
+        ) -> Poll<io::Result<ManifestFileCancellation>> {
+            loop {
+                if let Some(result) = self.cancellation_result() {
+                    return Poll::Ready(result);
+                }
+                // Drive only retained work, ignoring a PREVIOUS receive failure.
+                // Never overwrite or abandon a pending write/checkpoint/commit.
+                match self.drive_pending(task) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(error)) if self.poisoned => {
+                        return Poll::Ready(Err(self.fail_cancellation(error)));
+                    }
+                    Poll::Ready(_) => {}
+                }
+                if let Some(result) = self.cancellation_result() {
+                    return Poll::Ready(result);
+                }
+                // A live commit request is a one-way boundary, even when its
+                // reported failure did not prove that publication occurred.
+                if self.receipt.is_some() || self.published.is_some() {
+                    return Poll::Ready(Err(self.fail_cancellation(invalid(
+                        "admitted finalization cannot be converted into cancellation",
+                    ))));
+                }
+                let journal = match self.journal.as_mut() {
+                    Some(state) if !state.released => state,
+                    _ => return Poll::Ready(Err(self.fail_cancellation(invalid(
+                        "journal ownership was released",
+                    )))),
+                };
+                let owner = match journal.owner.take() {
+                    Some(owner) => owner,
+                    None => return Poll::Ready(Err(self.fail_cancellation(invalid(
+                        "journal owner unavailable; reopen retained storage",
+                    )))),
+                };
+                let cancellation = self.cancellation.as_mut().expect("cancellation is installed");
+                let request = JournalCancelRequest {
+                    journal: owner, transfer_id: journal.transfer_id.clone(),
+                    manifest: Arc::clone(&self.manifest), reason: cancellation.reason.clone(),
+                    timestamp: cancellation.timestamp,
+                };
+                cancellation.started = true;
+                let writer = self.writer.clone();
+                let cx = cx.clone();
+                self.pending = Some(Box::pin(async move {
+                    let report = writer.cancel_to_journal(&cx, request).await
+                        .map_err(io::Error::other)?;
+                    Ok(Completion::JournalCancelled(Box::new(report)))
+                }));
+            }
+        }
+
         fn fail(&mut self, error: io::Error) -> io::Error {
             let failure = Failure(Arc::new(error));
             let reported = failure.repeat();
@@ -725,15 +1005,25 @@ mod manifest_sink {
         }
 
         fn drive(&mut self, task: &mut Context<'_>) -> Poll<io::Result<()>> {
-            if self.journal.as_ref().is_some_and(|state| state.released) {
+            if self.cancellation.is_some()
+                || self.journal.as_ref().is_some_and(|state| state.released)
+            {
                 return Poll::Ready(Err(io::ErrorKind::BrokenPipe.into()));
             }
             if let Some(error) = &self.failure {
                 return Poll::Ready(Err(error.repeat()));
             }
+            self.drive_pending(task)
+        }
+
+        // Cancellation may drain earlier work after a receive failure, but must
+        // never reopen admission or clear the original failure to do so.
+        fn drive_pending(&mut self, task: &mut Context<'_>) -> Poll<io::Result<()>> {
             if self.poisoned {
                 return Poll::Ready(Err(io::Error::other("manifest sink cannot repoll after panic")));
             }
+            let cancellation_job = self.cancellation.as_ref()
+                .is_some_and(|state| state.started && state.result.is_none());
             let Some(pending) = self.pending.as_mut() else { return Poll::Ready(Ok(())); };
             self.poisoned = true;
             let result = pending.as_mut().poll(task);
@@ -760,6 +1050,14 @@ mod manifest_sink {
                     if let Err(error) = self.observe_commit(*report) {
                         return Poll::Ready(Err(self.fail(error)));
                     }
+                }
+                Ok(Completion::JournalCancelled(report)) => {
+                    if let Err(error) = self.observe_cancellation(*report) {
+                        return Poll::Ready(Err(error));
+                    }
+                }
+                Err(error) if cancellation_job => {
+                    return Poll::Ready(Err(self.fail_cancellation(error)));
                 }
                 Err(error) => return Poll::Ready(Err(self.fail(error))),
             }
@@ -1110,6 +1408,486 @@ mod manifest_sink {
             let mut config = config(data, destination, policy);
             config.writer.fsync_policy = FsyncPolicy::BeforeCommit;
             config
+        }
+
+        fn cancellation_failure(error: &io::Error) -> &ManifestFileCancellationError {
+            let mut source: &(dyn std::error::Error + 'static) = error;
+            loop {
+                if let Some(error) = source.downcast_ref::<ManifestFileCancellationError>() {
+                    return error;
+                }
+                source = source.source().expect("cancellation error lost its typed observation");
+            }
+        }
+
+        #[test]
+        fn live_journal_cancellation_cleans_only_after_persistence_and_is_observably_idempotent() {
+            use crate::atp::journal::JournalRecord;
+            for workers in [1, 2] {
+                for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                    for quarantine in [false, true] {
+                        for data in [b"".as_slice(), b"abcdefgh".as_slice()] {
+                            let directory = tempfile::tempdir().unwrap();
+                            let runtime = runtime(workers, 2);
+                            runtime.block_on(async {
+                                let cx = Cx::current().unwrap();
+                                let path = directory.path().join("destination");
+                                let mut config = durable_config(data, path.clone(), policy);
+                                config.writer.enable_quarantine = quarantine;
+                                let mut sink = ManifestFileSink::new_journaled(
+                                    &cx, config, journal_input(directory.path()),
+                                ).await.unwrap();
+                                let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                                cx.scoped_fs().write(path.clone(), b"keep destination".to_vec()).await.unwrap();
+                                if !data.is_empty() {
+                                    sink.write_all(&data[..3]).await.unwrap();
+                                    sink.flush().await.unwrap();
+                                }
+                                let observed = sink.cancel_journaled(&cx, "application stopped", 72).await.unwrap();
+                                assert_eq!(observed, ManifestFileCancellation {
+                                    cancellation_persisted: true, cleanup_attempted: true,
+                                });
+                                assert_eq!(sink.journal_cancellation(), Some(observed));
+                                assert!(!staging.exists());
+                                assert_eq!(std::fs::read(&path).unwrap(), b"keep destination");
+                                let owner = sink.journal.as_ref().unwrap().owner.as_ref().unwrap();
+                                let sequence = owner.get_stats().sequence;
+                                assert_eq!(owner.get_resume_summary("live-checkpoint").unwrap().status,
+                                    TransferResumeStatus::Cancelled { reason: "application stopped".to_owned() });
+                                assert!(matches!(&owner.get_transfer_entries("live-checkpoint").unwrap().last().unwrap().record,
+                                    JournalRecord::Cancellation { .. }));
+                                assert_eq!(sink.cancel_journaled(&cx, "application stopped", 72).await.unwrap(), observed);
+                                assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                                assert_eq!(sink.write(b"x").await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                                assert_eq!(sink.flush().await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                                assert_eq!(commit(&mut sink, &receipt(data)).await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                                assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
+                                let mut owner = sink.release_journal().unwrap();
+                                let cfg = journal_config(directory.path());
+                                let summary = cx.scoped_fs().run_io(move |_| {
+                                    owner.compact().unwrap();
+                                    drop(owner);
+                                    let owner = AppendJournal::new(cfg, crate::security::AuthKey::from_seed(42)).unwrap();
+                                    Ok(owner.get_resume_summary("live-checkpoint").unwrap())
+                                }).await.unwrap();
+                                assert!(matches!(summary.status, TransferResumeStatus::Cancelled { .. }));
+                            });
+                            drained(&runtime);
+                        }
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn live_journal_cancellation_disposes_of_failed_ingress_without_erasing_its_error() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let path = directory.path().join("destination");
+                    let options = with_hints(durable_config(b"abcdefgh", path.clone(), CommitPolicy::AtomicRename),
+                        b"abcdefgh", &[(0, 4), (4, 8)]);
+                    let mut sink = ManifestFileSink::new_journaled(&cx, options, journal_input(directory.path())).await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    sink.write_all(b"abcd").await.unwrap();
+                    sink.flush().await.unwrap();
+                    let earlier = sink.write_all(b"xxxx").await.unwrap_err().to_string();
+                    assert_eq!(sink.written_bytes(), 4);
+                    assert!(sink.pending.is_none());
+                    sink.cancel_journaled(&cx, "bad source", 73).await.unwrap();
+                    assert_eq!(sink.failure.as_ref().unwrap().to_string(), earlier);
+                    assert!(!path.exists());
+                    assert!(!staging.exists());
+                    assert_eq!(sink.journal_publication(), None);
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_cancellation_drains_a_queued_write_without_starting_cleanup_from_drain_pending() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 1);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
+                        journal_input(directory.path())).await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    let (started, mut start) = oneshot::channel();
+                    let (release, wait) = mpsc::channel();
+                    let fs = cx.scoped_fs();
+                    let mut blocked = Box::pin(fs.run_io(move |_| {
+                        started.send_blocking(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                        Ok(())
+                    }));
+                    poll_fn(|task| {
+                        assert!(blocked.as_mut().poll(task).is_pending());
+                        start.poll_recv_uninterruptible(task)
+                    }).await.unwrap();
+                    let mut writing = Box::pin(sink.write(b"data"));
+                    poll_fn(|task| {
+                        assert!(writing.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(writing);
+                    assert!(sink.pending.is_some(), "real write must be retained behind the occupied pool");
+                    let mut cancelling = Box::pin(sink.cancel_journaled(&cx, "stop", 74));
+                    poll_fn(|task| {
+                        assert!(cancelling.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(cancelling);
+                    assert!(!sink.cancellation.as_ref().unwrap().started);
+                    assert_eq!(sink.write(b"no").await.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+                    assert_eq!(sink.cancel_journaled(&cx, "changed", 74).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                    assert!(matches!(sink.release_journal(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    release.send(()).unwrap();
+                    blocked.await.unwrap();
+                    sink.drain_pending(&cx).await.unwrap();
+                    assert_eq!(sink.written_bytes(), 4);
+                    assert_eq!(std::fs::read(&staging).unwrap(), b"data");
+                    assert_eq!(sink.journal_cancellation(), None);
+                    assert!(!sink.cancellation.as_ref().unwrap().started);
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    sink.cancel_journaled(&cx, "stop", 74).await.unwrap();
+                    assert!(!staging.exists());
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn dropped_journal_cancellation_wait_retains_its_owner_and_original_request() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 1);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
+                        journal_input(directory.path())).await.unwrap();
+                    sink.write_all(b"data").await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let (started, mut start) = oneshot::channel();
+                    let (release, wait) = mpsc::channel();
+                    let fs = cx.scoped_fs();
+                    let mut blocked = Box::pin(fs.run_io(move |_| {
+                        started.send_blocking(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                        Ok(())
+                    }));
+                    poll_fn(|task| {
+                        assert!(blocked.as_mut().poll(task).is_pending());
+                        start.poll_recv_uninterruptible(task)
+                    }).await.unwrap();
+                    let mut cancelling = Box::pin(sink.cancel_journaled(&cx, "stop", 75));
+                    poll_fn(|task| {
+                        assert!(cancelling.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(cancelling);
+                    assert!(sink.cancellation.as_ref().unwrap().started);
+                    assert!(sink.pending.is_some());
+                    assert!(sink.journal.as_ref().unwrap().owner.is_none());
+                    assert!(staging.exists());
+                    assert_eq!(sink.cancel_journaled(&cx, "stop", 76).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                    assert!(matches!(sink.release_journal(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+                    release.send(()).unwrap();
+                    blocked.await.unwrap();
+                    sink.drain_pending(&cx).await.unwrap();
+                    let observed = sink.journal_cancellation().unwrap();
+                    assert!(observed.cancellation_persisted && observed.cleanup_attempted);
+                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    assert_eq!(sink.cancel_journaled(&cx, "stop", 75).await.unwrap(), observed);
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    assert!(!staging.exists());
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_journal_cancellation_preserves_staging_on_real_terminal_storage_failure() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
+                        journal_input(directory.path())).await.unwrap();
+                    sink.write_all(b"data").await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let owner = sink.journal.as_mut().unwrap().owner.take().unwrap();
+                    let mut cfg = journal_config(directory.path());
+                    cfg.max_journal_size = 1;
+                    let blocker_base = cfg.base_dir.clone();
+                    let owner = cx.scoped_fs().run_io(move |_| {
+                        drop(owner);
+                        let owner = AppendJournal::new(cfg, crate::security::AuthKey::from_seed(42)).unwrap();
+                        // The real append precedes automatic compaction. A new
+                        // directory at its next generation prevents consolidation.
+                        let next = owner.get_stats().generation + 1;
+                        std::fs::create_dir(blocker_base.join(format!("journal_gen_{next:06}.dat")))?;
+                        Ok(owner)
+                    }).await.unwrap();
+                    sink.journal.as_mut().unwrap().owner = Some(owner);
+                    let error = sink.cancel_journaled(&cx, "stop", 77).await.unwrap_err();
+                    let observation = Some(ManifestFileCancellation {
+                        cancellation_persisted: false, cleanup_attempted: false,
+                    });
+                    assert_eq!(cancellation_failure(&error).observation, observation);
+                    assert_eq!(sink.journal_cancellation(), observation);
+                    assert_eq!(std::fs::read(&staging).unwrap(), b"data");
+                    assert!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap()
+                        .get_resume_summary("live-checkpoint").is_err());
+                    assert!(matches!(sink.writer.cancel(&cx).await.unwrap(),
+                        Outcome::Err(SparseWriterError::CommitFailed(_))));
+                    assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
+                    let repeated = sink.cancel_journaled(&cx, "stop", 77).await.unwrap_err();
+                    assert_eq!(error.to_string(), repeated.to_string());
+                    assert!(sink.release_journal().is_ok());
+                    assert_eq!(cancellation_failure(&error).observation, observation);
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_journal_cancellation_retries_only_confirmed_cleanup_failure() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut cfg = durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename);
+                    cfg.writer.enable_quarantine = false;
+                    let mut sink = ManifestFileSink::new_journaled(&cx, cfg, journal_input(directory.path())).await.unwrap();
+                    sink.write_all(b"data").await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let retained = directory.path().join("retained-payload");
+                    // Fault only this test's namespace. The payload and the
+                    // replacement directory are both preserved throughout.
+                    std::fs::rename(&staging, &retained).unwrap();
+                    std::fs::create_dir(&staging).unwrap();
+                    let error = sink.cancel_journaled(&cx, "stop", 78).await.unwrap_err();
+                    assert_eq!(cancellation_failure(&error).observation, Some(ManifestFileCancellation {
+                        cancellation_persisted: true, cleanup_attempted: true,
+                    }));
+                    assert!(matches!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap()
+                        .get_resume_summary("live-checkpoint").unwrap().status,
+                        TransferResumeStatus::Cancelled { .. }));
+                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    assert!(sink.cancel_journaled(&cx, "stop", 78).await.is_err());
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    let previous_error = sink.cancellation.as_ref().unwrap().result.as_ref()
+                        .unwrap().as_ref().unwrap_err().to_string();
+                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let child = region.cx();
+                    child.cancel_with(crate::types::CancelKind::User, Some("before cleanup retry"));
+                    let refused = sink.retry_journaled_cancellation(child).await.unwrap_err();
+                    assert_eq!(cancellation_failure(&refused).observation, None);
+                    assert_eq!(sink.journal_cancellation(), Some(ManifestFileCancellation {
+                        cancellation_persisted: true, cleanup_attempted: true,
+                    }));
+                    assert_eq!(sink.cancellation.as_ref().unwrap().result.as_ref()
+                        .unwrap().as_ref().unwrap_err().to_string(), previous_error);
+                    assert!(sink.pending.is_none());
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    region.close().await.unwrap();
+                    std::fs::rename(&staging, directory.path().join("retained-fault-directory")).unwrap();
+                    std::fs::rename(&retained, &staging).unwrap();
+                    let observed = sink.retry_journaled_cancellation(&cx).await.unwrap();
+                    assert!(observed.cancellation_persisted && observed.cleanup_attempted);
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence + 1);
+                    assert!(!staging.exists());
+                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let child = region.cx();
+                    child.cancel_with(crate::types::CancelKind::User, Some("after completed cleanup"));
+                    // Observing the retained result is not fresh cleanup work.
+                    assert_eq!(sink.cancel_journaled(child, "stop", 78).await.unwrap(), observed);
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence + 1);
+                    region.close().await.unwrap();
+                    assert!(sink.retry_journaled_cancellation(&cx).await.is_err());
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_cancellation_drains_admitted_commit_without_overwriting_publication_evidence() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 1);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let path = directory.path().join("destination");
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", path.clone(), CommitPolicy::AtomicRename), journal_input(directory.path())).await.unwrap();
+                    sink.write_all(b"data").await.unwrap();
+                    let (started, mut start) = oneshot::channel();
+                    let (release, wait) = mpsc::channel();
+                    let fs = cx.scoped_fs();
+                    let mut blocked = Box::pin(fs.run_io(move |_| {
+                        started.send_blocking(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                        Ok(())
+                    }));
+                    poll_fn(|task| {
+                        assert!(blocked.as_mut().poll(task).is_pending());
+                        start.poll_recv_uninterruptible(task)
+                    }).await.unwrap();
+                    let expected = receipt(b"data");
+                    let mut committing = Box::pin(commit(&mut sink, &expected));
+                    poll_fn(|task| {
+                        assert!(committing.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(committing);
+                    assert!(sink.pending.is_some());
+                    assert!(sink.receipt.is_some());
+                    let mut cancelling = Box::pin(sink.cancel_journaled(&cx, "too late", 79));
+                    poll_fn(|task| {
+                        assert!(cancelling.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(cancelling);
+                    release.send(()).unwrap();
+                    blocked.await.unwrap();
+                    let error = sink.cancel_journaled(&cx, "too late", 79).await.unwrap_err();
+                    assert_eq!(cancellation_failure(&error).observation, None);
+                    assert_eq!(cancellation_failure(&error).publication,
+                        Some(JournalPublication::Confirmed(path.clone())));
+                    assert_eq!(sink.published_path(), Some(path.as_path()));
+                    assert_eq!(sink.journal_publication(), Some(&JournalPublication::Confirmed(path.clone())));
+                    assert_eq!(std::fs::read(&path).unwrap(), b"data");
+                    let owner = sink.release_journal().unwrap();
+                    assert!(owner.get_transfer_entries("live-checkpoint").unwrap().iter().all(|entry| {
+                        !matches!(&entry.record, crate::atp::journal::JournalRecord::Cancellation { .. })
+                    }));
+                    assert!(matches!(owner.get_resume_summary("live-checkpoint").unwrap().status,
+                        TransferResumeStatus::Committed { .. }));
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn live_cancellation_rejects_bad_admission_and_preserves_the_actual_gateway_error() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 2);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut ordinary = ManifestFileSink::new(&cx,
+                        config(b"data", directory.path().join("ordinary"), CommitPolicy::AtomicRename)).await.unwrap();
+                    assert_eq!(ordinary.cancel_journaled(&cx, "stop", 80).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                    ordinary.write_all(b"data").await.unwrap();
+                    commit(&mut ordinary, &receipt(b"data")).await.unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", directory.path().join("journaled"), CommitPolicy::AtomicRename),
+                        journal_input(directory.path())).await.unwrap();
+                    for reason in [String::new(), "x".repeat(4097)] {
+                        assert_eq!(sink.cancel_journaled(&cx, &reason, 80).await.unwrap_err().kind(), io::ErrorKind::InvalidInput);
+                        assert!(sink.cancellation.is_none());
+                        assert!(!sink.shutdown);
+                    }
+                    sink.write_all(b"data").await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let child = region.cx();
+                    child.cancel_with(crate::types::CancelKind::User, Some("before explicit cleanup"));
+                    let error = sink.cancel_journaled(child, "stop", 80).await.unwrap_err();
+                    let observed = cancellation_failure(&error);
+                    assert_eq!(observed.observation, None);
+                    assert!(matches!(observed.source.get_ref()
+                        .and_then(|source| source.downcast_ref::<crate::fs::scoped::ScopedFsError>()),
+                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))));
+                    assert!(sink.journal.as_ref().unwrap().owner.is_some());
+                    assert!(sink.cancellation.is_none());
+                    assert!(!sink.shutdown);
+                    assert_eq!(std::fs::read(&staging).unwrap(), b"data");
+                    region.close().await.unwrap();
+                    // A known pre-admission refusal need not force disk reopen
+                    // or prevent a later authorized cleanup with the same owner.
+                    sink.flush().await.unwrap();
+                    let report = sink.cancel_journaled(&cx, "stop", 80).await.unwrap();
+                    assert!(report.cancellation_persisted && report.cleanup_attempted);
+                    assert!(!staging.exists());
+                    assert!(sink.release_journal().is_ok());
+                });
+                drained(&runtime);
+            }
+        }
+
+        #[test]
+        fn refused_cleanup_context_does_not_consume_a_live_journal_or_queued_write() {
+            for workers in [1, 2] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers, 1);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let mut sink = ManifestFileSink::new_journaled(&cx,
+                        durable_config(b"data", directory.path().join("destination"), CommitPolicy::AtomicRename),
+                        journal_input(directory.path())).await.unwrap();
+                    let staging = sink.journal_checkpoint().unwrap().source_path.clone();
+                    let sequence = sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence;
+                    let (started, mut start) = oneshot::channel();
+                    let (release, wait) = mpsc::channel();
+                    let fs = cx.scoped_fs();
+                    let mut blocked = Box::pin(fs.run_io(move |_| {
+                        started.send_blocking(()).unwrap();
+                        wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                        Ok(())
+                    }));
+                    poll_fn(|task| {
+                        assert!(blocked.as_mut().poll(task).is_pending());
+                        start.poll_recv_uninterruptible(task)
+                    }).await.unwrap();
+                    let mut writing = Box::pin(sink.write(b"data"));
+                    poll_fn(|task| {
+                        assert!(writing.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    }).await;
+                    drop(writing);
+                    assert!(sink.pending.is_some(), "write must be queued behind the sole occupied worker");
+                    let region = cx.open_child_region(crate::cx::ChildRegionSpec::inherit()).await.unwrap();
+                    let child = region.cx();
+                    child.cancel_with(crate::types::CancelKind::User, Some("reject fresh cleanup"));
+                    let mut cancelling = Box::pin(sink.cancel_journaled(child, "stop", 81));
+                    let error = poll_fn(|task| match cancelling.as_mut().poll(task) {
+                        Poll::Ready(Err(error)) => Poll::Ready(error),
+                        _ => panic!("known refusal must not poll or wait for the queued write"),
+                    }).await;
+                    drop(cancelling);
+                    let refused = cancellation_failure(&error);
+                    assert_eq!(refused.observation, None);
+                    assert!(matches!(refused.source.get_ref()
+                        .and_then(|error| error.downcast_ref::<crate::fs::scoped::ScopedFsError>()),
+                        Some(crate::fs::scoped::ScopedFsError::Checkpoint(_))));
+                    assert!(sink.pending.is_some());
+                    assert!(sink.cancellation.is_none());
+                    assert!(!sink.shutdown);
+                    assert_eq!(sink.written_bytes(), 0);
+                    assert_eq!(sink.journal.as_ref().unwrap().owner.as_ref().unwrap().get_stats().sequence, sequence);
+                    assert!(std::fs::read(&staging).unwrap().is_empty());
+                    release.send(()).unwrap();
+                    blocked.await.unwrap();
+                    assert_eq!(sink.write(b"data").await.unwrap(), 4);
+                    assert_eq!(std::fs::read(&staging).unwrap(), b"data");
+                    region.close().await.unwrap();
+                    sink.cancel_journaled(&cx, "stop", 81).await.unwrap();
+                    assert!(!staging.exists());
+                    assert!(sink.release_journal().is_ok());
+                });
+                drained(&runtime);
+            }
         }
 
         #[test]
