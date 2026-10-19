@@ -7,6 +7,8 @@ use std::thread;
 use std::time::Instant;
 
 const WATCHDOG: Duration = Duration::from_secs(5);
+// Only the epoll-backed blocking-poll tests below use it.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 const BLOCKER_WATCHDOG: Duration = Duration::from_secs(30);
 
 fn waiter_is_committed(parker: &Parker) -> bool {
