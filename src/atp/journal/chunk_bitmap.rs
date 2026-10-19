@@ -896,6 +896,274 @@ impl<'a> BitmapCursor<'a> {
     }
 }
 
+impl ChunkBitmap {
+    /// Return coalesced byte ranges that are wanted, including absent entries.
+    ///
+    /// Unlike `get_missing_chunks` (which preserves its explicit-entry semantics),
+    /// this supports sparse recovered bitmaps without initializing every logical
+    /// chunk. An untracked cell has the same Wanted meaning used by `get_stats`.
+    /// Valid non-Wanted cells are excluded, including Invalidated and Quarantined:
+    /// retry requires the explicit `requeue_invalidated_chunk` transition below.
+    /// Invalid imported offsets are diagnostic only and cannot hide missing bytes.
+    ///
+    /// Ranges are sorted, disjoint, coalesced and clipped to the declared size.
+    /// Zero chunk size is an error, including for an empty object. The calculation
+    /// uses u64 offsets and never enumerates the logical chunk count or sparse
+    /// gaps. Work is O(n + k log k), and auxiliary/output space is O(k + 1), where
+    /// n is tracked entries and k is valid non-Wanted entries. Caller-held bitmap
+    /// metadata and later expansion of returned ranges are separate memory costs.
+    ///
+    /// This is scheduling state, not authentication or durable resume permission.
+    /// Received/Verified/RepairDerived cells must still complete their existing
+    /// verification and durability stages. No file or journal is changed here.
+    pub fn get_missing_chunk_ranges(&self) -> Result<Vec<SparseRange>, ChunkBitmapDecodeError> {
+        if self.chunk_size == 0 {
+            return Err(ChunkBitmapDecodeError::InvalidGeometry {
+                total_size: self.total_size,
+                chunk_size: self.chunk_size,
+            });
+        }
+        let mut occupied: Vec<u64> = self.chunks.iter().filter_map(|(&offset, entry)| {
+            (entry.state != ChunkState::Wanted && self.is_valid_chunk_offset(offset))
+                .then_some(offset)
+        }).collect();
+        occupied.sort_unstable();
+        let mut ranges = Vec::new();
+        let mut cursor = 0_u64;
+        for offset in occupied {
+            if cursor < offset {
+                ranges.push(SparseRange::new(cursor, offset));
+            }
+            // A final short cell can extend past u64::MAX arithmetically; clamp
+            // the endpoint to the declared extent without offset+size overflow.
+            cursor = offset.saturating_add(self.chunk_size).min(self.total_size);
+        }
+        if cursor < self.total_size {
+            ranges.push(SparseRange::new(cursor, self.total_size));
+        }
+        Ok(ranges)
+    }
+
+    /// Explicitly schedule one valid Invalidated chunk for a new receive attempt.
+    ///
+    /// The ordinary priority-based update API intentionally cannot move from
+    /// Invalidated back to Wanted. This separate transition resets ONLY the
+    /// selected invalidated cell, discarding its stale hash and all per-attempt
+    /// metadata before setting Wanted and both update timestamps. Preserve any
+    /// forensic metadata elsewhere before requesting this reset.
+    ///
+    /// Unknown, misaligned, out-of-extent and non-Invalidated cells refuse without
+    /// any mutation. Quarantined/Committed cells are not automatically reopened;
+    /// another explicit invalidation decision is required first. New bytes must
+    /// pass the ordinary receive/verify/write/commit stages: the reset grants no
+    /// verification credit and does not erase payload files or journal records.
+    pub fn requeue_invalidated_chunk(&mut self, offset: u64, timestamp: u64) -> bool {
+        if !self.is_valid_chunk_offset(offset) {
+            return false;
+        }
+        let Some(entry) = self.chunks.get_mut(&offset) else {
+            return false;
+        };
+        if entry.state != ChunkState::Invalidated {
+            return false;
+        }
+        *entry = ChunkEntry::new(ChunkState::Wanted, timestamp);
+        self.updated_at = timestamp;
+        true
+    }
+}
+
 #[cfg(test)]
 #[path = "chunk_bitmap_inline_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod sparse_retry_tests {
+    use super::*;
+
+    #[test]
+    fn sparse_missing_ranges_include_implicit_wanted_and_preserve_short_tail() {
+        let mut bitmap = ChunkBitmap::new("sparse".to_owned(), 10, 4, 1);
+        assert!(bitmap.get_missing_chunks().is_empty()); // Legacy query is unchanged.
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(0, 10)]);
+        assert_eq!(bitmap.entry_count(), 0);
+        bitmap.update_chunk_state(0, ChunkState::Written, 2, Some([1; 32]));
+        bitmap.update_chunk_state(8, ChunkState::Verified, 3, Some([2; 32]));
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(4, 8)]);
+        bitmap.update_chunk_state(4, ChunkState::Wanted, 4, None);
+        let before = bitmap.serialize_to_bytes();
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(4, 8)]);
+        assert_eq!(bitmap.serialize_to_bytes(), before);
+        let decoded = ChunkBitmap::deserialize_from_bytes(&before).unwrap();
+        assert_eq!(decoded.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(4, 8)]);
+    }
+
+    #[test]
+    fn invalidated_retry_discards_old_attempt_evidence_and_uses_normal_progression() {
+        let mut bitmap = ChunkBitmap::new("retry".to_owned(), 4, 4, 1);
+        bitmap.update_chunk_state(0, ChunkState::Verified, 2, Some([1; 32]));
+        bitmap.set_chunk_metadata(0, "old-proof".to_owned(), "old-attempt".to_owned(), 3);
+        assert_eq!(bitmap.invalidate_chunks_in_state(ChunkState::Verified, 4), 1);
+        assert!(!bitmap.update_chunk_state(0, ChunkState::Wanted, 5, None));
+        assert!(bitmap.get_missing_chunk_ranges().unwrap().is_empty());
+        assert!(bitmap.requeue_invalidated_chunk(0, 6));
+        let entry = bitmap.get_chunk_entry(0).unwrap();
+        assert_eq!(entry.state, ChunkState::Wanted);
+        assert_eq!(entry.state_timestamp, 6);
+        assert_eq!(entry.chunk_hash, None);
+        assert!(entry.metadata.is_empty());
+        assert_eq!(bitmap.created_at(), 1);
+        assert_eq!(bitmap.updated_at(), 6);
+        assert_eq!(bitmap.entry_count(), 1);
+        assert_eq!(bitmap.get_stats().verified_chunks, 0);
+        assert_eq!(bitmap.get_missing_chunks(), vec![0]);
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(0, 4)]);
+        assert!(!bitmap.requeue_invalidated_chunk(0, 7));
+        assert_eq!(bitmap.updated_at(), 6);
+        for (state, timestamp, hash) in [
+            (ChunkState::Received, 8, None),
+            (ChunkState::Verified, 9, Some([2; 32])),
+            (ChunkState::Written, 10, None),
+            (ChunkState::Committed, 11, None),
+        ] {
+            assert!(bitmap.update_chunk_state(0, state, timestamp, hash));
+        }
+        assert_eq!(bitmap.get_chunk_entry(0).unwrap().chunk_hash, Some([2; 32]));
+        assert!(bitmap.is_complete());
+        assert!(bitmap.get_missing_chunk_ranges().unwrap().is_empty());
+    }
+
+    #[test]
+    fn every_other_state_and_invalid_offset_refuse_retry_without_changing_evidence() {
+        for state in ChunkState::all().iter().copied() {
+            if state == ChunkState::Invalidated { continue; }
+            let mut bitmap = ChunkBitmap::new("state".to_owned(), 8, 4, 1);
+            bitmap.update_chunk_state(0, state, 2, Some([9; 32]));
+            bitmap.set_chunk_metadata(0, "diagnostic".to_owned(), "keep".to_owned(), 3);
+            let before = bitmap.serialize_to_bytes();
+            assert!(!bitmap.requeue_invalidated_chunk(0, 99));
+            assert_eq!(bitmap.serialize_to_bytes(), before, "state={state:?}");
+            assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), if state == ChunkState::Wanted {
+                vec![SparseRange::new(0, 8)]
+            } else { vec![SparseRange::new(4, 8)] });
+        }
+        let mut bitmap = ChunkBitmap::new("diagnostic".to_owned(), 8, 4, 1);
+        for offset in [1, 8, u64::MAX] {
+            bitmap.update_chunk_state(offset, ChunkState::Invalidated, 2, Some([7; 32]));
+            let before = bitmap.serialize_to_bytes();
+            assert!(!bitmap.requeue_invalidated_chunk(offset, 3));
+            assert_eq!(bitmap.serialize_to_bytes(), before);
+        }
+        assert!(!bitmap.requeue_invalidated_chunk(0, 4)); // Valid but untracked.
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(0, 8)]);
+    }
+
+    #[test]
+    fn huge_sparse_geometry_does_not_expand_missing_cells_and_zero_size_is_explicit() {
+        let mut bitmap = ChunkBitmap::new("huge".to_owned(), u64::MAX, 1, 1);
+        bitmap.update_chunk_state(0, ChunkState::Written, 2, None);
+        bitmap.update_chunk_state(u64::MAX - 1, ChunkState::Written, 2, None);
+        assert_eq!(bitmap.get_missing_chunk_ranges().unwrap(),
+            vec![SparseRange::new(1, u64::MAX - 1)]);
+        assert_eq!(bitmap.entry_count(), 2);
+        let mut tail = ChunkBitmap::new("tail".to_owned(), u64::MAX, u64::MAX - 1, 1);
+        tail.update_chunk_state(u64::MAX - 1, ChunkState::Written, 2, None);
+        assert_eq!(tail.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(0, u64::MAX - 1)]);
+        tail.update_chunk_state(0, ChunkState::Written, 3, None);
+        assert!(tail.get_missing_chunk_ranges().unwrap().is_empty());
+        let empty = ChunkBitmap::new("empty".to_owned(), 0, 4, 1);
+        assert!(empty.get_missing_chunk_ranges().unwrap().is_empty());
+        for size in [0, 1, u64::MAX] {
+            let mut invalid = ChunkBitmap::new("invalid".to_owned(), size, 0, 1);
+            invalid.update_chunk_state(0, ChunkState::Invalidated, 2, Some([1; 32]));
+            let before = invalid.serialize_to_bytes();
+            assert_eq!(invalid.get_missing_chunk_ranges().unwrap_err(),
+                ChunkBitmapDecodeError::InvalidGeometry { total_size: size, chunk_size: 0 });
+            assert!(!invalid.requeue_invalidated_chunk(0, 3));
+            assert_eq!(invalid.serialize_to_bytes(), before);
+        }
+    }
+
+    #[test]
+    fn sparse_missing_and_retry_ranges_match_a_byte_set_oracle() {
+        for (length, chunk_size) in [(5_u64, 1_u64), (11, 3), (17, 4)] {
+            let count = length.div_ceil(chunk_size);
+            for pattern in 0_u64..4_u64.pow(count as u32) {
+                let mut bitmap = ChunkBitmap::new("oracle".to_owned(), length, chunk_size, 1);
+                let mut digits = pattern;
+                for i in 0..count {
+                    let state = match digits % 4 {
+                        0 => None,
+                        1 => Some(ChunkState::Wanted),
+                        2 => Some(ChunkState::Written),
+                        _ => Some(ChunkState::Invalidated),
+                    };
+                    digits /= 4;
+                    if let Some(state) = state { bitmap.update_chunk_state(i * chunk_size, state, 2, None); }
+                }
+                for retry in [false, true] {
+                    if retry {
+                        for i in 0..count { bitmap.requeue_invalidated_chunk(i * chunk_size, 3); }
+                    }
+                    let expected: Vec<u64> = (0..length).filter(|byte| {
+                        matches!(bitmap.get_chunk_state((byte / chunk_size) * chunk_size),
+                            None | Some(ChunkState::Wanted))
+                    }).collect();
+                    let ranges = bitmap.get_missing_chunk_ranges().unwrap();
+                    assert!(ranges.iter().all(|r| r.start < r.end && r.end <= length));
+                    assert!(ranges.windows(2).all(|pair| pair[0].end < pair[1].start));
+                    let actual: Vec<u64> = ranges.iter().flat_map(|r| r.start..r.end).collect();
+                    assert_eq!(actual, expected, "length={length} chunk={chunk_size} pattern={pattern} retry={retry}");
+                }
+            }
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn persisted_sparse_retry_reopens_without_old_hash_or_quarantine_credit() {
+        use crate::cx::Cx;
+        use crate::runtime::{RootDrainOutcome, RuntimeBuilder};
+        use std::time::Duration;
+
+        for workers in [1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            let runtime = builder.blocking_threads(1, 2).build().unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut bitmap = ChunkBitmap::new("reopened".to_owned(), 16, 4, 1);
+                bitmap.update_chunk_state(0, ChunkState::Written, 2, Some([1; 32]));
+                bitmap.update_chunk_state(4, ChunkState::Invalidated, 3, Some([2; 32]));
+                bitmap.set_chunk_metadata(4, "receipt".to_owned(), "old".to_owned(), 4);
+                bitmap.update_chunk_state(8, ChunkState::Quarantined, 5, Some([3; 32]));
+                let old_path = directory.path().join("before.bitmap");
+                let old_bytes = bitmap.serialize_to_bytes();
+                cx.scoped_fs().write(old_path.clone(), old_bytes.clone()).await.unwrap();
+                let bytes = cx.scoped_fs().read(old_path.clone()).await.unwrap();
+                let mut reopened = ChunkBitmap::deserialize_from_bytes(&bytes).unwrap();
+                assert_eq!(reopened.get_missing_chunk_ranges().unwrap(), vec![SparseRange::new(12, 16)]);
+                assert!(reopened.requeue_invalidated_chunk(4, 6));
+                assert!(!reopened.requeue_invalidated_chunk(8, 6));
+                let new_path = directory.path().join("after.bitmap");
+                cx.scoped_fs().write(new_path.clone(), reopened.serialize_to_bytes()).await.unwrap();
+                let bytes = cx.scoped_fs().read(new_path).await.unwrap();
+                let reopened = ChunkBitmap::deserialize_from_bytes(&bytes).unwrap();
+                assert_eq!(reopened.get_missing_chunk_ranges().unwrap(),
+                    vec![SparseRange::new(4, 8), SparseRange::new(12, 16)]);
+                assert_eq!(reopened.get_chunk_entry(4).unwrap().chunk_hash, None);
+                assert!(reopened.get_chunk_entry(4).unwrap().metadata.is_empty());
+                assert_eq!(reopened.get_chunk_entry(0).unwrap().chunk_hash, Some([1; 32]));
+                assert_eq!(reopened.get_chunk_state(8), Some(ChunkState::Quarantined));
+                assert!(reopened.has_errors());
+                assert_eq!(cx.scoped_fs().read(old_path).await.unwrap(), old_bytes);
+            });
+            let report = runtime.shutdown_drained(Duration::from_secs(5));
+            assert_eq!(report.outcome, RootDrainOutcome::Quiescent, "{report:?}");
+            assert_eq!(report.live_tasks, 0);
+            assert_eq!(report.pending_spawns, 0);
+            assert_eq!(report.pending_obligations, 0);
+        }
+    }
+}

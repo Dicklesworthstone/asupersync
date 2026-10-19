@@ -1,8 +1,8 @@
 //! Connection establishment for the existing demand-driven stream owner.
 
 use super::{
-    CallDeadline, NativeDuplexStream, NativeServerStream, NativeStreamConfig, NativeStreamWindows,
-    check_cancellation, io_status, request_headers,
+    CallDeadline, KeepaliveBackoff, NativeDuplexStream, NativeServerStream, NativeStreamConfig,
+    NativeStreamWindows, check_cancellation, io_status, request_headers,
 };
 use crate::cx::{CancelWakerToken, Cx};
 use crate::grpc::client::ConnectPolicy;
@@ -17,6 +17,7 @@ use crate::types::Time;
 use std::future::{Future, poll_fn};
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -43,6 +44,7 @@ pub struct NativeStreamEndpoint {
     authority: String,
     setup_timeout: Duration,
     connect_policy: ConnectPolicy,
+    keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,7 @@ impl NativeStreamEndpoint {
             authority,
             setup_timeout,
             connect_policy: ConnectPolicy::default(),
+            keepalive_backoff: None,
         })
     }
 
@@ -169,6 +172,14 @@ impl NativeStreamEndpoint {
     #[must_use]
     pub fn with_connect_policy(mut self, policy: ConnectPolicy) -> Self {
         self.connect_policy = policy;
+        self
+    }
+
+    pub(crate) fn with_keepalive_backoff(
+        mut self,
+        backoff: Option<Arc<KeepaliveBackoff>>,
+    ) -> Self {
+        self.keepalive_backoff = backoff;
         self
     }
 
@@ -499,6 +510,8 @@ impl NativeStreamEndpoint {
                 )
             })
             .await?;
+        // Setup can receive SETTINGS and GOAWAY while the request flush is pending.
+        stream = stream.with_keepalive_backoff(self.keepalive_backoff.clone());
         // Response headers are not part of setup: a server may send them with
         // its first message, which a Watch can produce long after connecting.
         setup.run(stream.establish()).await?;
@@ -542,6 +555,8 @@ impl NativeStreamEndpoint {
                 )
             })
             .await?;
+        // Install on the inner owner before its first response read.
+        stream = stream.with_keepalive_backoff(self.keepalive_backoff.clone());
         setup.run(stream.flush_initial_headers()).await?;
         Ok(stream)
     }

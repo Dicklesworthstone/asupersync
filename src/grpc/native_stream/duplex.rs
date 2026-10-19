@@ -170,6 +170,14 @@ where
         Ok(self)
     }
 
+    pub(crate) fn with_keepalive_backoff(
+        mut self,
+        backoff: Option<Arc<KeepaliveBackoff>>,
+    ) -> Self {
+        self.inner = self.inner.with_keepalive_backoff(backoff);
+        self
+    }
+
     fn check_request(&mut self) -> Result<(), Status> {
         if !self.request_ready() {
             return Err(Status::failed_precondition(

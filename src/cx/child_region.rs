@@ -287,6 +287,7 @@ impl<Caps> Drop for ChildRegionOpening<Caps> {
 /// unrestricted opener), so [`ChildRegion::cx`] never exceeds it.
 pub struct ChildRegion<Caps = crate::cx::cap::All> {
     region_id: RegionId,
+    parent: RegionId,
     cx: crate::cx::Cx<Caps>,
     close_notify: Arc<Mutex<RegionCloseState>>,
     close_receipt: Arc<Mutex<Option<crate::record::region::RegionCloseOutcome>>>,
@@ -312,6 +313,7 @@ impl<Caps> ChildRegion<Caps> {
         let handles = admitted.cx.spawn_gateway_handle();
         Self {
             region_id: admitted.region_id,
+            parent: admitted.parent,
             // The scheduler mints a Cx<All>. Re-type it to the opener's
             // compile-time set; the runtime mask was already met with the
             // opener's in ChildRegionOpening::poll.
@@ -327,6 +329,11 @@ impl<Caps> ChildRegion<Caps> {
     #[must_use]
     pub fn region_id(&self) -> RegionId {
         self.region_id
+    }
+
+    /// Authoritative parent selected at region admission.
+    pub(crate) fn parent_region_id(&self) -> RegionId {
+        self.parent
     }
 
     /// Principal capability context for spawning body work into this region.

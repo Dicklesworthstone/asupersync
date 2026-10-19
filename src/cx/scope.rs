@@ -4,6 +4,10 @@
 //! tasks, creating child regions, and registering finalizers. Runtime-wired
 //! application code normally spawns through [`Cx`] instead.
 //!
+//! The `P` parameter is a legacy policy marker; registering a task here does
+//! not install a child-completion policy. Use [`Cx::open_policy_region`] for
+//! opt-in typed policy members with automatic sibling cancellation and drain.
+//!
 //! # Choosing a Spawn Surface
 //!
 //! Asupersync exposes three related paths with deliberately different bounds:
@@ -126,6 +130,10 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 /// A scope for spawning work within a region.
+///
+/// `P` remains a type marker on this legacy surface. A child error or panic
+/// does not apply `P::on_child_outcome` automatically. The additive
+/// [`Cx::open_policy_region`] surface provides that typed membership contract.
 ///
 /// The scope provides methods for:
 /// - Spawning tasks

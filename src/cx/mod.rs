@@ -67,6 +67,7 @@ pub mod fiber;
 pub(crate) mod io_gate;
 pub mod macaroon;
 mod owned_join;
+pub mod policy_region;
 pub mod registry;
 pub mod resource_bracket;
 pub mod scope;
@@ -112,6 +113,9 @@ pub use io_gate::{IoCapabilityDenied, WithAmbient};
 pub use macaroon::{
     BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
     VerificationError,
+};
+pub use policy_region::{
+    PolicyRegion, PolicyRegionClose, PolicyRegionReport, PolicyRegionSpawnError,
 };
 pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
