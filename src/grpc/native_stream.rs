@@ -66,6 +66,7 @@ use base64::Engine as _;
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -213,6 +214,30 @@ impl NativeStreamKeepalive {
     /// Absolute allowance from probe admission through its matching ACK.
     #[must_use]
     pub fn timeout(self) -> Duration { self.timeout }
+}
+
+/// Learned interval for connections created by one opted-in channel family.
+/// The active owner's Keepalive policy remains a separate immutable snapshot.
+#[derive(Debug)]
+pub(crate) struct KeepaliveBackoff {
+    interval: Mutex<Duration>,
+}
+
+impl KeepaliveBackoff {
+    pub(crate) fn new(interval: Duration) -> Self {
+        Self { interval: Mutex::new(interval) }
+    }
+
+    pub(crate) fn interval(&self) -> Duration {
+        *self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn back_off(&self) -> (Duration, Duration) {
+        let mut interval = self.interval.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = *interval;
+        *interval = previous.saturating_mul(2);
+        (previous, *interval)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -376,6 +401,8 @@ pub struct NativeServerStream<IO, C> {
     ready_messages: usize,
     unflushed_read_frames: usize,
     keepalive: Option<Keepalive>,
+    // Consumed at most once by this dedicated connection's rejection signal.
+    keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
     outbound_allows_probe: bool,
 }
 
@@ -541,8 +568,16 @@ where
             body_limit, stream_id, final_status: None, ready_messages: 0,
             terminal_reported: false,
             unflushed_read_frames: 0,
-            keepalive: None, outbound_allows_probe: false,
+            keepalive: None, keepalive_backoff: None, outbound_allows_probe: false,
         })
+    }
+
+    pub(crate) fn with_keepalive_backoff(
+        mut self,
+        backoff: Option<Arc<KeepaliveBackoff>>,
+    ) -> Self {
+        self.keepalive_backoff = backoff;
+        self
     }
 
     /// Enable demand-driven HTTP/2 keepalive on this dedicated connection.
@@ -933,9 +968,33 @@ where
             Some(ReceivedFrame::Reset { stream_id, error_code }) if stream_id == self.stream_id => {
                 Err(Status::from_h2_rst_stream_code(error_code))
             }
-            Some(ReceivedFrame::GoAway { last_stream_id, error_code, .. })
-                if last_stream_id < self.stream_id || error_code != crate::http::h2::ErrorCode::NoError => {
-                Err(Status::unavailable("HTTP/2 GOAWAY refused the active gRPC stream"))
+            Some(ReceivedFrame::GoAway { last_stream_id, error_code, debug_data }) => {
+                if error_code == crate::http::h2::ErrorCode::EnhanceYourCalm
+                    && debug_data.as_ref() == b"too_many_pings"
+                {
+                    // This owner is the connection, including in duplex calls.
+                    // Remove its notification before updating shared state so a
+                    // repeated GOAWAY cannot multiply the same rejection twice.
+                    if let Some(backoff) = self.keepalive_backoff.take() {
+                        let (previous, next) = backoff.back_off();
+                        let previous_interval_ns = previous.as_nanos().to_string();
+                        let next_interval_ns = next.as_nanos().to_string();
+                        self.cx.trace_with_fields("grpc.keepalive_backoff", &[
+                            ("previous_interval_ns", &previous_interval_ns),
+                            ("next_interval_ns", &next_interval_ns),
+                        ]);
+                        crate::tracing_compat::warn!(
+                            previous_interval_ns = %previous_interval_ns,
+                            next_interval_ns = %next_interval_ns,
+                            "gRPC peer rejected keepalive frequency; backing off future connections"
+                        );
+                    }
+                }
+                if last_stream_id < self.stream_id || error_code != crate::http::h2::ErrorCode::NoError {
+                    Err(Status::unavailable("HTTP/2 GOAWAY refused the active gRPC stream"))
+                } else {
+                    Ok(())
+                }
             }
             _ => Ok(()),
         }
@@ -972,6 +1031,7 @@ where
         if let Some(token) = self.cancel_waker.take() { self.cx.clear_cancel_waker(token); }
         self.timer = None;
         self.keepalive = None;
+        self.keepalive_backoff = None;
         self.io = None;
         self.connection = None;
         self.inbound = BytesMut::new();

@@ -548,6 +548,7 @@ fn gzip_stream_uses_the_existing_codec_and_enforces_decompressed_limit() {
 }
 
 mod native;
+mod keepalive_backoff;
 
 #[test]
 fn immediately_ready_message_batches_yield_without_losing_the_next_item() {

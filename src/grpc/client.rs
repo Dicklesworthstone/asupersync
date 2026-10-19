@@ -38,8 +38,8 @@ use crate::tls::TlsStream;
 use super::codec::{Codec, FramedCodec, IdentityCodec};
 #[cfg(not(target_arch = "wasm32"))]
 use super::native_stream::{
-    CallDeadline, DialedStream, NativeDuplexStream, NativeServerStream, NativeStreamConfig,
-    NativeStreamEndpoint, NativeStreamKeepalive, NativeStreamWindows,
+    CallDeadline, DialedStream, KeepaliveBackoff, NativeDuplexStream, NativeServerStream,
+    NativeStreamConfig, NativeStreamEndpoint, NativeStreamKeepalive, NativeStreamWindows,
 };
 use super::status::{Code, GrpcError, Status, TransportErrorKind};
 use super::streaming::{
@@ -328,6 +328,9 @@ pub struct ChannelBuilder {
     /// Idle unary connections to keep for reuse; 0 keeps none.
     #[cfg(not(target_arch = "wasm32"))]
     reuse_connections: usize,
+    /// Whether peer keepalive rejections increase intervals for future connections.
+    #[cfg(not(target_arch = "wasm32"))]
+    keepalive_backoff: bool,
 }
 
 impl ChannelBuilder {
@@ -351,6 +354,8 @@ impl ChannelBuilder {
             connect_policy: ConnectPolicy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             reuse_connections: 0,
+            #[cfg(not(target_arch = "wasm32"))]
+            keepalive_backoff: false,
         }
     }
 
@@ -432,6 +437,21 @@ impl ChannelBuilder {
     #[must_use]
     pub fn keepalive_timeout(mut self, timeout: Duration) -> Self {
         self.config.keepalive_timeout = Some(timeout);
+        self
+    }
+
+    /// Back off native streaming keepalive when the peer rejects its frequency.
+    ///
+    /// An HTTP/2 GOAWAY with ENHANCE_YOUR_CALM and exactly `too_many_pings`
+    /// doubles the interval for future connections on this channel and its
+    /// clones. Each connection can increase it once, saturating at
+    /// `Duration::MAX`. Active connections keep their interval and timeout.
+    /// This does not enable keepalive without a configured interval or retry
+    /// the rejected call.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn keepalive_backoff(mut self) -> Self {
+        self.keepalive_backoff = true;
         self
     }
 
@@ -547,6 +567,9 @@ impl ChannelBuilder {
         #[cfg(not(target_arch = "wasm32"))]
         {
             channel.connect_policy = self.connect_policy;
+            if self.keepalive_backoff {
+                channel = channel.with_keepalive_backoff();
+            }
             if self.reuse_connections > 0 {
                 channel.unary_pool = Some(Arc::new(UnaryConnectionPool::new(self.reuse_connections)));
             }
@@ -589,6 +612,9 @@ pub struct Channel {
     /// ([`ChannelBuilder::reuse_connections`]).
     #[cfg(not(target_arch = "wasm32"))]
     unary_pool: Option<Arc<UnaryConnectionPool>>,
+    /// Future connection intervals, shared only by clones of an opted-in channel.
+    #[cfg(not(target_arch = "wasm32"))]
+    keepalive_backoff: Option<Arc<KeepaliveBackoff>>,
 }
 
 impl Channel {
@@ -670,6 +696,8 @@ impl Channel {
             connect_policy: ConnectPolicy::default(),
             #[cfg(not(target_arch = "wasm32"))]
             unary_pool: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            keepalive_backoff: None,
         })
     }
 
@@ -683,6 +711,39 @@ impl Channel {
     #[must_use]
     pub fn config(&self) -> &ChannelConfig {
         &self.config
+    }
+
+    /// Opt into peer-directed backoff for future native streaming connections.
+    ///
+    /// Enable this before cloning the channel to share subsequent interval
+    /// increases. Re-enabling an opted-in channel preserves its learned
+    /// interval. Only GOAWAY with ENHANCE_YOUR_CALM and exactly `too_many_pings`
+    /// triggers a saturating doubling, at most once per connection. Existing
+    /// connections, acknowledgement timeouts and call deadlines stay fixed;
+    /// the rejected call is not retried.
+    ///
+    /// Keepalive remains disabled without a configured interval.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_keepalive_backoff(mut self) -> Self {
+        if self.keepalive_backoff.is_none() {
+            self.keepalive_backoff = self.config.keepalive_interval
+                .map(|interval| Arc::new(KeepaliveBackoff::new(interval)));
+        }
+        self
+    }
+
+    /// The keepalive interval a new native streaming call will use.
+    ///
+    /// This includes peer-directed backoff when enabled; `config()` retains
+    /// the original interval. Active connections retain their own snapshot.
+    /// Returns `None` when keepalive is disabled.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn effective_keepalive_interval(&self) -> Option<Duration> {
+        self.keepalive_backoff.as_ref().map_or(self.config.keepalive_interval, |backoff| {
+            Some(backoff.interval())
+        })
     }
 
     /// Get the policy used for native hostname connection attempts.
@@ -1100,7 +1161,10 @@ impl<C: Codec> GrpcClient<C> {
         }
         let config = self.channel.config();
         let deadline = CallDeadline::capture(cx, request.metadata(), config.timeout)?;
-        let keepalive = match (config.keepalive_interval, config.keepalive_timeout) {
+        let keepalive = match (
+            self.channel.effective_keepalive_interval(),
+            config.keepalive_timeout,
+        ) {
             (Some(interval), timeout) => {
                 let policy = NativeStreamKeepalive::new(
                     interval, timeout.unwrap_or(Duration::from_secs(20)),
@@ -1138,7 +1202,8 @@ impl<C: Codec> GrpcClient<C> {
                 config.connect_timeout,
             )?,
         }
-        .with_connect_policy(target.connect_policy);
+        .with_connect_policy(target.connect_policy)
+        .with_keepalive_backoff(self.channel.keepalive_backoff.clone());
         let stream_config = NativeStreamConfig {
             max_send_message_size: config.max_send_message_size,
             max_recv_message_size: config.max_recv_message_size,
