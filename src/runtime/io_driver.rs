@@ -963,6 +963,16 @@ impl IoRegistration {
         self.interest
     }
 
+    /// Whether this registration belongs to the handle's physical dispatcher.
+    /// Independently constructed participants of one shared reactor use the
+    /// same dispatcher; moving between them does not require a new token.
+    /// Comparing the weak allocation identity neither retains a dead driver
+    /// nor locks its registration table.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn belongs_to(&self, driver: &IoDriverHandle) -> bool {
+        std::ptr::eq(self.driver.as_ptr(), Arc::as_ptr(&driver.inner))
+    }
+
     /// Returns true if the driver is still alive.
     #[inline]
     #[must_use]
@@ -3340,7 +3350,7 @@ mod tests {
             crate::test_complete!("epoll_rearm_reaches_a_poll_blocked_on_another_thread");
         }
 
-        /// A waker that owns a driver handle, as a runtime's root waker does.
+        /// A waker that owns a driver handle, as a user waker can.
         struct HandleOwningWaker {
             _handle: IoDriverHandle,
         }
@@ -3583,6 +3593,92 @@ mod tests {
             }
             crate::test_complete!("an_io_object_dropped_after_its_runtime_does_not_deadlock");
         }
+
+        /// GH#85: a parked root must not keep the dispatcher alive after the
+        /// runtime's workers stop. A second registration observes dispatcher
+        /// retirement while the original stream and its root waker still live.
+        #[test]
+        fn parked_root_waker_does_not_retain_a_dropped_runtime_driver() {
+            use crate::io::{AsyncRead, ReadBuf};
+            use std::pin::Pin;
+            use std::task::Poll;
+
+            returns_within("retiring a runtime with a parked root socket", || {
+                for multi_worker in [false, true] {
+                    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                    let address = listener.local_addr().unwrap();
+                    let observer = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                    let runtime = if multi_worker {
+                        crate::runtime::RuntimeBuilder::new().worker_threads(2)
+                    } else {
+                        crate::runtime::RuntimeBuilder::current_thread()
+                    }
+                    .build()
+                    .unwrap();
+                    let (stream, registration) = runtime.block_on(async {
+                        let mut stream = crate::net::TcpStream::connect(address).await.unwrap();
+                        std::future::poll_fn(|cx| {
+                            let mut byte = [0_u8; 1];
+                            let mut buf = ReadBuf::new(&mut byte);
+                            assert!(Pin::new(&mut stream).poll_read(cx, &mut buf).is_pending());
+                            Poll::Ready(())
+                        })
+                        .await;
+                        let driver = crate::Cx::current().unwrap().io_driver_handle().unwrap();
+                        let registration = driver
+                            .register(&observer, Interest::READABLE, Waker::noop().clone())
+                            .unwrap();
+                        (stream, registration)
+                    });
+                    let (mut peer, _) = listener.accept().unwrap();
+                    assert!(registration.is_active());
+                    assert!(runtime.is_quiescent());
+                    drop(runtime);
+                    assert!(
+                        !registration.is_active(),
+                        "a root waker retained the stopped runtime (multi_worker={multi_worker})"
+                    );
+                    drop(registration);
+                    drop(stream);
+                    peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+                    assert_eq!(peer.read(&mut [0_u8; 1]).unwrap(), 0);
+                }
+            });
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn registration_identity_tracks_shared_dispatchers_and_rejects_retired_ones() {
+        let reactor = Arc::new(LabReactor::new());
+        let first = IoDriverHandle::new(reactor.clone());
+        let shared = IoDriverHandle::new(reactor.clone());
+        let other = IoDriverHandle::new(Arc::new(LabReactor::new()));
+        let (waker, wakes) = create_test_waker();
+        let registration = first.register(&TestFdSource, Interest::READABLE, waker).unwrap();
+        assert!(registration.belongs_to(&first));
+        assert!(registration.belongs_to(&shared));
+        assert!(!registration.belongs_to(&other));
+        reactor.set_ready(registration.token(), Interest::READABLE);
+        shared.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+        assert_eq!(wakes.count.load(Ordering::SeqCst), 1);
+        drop(first);
+        assert!(registration.is_active());
+        drop(shared);
+        assert!(!registration.is_active());
+
+        let successor = IoDriverHandle::new(reactor.clone());
+        assert!(!registration.belongs_to(&successor));
+        let live = successor
+            .register(&TestFdSource, Interest::READABLE, Waker::noop().clone())
+            .unwrap();
+        assert_ne!(live.token(), registration.token());
+        drop(registration);
+        assert_eq!(successor.waker_count(), 1, "old cleanup must preserve the successor");
+        assert_eq!(reactor.registration_count(), 1);
+        drop(live);
+        assert_eq!(successor.waker_count(), 0);
+        assert_eq!(reactor.registration_count(), 0);
     }
 
     #[test]

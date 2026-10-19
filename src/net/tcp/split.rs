@@ -642,14 +642,15 @@ impl TcpStreamInner {
                 guard.write_waiter.is_some(),
                 interest,
             );
-            // A registration parked on the fallback driver retires through the
-            // ordinary transition path once an ambient driver is present, so
-            // the fresh registration below lands on that driver (GH#67,
-            // asupersync-9e6a28).
-            let rearm_result = if guard.registration.is_some()
-                && guard.registration_on_fallback
-                && crate::net::udp::ambient_io_driver_present()
-            {
+            // Retire a fallback or foreign-runtime registration through the
+            // ordinary transition. The latest read/write waiter union survives
+            // the old DEL and is registered on the polling runtime (GH#85).
+            let rearm_result = if guard.registration.as_ref().is_some_and(|registration| {
+                crate::net::udp::registration_needs_migration(
+                    registration,
+                    guard.registration_on_fallback,
+                )
+            }) {
                 Some(Ok(false))
             } else {
                 guard

@@ -131,6 +131,55 @@
             );
         }
 
+        #[test]
+        fn runtime_migration_keeps_the_opposite_direction_waiter() {
+            let (read, write, _peer) = split_pair();
+            let first = IoDriverHandle::new(Arc::new(LabReactor::new()));
+            let reactor = Arc::new(LabReactor::new());
+            let second = IoDriverHandle::new(reactor.clone());
+            let (read_signal, read_waker, _) = signal_waker();
+            let (write_signal, write_waker, _) = signal_waker();
+            let read_cx = Context::from_waker(&read_waker);
+            let write_cx = Context::from_waker(&write_waker);
+            let ambient = |driver| {
+                Cx::new_with_observability(
+                    RegionId::new_for_test(0, 1),
+                    TaskId::new_for_test(0, 0),
+                    Budget::INFINITE,
+                    None,
+                    Some(driver),
+                    None,
+                )
+            };
+            let first_cx = Cx::set_current(Some(ambient(first.clone())));
+            read.inner.register_interest(&read_cx, Interest::READABLE).unwrap();
+            write.inner.register_interest(&write_cx, Interest::WRITABLE).unwrap();
+            let write_token = read.inner.state.lock().write_waiter.as_ref().unwrap().token;
+            assert_eq!(first.waker_count(), 1);
+            drop(first_cx);
+
+            let _second_cx = Cx::set_current(Some(ambient(second.clone())));
+            read.inner.register_interest(&read_cx, Interest::READABLE).unwrap();
+            let token = {
+                let state = read.inner.state.lock();
+                assert_eq!(state.write_waiter.as_ref().unwrap().token, write_token);
+                let registration = state.registration.as_ref().unwrap();
+                assert!(registration.belongs_to(&second));
+                assert!(registration.interest().is_readable());
+                assert!(registration.interest().is_writable());
+                registration.token()
+            };
+            assert_eq!(first.waker_count(), 0);
+            assert_eq!(second.waker_count(), 1);
+            reactor.set_ready(token, Interest::READABLE | Interest::WRITABLE);
+            second.turn_with(Some(Duration::ZERO), |_, _| {}).unwrap();
+            assert_eq!(read_signal.hits.load(Ordering::SeqCst), 1);
+            assert_eq!(write_signal.hits.load(Ordering::SeqCst), 1);
+            drop(read);
+            drop(write);
+            assert_eq!(second.waker_count(), 0);
+        }
+
         /// Reuniting halves parked on the fallback driver keeps that fact, so
         /// the reunited stream still hands its registration to the ambient
         /// driver once polled under a `Cx` that has one. reunite dropped the

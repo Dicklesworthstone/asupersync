@@ -1822,9 +1822,10 @@ pub fn fallback_io_driver_probe() -> Option<FallbackIoDriverProbe> {
 /// `Option<IoRegistration>`. [`arm`](Self::arm) is the single authoritative
 /// implementation of the registration dance:
 ///
-/// 1. a registration parked on the fallback driver is dropped as soon as the
-///    socket is polled under a `Cx` that carries an ambient driver, so the
-///    fallback never captures a socket that a runtime later adopts;
+/// 1. a registration parked on the fallback driver or another runtime's
+///    dispatcher is retired when the socket is polled under a new ambient
+///    driver. A live but undriven runtime must not capture its successor's
+///    readiness;
 /// 2. an existing registration is re-armed in place (oneshot reactor
 ///    interest is re-armed per poll; the `will_wake` guard skips the clone).
 ///    The socket has one waiter, so a read wait and a write wait in the same
@@ -1957,9 +1958,9 @@ impl ReactorRegistration {
     }
 
     /// Adopts a registration handed over by another owner of the same fd (a
-    /// completed connect). It is treated as living on an ambient driver: it is
-    /// re-armed in place and never migrated. Only Unix stream sockets hand a
-    /// registration over this way since TCP reunite moved to `from_parts`, so
+    /// completed connect). It is treated as living on an ambient driver and
+    /// follows later polling-runtime changes through `arm`. Only Unix stream
+    /// sockets hand a registration over this way since TCP reunite moved to `from_parts`, so
     /// it is Unix-only (it was dead code that broke the wasm32 build).
     #[cfg(unix)]
     pub(crate) const fn from_registration(registration: Option<IoRegistration>) -> Self {
@@ -2024,16 +2025,15 @@ impl ReactorRegistration {
         interest: Interest,
         waker: &std::task::Waker,
     ) -> io::Result<Armed> {
-        // Step 1: migrate a fallback registration to a newly present ambient
-        // driver. Dropping it deregisters the fd from the fallback reactor
-        // before the ambient one registers it.
-        if self.on_fallback
-            && Cx::current()
-                .and_then(|current| current.io_driver_handle())
-                .is_some()
+        // Step 1: follow the polling runtime, including when the previous
+        // runtime is still alive but its worker is suspended in a nested
+        // block_on. Retire the old registration before the new reactor ADD.
+        if self.registration.as_ref().is_some_and(|registration| {
+            registration_needs_migration(registration, self.on_fallback)
+        })
         {
             #[cfg(any(test, feature = "test-internals"))]
-            fallback_io_probe::bump(&fallback_io_probe::MIGRATIONS);
+            fallback_io_probe::bump_if(self.on_fallback, &fallback_io_probe::MIGRATIONS);
             self.clear();
         }
 
@@ -2152,6 +2152,23 @@ pub fn ambient_io_driver_present() -> bool {
     Cx::current()
         .and_then(|current| current.io_driver_handle())
         .is_some()
+}
+
+/// Established sockets follow the dispatcher of the context polling them.
+/// An absent ambient driver leaves the existing registration alone. Owned
+/// split halves use the same decision inside their waiter-preserving
+/// registration transition, so changing runtimes cannot strand one direction.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn registration_needs_migration(
+    registration: &IoRegistration,
+    on_fallback: bool,
+) -> bool {
+    if on_fallback {
+        return ambient_io_driver_present();
+    }
+    Cx::current()
+        .and_then(|current| current.io_driver_handle())
+        .is_some_and(|driver| !registration.belongs_to(&driver))
 }
 
 /// Test-only switch that makes the process-global fallback driver look absent
