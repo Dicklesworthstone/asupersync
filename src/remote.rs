@@ -107,8 +107,13 @@ use std::time::Duration;
 mod admission;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod durable;
+pub mod typed;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 mod write_progress;
+pub use typed::{
+    PreparedTypedRemoteCall, TypedRemoteComputation, TypedRemoteError, TypedRemoteHandle,
+    TypedRemoteLimits, TypedRemoteOutcome, TypedRemoteStage, spawn_remote_typed,
+};
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 pub use admission::{
     AdmittedNativeRemoteRuntime, NativeRemoteAdmissionError, NativeRemoteAdmissionLimits,
