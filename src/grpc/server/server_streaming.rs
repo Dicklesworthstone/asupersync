@@ -50,7 +50,7 @@ pub struct ServerStreamingConfig {
 }
 
 impl ServerStreamingConfig {
-    pub(super) fn validate(self) -> io::Result<()> {
+    pub(in crate::grpc) fn validate(self) -> io::Result<()> {
         if self
             .frame_capacity
             .get()
@@ -69,6 +69,94 @@ impl ServerStreamingConfig {
 }
 
 type ProducedGrpcFuture = Pin<Box<dyn Future<Output = Http2ProducedResponse> + Send + 'static>>;
+
+/// Private transport seam shared by native H2 and the gRPC-Web body adapter.
+/// Each send retains the caller's cancellation and partial-message boundary.
+pub(in crate::grpc) trait ServerStreamSink: Send {
+    const REGION_NAME: &'static str;
+
+    fn message_limit(&self) -> Option<usize> {
+        None
+    }
+
+    fn send_chunk<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a;
+
+    fn send_trailers<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        trailers: HeaderMap,
+    ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a;
+}
+
+impl ServerStreamSink for Http2BodySender {
+    const REGION_NAME: &'static str = "h2-grpc-stream";
+
+    fn send_chunk<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        data: &'a [u8],
+    ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a {
+        Http2BodySender::send_chunk(self, cx, data)
+    }
+
+    fn send_trailers<'a>(
+        &'a mut self,
+        cx: &'a Cx,
+        trailers: HeaderMap,
+    ) -> impl Future<Output = Result<(), HttpError>> + Send + 'a {
+        Http2BodySender::send_trailers(self, cx, trailers)
+    }
+}
+
+/// Decoded input and frozen deadline; no application stream is created until
+/// the HTTP producer supplies its live request context.
+pub(in crate::grpc) struct PreparedServerStream {
+    server: Arc<Server>,
+    service: Arc<dyn ServiceHandler>,
+    path: String,
+    request: Request<Bytes>,
+    trailers: Metadata,
+    codec: FramedCodec<IdentityCodec>,
+    encoding: Option<&'static str>,
+    deadline: StreamDeadline,
+}
+
+impl PreparedServerStream {
+    pub(in crate::grpc) fn head(&self) -> HttpResponse {
+        let mut head = HttpResponse::new(200, "OK", Vec::new())
+            .with_header("content-type", "application/grpc");
+        if let Some(encoding) = self.encoding {
+            head.headers
+                .push(("grpc-encoding".to_owned(), encoding.to_owned()));
+        }
+        head
+    }
+
+    pub(in crate::grpc) async fn run<S: ServerStreamSink>(
+        self,
+        cx: Cx,
+        sender: S,
+        config: ServerStreamingConfig,
+    ) -> Result<S, HttpError> {
+        self.server
+            .run_registered_server_stream(
+                cx,
+                sender,
+                self.service,
+                self.path,
+                self.request,
+                self.trailers,
+                self.codec,
+                config,
+                self.deadline,
+            )
+            .await
+    }
+}
 
 /// Freeze the request's absolute deadline before it waits for producer admission.
 /// Keep its clock with it: a later task-local context must not change time domains.
@@ -222,16 +310,7 @@ impl Server {
         self: &Arc<Self>,
         streaming: ServerStreamingConfig,
     ) -> io::Result<impl Fn(HttpRequest) -> ProducedGrpcFuture + Send + Sync + 'static> {
-        streaming.validate()?;
-        self.validate_http2_transport_config()?;
-        if self.services.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "no registered gRPC service",
-            ));
-        }
-        self.streaming_output_codec(self.config.send_compression)
-            .map_err(io::Error::other)?;
+        self.validate_registered_streaming(streaming)?;
         let server = Arc::clone(self);
         Ok(move |request: HttpRequest| -> ProducedGrpcFuture {
             let server = Arc::clone(&server);
@@ -257,6 +336,27 @@ impl Server {
             .await?
             .run_produced(runtime)
             .await
+    }
+
+    pub(in crate::grpc) fn validate_registered_streaming(
+        &self,
+        streaming: ServerStreamingConfig,
+    ) -> io::Result<()> {
+        streaming.validate()?;
+        self.validate_http2_transport_config()?;
+        if self.services.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no registered gRPC service",
+            ));
+        }
+        self.streaming_output_codec(self.config.send_compression)
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    pub(in crate::grpc) fn is_registered_server_stream(&self, path: &str) -> bool {
+        self.resolve_registered_server_stream(path).is_ok()
     }
 
     fn resolve_registered_server_stream(
@@ -298,50 +398,45 @@ impl Server {
                 self.dispatch_http2_registered_unary(request).await,
             );
         }
-        let service = match self.resolve_registered_server_stream(&request.uri) {
-            Ok(service) => service,
+        let prepared = match self.prepare_registered_server_stream(request, Cx::current().as_ref()) {
+            Ok(prepared) => prepared,
             Err(status) => {
                 return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
             }
         };
-        let (path, request, trailers) = match self.decode_http2_unary_request(request) {
-            Ok(request) => request,
-            Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
-            }
-        };
-        let Some(request_cx) = Cx::current() else {
-            return Http2ProducedResponse::buffered(Self::http2_status_response(
-                &Status::internal("gRPC server streaming requires a runtime context"),
-            ));
-        };
-        let deadline = StreamDeadline::capture(&request_cx, request.metadata(), &self.config);
-        let compression = self.response_compression(request.metadata());
-        let (codec, encoding) = match self.streaming_output_codec(compression) {
-            Ok(codec) => codec,
-            Err(status) => {
-                return Http2ProducedResponse::buffered(Self::http2_status_response(&status));
-            }
-        };
-        let mut head = HttpResponse::new(200, "OK", Vec::new())
-            .with_header("content-type", "application/grpc");
-        if let Some(encoding) = encoding {
-            head.headers
-                .push(("grpc-encoding".to_owned(), encoding.to_owned()));
-        }
         // Do not call user code or create its stream here. The handler context
         // is retired before H2 starts the distinct response-producer context.
         Http2ProducedResponse::streaming(
-            head,
+            prepared.head(),
             config.frame_capacity,
             config.max_frame_bytes,
-            move |cx, sender| async move {
-                self.run_registered_server_stream(
-                    cx, sender, service, path, request, trailers, codec, config, deadline,
-                )
-                .await
-            },
+            move |cx, sender| prepared.run(cx, sender, config),
         )
+    }
+
+    pub(in crate::grpc) fn prepare_registered_server_stream(
+        self: &Arc<Self>,
+        request: HttpRequest,
+        request_cx: Option<&Cx>,
+    ) -> Result<PreparedServerStream, Status> {
+        let service = self.resolve_registered_server_stream(&request.uri)?;
+        let (path, request, trailers) = self.decode_http2_unary_request(request)?;
+        let request_cx = request_cx.ok_or_else(|| {
+            Status::internal("gRPC server streaming requires a runtime context")
+        })?;
+        let deadline = StreamDeadline::capture(request_cx, request.metadata(), &self.config);
+        let compression = self.response_compression(request.metadata());
+        let (codec, encoding) = self.streaming_output_codec(compression)?;
+        Ok(PreparedServerStream {
+            server: Arc::clone(self),
+            service,
+            path,
+            request,
+            trailers,
+            codec,
+            encoding,
+            deadline,
+        })
     }
 
     /// Output codec for `encoding`: the configured `send_compression` at bind
@@ -367,10 +462,10 @@ impl Server {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn run_registered_server_stream(
+    async fn run_registered_server_stream<S: ServerStreamSink>(
         self: Arc<Self>,
         cx: Cx,
-        mut sender: Http2BodySender,
+        mut sender: S,
         service: Arc<dyn ServiceHandler>,
         path: String,
         request: Request<Bytes>,
@@ -378,13 +473,13 @@ impl Server {
         codec: FramedCodec<IdentityCodec>,
         config: ServerStreamingConfig,
         deadline: StreamDeadline,
-    ) -> Result<Http2BodySender, HttpError> {
+    ) -> Result<S, HttpError> {
         // Only the live producer supplies cancellation/spawn authority. The
         // earlier handler contributed a deadline, never an escaped request Cx.
         // Tighten before canonical dispatch creates its own per-call context,
         // so even service code inspecting Cx::budget sees the admission delay.
         let region = ServerRequestRegion::mint_from_connection(
-            "h2-grpc-stream",
+            S::REGION_NAME,
             deadline.budget(cx.budget()),
             deadline.now(),
             &cx,
@@ -525,12 +620,12 @@ pub(super) async fn poll_cancellable<F: Future>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(super) async fn forward_messages(
+pub(super) async fn forward_messages<S: ServerStreamSink>(
     owner: &Cx,
     cx: &Cx,
     stream: RegisteredServerStream,
     mut codec: FramedCodec<IdentityCodec>,
-    sender: &mut Http2BodySender,
+    sender: &mut S,
     partial_frame: &mut bool,
     transport_error: &mut Option<HttpError>,
     max_frame_bytes: usize,
@@ -555,6 +650,11 @@ pub(super) async fn forward_messages(
             .encode_message(&message, &mut frame)
             .map_err(GrpcError::into_status)?;
         drop(message);
+        if sender.message_limit().is_some_and(|limit| frame.len() > limit) {
+            return Err(Status::resource_exhausted(
+                "gRPC-Web response message exceeds wire limit",
+            ));
+        }
         // The frame is complete in memory before sending any prefix. If an
         // enclosing deadline drops this future between chunks, the owner sees
         // this latch and refuses to append status trailers to truncated framing.

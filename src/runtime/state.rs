@@ -42,6 +42,7 @@ use crate::runtime::{
     ObligationTable, RegionTable, TaskTable,
 };
 use crate::time::TimerDriverHandle;
+use crate::trace::buffer::TerminalCancellationState;
 use crate::trace::distributed::{LogicalClockMode, LogicalTime};
 use crate::trace::event::{TraceData, TraceEventKind};
 use crate::trace::{TraceBufferHandle, TraceEvent};
@@ -3724,6 +3725,17 @@ impl RuntimeState {
         reason: &CancelReason,
     ) -> CancellationEffects<bool> {
         let budget = reason.cleanup_budget();
+        self.cancel_task_with_budget(task_id, reason, budget)
+    }
+
+    /// Replays an already-witnessed request with its effective cleanup budget,
+    /// including any region/shutdown ceiling applied by the source runtime.
+    pub(crate) fn cancel_task_with_budget(
+        &mut self,
+        task_id: TaskId,
+        reason: &CancelReason,
+        budget: Budget,
+    ) -> CancellationEffects<bool> {
         let Some(effects) = self.update_task(task_id, |record| {
             record.request_cancel_with_budget_and_publication(reason.clone(), budget)
         }) else {
@@ -5735,14 +5747,34 @@ impl RuntimeState {
     /// Records a task's Complete event together with its terminal outcome,
     /// which a schedule capture keeps (br-asupersync-bi2462.8). The logical
     /// time is read from `self.tasks`, as the completion path always has.
-    fn record_task_completion_trace_event<F>(&self, task_id: TaskId, outcome: Severity, build: F)
-    where
+    fn record_task_completion_trace_event<F>(
+        &self,
+        task: &TaskRecord,
+        outcome: Severity,
+        build: F,
+    ) where
         F: FnOnce(u64) -> TraceEvent,
     {
-        let logical_time = self.logical_time_for_task(task_id);
-        self.trace.record_completion_event(outcome, move |seq| {
-            stamp_logical_time(build(seq), logical_time)
-        });
+        let logical_time = self.logical_time_for_task(task.id);
+        // The passed record is authoritative on embedded and detached-shard
+        // completion paths. Waker retirement closes registrations but preserves
+        // its Cx cancellation flag and reason. A derived fiber Cx is never used.
+        let cancellation = if self.trace.cancellation_capture_enabled() {
+            task.cx_inner.as_ref().map(|inner| {
+                let inner = inner.read();
+                TerminalCancellationState {
+                    requested: inner.is_cancel_requested(),
+                    reason: inner.cancel_reason.clone(),
+                }
+            })
+        } else {
+            None
+        };
+        self.trace.record_completion_event_with_cancellation(
+            outcome,
+            cancellation,
+            move |seq| stamp_logical_time(build(seq), logical_time),
+        );
     }
 
     /// Records a task trace event with the task's logical time supplied by
@@ -5829,7 +5861,7 @@ impl RuntimeState {
             TaskState::Completed(outcome) => outcome.severity(),
             _ => Severity::Err,
         };
-        self.record_task_completion_trace_event(task.id, severity, |seq| {
+        self.record_task_completion_trace_event(task, severity, |seq| {
             TraceEvent::complete(seq, now, task.id, task.owner)
         });
 
@@ -7788,16 +7820,42 @@ impl RuntimeState {
                 continue;
             }
             let budget = reason.cleanup_budget();
+            // Bracket publication, not just its later trace event: an already
+            // awake worker can observe the Cx flag before Request is recorded.
+            // Disabled captures take no trace lock and reserve no sequence.
+            let capture_start = self.trace.begin_cancellation_publication(task_id);
             let res = tasks
                 .resolve(&mut self.tasks)
                 .update_task(task_id, |task_record| {
-                    task_record.request_cancel_with_budget_and_publication(reason.clone(), budget)
+                    let capture_first_request = capture_start.is_some()
+                        && !task_record.state.is_terminal()
+                        && task_record.cancel_reason().is_none();
+                    let mut unwitnessed_cx_cancel = capture_first_request
+                        && task_record.cx_inner.as_ref().is_some_and(|inner| {
+                            let inner = inner.read();
+                            inner.is_cancel_requested() || inner.cancel_reason.is_some()
+                        });
+                    let effects = task_record
+                        .request_cancel_with_budget_and_publication(reason.clone(), budget);
+                    // A Cx producer may race the precheck before the record
+                    // takes its publication lock. Do not attest an incoming
+                    // reason that the authoritative request already strengthened.
+                    unwitnessed_cx_cancel |= capture_first_request
+                        && task_record
+                            .cancel_reason()
+                            .is_some_and(|effective| effective != reason);
+                    let captured_budget =
+                        capture_start.and_then(|_| task_record.cleanup_budget());
+                    (effects, captured_budget, unwitnessed_cx_cancel)
                 });
-            let Some(effects) = res else {
+            let Some((effects, captured_budget, unwitnessed_cx_cancel)) = res else {
+                self.trace
+                    .finish_cancellation_publication(capture_start, None, None, false);
                 continue;
             };
             let ((newly_cancelled, changed, publication), task_wakes) = effects.into_parts();
             wakes.merge(task_wakes);
+            let mut request_sequence = None;
             if newly_cancelled {
                 if let Some(validation_result) =
                     self.live_task_protocol_violation_in(tasks, task_id, TaskEvent::RequestCancel)
@@ -7813,9 +7871,16 @@ impl RuntimeState {
                 let holder_logical_time =
                     Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
                 self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
+                    request_sequence = Some(seq);
                     TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
                 });
             }
+            self.trace.finish_cancellation_publication(
+                capture_start,
+                request_sequence,
+                captured_budget,
+                unwitnessed_cx_cancel || (changed && !newly_cancelled),
+            );
             if changed && publication.is_published() {
                 tasks_to_cancel.push((task_id, budget.priority));
             }
@@ -8150,24 +8215,52 @@ impl RuntimeState {
                 .unwrap_or_else(|| (reason.clone(), reason.cleanup_budget()));
 
             for &task_id in &task_id_buf {
-                let Some((effects, task_budget_res, task_live)) =
-                    tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
-                        let task_budget = shutdown_budgets.get(&rid).copied().map_or(
-                            cleanup_budget,
-                            |ceiling| cleanup_budget.combine_untraced(ceiling),
-                        );
-                        let effects = task.request_cancel_with_budget_and_publication(
-                            task_reason.clone(),
-                            task_budget,
-                        );
-                        (effects, task_budget, !task.state.is_terminal())
-                    })
+                let capture_start = self.trace.begin_cancellation_publication(task_id);
+                let Some((
+                    effects,
+                    task_budget_res,
+                    task_live,
+                    captured_budget,
+                    unwitnessed_cx_cancel,
+                )) = tasks.resolve(&mut self.tasks).update_task(task_id, |task| {
+                    let capture_first_request = capture_start.is_some()
+                        && !task.state.is_terminal()
+                        && task.cancel_reason().is_none();
+                    let mut unwitnessed_cx_cancel = capture_first_request
+                        && task.cx_inner.as_ref().is_some_and(|inner| {
+                            let inner = inner.read();
+                            inner.is_cancel_requested() || inner.cancel_reason.is_some()
+                        });
+                    let task_budget = shutdown_budgets.get(&rid).copied().map_or(
+                        cleanup_budget,
+                        |ceiling| cleanup_budget.combine_untraced(ceiling),
+                    );
+                    let effects = task.request_cancel_with_budget_and_publication(
+                        task_reason.clone(),
+                        task_budget,
+                    );
+                    unwitnessed_cx_cancel |= capture_first_request
+                        && task
+                            .cancel_reason()
+                            .is_some_and(|effective| effective != &task_reason);
+                    let captured_budget = capture_start.and_then(|_| task.cleanup_budget());
+                    (
+                        effects,
+                        task_budget,
+                        !task.state.is_terminal(),
+                        captured_budget,
+                        unwitnessed_cx_cancel,
+                    )
+                })
                 else {
+                    self.trace
+                        .finish_cancellation_publication(capture_start, None, None, false);
                     continue;
                 };
                 let ((newly_cancelled, changed, publication), task_wakes) = effects.into_parts();
                 wakes.merge(task_wakes);
 
+                let mut request_sequence = None;
                 if newly_cancelled {
                     if let Some(validation_result) = self.live_task_protocol_violation_in(
                         tasks,
@@ -8185,6 +8278,7 @@ impl RuntimeState {
                     let holder_logical_time =
                         Self::logical_time_from_table(tasks.resolve_ref(&self.tasks), task_id);
                     self.record_task_trace_event_with_logical_time(holder_logical_time, |seq| {
+                        request_sequence = Some(seq);
                         TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
                     });
                 }
@@ -8195,6 +8289,14 @@ impl RuntimeState {
                 let finalizer_tightened = tightened_finalizers.contains(&rid)
                     && task_live
                     && self.async_finalizer_tasks.contains_key(&task_id);
+                self.trace.finish_cancellation_publication(
+                    capture_start,
+                    request_sequence,
+                    captured_budget,
+                    unwitnessed_cx_cancel
+                        || (changed && !newly_cancelled)
+                        || finalizer_tightened,
+                );
                 if (changed || finalizer_tightened) && publication.is_published() {
                     tasks_to_cancel.push((task_id, task_budget_res.priority));
                 }
@@ -12286,3 +12388,57 @@ mod obligation_transfer_epoch_tests;
 #[cfg(test)]
 #[path = "state_oracle_history_retention_tests_inline_tests.rs"]
 mod oracle_history_retention_tests;
+
+#[cfg(test)]
+#[test]
+fn captured_terminal_fast_cancellation_without_reason_is_refused() {
+    let state = RuntimeState::new();
+    let trace = state.trace_handle();
+    let recorder = crate::trace::capture::ScheduleCaptureRecorder::new(trace.clone(), 1);
+    let task = TaskId::new_for_test(0, 1);
+    let region = RegionId::new_for_test(0, 1);
+    let budget = Budget::new();
+    let reason = CancelReason::user("fast cancellation witness");
+    let inner = Arc::new(parking_lot::RwLock::new(
+        crate::types::task_context::CxInner::new(region, task, budget),
+    ));
+    let mut record = TaskRecord::new(task, region, budget);
+    record.set_cx_inner(Arc::clone(&inner));
+
+    trace.record_event(|seq| TraceEvent::spawn(seq, Time::ZERO, task, region));
+    let start = trace.begin_cancellation_publication(task);
+    let mut request_sequence = None;
+    trace.record_event(|seq| {
+        request_sequence = Some(seq);
+        TraceEvent::cancel_request(seq, Time::ZERO, task, region, reason.clone())
+    });
+    trace.finish_cancellation_publication(
+        start,
+        request_sequence,
+        Some(reason.cleanup_budget()),
+        false,
+    );
+    {
+        let guard = inner.read();
+        guard.fast_cancel.store(true, Ordering::Release);
+        assert!(!guard.cancel_requested);
+        assert!(guard.cancel_reason.is_none());
+        assert!(guard.is_cancel_requested());
+    }
+    recorder.record(Some(0), |seq| TraceEvent::poll(seq, Time::ZERO, task, region));
+    record.state = TaskState::Completed(Outcome::Ok(()));
+    state.record_task_completion_trace_event(&record, Severity::Ok, |seq| {
+        TraceEvent::complete(seq, Time::ZERO, task, region)
+    });
+
+    assert!(matches!(
+        recorder
+            .snapshot()
+            .production_schedule_with_cancellation()
+            .unwrap_err(),
+        crate::trace::capture::ScheduleCaptureError::CancellationOrder {
+            reason: "terminal cancellation reason is missing or differs from the witnessed request",
+            ..
+        }
+    ));
+}

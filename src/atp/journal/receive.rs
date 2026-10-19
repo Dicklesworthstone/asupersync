@@ -13,7 +13,7 @@ use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 
 /// Explicit bounds for one receive operation, checked before source polling.
@@ -46,6 +46,10 @@ pub enum ScopedReceiveError {
     /// A previous poll unwound; unknown source progress must not be replayed.
     #[error("scoped receive cannot resume after a poll panic")]
     Poisoned,
+    /// Initial checkpoint preparation cannot be installed after body admission.
+    /// The refused preparation call does not poll the source or stop the receive.
+    #[error("scoped receive preparation is too late: body already admitted")]
+    PreparationTooLate,
 }
 
 /// Source/gateway failures remain distinct from the actual writer outcome.
@@ -188,6 +192,71 @@ pub struct JournalReceiveReport {
     pub outcome: ScopedReceiveResult<PathBuf>,
 }
 
+/// Result of preparing recovery evidence before any receive-body effect.
+///
+/// Preparation never reads the source or publishes even an empty object. A
+/// failed preflight returns its actual report and journal owner, not an invented
+/// successful checkpoint or a second way to recover a consumed terminal result.
+pub enum JournalReceivePreparation {
+    /// The initial local prefix and its journal records are synchronized. The
+    /// receive remains paused until `ScopedJournalReceive::wait` is polled.
+    Checkpoint(Arc<super::JournalCheckpoint>),
+    /// Preparation terminated the receive. This report is consumed once, just
+    /// like a report returned by `wait`; inspect its journal and actual outcome.
+    Stopped(JournalReceiveReport),
+}
+
+// This is a session-local admission latch, not a concurrently polled primitive.
+// Only the session changes Held back to Open, immediately before repolling work.
+// No task or filesystem worker waits on this latch; a held receive simply stays
+// in its owning future, retaining the existing writer admission permit. Only
+// the driver can publish Prepared after observing successful job retirement;
+// seeing a checkpoint snapshot while its producing job is still pending is
+// insufficient for returning preparation success.
+#[derive(Default)]
+pub(super) struct ReceiveStartGate(AtomicU8);
+
+impl ReceiveStartGate {
+    const OPEN: u8 = 0;
+    const HELD: u8 = 1;
+    const ADMITTED: u8 = 2;
+    const PREPARED: u8 = 3;
+
+    fn hold(&self) -> bool {
+        match self.0.compare_exchange(
+            Self::OPEN, Self::HELD, Ordering::AcqRel, Ordering::Acquire,
+        ) {
+            Ok(_) | Err(Self::HELD | Self::PREPARED) => true,
+            Err(_) => false,
+        }
+    }
+
+    fn release(&self) {
+        // Never undo body admission after an earlier wait has started it.
+        let _ = self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            matches!(state, Self::HELD | Self::PREPARED).then_some(Self::OPEN)
+        });
+    }
+
+    fn is_prepared(&self) -> bool {
+        self.0.load(Ordering::Acquire) == Self::PREPARED
+    }
+
+    pub(super) fn poll_admit(&self) -> Poll<()> {
+        let previous = self.0.fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+            match state {
+                Self::OPEN => Some(Self::ADMITTED),
+                Self::HELD => Some(Self::PREPARED),
+                _ => None,
+            }
+        });
+        match previous {
+            Ok(Self::OPEN) | Err(Self::ADMITTED) => Poll::Ready(()),
+            _ => Poll::Pending,
+        }
+    }
+}
+
 pub(super) type JournalCheckpointSlot =
     Arc<parking_lot::Mutex<Option<Arc<super::JournalCheckpoint>>>>;
 pub(super) type JournalReceiveWork<R> = Pin<
@@ -206,13 +275,16 @@ pub(super) type JournalReceiveWork<R> = Pin<
 /// The snapshot accessor below never takes the writer/journal locks; its short
 /// metadata lock is never held across disk work or destruction of old snapshots.
 /// Persist the initial snapshot's source path in the application's trusted
-/// recovery catalog: this type does not install a persistent path catalog.
-#[must_use = "journaled receive sessions do nothing until their wait is polled"]
+/// recovery catalog: this type does not install a persistent path catalog. Use
+/// `prepare_checkpoint` to get that evidence without allowing source reads or
+/// publication; ordinary `wait` retains its existing automatic-start behavior.
+#[must_use = "journaled receives need a polled wait or checkpoint preparation"]
 pub struct ScopedJournalReceive<R> {
     pub(super) work: Option<JournalReceiveWork<R>>,
     pub(super) source: Option<R>,
     pub(super) accepted: Arc<AtomicU64>,
     pub(super) checkpoint: JournalCheckpointSlot,
+    pub(super) start: Arc<ReceiveStartGate>,
     pub(super) poisoned: bool,
 }
 
@@ -254,29 +326,123 @@ impl<R> ScopedJournalReceive<R> {
         self.source.take()
     }
 
+    /// Prepare the initial checkpoint without reading any receive-body bytes.
+    ///
+    /// On Checkpoint, save its source path, expected manifest and protected key
+    /// reference in the application's trusted durable recovery catalog before
+    /// polling `wait`. The same admission slot keeps writer clones from changing
+    /// staging during that catalog operation. Do not await a writer clone while
+    /// the session is paused. This method does not write the catalog itself.
+    ///
+    /// Fresh, resumed, complete-prefix and empty objects all stop before source
+    /// polling AND finalization. Preparing twice returns the same initial Arc.
+    /// Dropping a borrowing preparation wait retains all admitted work and the
+    /// pause; another preparation continues it, or `wait` explicitly opens it.
+    /// Dropping the whole session preserves the existing drain/evidence rules.
+    ///
+    /// Stopped returns the terminal report and journal ownership exactly once.
+    /// After body admission this refuses with PreparationTooLate without polling
+    /// or disrupting that operation. This is not a later checkpoint scheduler.
+    pub async fn prepare_checkpoint(
+        &mut self,
+    ) -> Result<JournalReceivePreparation, ScopedReceiveError> {
+        if self.poisoned {
+            return Err(ScopedReceiveError::Poisoned);
+        }
+        if self.work.is_none() {
+            return Err(ScopedReceiveError::Completed);
+        }
+        if !self.start.hold() {
+            return Err(ScopedReceiveError::PreparationTooLate);
+        }
+        poll_fn(|task| match self.poll_report(task) {
+            Poll::Ready(Ok(report)) => {
+                Poll::Ready(Ok(JournalReceivePreparation::Stopped(report)))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending if self.start.is_prepared() => match self.last_checkpoint() {
+                Some(checkpoint) => {
+                    Poll::Ready(Ok(JournalReceivePreparation::Checkpoint(checkpoint)))
+                }
+                None => Poll::Pending,
+            },
+            Poll::Pending => Poll::Pending,
+        }).await
+    }
+
     /// Drive the same operation and consume its report once.
     /// Dropping this wait alone does not cancel its retained source or disk job.
+    /// Polling this explicitly releases any initial preparation pause; a caller
+    /// that needs a durable recovery catalog must finish saving it beforehand.
     /// Consumed/poisoned session errors are outside the report; ordinary transfer
     /// failures return a report so journal ownership and evidence are not lost.
     pub async fn wait(&mut self) -> Result<JournalReceiveReport, ScopedReceiveError> {
-        poll_fn(|task| {
-            if self.poisoned {
-                return Poll::Ready(Err(ScopedReceiveError::Poisoned));
-            }
-            let Some(work) = self.work.as_mut() else {
-                return Poll::Ready(Err(ScopedReceiveError::Completed));
-            };
-            self.poisoned = true;
-            let result = work.as_mut().poll(task);
-            self.poisoned = false;
-            let Poll::Ready((source, report)) = result else {
-                return Poll::Pending;
-            };
-            let retired = self.work.take();
-            self.source = source;
-            // Publish terminal ownership before dropping arbitrary captures.
-            drop(retired);
-            Poll::Ready(Ok(report))
-        }).await
+        self.start.release();
+        poll_fn(|task| self.poll_report(task)).await
+    }
+
+    // Both public waits publish exactly the same terminal ownership before
+    // capture destruction. Preparation must not add a second receive/result path.
+    fn poll_report(
+        &mut self,
+        task: &mut Context<'_>,
+    ) -> Poll<Result<JournalReceiveReport, ScopedReceiveError>> {
+        if self.poisoned {
+            return Poll::Ready(Err(ScopedReceiveError::Poisoned));
+        }
+        let Some(work) = self.work.as_mut() else {
+            return Poll::Ready(Err(ScopedReceiveError::Completed));
+        };
+        self.poisoned = true;
+        let result = work.as_mut().poll(task);
+        self.poisoned = false;
+        let Poll::Ready((source, report)) = result else {
+            return Poll::Pending;
+        };
+        let retired = self.work.take();
+        self.source = source;
+        // Publish terminal ownership before dropping arbitrary captures.
+        drop(retired);
+        Poll::Ready(Ok(report))
+    }
+}
+
+#[cfg(test)]
+mod preparation_gate_tests {
+    use super::*;
+
+    #[test]
+    fn preparation_needs_the_driver_boundary_not_just_a_published_snapshot() {
+        let gate = ReceiveStartGate::default();
+        assert!(gate.hold());
+        assert!(!gate.is_prepared());
+        assert!(gate.hold(), "a dropped borrowing preparation can be resumed");
+        assert!(!gate.is_prepared(), "holding alone is not preflight retirement");
+        assert!(gate.poll_admit().is_pending());
+        assert!(gate.is_prepared());
+        assert!(gate.hold());
+        assert!(gate.poll_admit().is_pending());
+        gate.release();
+        assert!(!gate.is_prepared());
+        assert!(gate.poll_admit().is_ready());
+        assert!(!gate.hold(), "late preparation cannot close an admitted body");
+        gate.release();
+        assert!(gate.poll_admit().is_ready());
+    }
+
+    #[test]
+    fn ordinary_wait_and_abandoned_preparation_need_no_external_wake() {
+        let ordinary = ReceiveStartGate::default();
+        ordinary.release();
+        assert!(ordinary.poll_admit().is_ready());
+        assert!(!ordinary.hold());
+
+        let abandoned = ReceiveStartGate::default();
+        assert!(abandoned.hold());
+        // A regular wait may replace preparation before the preflight job ends.
+        abandoned.release();
+        assert!(abandoned.poll_admit().is_ready());
+        assert!(!abandoned.is_prepared());
+        assert!(!abandoned.hold());
     }
 }

@@ -7,7 +7,7 @@ use crate::atp::journal::{
     FsyncPolicy, JournalCommitRequest, JournalPublication, JournalReceiveReport,
     JournalReceiveRequest, ScopedJournalReceive,
 };
-use crate::atp::journal::receive::JournalCheckpointSlot;
+use crate::atp::journal::receive::{JournalCheckpointSlot, ReceiveStartGate};
 use crate::io::{AsyncRead, AsyncReadExt};
 use crate::net::atp::chunk::profiles::ChunkingProfile as _;
 use crate::net::atp::chunk::reader::StreamChunkReader;
@@ -40,6 +40,7 @@ struct ReceiveJournal {
     checkpoint_bytes: u64,
     saved_offset: u64,
     observation: JournalCheckpointSlot,
+    start: Arc<ReceiveStartGate>,
 }
 
 impl ReceiveJournal {
@@ -84,7 +85,9 @@ impl ScopedSparseWriter {
     ///
     /// One writer admission slot spans preflight, the initial checkpoint,
     /// source ingestion, periodic checkpoints, fresh verification and journaled
-    /// publication. Existing receive APIs remain unjournaled.
+    /// publication. Existing receive APIs remain unjournaled. The returned
+    /// session's `prepare_checkpoint` exposes an optional catalog-persistence
+    /// boundary before source reads or publication, including for empty objects.
     pub fn receive_to_journal<R, Caps>(
         &self,
         cx: &Cx<Caps>,
@@ -112,6 +115,8 @@ impl ScopedSparseWriter {
         let progress = Arc::clone(&accepted);
         let checkpoint = Arc::new(parking_lot::Mutex::new(None));
         let observation = Arc::clone(&checkpoint);
+        let start = Arc::new(ReceiveStartGate::default());
+        let body_start = Arc::clone(&start);
         let work = Box::pin(async move {
             let mut source = source;
             let request = ReceiveRequest {
@@ -126,6 +131,7 @@ impl ScopedSparseWriter {
                     checkpoint_bytes,
                     saved_offset: 0,
                     observation,
+                    start: body_start,
                 }),
                 publication: Some(JournalPublication::NotAttempted),
             };
@@ -151,6 +157,7 @@ impl ScopedSparseWriter {
             source: None,
             accepted,
             checkpoint,
+            start,
             poisoned: false,
         })
     }
@@ -347,6 +354,13 @@ impl ScopedSparseWriter {
         let length = integrity.length;
         let mut offset = resume_offset.unwrap_or(0);
         accepted.store(offset, Ordering::Relaxed);
+        if let Some(journal) = persistence.journal.as_ref() {
+            let start = Arc::clone(&journal.start);
+            // Preparation holds this future, not a pool worker. Only a later
+            // session wait opens the latch and immediately repolls it. Place
+            // this BEFORE even the empty-object finalization path.
+            poll_fn(|_| start.poll_admit()).await;
+        }
         let limited = source.take(length - offset);
         let mut chunks = StreamChunkReader::new(limited, options.chunk_size)
             .map_err(ScopedReceiveError::Source)?;
@@ -1048,4 +1062,308 @@ mod journaled_tests {
         }
     }
 
+    fn prepared_snapshot(result: crate::atp::journal::JournalReceivePreparation)
+        -> Arc<crate::atp::journal::JournalCheckpoint>
+    {
+        match result {
+            crate::atp::journal::JournalReceivePreparation::Checkpoint(saved) => saved,
+            crate::atp::journal::JournalReceivePreparation::Stopped(_) => {
+                panic!("preparation stopped before its checkpoint")
+            }
+        }
+    }
+
+    struct CatalogSource {
+        inner: Source,
+        catalog_ready: Arc<AtomicBool>,
+    }
+
+    impl AsyncRead for CatalogSource {
+        fn poll_read(
+            mut self: Pin<&mut Self>, task: &mut Context<'_>, buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            assert!(self.catalog_ready.load(Ordering::SeqCst),
+                "source polled before the application confirmed catalog persistence");
+            Pin::new(&mut self.inner).poll_read(task, buffer)
+        }
+    }
+
+    #[test]
+    fn prepared_receive_waits_for_catalog_before_body_and_empty_publication() {
+        for workers in [1, 2] {
+            for policy in [CommitPolicy::AtomicRename, CommitPolicy::CopyAndVerify, CommitPolicy::LinkAndUnlink] {
+                for content in [b"".as_slice(), b"abcdefgh".as_slice()] {
+                    let directory = tempfile::tempdir().unwrap();
+                    // A preparation pause must never occupy even the only pool worker.
+                    let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+                        else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+                    let runtime = builder.blocking_threads(1, 1).build().unwrap();
+                    runtime.block_on(async {
+                        let cx = Cx::current().unwrap();
+                        let (writer, manifest) = prepared(&cx, directory.path(), content, policy).await;
+                        let mut body = content.to_vec();
+                        body.extend_from_slice(b"NEXT");
+                        let (source, probe) = Source::new(&body);
+                        let catalog_ready = Arc::new(AtomicBool::new(false));
+                        let source = CatalogSource { inner: source, catalog_ready: catalog_ready.clone() };
+                        let mut receive = writer.receive_to_journal(&cx, source,
+                            request(reopen(directory.path()), manifest, 2)).unwrap();
+                        let saved = prepared_snapshot(receive.prepare_checkpoint().await.unwrap());
+                        assert!(saved.source_path.is_file());
+                        assert_eq!(saved.summary.durable_bytes, 0);
+                        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                        assert_eq!(writer.admission.available_permits(), 0);
+                        assert!(!directory.path().join("destination").exists());
+                        assert_eq!(receive.accepted_bytes(), 0);
+                        assert!(receive.take_source().is_none());
+                        let again = prepared_snapshot(receive.prepare_checkpoint().await.unwrap());
+                        assert!(Arc::ptr_eq(&saved, &again));
+                        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                        // Constructing a wait is lazy and does not open the latch.
+                        drop(receive.wait());
+                        assert!(Arc::ptr_eq(&saved,
+                            &prepared_snapshot(receive.prepare_checkpoint().await.unwrap())));
+                        let catalog = directory.path().join("recovery-catalog");
+                        let source_path = saved.source_path.clone();
+                        let written_catalog = catalog.clone();
+                        cx.scoped_fs().run_io(move |_| {
+                            use std::io::Write;
+                            let mut file = std::fs::OpenOptions::new()
+                                .create_new(true).write(true).open(&written_catalog)?;
+                            file.write_all(source_path.to_str().unwrap().as_bytes())?;
+                            file.sync_all()?;
+                            #[cfg(unix)]
+                            File::open(written_catalog.parent().unwrap())?.sync_all()?;
+                            Ok(())
+                        }).await.unwrap();
+                        assert_eq!(std::fs::read_to_string(catalog).unwrap(), saved.source_path.to_str().unwrap());
+                        assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                        catalog_ready.store(true, Ordering::SeqCst);
+                        let report = receive.wait().await.unwrap();
+                        let path = directory.path().join("destination");
+                        assert_eq!(report.outcome.unwrap().unwrap(), path);
+                        assert_eq!(report.publication, Some(JournalPublication::Confirmed(path.clone())));
+                        assert_eq!(std::fs::read(path).unwrap(), content);
+                        assert_eq!(probe.consumed.load(Ordering::SeqCst), content.len());
+                        let source = receive.take_source().unwrap();
+                        assert_eq!(&source.inner.bytes[source.inner.position..], b"NEXT");
+                        assert!(matches!(report.journal.unwrap().get_resume_summary("automatic").unwrap().status,
+                            TransferResumeStatus::Committed { .. }));
+                        assert_eq!(writer.admission.available_permits(), 1);
+                    });
+                    drained(&runtime);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_resume_exposes_the_checked_prefix_without_reading_suffix() {
+        for workers in [1, 2] {
+            for prefix in [4, 8] {
+                let directory = tempfile::tempdir().unwrap();
+                let runtime = runtime(workers);
+                runtime.block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let (writer, manifest) = prepared(&cx, directory.path(), b"abcdefgh", CommitPolicy::AtomicRename).await;
+                    writer.set_expected_size(&cx, 8).await.unwrap().unwrap();
+                    for (index, part) in b"abcdefgh"[..prefix].chunks(4).enumerate() {
+                        writer.write_chunk(&cx, (index * 4) as u64, part.to_vec(), WriteOptions::default())
+                            .await.unwrap().unwrap();
+                    }
+                    let mut body = b"abcdefgh"[prefix..].to_vec();
+                    body.extend_from_slice(b"NEXT");
+                    let (source, probe) = Source::new(&body);
+                    let mut input = request(reopen(directory.path()), manifest, 2);
+                    input.resume_offset = Some(prefix as u64);
+                    let mut receive = writer.receive_to_journal(&cx, source, input).unwrap();
+                    let saved = prepared_snapshot(receive.prepare_checkpoint().await.unwrap());
+                    assert_eq!(saved.summary.contiguous_prefix_bytes, prefix as u64);
+                    assert_eq!(receive.accepted_bytes(), prefix as u64,
+                        "preparation returned before the driver observed preflight retirement");
+                    assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                    assert!(!directory.path().join("destination").exists());
+                    assert!(matches!(writer.writer.lock_state().verification_state,
+                        crate::atp::journal::sparse_writer::VerificationState::Pending));
+                    let report = receive.wait().await.unwrap();
+                    assert_eq!(report.outcome.unwrap().unwrap(), directory.path().join("destination"));
+                    assert_eq!(probe.consumed.load(Ordering::SeqCst), 8 - prefix);
+                    assert_eq!(std::fs::read(directory.path().join("destination")).unwrap(), b"abcdefgh");
+                });
+                drained(&runtime);
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_failure_returns_the_original_terminal_report_once() {
+        for case in 0..3 {
+            let directory = tempfile::tempdir().unwrap();
+            let runtime = runtime(1);
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                let mut input = request(reopen(directory.path()), manifest, 2);
+                match case {
+                    0 => input.commit.expected_chunk_commitment = Some(ManifestChunkCommitment::new([0; 32])),
+                    1 => input.commit.checkpoint.limits.max_bytes = 3,
+                    2 => { input.commit.checkpoint.journal.append(JournalRecord::Cancellation {
+                        transfer_id: "automatic".to_owned(), reason: "stop".to_owned(), timestamp: 1,
+                        auth_tag: AuthenticationTag::zero(),
+                    }).unwrap(); }
+                    _ => unreachable!(),
+                }
+                let sequence = input.commit.checkpoint.journal.get_stats().sequence;
+                let (source, probe) = Source::new(b"dataNEXT");
+                let mut receive = writer.receive_to_journal(&cx, source, input).unwrap();
+                let crate::atp::journal::JournalReceivePreparation::Stopped(report) =
+                    receive.prepare_checkpoint().await.unwrap()
+                else { panic!("invalid preparation produced a checkpoint"); };
+                assert!(matches!(report.outcome, Ok(Outcome::Err(SparseWriterError::VerificationFailed(_)))));
+                assert_eq!(report.publication, Some(JournalPublication::NotAttempted));
+                assert_eq!(report.journal.unwrap().get_stats().sequence, sequence);
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                assert!(receive.last_checkpoint().is_none());
+                assert!(writer.writer.lock_state().temp_file.is_none());
+                assert!(matches!(receive.prepare_checkpoint().await, Err(ScopedReceiveError::Completed)));
+                assert!(matches!(receive.wait().await, Err(ScopedReceiveError::Completed)));
+                assert_eq!(writer.admission.available_permits(), 1);
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn dropped_preparation_wait_keeps_checkpoint_job_and_body_pause() {
+        use crate::channel::oneshot;
+        use std::sync::mpsc;
+        for workers in [1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let builder = if workers == 1 { RuntimeBuilder::current_thread() }
+                else { RuntimeBuilder::new().worker_threads(workers).with_sharded_state(true) };
+            let runtime = builder.blocking_threads(1, 1).build().unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+                let (source, probe) = Source::new(b"dataNEXT");
+                let mut receive = writer.receive_to_journal(&cx, source,
+                    request(reopen(directory.path()), manifest, 2)).unwrap();
+                let (started, mut start) = oneshot::channel();
+                let (release, wait) = mpsc::channel();
+                let fs = cx.scoped_fs();
+                let mut blocker = Box::pin(fs.run_io(move |_| {
+                    started.send_blocking(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(10)).unwrap();
+                    Ok(())
+                }));
+                poll_fn(|task| { assert!(blocker.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                start.recv(&cx).await.unwrap();
+                let mut preparing = Box::pin(receive.prepare_checkpoint());
+                poll_fn(|task| { assert!(preparing.as_mut().poll(task).is_pending()); Poll::Ready(()) }).await;
+                drop(preparing);
+                assert_eq!(writer.admission.available_permits(), 0);
+                assert!(receive.last_checkpoint().is_none());
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                release.send(()).unwrap();
+                blocker.await.unwrap();
+                let saved = prepared_snapshot(receive.prepare_checkpoint().await.unwrap());
+                assert_eq!(saved.summary.durable_bytes, 0);
+                assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+                assert_eq!(writer.admission.available_permits(), 0);
+                let report = receive.wait().await.unwrap();
+                assert_eq!(report.outcome.unwrap().unwrap(), directory.path().join("destination"));
+                assert_eq!(report.journal.unwrap().get_transfer_entries("automatic").unwrap().len(), 9);
+                assert_eq!(probe.consumed.load(Ordering::SeqCst), 4);
+            });
+            drained(&runtime);
+        }
+    }
+
+    #[test]
+    fn preparation_after_body_admission_refuses_without_repolling_or_stopping_receive() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = runtime(2);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+            let (mut source, probe) = Source::new(b"dataNEXT");
+            source.pause_at = Some(0);
+            let mut receive = writer.receive_to_journal(&cx, source,
+                request(reopen(directory.path()), manifest, 2)).unwrap();
+            park(&cx, &mut receive, &probe).await;
+            let polls = probe.polls.load(Ordering::SeqCst);
+            assert!(matches!(receive.prepare_checkpoint().await, Err(ScopedReceiveError::PreparationTooLate)));
+            assert_eq!(probe.polls.load(Ordering::SeqCst), polls);
+            assert_eq!(writer.admission.available_permits(), 0);
+            release(&probe);
+            assert_eq!(receive.wait().await.unwrap().outcome.unwrap().unwrap(), directory.path().join("destination"));
+            assert_eq!(probe.consumed.load(Ordering::SeqCst), 4);
+            assert_eq!(writer.admission.available_permits(), 1);
+        });
+        drained(&runtime);
+    }
+
+    #[test]
+    fn failed_catalog_can_abandon_preparation_without_consuming_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = runtime(1);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+            let (source, probe) = Source::new(b"dataNEXT");
+            let mut receive = writer.receive_to_journal(&cx, source,
+                request(reopen(directory.path()), manifest, 2)).unwrap();
+            let saved = prepared_snapshot(receive.prepare_checkpoint().await.unwrap());
+            let catalog = directory.path().join("catalog");
+            cx.scoped_fs().write(catalog.clone(), b"existing catalog".to_vec()).await.unwrap();
+            // A real filesystem refusal, not a sleep or successful mock barrier.
+            assert!(cx.scoped_fs().run_io(move |_| {
+                std::fs::OpenOptions::new().create_new(true).write(true).open(catalog)?;
+                Ok(())
+            }).await.is_err());
+            assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+            drop(receive);
+            assert_eq!(writer.admission.available_permits(), 1);
+            assert!(saved.source_path.is_file());
+            assert!(!directory.path().join("destination").exists());
+            let summary = reopen(directory.path()).get_resume_summary("automatic").unwrap();
+            assert_eq!(summary.status, TransferResumeStatus::Resumable);
+            assert_eq!(summary.durable_bytes, 0);
+            assert_eq!(summary.total_size, Some(4));
+        });
+        drained(&runtime);
+    }
+
+    #[test]
+    fn precancelled_preparation_is_send_and_returns_journal_without_storage_effects() {
+        fn assert_send<T: Send>(_: &T) {}
+        use crate::cx::ChildRegionSpec;
+        use crate::types::CancelKind;
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = runtime(1);
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let (writer, manifest) = prepared(&cx, directory.path(), b"data", CommitPolicy::AtomicRename).await;
+            let region = cx.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let child = region.cx();
+            child.cancel_with(CancelKind::User, Some("before preparation"));
+            let (source, probe) = Source::new(b"dataNEXT");
+            let mut receive = writer.receive_to_journal(child, source,
+                request(reopen(directory.path()), manifest, 2)).unwrap();
+            let preparing = receive.prepare_checkpoint();
+            assert_send(&preparing);
+            drop(preparing);
+            let crate::atp::journal::JournalReceivePreparation::Stopped(report) =
+                receive.prepare_checkpoint().await.unwrap()
+            else { panic!("pre-cancelled preparation reached checkpoint"); };
+            assert!(matches!(report.outcome, Err(ScopedReceiveError::Gateway(ScopedFsError::Checkpoint(_)))));
+            assert_eq!(report.publication, Some(JournalPublication::NotAttempted));
+            assert_eq!(report.journal.unwrap().get_stats().sequence, 0);
+            assert_eq!(probe.polls.load(Ordering::SeqCst), 0);
+            assert!(writer.writer.lock_state().temp_file.is_none());
+            assert_eq!(std::fs::read_dir(journal_config(directory.path()).base_dir).unwrap().count(), 0);
+            region.close().await.unwrap();
+        });
+        drained(&runtime);
+    }
 }

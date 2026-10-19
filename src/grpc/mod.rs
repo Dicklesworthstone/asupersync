@@ -60,7 +60,7 @@
 //! - `reflection_rpc`: Native v1/v1alpha reflection (`http2-streaming` feature)
 //! - [`interceptor`]: Interceptor middleware and layers
 //! - [`web`]: gRPC-Web protocol support (HTTP/1.1, base64 text mode)
-//! - `web_handler`: Native registered unary gRPC-Web dispatch (non-Wasm)
+//! - `web_handler`: Native registered unary and server-streaming gRPC-Web (non-Wasm)
 
 pub mod client;
 pub mod codec;
@@ -166,4 +166,4 @@ pub use web::{
     is_text_mode,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use web_handler::{GrpcWebConfig, GrpcWebHandlerFuture};
+pub use web_handler::{GrpcWebConfig, GrpcWebHandlerFuture, GrpcWebStreamingHandlerFuture};

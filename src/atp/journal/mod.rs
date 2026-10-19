@@ -37,7 +37,9 @@ pub use range_tracker::{ChunkRange, RangeTracker, SparseRange};
 #[cfg(not(target_arch = "wasm32"))]
 pub use receive::{ScopedReceive, ScopedReceiveError, ScopedReceiveOptions, ScopedReceiveResult};
 #[cfg(not(target_arch = "wasm32"))]
-pub use receive::{JournalReceiveReport, JournalReceiveRequest, ScopedJournalReceive};
+pub use receive::{
+    JournalReceivePreparation, JournalReceiveReport, JournalReceiveRequest, ScopedJournalReceive,
+};
 pub use recovery::{
     RecoveryContext, RecoveryError, RecoveryStats, load_recovered_or_create_bitmap,
     recover_journal_and_bitmap,

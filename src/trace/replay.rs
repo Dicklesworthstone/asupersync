@@ -45,7 +45,7 @@
 //! let loaded = ReplayTrace::from_bytes(&bytes).expect("deserialize");
 //! ```
 
-use crate::types::{RegionId, Severity, TaskId, Time};
+use crate::types::{Budget, CancelReason, RegionId, Severity, TaskId, Time};
 use serde::{Deserialize, Serialize};
 use std::io;
 
@@ -820,6 +820,114 @@ pub struct ProjectionSummary {
     pub steps_from_schedule_events: bool,
 }
 
+/// One recorded phase of a task's cooperative cancellation protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProductionCancellationPhase {
+    /// A witnessed cancellation publication between native task polls.
+    Request,
+    /// The scheduler consumed a checkpoint acknowledgement after a task poll.
+    Acknowledgement,
+}
+
+/// Cancellation evidence carried beside the existing replay wire schema.
+///
+/// Only [`crate::trace::capture::ScheduleCaptureSnapshot::production_schedule_with_cancellation`]
+/// constructs this evidence, after checking publication spans and poll ordering.
+/// Source identities in the full reason remain provenance; replay injects that
+/// exact reason into the task selected by its captured spawn ordinal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductionCancellationEvent {
+    source_sequence: u64,
+    after_dispatches: usize,
+    task: CompactTaskId,
+    region: CompactRegionId,
+    reason: CancelReason,
+    phase: ProductionCancellationPhase,
+    task_poll_ordinal: usize,
+    cleanup_budget: Budget,
+}
+
+impl ProductionCancellationEvent {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        source_sequence: u64,
+        after_dispatches: usize,
+        task: CompactTaskId,
+        region: CompactRegionId,
+        reason: CancelReason,
+        phase: ProductionCancellationPhase,
+        task_poll_ordinal: usize,
+        cleanup_budget: Budget,
+    ) -> Self {
+        Self {
+            source_sequence,
+            after_dispatches,
+            task,
+            region,
+            reason,
+            phase,
+            task_poll_ordinal,
+            cleanup_budget,
+        }
+    }
+
+    /// Canonical source Request or Ack sequence, retained for diagnostics.
+    #[must_use]
+    pub const fn source_sequence(&self) -> u64 {
+        self.source_sequence
+    }
+
+    /// Number of captured task Poll entries preceding this observation.
+    #[must_use]
+    pub const fn after_dispatches(&self) -> usize {
+        self.after_dispatches
+    }
+
+    /// Captured target task, bound to a reconstructed task by spawn ordinal.
+    #[must_use]
+    pub const fn task(&self) -> CompactTaskId {
+        self.task
+    }
+
+    /// Captured owner region of the target task.
+    #[must_use]
+    pub const fn region(&self) -> CompactRegionId {
+        self.region
+    }
+
+    /// Complete recorded cancellation reason, including its source provenance.
+    #[must_use]
+    pub fn reason(&self) -> &CancelReason {
+        &self.reason
+    }
+
+    /// Whether this observation requests cancellation or acknowledges it.
+    #[must_use]
+    pub const fn phase(&self) -> ProductionCancellationPhase {
+        self.phase
+    }
+
+    /// Task-poll boundary associated with this cancellation observation.
+    ///
+    /// For an acknowledgement this is the one-based ordinal of the poll that
+    /// produced it, identified by the source worker even when the same task
+    /// has already been polled again on another worker. For a request it is the
+    /// number of already completed polls of the target task and may be zero.
+    #[must_use]
+    pub const fn task_poll_ordinal(&self) -> usize {
+        self.task_poll_ordinal
+    }
+
+    /// Effective cleanup budget of the witnessed request. An acknowledgement
+    /// repeats its matching request's budget; this is not a fresh budget sample
+    /// taken at acknowledgement time.
+    #[must_use]
+    pub const fn cleanup_budget(&self) -> Budget {
+        self.cleanup_budget
+    }
+}
+
 /// A production runtime trace reduced to the decisions the lab can re-drive.
 ///
 /// The production runtime records the lab's [`crate::trace::event::TraceEvent`]
@@ -836,9 +944,10 @@ pub struct ProjectionSummary {
 ///   [`ProjectionSummary::steps_from_schedule_events`] is set;
 /// - the tick recorded on every projected event is the production sequence
 ///   number, monotone within the trace;
-/// - I/O, obligation, region and cancellation events are not carried (they
-///   are outcomes to re-inject, not decisions to re-drive) and are counted
-///   in [`ProjectionSummary::skipped`];
+/// - I/O, obligation, region and cancellation events are not carried by the
+///   replay wire schema and are counted in [`ProjectionSummary::skipped`];
+///   checked native captures can separately retain witnessed task cancellation
+///   through [`Self::cancellation_events`];
 /// - a task that acts before its `Spawn` is a truncated ring buffer: strict
 ///   projection returns [`ProjectionError::MissingSpawn`]; with
 ///   [`ProjectionOptions::allow_orphans`] it is admitted and listed.
@@ -850,6 +959,9 @@ pub struct ProductionSchedule {
     source_sequence_disorder: Option<(u64, u64)>,
     /// Whether the projected completions carry captured terminal outcomes.
     outcomes_captured: bool,
+    /// `None` preserves legacy task-order projection. `Some`, including an
+    /// empty vector, opts into request injection and acknowledgement checking.
+    cancellation_events: Option<Vec<ProductionCancellationEvent>>,
 }
 
 impl ProductionSchedule {
@@ -1029,6 +1141,7 @@ impl ProductionSchedule {
                 .find(|pair| pair[1].seq <= pair[0].seq)
                 .map(|pair| (pair[0].seq, pair[1].seq)),
             outcomes_captured: false,
+            cancellation_events: None,
         })
     }
 
@@ -1056,6 +1169,23 @@ impl ProductionSchedule {
     #[must_use]
     pub const fn carries_outcomes(&self) -> bool {
         self.outcomes_captured
+    }
+
+    pub(crate) fn with_cancellation_events(
+        mut self,
+        events: Vec<ProductionCancellationEvent>,
+    ) -> Self {
+        self.cancellation_events = Some(events);
+        self
+    }
+
+    /// Witnessed task cancellation observations, when explicitly requested
+    /// from a checked native capture. `Some(&[])` also requires the replay to
+    /// observe no unexpected cancellation acknowledgements; `None` retains
+    /// legacy task-order-only replay behavior.
+    #[must_use]
+    pub fn cancellation_events(&self) -> Option<&[ProductionCancellationEvent]> {
+        self.cancellation_events.as_deref()
     }
 
     /// The captured terminal outcome of a recorded task, or `None` when the
@@ -1091,7 +1221,8 @@ impl ProductionSchedule {
         &self.trace
     }
 
-    /// Consume the projection, keeping only the replay trace.
+    /// Consume the projection, keeping only the replay trace. Cancellation
+    /// evidence is separate from that wire schema and is discarded here.
     #[must_use]
     pub fn into_trace(self) -> ReplayTrace {
         self.trace
