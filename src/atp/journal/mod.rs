@@ -179,3 +179,42 @@ pub struct JournalCommitReport {
     /// Full operation result. Success includes the journal's final sync barrier.
     pub outcome: crate::types::Outcome<std::path::PathBuf, sparse_writer::SparseWriterError>,
 }
+
+/// Authority and sole journal ownership for durable transfer cancellation.
+///
+/// The journal must already contain an authenticated Offer matching the writer,
+/// expected manifest root and file length. Cancellation never imports journal
+/// path strings as cleanup authority and never creates a replacement offer.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCancelRequest {
+    /// Original journal owner; keep exclusive ownership of its directory.
+    pub journal: AppendJournal,
+    /// Offered transfer to stop. Must be nonempty and at most 4096 UTF-8 bytes.
+    pub transfer_id: String,
+    /// Trusted expectation used to bind the offered identity, root and length.
+    /// Payload authentication is unnecessary for cancelling corrupt staging.
+    pub manifest: std::sync::Arc<crate::atp::manifest::Manifest>,
+    /// Nonempty reason, at most 4096 UTF-8 bytes. A recorded reason is immutable.
+    pub reason: String,
+    /// Application timestamp; record sequence, not time, establishes ordering.
+    pub timestamp: u64,
+}
+
+/// Journal durability and local cleanup are separately observable outcomes.
+///
+/// Success requires a synchronized Cancellation followed by canonical cleanup.
+/// An error after confirmed persistence leaves the transfer cancelled in the
+/// journal even when cleanup failed. A false flag never proves a record absent.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct JournalCancelReport {
+    /// Original owner returned on ordinary domain outcomes, including refusal.
+    pub journal: AppendJournal,
+    /// This invocation observed a successful terminal append and sync barrier.
+    pub cancellation_persisted: bool,
+    /// The canonical cleanup function was invoked. This does not prove that all
+    /// filesystem effects completed or that an already-cancelled writer had work.
+    pub cleanup_attempted: bool,
+    /// Actual outcome. Gateway failure or an abandoned report loses these
+    /// observations; drain and reconcile retained evidence rather than guessing.
+    pub outcome: crate::types::Outcome<(), sparse_writer::SparseWriterError>,
+}
