@@ -968,12 +968,15 @@ impl UnixStream {
         interest: Interest,
         owner: u64,
     ) -> Poll<io::Result<T>> {
+        // RawWaker clone hooks may re-enter this stream, just like drop and
+        // wake hooks. Run them before taking the registration lock.
+        let waker = cx.waker().clone();
         let (armed, stranded, displaced) =
             self.registration
                 .lock()
-                .arm_shared(&*self.inner, interest, owner, cx.waker());
+                .arm_shared(&*self.inner, interest, owner, waker);
         // The registration lock was released at the end of the statement
-        // above; the waker this call replaced drops only now.
+        // above; replaced, redundant, and failed-call wakers drop only now.
         drop(displaced);
         for waiter in stranded {
             waiter.wake();

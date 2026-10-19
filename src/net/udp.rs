@@ -1859,7 +1859,15 @@ pub struct ReactorRegistration {
 struct SharedWaiters {
     /// One entry per waiting call future, keyed by its owner id
     /// ([`next_shared_waiter_owner`]).
-    waiters: parking_lot::Mutex<Vec<(u64, std::task::Waker)>>,
+    waiters: parking_lot::Mutex<Vec<SharedWaiter>>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct SharedWaiter {
+    owner: u64,
+    interest: Interest,
+    waker: std::task::Waker,
 }
 
 /// A fresh owner id for one call future's entry in a socket's shared waiter
@@ -1879,17 +1887,37 @@ impl SharedWaiters {
     /// 33 or more waiting tasks wake each other forever
     /// (br-asupersync-reactor-audit-dofi11).
     ///
-    /// Returns the waker it replaced, for the caller to drop after releasing
-    /// its own locks: a waker can own the last reference to a task, and
-    /// dropping that task can run code that takes them (br-asupersync-9kb866).
-    fn register(&self, owner: u64, waker: &std::task::Waker) -> Option<std::task::Waker> {
+    /// Returns the union of the parked calls' interests and any replaced or
+    /// redundant waker. The caller clones before locking and drops retired
+    /// wakers after releasing its own locks: a waker can own the last
+    /// reference to a task whose drop takes them (br-asupersync-9kb866).
+    fn register(
+        &self,
+        owner: u64,
+        interest: Interest,
+        waker: std::task::Waker,
+    ) -> (Interest, Option<std::task::Waker>) {
         let mut waiters = self.waiters.lock();
-        if let Some((_, existing)) = waiters.iter_mut().find(|(id, _)| *id == owner) {
-            (!existing.will_wake(waker)).then(|| std::mem::replace(existing, waker.clone()))
+        let retired = if let Some(existing) = waiters.iter_mut().find(|entry| entry.owner == owner)
+        {
+            existing.interest = interest;
+            Some(if existing.waker.will_wake(&waker) {
+                waker
+            } else {
+                std::mem::replace(&mut existing.waker, waker)
+            })
         } else {
-            waiters.push((owner, waker.clone()));
+            waiters.push(SharedWaiter {
+                owner,
+                interest,
+                waker,
+            });
             None
-        }
+        };
+        let interest = waiters
+            .iter()
+            .fold(interest, |union, entry| union | entry.interest);
+        (interest, retired)
     }
 
     /// Removes `owner`'s entry and takes the surviving waiters. The
@@ -1899,30 +1927,36 @@ impl SharedWaiters {
     /// (GH#85). Ordinary registration changes never notify peers this way.
     fn forget(&self, owner: u64) -> (Option<std::task::Waker>, Vec<std::task::Waker>) {
         let mut waiters = self.waiters.lock();
-        let Some(position) = waiters.iter().position(|(id, _)| *id == owner) else {
+        let Some(position) = waiters.iter().position(|entry| entry.owner == owner) else {
             return (None, Vec::new());
         };
-        let removed = waiters.swap_remove(position).1;
+        let removed = waiters.swap_remove(position).waker;
         let survivors = std::mem::take(&mut *waiters);
         drop(waiters);
-        let survivors = survivors.into_iter().map(|(_, waker)| waker).collect();
+        let survivors = survivors.into_iter().map(|entry| entry.waker).collect();
         (Some(removed), survivors)
     }
 
-    /// Removes every waiter and returns all but `current`'s.
-    fn take_others(&self, current: u64) -> Vec<std::task::Waker> {
+    /// Removes every waiter, returning `current` separately for deferred
+    /// disposal. Its waker must not drop while the caller's lock is held.
+    fn take_others(&self, current: u64) -> (Vec<std::task::Waker>, Option<std::task::Waker>) {
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        waiters
-            .into_iter()
-            .filter(|(id, _)| *id != current)
-            .map(|(_, waker)| waker)
-            .collect()
+        let mut others = Vec::with_capacity(waiters.len().saturating_sub(1));
+        let mut retired = None;
+        for entry in waiters {
+            if entry.owner == current {
+                retired = Some(entry.waker);
+            } else {
+                others.push(entry.waker);
+            }
+        }
+        (others, retired)
     }
 
     fn wake_all(&self) {
         let waiters = std::mem::take(&mut *self.waiters.lock());
-        for (_, waiter) in waiters {
-            waiter.wake();
+        for waiter in waiters {
+            waiter.waker.wake();
         }
     }
 
@@ -2087,31 +2121,38 @@ impl ReactorRegistration {
     ///
     /// `owner` ([`next_shared_waiter_owner`]) names the calling future's one
     /// entry in the list; the future removes it with
-    /// [`forget_shared`](Self::forget_shared) when dropped. The third value
-    /// is the waker that entry held before, if this call replaced it; the
-    /// caller drops it after releasing the lock that guards `self`.
+    /// [`forget_shared`](Self::forget_shared) when dropped. The caller clones
+    /// `waker` before taking the lock that guards `self`. The third value
+    /// contains replaced or redundant wakers and, on failure, the current
+    /// entry's waker; the caller drops them after releasing that lock.
     #[cfg(unix)]
     pub(crate) fn arm_shared(
         &mut self,
         source: &dyn crate::runtime::reactor::Source,
         interest: Interest,
         owner: u64,
-        waker: &std::task::Waker,
+        waker: std::task::Waker,
     ) -> (
         io::Result<Armed>,
         Vec<std::task::Waker>,
-        Option<std::task::Waker>,
+        smallvec::SmallVec<[std::task::Waker; 2]>,
     ) {
         let waiters = Arc::clone(self.shared_waiters.get_or_insert_with(Default::default));
-        let displaced = waiters.register(owner, waker);
+        // Migration creates a fresh token and cannot recover the old driver's
+        // accumulated interest. Keep every still-parked call's direction in
+        // the shared list so one runtime's writer cannot disarm a reader.
+        let (interest, displaced) = waiters.register(owner, interest, waker);
+        let mut retired: smallvec::SmallVec<[_; 2]> = displaced.into_iter().collect();
         let dispatch = std::task::Waker::from(Arc::clone(&waiters));
         let armed = self.arm(source, interest, &dispatch);
         let stranded = if matches!(armed, Ok(Armed::Parked)) {
             Vec::new()
         } else {
-            waiters.take_others(owner)
+            let (others, current) = waiters.take_others(owner);
+            retired.extend(current);
+            others
         };
-        (armed, stranded, displaced)
+        (armed, stranded, retired)
     }
 
     /// Removes `owner`'s entry from the shared waiter list. The caller drops
@@ -2168,6 +2209,9 @@ pub fn ambient_io_driver_present() -> bool {
 /// Whether a live polling context has adopted a registration from another
 /// dispatcher. Shared reactor participants keep the same dispatcher identity;
 /// switching workers or participants must not force a new backend token.
+/// A context without an I/O driver selects fallback readiness, so it must
+/// retire a registration left on another runtime. Without any ambient context,
+/// preserve registrations whose caller may be driving their reactor manually.
 ///
 /// This check belongs in the socket poll path, not `IoRegistration::rearm`:
 /// cancellation also rearms surviving waiters and must keep their owner.
@@ -2176,10 +2220,9 @@ pub(crate) fn registration_needs_migration(
     registration: &IoRegistration,
     on_fallback: bool,
 ) -> bool {
-    Cx::with_current(|current| {
-        current
-            .io_driver_ref()
-            .is_some_and(|driver| on_fallback || !registration.belongs_to(driver))
+    Cx::with_current(|current| match current.io_driver_ref() {
+        Some(driver) => on_fallback || !registration.belongs_to(driver),
+        None => !on_fallback,
     })
     .unwrap_or(false)
 }

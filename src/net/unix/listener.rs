@@ -70,41 +70,63 @@ impl AcceptWaiters {
     }
 
     fn register(&self, owner: Option<u64>, waker: &Waker) {
+        {
+            let waiters = self.waiters.lock();
+            if waiters
+                .iter()
+                .any(|entry| entry.owner == owner && entry.waker.will_wake(waker))
+            {
+                return;
+            }
+        }
+        // User waker clone/drop/wake hooks may re-enter this list. Clone
+        // outside the gate, then recheck any state its hook could change.
+        // An unchanged waker takes the no-clone path above.
+        let waker = waker.clone();
         let mut waiters = self.waiters.lock();
         if owner.is_some() {
             // An accept() future keeps one entry, updated in place and removed
             // when the future is dropped, so it never has to be evicted.
-            if let Some(entry) = waiters.iter_mut().find(|entry| entry.owner == owner) {
-                entry.waker.clone_from(waker);
+            let retired = if let Some(entry) = waiters.iter_mut().find(|entry| entry.owner == owner)
+            {
+                Some(if entry.waker.will_wake(&waker) {
+                    waker
+                } else {
+                    std::mem::replace(&mut entry.waker, waker)
+                })
             } else {
-                waiters.push(AcceptWaiter {
-                    owner,
-                    waker: waker.clone(),
-                });
-            }
+                waiters.push(AcceptWaiter { owner, waker });
+                None
+            };
+            drop(waiters);
+            drop(retired);
             return;
         }
         if waiters
             .iter()
-            .any(|existing| existing.owner.is_none() && existing.waker.will_wake(waker))
+            .any(|existing| existing.owner.is_none() && existing.waker.will_wake(&waker))
         {
+            drop(waiters);
+            drop(waker);
             return;
         }
         // A direct poll_accept caller cannot be told apart from an abandoned
         // one, so those entries stay capped. Evicting live accept() futures
         // instead made each evicted waiter evict the next: with 33 tasks
         // accepting on one listener they woke each other forever.
+        let mut evicted = None;
         if waiters.iter().filter(|entry| entry.owner.is_none()).count() >= 32 {
             if let Some(index) = waiters.iter().position(|entry| entry.owner.is_none()) {
-                // Wake the evicted waiter so its task can re-register
-                // rather than hang forever with a lost wakeup.
-                waiters.remove(index).waker.wake();
+                evicted = Some(waiters.remove(index).waker);
             }
         }
-        waiters.push(AcceptWaiter {
-            owner: None,
-            waker: waker.clone(),
-        });
+        waiters.push(AcceptWaiter { owner: None, waker });
+        drop(waiters);
+        // Publish the newcomer before waking the displaced direct poller:
+        // reentrant registration must see a complete, capped waiter list.
+        if let Some(evicted) = evicted {
+            evicted.wake();
+        }
     }
 
     fn remove(&self, owner: u64) {
