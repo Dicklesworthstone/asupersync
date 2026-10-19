@@ -50,7 +50,7 @@ mod owned;
 #[cfg(not(target_arch = "wasm32"))]
 pub(super) use owned::OwnedRequests;
 
-/// Inputs shared by legacy and opt-in scheduler-owned buffered dispatch.
+/// Inputs shared by legacy and opt-in scheduler-owned dispatch.
 pub(super) struct RequestExecutionConfig {
     budget: Budget,
     started_at: crate::types::Time,
@@ -1753,6 +1753,105 @@ pub struct Http1StreamingServer<F> {
     in_flight_requests: Option<Arc<AtomicUsize>>,
 }
 
+/// Head-only admission is complete before either executor creates a body.
+struct StreamingRequestExecution {
+    head: RequestHead,
+    body_kind: BodyKind,
+    peer_addr: Option<SocketAddr>,
+    config: Arc<Http1StreamingConfig>,
+    request: RequestExecutionConfig,
+}
+
+enum StreamingRequestOutcome {
+    Complete {
+        hop: ServerHopOutcome<Response>,
+        // An interrupted exchange cannot claim synchronized body EOF.
+        drain: Option<IncomingBodyDrainProgress>,
+    },
+    BodyFailed(IncomingBodyError),
+    Closed,
+}
+
+impl StreamingRequestOutcome {
+    fn from_joined(
+        joined: Result<
+            Option<(ServerHopOutcome<Response>, IncomingRequestBodyWriter)>,
+            IncomingBodyError,
+        >,
+    ) -> Self {
+        match joined {
+            Ok(Some((hop, writer))) => Self::Complete {
+                hop,
+                drain: Some(writer.drain_progress()),
+            },
+            Ok(None) => Self::Closed,
+            Err(error) => Self::BodyFailed(error),
+        }
+    }
+}
+
+async fn execute_legacy_streaming<F, Fut, T>(
+    handler: Arc<F>,
+    mut io: T,
+    mut read_buffer: BytesMut,
+    execution: StreamingRequestExecution,
+) -> Result<(T, BytesMut, StreamingRequestOutcome), HttpError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Response> + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let cx = execution
+        .request
+        .connection
+        .as_ref()
+        .expect("streaming HTTP/1 connection context");
+    let region = ServerRequestRegion::mint_from_connection(
+        "h1",
+        execution.request.budget,
+        execution.request.started_at,
+        cx,
+    );
+    let request_cx = region.cx().clone();
+    let body_cx = request_cx.clone();
+    let (writer, body) = IncomingRequestBody::channel_with_limits(
+        &request_cx,
+        execution.body_kind,
+        execution.config.incoming_body_frame_capacity,
+        execution.config.incoming_body_queued_bytes,
+    );
+    let request = StreamingServerRequest {
+        head: execution.head,
+        peer_addr: execution.peer_addr,
+        body,
+    };
+    let handler = race_force_close(
+        execution.request.shutdown.as_ref(),
+        region.run_with_protocol_drain(
+            execution.request.source,
+            Some(cx.clone()),
+            execution.request.drain_grace,
+            handler(request_cx, request),
+        ),
+    );
+    let body_driver = drive_incoming_body(
+        &body_cx,
+        &mut io,
+        &mut read_buffer,
+        writer.max_body_size(u64::try_from(execution.config.max_body_size).unwrap_or(u64::MAX)),
+        &execution.config,
+    );
+    let joined = join_streaming_handler_and_body(
+        cx,
+        handler,
+        body_driver,
+        &execution.config,
+        execution.request.shutdown.as_ref(),
+    )
+    .await;
+    Ok((io, read_buffer, StreamingRequestOutcome::from_joined(joined)))
+}
+
 impl<F> Http1StreamingServer<F> {
     /// Creates an HTTP/1 server whose handler returns a supervised framed response.
     ///
@@ -1835,20 +1934,39 @@ where
     }
 
     /// Serves one streaming HTTP/1 connection and records its peer address.
-    #[allow(clippy::too_many_lines)]
     pub async fn serve_with_peer_addr<T>(
         self,
         cx: &Cx,
-        mut io: T,
+        io: T,
         peer_addr: Option<SocketAddr>,
     ) -> Result<ConnectionState, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
     {
+        self.serve_connection_using(cx, io, peer_addr, execute_legacy_streaming::<F, Fut, T>)
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn serve_connection_using<T, Execute, Execution>(
+        self,
+        cx: &Cx,
+        mut io: T,
+        peer_addr: Option<SocketAddr>,
+        execute: Execute,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+        Execute: Fn(Arc<F>, T, BytesMut, StreamingRequestExecution) -> Execution,
+        Execution: Future<Output = Result<(T, BytesMut, StreamingRequestOutcome), HttpError>>,
+    {
+        let handler = Arc::new(self.handler);
+        let execution_config = Arc::new(self.config.clone());
         let mut read_buffer = BytesMut::with_capacity(8192);
         let mut state = ConnectionState::new(connection_now(cx));
         let response_write =
-            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref());
+            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref())
+                .with_owner(Some(cx));
 
         loop {
             state.phase = ConnectionPhase::Idle;
@@ -1950,55 +2068,36 @@ where
                 parse_request_timeout_header(&head.headers),
                 self.config.request_timeout_header_cap,
             );
-            let region =
-                ServerRequestRegion::mint_from_connection("h1", request_budget, request_now, cx);
-            let request_cx = region.cx().clone();
-            let body_cx = request_cx.clone();
-            let (writer, body) = IncomingRequestBody::channel_with_limits(
-                &request_cx,
-                body_kind,
-                self.config.incoming_body_frame_capacity,
-                self.config.incoming_body_queued_bytes,
-            );
-            let request = StreamingServerRequest {
-                head,
-                peer_addr,
-                body,
-            };
-
             state.phase = ConnectionPhase::Processing;
-            let handler = race_force_close(
-                self.shutdown_signal.as_ref(),
-                region.run_with_protocol_drain(
-                    budget_source,
-                    Some(cx.clone()),
-                    self.config.request_drain_grace,
-                    (self.handler)(request_cx, request),
-                ),
-            );
-            let body_driver = drive_incoming_body(
-                &body_cx,
-                &mut io,
-                &mut read_buffer,
-                writer.max_body_size(u64::try_from(self.config.max_body_size).unwrap_or(u64::MAX)),
-                &self.config,
-            );
-
-            let (hop, writer) = match join_streaming_handler_and_body(
-                cx,
-                handler,
-                body_driver,
-                &self.config,
-                self.shutdown_signal.as_ref(),
+            let (returned_io, returned_buffer, outcome) = execute(
+                Arc::clone(&handler),
+                io,
+                read_buffer,
+                StreamingRequestExecution {
+                    head,
+                    body_kind,
+                    peer_addr,
+                    config: Arc::clone(&execution_config),
+                    request: RequestExecutionConfig {
+                        budget: request_budget,
+                        started_at: request_now,
+                        source: budget_source,
+                        drain_grace: self.config.request_drain_grace,
+                        connection: Some(cx.clone()),
+                        shutdown: self.shutdown_signal.clone(),
+                    },
+                },
             )
-            .await
-            {
-                Ok(Some(joined)) => joined,
-                Ok(None) => {
+            .await?;
+            io = returned_io;
+            read_buffer = returned_buffer;
+            let (hop, drain) = match outcome {
+                StreamingRequestOutcome::Complete { hop, drain } => (hop, drain),
+                StreamingRequestOutcome::Closed => {
                     state.phase = ConnectionPhase::Closing;
                     break;
                 }
-                Err(body_error) => {
+                StreamingRequestOutcome::BodyFailed(body_error) => {
                     record_incoming_body_failure(&body_error);
                     // br-asupersync-hw83se: incoming_body_failure_response maps
                     // DrainLimitExceeded to None; deliver an explicit 413 +
@@ -2054,7 +2153,7 @@ where
             // silently (RFC 9112 §9.6). The connection cannot be reused — the
             // undrained request body would corrupt the next request — so this is
             // a forced close, not keep-alive.
-            if validate_unread_drain(writer.drain_progress(), &self.config).is_err() {
+            if drain.is_none_or(|progress| validate_unread_drain(progress, &self.config).is_err()) {
                 forced_close = true;
             }
             if request_method == Method::Head {
@@ -2087,6 +2186,53 @@ where
 
         let _ = response_write.close_transport(&mut io).await;
         Ok(state)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<F, Fut> Http1StreamingServer<F>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    /// Serves streaming requests in real request tasks and child regions.
+    ///
+    /// The complete request head is admitted before the body channel is
+    /// created. Both the handler and the incoming-body driver run under the
+    /// admitted task's capability context; request bytes remain streamed
+    /// through the configured bounded queues. Responses and connection reuse
+    /// wait for actual task retirement, descendant cleanup, and finalizers.
+    /// Owner cancellation and force-close request that cleanup and keep
+    /// joining it. Dropping the serving future requests the runtime backstop;
+    /// the enclosing region's close remains the quiescence barrier.
+    ///
+    /// The transport moves into the request task while that exchange runs,
+    /// so this additive entry point requires owned, `'static` transport and
+    /// handler state. [`Self::serve`] retains borrowed-state compatibility.
+    /// This API serves buffered responses; produced and SSE responses retain
+    /// their separately named entry points.
+    pub async fn serve_owned<T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.serve_owned_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves scheduler-owned streaming requests and records the peer address.
+    pub async fn serve_owned_with_peer_addr<T>(
+        self,
+        cx: &Cx,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let owned = OwnedRequests::new(cx.clone())?;
+        self.serve_connection_using(cx, io, peer_addr, move |handler, io, buffer, execution| {
+            owned.clone().execute_streaming(handler, io, buffer, execution)
+        })
+        .await
     }
 }
 
@@ -3194,8 +3340,10 @@ where
     // bounds the head the same way; the body now spends at most one
     // `idle_timeout` waiting on the socket in total. Time spent applying
     // backpressure to the handler (`push_bytes`) is not charged, so a slow
-    // consumer of a fast client is unaffected. The driver runs outside the
-    // request region, so the request budget does not cover it.
+    // consumer of a fast client is unaffected. Legacy serving drives this
+    // outside the logical request region. Owned serving drives it in the
+    // admitted request task alongside the handler; both paths still bound
+    // the protocol's socket waits independently of application progress.
     let mut read_budget = config.idle_timeout;
     loop {
         if writer.is_done() {

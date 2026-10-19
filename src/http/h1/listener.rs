@@ -662,6 +662,43 @@ where
         self.run_with(runtime, spawn_streaming_connection::<F, Fut>)
             .await
     }
+
+    /// Serve live incoming bodies in actual request tasks and child regions.
+    ///
+    /// Connections are owned by `cx`. Each admitted request owns its handler
+    /// and incoming-body driver under a separate child region; bounded body
+    /// queues still let the handler process uploads before body EOF. Response
+    /// writes, keep-alive reuse, and listener drain wait for task retirement
+    /// and the complete request subtree's cleanup.
+    ///
+    /// This entry point serves buffered responses over the listener's TCP,
+    /// Unix, or handed-off transports. The existing [`Self::run_streaming`]
+    /// entry point retains its established execution contract.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_streaming_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_streaming_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F, Fut, S> Http1Listener<F>
@@ -1907,6 +1944,34 @@ async fn serve_owned_tls_connection<F, Fut, R>(
             }
         }
         Err(error) => cx.trace(&format!("h1_owned_tls_connection_failed: {error}")),
+    }
+    let _ = cx.checkpoint();
+}
+
+/// Serve a native connection with owned incoming streaming requests.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_streaming_connection<F, Fut>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Response> + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server.serve_owned_with_peer_addr(&cx, stream, peer_addr).await {
+        cx.trace(&format!("h1_owned_streaming_connection_failed: {error}"));
     }
     let _ = cx.checkpoint();
 }

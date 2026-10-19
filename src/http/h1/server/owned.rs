@@ -1,4 +1,4 @@
-//! Scheduler-owned buffered HTTP/1 request execution.
+//! Scheduler-owned HTTP/1 request execution.
 //!
 //! This opt-in executor shares the established parser and response path with
 //! legacy serving. A response is published independently of task cancellation,
@@ -6,10 +6,15 @@
 
 use super::{
     Http1Response, HttpError, IntoHttp1Response, Request, RequestExecutionConfig,
-    ServerHopOutcome, ServerRequestRegion, ShutdownPhase,
+    ServerHopOutcome, ServerRequestRegion, ShutdownPhase, StreamingRequestExecution,
+    StreamingRequestOutcome, drive_incoming_body, join_streaming_handler_and_body,
 };
+use crate::bytes::BytesMut;
 use crate::cx::{ChildRegion, ChildRegionSpec, Cx};
+use crate::http::h1::stream::{IncomingRequestBody, StreamingServerRequest};
+use crate::http::h1::types::Response;
 use crate::http::listener_cancel::ListenerCancellation;
+use crate::io::{AsyncRead, AsyncWrite};
 use crate::runtime::{JoinError, TaskHandle};
 use crate::types::{CancelKind, CancelReason};
 use std::future::{Future, poll_fn};
@@ -46,12 +51,142 @@ impl OwnedRequests {
         Fut: Future<Output = R> + Send + 'static,
         R: IntoHttp1Response,
     {
-        run_owned_request(&self.owner, config, move || async move {
-            // Both factory invocation and response conversion are inside the
-            // actual admitted task and its panic boundary.
-            handler(request).await.into_h1_response()
+        let source = config.source;
+        let drain_grace = config.drain_grace;
+        run_owned_request(&self.owner, config, move |body_cx, region| async move {
+            region
+                .run_with_protocol_drain(
+                    source,
+                    Some(body_cx),
+                    drain_grace,
+                    async move {
+                        // Factory invocation and response conversion stay
+                        // inside the task's protocol drain/panic boundary.
+                        handler(request).await.into_h1_response()
+                    },
+                )
+                .await
         })
         .await
+    }
+
+    pub(super) async fn execute_streaming<F, Fut, T>(
+        self,
+        handler: Arc<F>,
+        io: T,
+        read_buffer: BytesMut,
+        execution: StreamingRequestExecution,
+    ) -> Result<(T, BytesMut, StreamingRequestOutcome), HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Response> + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        // The protocol-drain boundary encloses the handler, not the owned
+        // transport. A timeout must retain I/O to deliver its 503 and keep
+        // read-ahead bytes whenever the body reached synchronized EOF.
+        // The guard also returns I/O on unwind, but it is never reclaimed
+        // until the task and the complete subtree have actually retired.
+        let transport = Arc::new(parking_lot::Mutex::new(Some((io, read_buffer))));
+        let task_transport = Arc::clone(&transport);
+        let source = execution.request.source;
+        let drain_grace = execution.request.drain_grace;
+        let signal = execution.request.shutdown.clone();
+        let config = execution.config;
+        let head = execution.head;
+        let body_kind = execution.body_kind;
+        let peer_addr = execution.peer_addr;
+        let outcome = run_owned_request(
+            &self.owner,
+            execution.request,
+            move |body_cx, region| async move {
+                let mut transport = StreamingTransport::take(task_transport);
+                let (io, read_buffer) = transport.parts();
+                let (writer, body) = IncomingRequestBody::channel_with_limits(
+                    &body_cx,
+                    body_kind,
+                    config.incoming_body_frame_capacity,
+                    config.incoming_body_queued_bytes,
+                );
+                let request = StreamingServerRequest {
+                    head,
+                    peer_addr,
+                    body,
+                };
+                let handler_cx = body_cx.clone();
+                let handler = region.run_with_protocol_drain(
+                    source,
+                    Some(body_cx.clone()),
+                    drain_grace,
+                    async move { handler(handler_cx, request).await },
+                );
+                let handler = async move { Some(handler.await) };
+                let body_driver = drive_incoming_body(
+                    &body_cx,
+                    io,
+                    read_buffer,
+                    writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
+                    &config,
+                );
+                let joined = join_streaming_handler_and_body(
+                    &body_cx,
+                    handler,
+                    body_driver,
+                    &config,
+                    signal.as_ref(),
+                )
+                .await;
+                // Retire the protocol writer in its admitted task too. Only
+                // its observed drain progress crosses the retirement barrier.
+                ServerHopOutcome::Ok(StreamingRequestOutcome::from_joined(joined))
+            },
+        )
+        .await?;
+        let (io, read_buffer) = transport
+            .lock()
+            .take()
+            .ok_or_else(|| ownership_error("streaming request omitted its transport return"))?;
+        let terminal = |hop| StreamingRequestOutcome::Complete { hop, drain: None };
+        let outcome = match outcome {
+            None => StreamingRequestOutcome::Closed,
+            Some(ServerHopOutcome::Ok(outcome)) => outcome,
+            Some(ServerHopOutcome::Cancelled) => terminal(ServerHopOutcome::Cancelled),
+            Some(ServerHopOutcome::ConnectionLost) => terminal(ServerHopOutcome::ConnectionLost),
+            Some(ServerHopOutcome::DeadlineExceeded) => terminal(ServerHopOutcome::DeadlineExceeded),
+            Some(ServerHopOutcome::Panicked(message)) => terminal(ServerHopOutcome::Panicked(message)),
+        };
+        Ok((io, read_buffer, outcome))
+    }
+}
+
+/// Exclusive transport ownership while an admitted streaming task runs.
+/// The shared slot carries ownership only at admission and retirement; no
+/// socket poll, application code, or transport destructor runs under its lock.
+struct StreamingTransport<T> {
+    value: Option<(T, BytesMut)>,
+    returned: Arc<parking_lot::Mutex<Option<(T, BytesMut)>>>,
+}
+
+impl<T> StreamingTransport<T> {
+    fn take(returned: Arc<parking_lot::Mutex<Option<(T, BytesMut)>>>) -> Self {
+        let value = returned.lock().take();
+        Self { value, returned }
+    }
+
+    fn parts(&mut self) -> (&mut T, &mut BytesMut) {
+        let (io, buffer) = self.value.as_mut().expect("admitted streaming transport");
+        (io, buffer)
+    }
+}
+
+impl<T> Drop for StreamingTransport<T> {
+    fn drop(&mut self) {
+        if let Some(value) = self.value.take() {
+            let previous = self.returned.lock().replace(value);
+            // Retire any unexpected previous value after releasing the lock.
+            debug_assert!(previous.is_none(), "streaming transport returned twice");
+            drop(previous);
+        }
     }
 }
 
@@ -99,14 +234,15 @@ fn force_closing(config: &RequestExecutionConfig) -> bool {
         .is_some_and(|signal| signal.phase() as u8 >= ShutdownPhase::ForceClosing as u8)
 }
 
-async fn run_owned_request<F, Fut>(
+async fn run_owned_request<F, Fut, R>(
     cx: &Cx,
     config: RequestExecutionConfig,
     factory: F,
-) -> Result<Option<ServerHopOutcome<Http1Response>>, HttpError>
+) -> Result<Option<ServerHopOutcome<R>>, HttpError>
 where
-    F: FnOnce() -> Fut + Send + 'static,
-    Fut: Future<Output = Http1Response> + Send + 'static,
+    F: FnOnce(Cx, ServerRequestRegion) -> Fut + Send + 'static,
+    Fut: Future<Output = ServerHopOutcome<R>> + Send + 'static,
+    R: Send + 'static,
 {
     let polling_cx = Cx::current();
     let region = cx
@@ -152,9 +288,7 @@ where
 
     let publication = Arc::new(parking_lot::Mutex::new(None));
     let body_publication = Arc::clone(&publication);
-    let source = config.source;
     let started_at = config.started_at;
-    let drain_grace = config.drain_grace;
     let signal = config.shutdown.clone();
     let region = owner.region.as_ref().expect("admitted HTTP/1 request region");
     let scope = region.cx().scope();
@@ -171,12 +305,9 @@ where
                 return;
             }
             let mut execution = Box::pin(CatchUnwind {
-                inner: region.run_with_protocol_drain(
-                    source,
-                    Some(body_cx),
-                    drain_grace,
-                    async move { factory().await },
-                ),
+                // Each protocol keeps its own drain boundary. In particular,
+                // streaming transport ownership must survive handler timeout.
+                inner: async move { factory(body_cx, region).await },
             });
             let returned = execution.as_mut().await;
             // A cancelled handler can panic when its future is retired. Catch
