@@ -18,10 +18,13 @@ therefore **no old-main-red or repaired-main-green native receipt** from this
 investigation. During review, main advanced through unrelated Spork and HTTP
 work and through `fec7be6d7608b14b5448f24a69124e7bb3b4ee34`, which independently
 landed the weak root waker and established-socket dispatcher migration. This
-follow-up preserves that implementation and all its tests, completing worker
-waker ownership, retirement notifications, pending connect adoption and
-surviving-waiter departures on top of
-`ed03b6ea0dd6aa716edbd3149b7dfe8381930eea`.
+implementation was preserved in
+`8ff71ca3e5b3f2d8ab62fee02d9d82f87f97a131`, which added worker waker ownership,
+retirement notifications, pending connect adoption and surviving-waiter
+departures. Further inspection of main at
+`91b6fa92363a2e60a8cec3598edb000bc9946afd` found explicit driverless-context
+adoption, shared opposite-direction interests and waiter callback locking still
+needed repair; the follow-up changes address those boundaries.
 
 The library changes and native tests remain **uncompiled and unexecuted** in
 this session. Pinned `nightly-2026-08-31` rustfmt parsing and source review are
@@ -52,6 +55,14 @@ child-process pipes. Pending TCP and Unix connect futures also resolve the
 current driver inside their poll instead of retaining their first driver
 across an await.
 
+A present runtime context without an I/O driver, including one built with
+`enable_platform_reactor(false)`, must also retire a registration left on
+another runtime. The existing fallback path can then service its readiness.
+An existing fallback registration already has the correct owner in this case.
+With no ambient context at all, an existing manually driven registration keeps
+its owner. This distinction applies to pending connects as well as established
+socket registrations.
+
 The comparison uses the shared `IoDriver` allocation, not the participant
 reactor allocation. Independently constructed runtimes sharing one supplied
 reactor intentionally share its dispatcher and token namespace. Switching
@@ -71,6 +82,15 @@ vacant token namespace before waking detached waiters. Callbacks run outside
 the driver and registry locks. Existing token generations and per-callback
 panic isolation remain in effect. A retained registration's eventual drop
 cannot deregister a replacement dispatcher's token.
+
+A retained runtime-created `Cx` still owns a strong driver handle. Installing
+that same context on an unrelated executor after runtime shutdown is a remaining
+service-lifetime boundary: the driver can be allocated and report an active
+owner while no runtime services it. This needs runtime service revocation that
+also preserves active participants of a shared dispatcher and manual drivers.
+The native retained-context test keeps the old context alive but polls under
+the destination runtime's fresh context; it does not validate installing a
+stale context on another executor.
 
 ## Concurrent waiters and cancellation
 
@@ -94,6 +114,22 @@ manufacture readiness bits. Cancellation/drop maintenance does not select an
 unrelated driver from the context performing the drop; adoption happens when
 the surviving operation is actually polled.
 
+Shared Unix ancillary entries now retain each parked operation's direction.
+Fresh registration after migration uses the union of those entries, so a
+writer moving the registration cannot strand an earlier reader, or vice versa.
+Completed or cancelled entries are absent from the next fresh registration.
+`AsyncFd` similarly updates and snapshots its armed-direction union under the
+registration mutex. Concurrent dispatch can consume that snapshot, publish
+readiness hints and wake the waiters; a later rearm of the snapshot preserves
+the existing spurious-readiness contract. Departure alone never sets ready bits.
+
+Waiter replacement must also allow a retired task waker's destructor to re-enter
+cancellation. Ancillary, accept and `AsyncFd` registration perform user waker
+clones, disposal and wake callbacks outside their waiter/registration locks.
+Anonymous waiter eviction and insertion remain one serialized mutation, so a
+reentrant callback cannot refill an eviction slot before the incoming waiter is
+installed and exceed the bounded list.
+
 ## Regression coverage
 
 `tests/runtime_handoff.rs` retains the reporter's original two public-API tests.
@@ -106,6 +142,10 @@ traffic and EOF, and join the new fixture/watchdog threads. The cases cover:
 - A nested destination while the live current-thread source worker is still
   on loan to its root, so the source background thread cannot service I/O.
 - Repeated transfers back and forth, including a two-worker destination.
+- Driverless current-thread and two-worker destinations, both while the source
+  is alive but unable to service its reactor and after drop or explicit shutdown
+  with a retained source context. `test-internals` additionally checks removal
+  of the retained driver's registration; public-API behavior runs without it.
 - Socket handoff through actual spawned tasks in both runtime flavors.
 - A root panic after a witnessed pending read.
 - Cancellation of a parked child read, preserving `Interrupted`, an unchanged
@@ -117,7 +157,12 @@ Unit regressions additionally cover runtime-created root/worker/local waker
 lifetimes, safe stale wakes, final shared-owner retirement, reentrant and
 panicking retirement callbacks, repeated live dispatcher changes, failed
 replacement registration, same-dispatcher participant reuse, connect handoff,
-and surviving split/shared waiter generations.
+and surviving split/shared waiter generations. Further deterministic cases use
+real nonblocking descriptors with model-provided readiness to cover both
+ancillary and `AsyncFd` read/write migration orders, repeated transfers,
+cancellation, directional clearing and an old dispatch extracted before
+migration but delivered afterward. Callback probes cover reentrant replacement
+destructors and anonymous waiter eviction.
 
 `tests/runtime_handoff_registration_census.rs` inventories production references
 to the registration types. A new unclassified carrier fails this census and
@@ -130,19 +175,22 @@ cannot show that a real socket wakes a native executor.
 ## Required native verification
 
 Run the focused lane before broader suites, on the exact repaired main commit,
-with the repository's pinned toolchain and required remote RCH admission:
+with the repository's pinned toolchain and required remote RCH admission. Give
+every remote command an explicit target directory:
 
 ```sh
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --test runtime_handoff -- --test-threads=1 --nocapture
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --test runtime_handoff_registration_census -- --nocapture
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --lib runtime:: -- --test-threads=1
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --lib net:: -- --test-threads=1
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --lib io::async_fd:: -- --test-threads=1
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --lib cancel:: -- --test-threads=1
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo test -p asupersync --locked --test runtime_bounded_shutdown_and_reentrant_block_on --test runtime_io_driver_fd_eager_close_audit --test polled_replay_native_tcp --test tcp_socket_options -- --test-threads=1
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo check --all-targets --keep-going
-RCH_REQUIRE_REMOTE=1 rch exec -- cargo clippy --all-targets -- -D warnings
+handoff_target="${RCH_TARGET_BASE:-${TMPDIR:-/tmp}}/rch_target_runtime_handoff"
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --test runtime_handoff -- --test-threads=1 --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --features test-internals --test runtime_handoff -- --test-threads=1 --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --test runtime_handoff_registration_census -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --lib runtime:: -- --test-threads=1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --lib net:: -- --test-threads=1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --lib io::async_fd:: -- --test-threads=1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --lib cancel:: -- --test-threads=1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --test runtime_abort_vs_cancel_semantics_audit -- --nocapture
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo test -p asupersync --locked --test runtime_bounded_shutdown_and_reentrant_block_on --test runtime_io_driver_fd_eager_close_audit --test polled_replay_native_tcp --test tcp_socket_options -- --test-threads=1
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo check --all-targets --keep-going
+RCH_REQUIRE_REMOTE=1 rch exec -- env CARGO_TARGET_DIR="$handoff_target" cargo clippy --all-targets -- -D warnings
 ```
 
 Capture the actual command, source commit, feature graph, remote admission,

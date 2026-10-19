@@ -103,36 +103,56 @@ impl FdReadiness {
     /// evict the next, so 33 tasks waiting on one descriptor woke each other
     /// forever (br-asupersync-68jvck, as for the listeners in dofi11).
     fn register(&self, owner: Option<u64>, waker: &Waker) {
-        let mut waiters = self.waiters.lock();
-        if owner.is_some() {
-            if let Some(entry) = waiters.iter_mut().find(|entry| entry.owner == owner) {
-                entry.waker.clone_from(waker);
+        // Keep unchanged pollers cheap. will_wake only compares waker
+        // identity; cloning or dropping a user waker can run arbitrary code.
+        {
+            let waiters = self.waiters.lock();
+            if waiters
+                .iter()
+                .any(|entry| entry.owner == owner && entry.waker.will_wake(waker))
+            {
+                return;
+            }
+        }
+
+        let incoming = waker.clone();
+        let (retired, evicted) = {
+            let mut waiters = self.waiters.lock();
+            // The clone above may reenter, and another poller may have
+            // changed the list. Recheck identity before replacing/inserting.
+            let existing = waiters.iter_mut().find(|entry| {
+                entry.owner == owner && (owner.is_some() || entry.waker.will_wake(&incoming))
+            });
+            if let Some(entry) = existing {
+                let retired = if entry.waker.will_wake(&incoming) {
+                    incoming
+                } else {
+                    std::mem::replace(&mut entry.waker, incoming)
+                };
+                (Some(retired), None)
             } else {
+                let evicted = if owner.is_none()
+                    && waiters.iter().filter(|entry| entry.owner.is_none()).count() >= 32
+                    && let Some(index) = waiters.iter().position(|entry| entry.owner.is_none())
+                {
+                    Some(waiters.remove(index))
+                } else {
+                    None
+                };
+                // Publish the insertion before waking an evicted poller. If
+                // its callback registers again, it must see the full list so
+                // it cannot refill a vacancy and let this insertion exceed 32.
                 waiters.push(FdWaiter {
                     owner,
-                    waker: waker.clone(),
+                    waker: incoming,
                 });
+                (None, evicted)
             }
-            return;
-        }
-        if waiters
-            .iter()
-            .any(|existing| existing.owner.is_none() && existing.waker.will_wake(waker))
-        {
-            return;
-        }
-        if waiters.iter().filter(|entry| entry.owner.is_none()).count() >= 32
-            && let Some(index) = waiters.iter().position(|entry| entry.owner.is_none())
-        {
-            let evicted = waiters.remove(index);
-            drop(waiters);
+        };
+        drop(retired);
+        if let Some(evicted) = evicted {
             evicted.waker.wake();
-            waiters = self.waiters.lock();
         }
-        waiters.push(FdWaiter {
-            owner: None,
-            waker: waker.clone(),
-        });
     }
 
     fn remove(&self, owner: u64) {
@@ -432,13 +452,21 @@ impl<T: AsRawFd> AsyncFd<T> {
         // Listed and armed before the reactor sees the interest, so an event
         // that fires at once still finds this waiter.
         self.readiness.register(owner, cx.waker());
-        self.readiness.armed.fetch_or(wanted, Ordering::AcqRel);
         let dispatch = Waker::from(Arc::clone(&self.readiness));
         let source = RawSource(self.get_ref().as_raw_fd());
-        let armed = self
-            .registration
-            .lock()
-            .arm(&source, bits_interest(wanted), &dispatch);
+        let armed = {
+            let mut registration = self.registration.lock();
+            // A different poller can move this registration to another
+            // runtime. Preserve every direction still waiting for an event,
+            // including the opposite direction requested by an earlier poll.
+            // Update and snapshot under the registration lock so serialized
+            // arm calls cannot overwrite a newer poll's interest union.
+            let pending = self.readiness.armed.fetch_or(wanted, Ordering::AcqRel) | wanted;
+            // A concurrent fire may consume this snapshot, but it publishes
+            // those bits to ready and wakes the waiters. Re-arming that older
+            // union can only produce another readiness hint.
+            registration.arm(&source, bits_interest(pending), &dispatch)
+        };
         match armed {
             Ok(Armed::Parked) => {
                 // An event may have landed between the first check and arming.
@@ -681,7 +709,436 @@ impl<T: AsRawFd + fmt::Debug> fmt::Debug for AsyncFdReadyMutGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cx::Cx;
+    use crate::runtime::IoDriverHandle;
+    use crate::runtime::reactor::{Event, LabReactor, Reactor, Token};
+    use crate::types::{Budget, RegionId, TaskId};
+    use std::future::Future;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    fn counted_waker() -> (Arc<WakeCount>, Waker) {
+        let count = Arc::new(WakeCount::default());
+        let waker = Waker::from(Arc::clone(&count));
+        (count, waker)
+    }
+
+    fn lab_driver() -> (Arc<LabReactor>, IoDriverHandle) {
+        let reactor = Arc::new(LabReactor::new());
+        let driver = IoDriverHandle::new(reactor.clone());
+        (reactor, driver)
+    }
+
+    fn ambient(driver: &IoDriverHandle) -> Cx {
+        Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            Some(driver.clone()),
+            None,
+        )
+    }
+
+    fn with_driver<T>(driver: &IoDriverHandle, poll: impl FnOnce() -> T) -> T {
+        let _current = Cx::set_current(Some(ambient(driver)));
+        poll()
+    }
+
+    fn nonblocking_pair() -> (AsyncFd<UnixStream>, UnixStream) {
+        let (local, peer) = UnixStream::pair().expect("socket pair");
+        local.set_nonblocking(true).expect("nonblocking local");
+        peer.set_nonblocking(true).expect("nonblocking peer");
+        (AsyncFd::new(local).expect("wrap descriptor"), peer)
+    }
+
+    fn registered_token(fd: &AsyncFd<UnixStream>, driver: &IoDriverHandle, expected: u8) -> Token {
+        let registration = fd.registration.lock();
+        let registration = registration.as_ref().expect("live registration");
+        assert!(registration.belongs_to(driver));
+        assert_eq!(interest_bits(registration.interest()), expected);
+        registration.token()
+    }
+
+    fn dispatch(reactor: &LabReactor, driver: &IoDriverHandle, token: Token, ready: u8) -> usize {
+        reactor.set_ready(token, Event::new(token, bits_interest(ready)));
+        driver
+            .turn_with(Some(Duration::ZERO), |_, _| {})
+            .expect("dispatch readiness")
+    }
+
+    #[test]
+    fn opposite_direction_migration_preserves_pending_interests() {
+        for first in [READ, WRITE] {
+            let second = (READ | WRITE) ^ first;
+            let (fd, mut peer) = nonblocking_pair();
+            let raw = fd.as_raw_fd();
+            let (reactor_a, driver_a) = lab_driver();
+            let (reactor_b, driver_b) = lab_driver();
+            let (first_count, first_waker) = counted_waker();
+            let (second_count, second_waker) = counted_waker();
+            let mut first_cx = Context::from_waker(&first_waker);
+            let mut second_cx = Context::from_waker(&second_waker);
+            {
+                let mut first_wait = Box::pin(fd.ready(bits_interest(first)));
+                let mut second_wait = Box::pin(fd.ready(bits_interest(second)));
+                assert!(
+                    with_driver(&driver_a, || { first_wait.as_mut().poll(&mut first_cx) })
+                        .is_pending()
+                );
+                let old_token = registered_token(&fd, &driver_a, first);
+                assert!(
+                    with_driver(&driver_b, || { second_wait.as_mut().poll(&mut second_cx) })
+                        .is_pending()
+                );
+                let new_token = registered_token(&fd, &driver_b, READ | WRITE);
+                assert_eq!(reactor_a.registration_count(), 0);
+                assert_eq!(driver_a.waker_count(), 0);
+                assert_eq!(reactor_b.registration_count(), 1);
+                assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), READ | WRITE);
+                assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), 0);
+                assert_eq!(first_count.0.load(Ordering::SeqCst), 0);
+                assert_eq!(second_count.0.load(Ordering::SeqCst), 0);
+
+                // A retired token cannot satisfy the wait. The only event on
+                // B is for A's original direction: arming only `second`
+                // filters this event out and leaves both callers asleep.
+                assert_eq!(dispatch(&reactor_a, &driver_a, old_token, first), 0);
+                assert_eq!(dispatch(&reactor_b, &driver_b, new_token, first), 1);
+                assert_eq!(first_count.0.load(Ordering::SeqCst), 1);
+                assert_eq!(second_count.0.load(Ordering::SeqCst), 1);
+                assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), 0);
+                // The dispatcher has always reported all armed directions
+                // as hints; each guard still returns only its requested bit.
+                assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), READ | WRITE);
+                let Poll::Ready(Ok(mut first_guard)) =
+                    with_driver(&driver_a, || first_wait.as_mut().poll(&mut first_cx))
+                else {
+                    panic!("original direction must be ready after migration");
+                };
+                assert_eq!(first_guard.ready, first);
+                first_guard.clear_ready();
+                assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), second);
+                let Poll::Ready(Ok(mut second_guard)) =
+                    with_driver(&driver_b, || second_wait.as_mut().poll(&mut second_cx))
+                else {
+                    panic!("opposite direction retains its readiness hint");
+                };
+                assert_eq!(second_guard.ready, second);
+                second_guard.clear_ready();
+                assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), 0);
+            }
+            let mut local = fd.into_inner();
+            assert_eq!(local.as_raw_fd(), raw);
+            assert_eq!(reactor_b.registration_count(), 0);
+            assert_eq!(driver_b.waker_count(), 0);
+            peer.write_all(b"owned").expect("peer write");
+            let mut bytes = [0; 5];
+            local.read_exact(&mut bytes).expect("descriptor survives");
+            assert_eq!(&bytes, b"owned");
+        }
+    }
+
+    #[test]
+    fn departing_migrator_preserves_the_opposite_waiter_and_readiness_bits() {
+        for first in [READ, WRITE] {
+            for cancel in [false, true] {
+                let second = (READ | WRITE) ^ first;
+                let (fd, _peer) = nonblocking_pair();
+                let (reactor_a, driver_a) = lab_driver();
+                let (reactor_b, driver_b) = lab_driver();
+                let (first_count, first_waker) = counted_waker();
+                let (second_count, second_waker) = counted_waker();
+                let mut first_cx = Context::from_waker(&first_waker);
+                let mut second_cx = Context::from_waker(&second_waker);
+                let mut first_wait = Box::pin(fd.ready(bits_interest(first)));
+                let mut second_wait = Box::pin(fd.ready(bits_interest(second)));
+                assert!(
+                    with_driver(&driver_a, || { first_wait.as_mut().poll(&mut first_cx) })
+                        .is_pending()
+                );
+                assert!(
+                    with_driver(&driver_b, || { second_wait.as_mut().poll(&mut second_cx) })
+                        .is_pending()
+                );
+                registered_token(&fd, &driver_b, READ | WRITE);
+
+                if cancel {
+                    let cancelled = ambient(&driver_b);
+                    cancelled.set_cancel_requested(true);
+                    let _current = Cx::set_current(Some(cancelled));
+                    let Poll::Ready(Err(error)) = second_wait.as_mut().poll(&mut second_cx) else {
+                        panic!("cancelled migrating wait must finish");
+                    };
+                    assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+                }
+                drop(second_wait);
+                assert_eq!(first_count.0.load(Ordering::SeqCst), 1);
+                assert_eq!(second_count.0.load(Ordering::SeqCst), 0);
+                assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), 0);
+                assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), READ | WRITE);
+
+                // B can now remain alive and idle. The departure wake lets
+                // A rehome the surviving wait without claiming I/O occurred.
+                assert!(
+                    with_driver(&driver_a, || { first_wait.as_mut().poll(&mut first_cx) })
+                        .is_pending()
+                );
+                let token = registered_token(&fd, &driver_a, READ | WRITE);
+                assert_eq!(reactor_b.registration_count(), 0);
+                assert_eq!(driver_b.waker_count(), 0);
+                assert_eq!(dispatch(&reactor_a, &driver_a, token, first), 1);
+                assert_eq!(first_count.0.load(Ordering::SeqCst), 2);
+                assert_eq!(second_count.0.load(Ordering::SeqCst), 0);
+                {
+                    let Poll::Ready(Ok(guard)) =
+                        with_driver(&driver_a, || first_wait.as_mut().poll(&mut first_cx))
+                    else {
+                        panic!("surviving waiter must receive its event");
+                    };
+                    assert_eq!(guard.ready, first);
+                }
+                drop(first_wait);
+                drop(fd);
+                assert_eq!(reactor_a.registration_count(), 0);
+                assert_eq!(driver_a.waker_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn extracted_readiness_survives_migration_and_directional_clear() {
+        for first in [READ, WRITE] {
+            let second = (READ | WRITE) ^ first;
+            let (fd, _peer) = nonblocking_pair();
+            let (reactor_a, driver_a) = lab_driver();
+            let (reactor_b, driver_b) = lab_driver();
+            let (first_count, first_waker) = counted_waker();
+            let (second_count, second_waker) = counted_waker();
+            let mut first_cx = Context::from_waker(&first_waker);
+            let mut second_cx = Context::from_waker(&second_waker);
+            let mut first_wait = Box::pin(fd.ready(bits_interest(first)));
+            let mut second_wait = Box::pin(fd.ready(bits_interest(second)));
+            assert!(
+                with_driver(&driver_a, || { first_wait.as_mut().poll(&mut first_cx) }).is_pending()
+            );
+            let token = registered_token(&fd, &driver_a, first);
+            reactor_a.set_ready(token, Event::new(token, bits_interest(first)));
+            // The driver has extracted its dispatch waker before this
+            // callback. Retire its token and migrate, then deliver the old
+            // waker afterward: this is a deterministic concurrent-event cut.
+            assert_eq!(
+                driver_a
+                    .turn_with(Some(Duration::ZERO), |_, _| {
+                        assert!(
+                            with_driver(&driver_b, || {
+                                second_wait.as_mut().poll(&mut second_cx)
+                            })
+                            .is_pending()
+                        );
+                        registered_token(&fd, &driver_b, READ | WRITE);
+                        assert_eq!(reactor_a.registration_count(), 0);
+                        assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), 0);
+                        assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), READ | WRITE);
+                    })
+                    .expect("dispatch extracted event"),
+                1
+            );
+            assert_eq!(first_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(second_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), 0);
+            assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), READ | WRITE);
+            {
+                let Poll::Ready(Ok(mut guard)) =
+                    with_driver(&driver_a, || first_wait.as_mut().poll(&mut first_cx))
+                else {
+                    panic!("extracted event must reach the original waiter");
+                };
+                guard.clear_ready();
+            }
+            drop(first_wait);
+            assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), second);
+
+            let mut first_again = Box::pin(fd.ready(bits_interest(first)));
+            assert!(
+                with_driver(&driver_b, || { first_again.as_mut().poll(&mut first_cx) })
+                    .is_pending()
+            );
+            assert_eq!(fd.readiness.armed.load(Ordering::SeqCst), first);
+            assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), second);
+            let token = registered_token(&fd, &driver_b, READ | WRITE);
+            assert_eq!(dispatch(&reactor_b, &driver_b, token, first), 1);
+            assert_eq!(first_count.0.load(Ordering::SeqCst), 2);
+            assert_eq!(second_count.0.load(Ordering::SeqCst), 1);
+            assert_eq!(fd.readiness.ready.load(Ordering::SeqCst), READ | WRITE);
+            let Poll::Ready(Ok(first_guard)) =
+                with_driver(&driver_b, || first_again.as_mut().poll(&mut first_cx))
+            else {
+                panic!("cleared direction must receive a later event");
+            };
+            let Poll::Ready(Ok(second_guard)) =
+                with_driver(&driver_b, || second_wait.as_mut().poll(&mut second_cx))
+            else {
+                panic!("clearing one direction must retain the other hint");
+            };
+            assert_eq!(first_guard.ready, first);
+            assert_eq!(second_guard.ready, second);
+        }
+    }
+
+    #[test]
+    fn replacing_owned_waker_runs_its_destructor_after_publishing_and_unlocking() {
+        struct Replaced {
+            readiness: std::sync::Weak<FdReadiness>,
+            replacement: Waker,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Wake for Replaced {
+            fn wake(self: Arc<Self>) {
+                panic!("a replaced waiter must not be woken");
+            }
+        }
+        impl Drop for Replaced {
+            fn drop(&mut self) {
+                if let Some(readiness) = self.readiness.upgrade() {
+                    {
+                        let waiters = readiness
+                            .waiters
+                            .try_lock()
+                            .expect("replacement destructor must run outside the gate");
+                        assert_eq!(waiters.len(), 1);
+                        assert_eq!(waiters[0].owner, Some(0));
+                        assert!(waiters[0].waker.will_wake(&self.replacement));
+                    }
+                    readiness.register(Some(1), Waker::noop());
+                }
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let readiness = Arc::new(FdReadiness::default());
+        let (count, replacement) = counted_waker();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let old = Waker::from(Arc::new(Replaced {
+            readiness: Arc::downgrade(&readiness),
+            replacement: replacement.clone(),
+            drops: Arc::clone(&drops),
+        }));
+        readiness.ready.store(WRITE, Ordering::SeqCst);
+        readiness.armed.store(READ, Ordering::SeqCst);
+        readiness.register(Some(0), &old);
+        drop(old);
+        readiness.register(Some(0), &replacement);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        assert_eq!(readiness.waiters.lock().len(), 2);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+
+        // An unchanged owner is a no-op, but another owner with the same
+        // waker still needs its own entry. Direct pollers deduplicate only
+        // against other direct pollers, never against owned futures.
+        readiness.register(Some(0), &replacement);
+        assert_eq!(readiness.waiters.lock().len(), 2);
+        readiness.register(Some(2), &replacement);
+        assert_eq!(readiness.waiters.lock().len(), 3);
+        readiness.register(None, &replacement);
+        readiness.register(None, &replacement);
+        assert_eq!(readiness.waiters.lock().len(), 4);
+        assert_eq!(count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);
+    }
+
+    #[test]
+    fn reentrant_eviction_preserves_the_direct_poller_cap_and_owned_waiters() {
+        struct Evicted {
+            readiness: std::sync::Weak<FdReadiness>,
+            reentrant: Waker,
+            wakes: Arc<AtomicUsize>,
+            drops: Arc<AtomicUsize>,
+        }
+        impl Wake for Evicted {
+            fn wake(self: Arc<Self>) {
+                let readiness = self.readiness.upgrade().expect("live waiter list");
+                assert!(readiness.waiters.try_lock().is_some(), "wake outside gate");
+                self.wakes.fetch_add(1, Ordering::SeqCst);
+                readiness.register(None, &self.reentrant);
+            }
+        }
+        impl Drop for Evicted {
+            fn drop(&mut self) {
+                if let Some(readiness) = self.readiness.upgrade() {
+                    assert!(readiness.waiters.try_lock().is_some(), "drop outside gate");
+                }
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let readiness = Arc::new(FdReadiness::default());
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (reentrant_count, reentrant) = counted_waker();
+        let oldest = Waker::from(Arc::new(Evicted {
+            readiness: Arc::downgrade(&readiness),
+            reentrant: reentrant.clone(),
+            wakes: Arc::clone(&wakes),
+            drops: Arc::clone(&drops),
+        }));
+        for owner in 0..40 {
+            readiness.register(Some(owner), Waker::noop());
+        }
+        readiness.register(None, &oldest);
+        drop(oldest);
+        let later: Vec<_> = (0..31).map(|_| counted_waker()).collect();
+        for (_, waker) in &later {
+            readiness.register(None, waker);
+        }
+        readiness.ready.store(WRITE, Ordering::SeqCst);
+        readiness.armed.store(READ, Ordering::SeqCst);
+        let (incoming_count, incoming) = counted_waker();
+        readiness.register(None, &incoming);
+
+        assert_eq!(wakes.load(Ordering::SeqCst), 1);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+        let (next_evicted, _) = &later[0];
+        assert_eq!(next_evicted.0.load(Ordering::SeqCst), 1);
+        assert!(
+            later[1..]
+                .iter()
+                .all(|(count, _)| count.0.load(Ordering::SeqCst) == 0)
+        );
+        assert_eq!(incoming_count.0.load(Ordering::SeqCst), 0);
+        assert_eq!(reentrant_count.0.load(Ordering::SeqCst), 0);
+        {
+            let waiters = readiness.waiters.lock();
+            assert_eq!(
+                waiters.iter().filter(|entry| entry.owner.is_none()).count(),
+                32
+            );
+            assert_eq!(
+                waiters.iter().filter(|entry| entry.owner.is_some()).count(),
+                40
+            );
+            assert!(waiters.iter().any(|entry| entry.waker.will_wake(&incoming)));
+            assert!(
+                waiters
+                    .iter()
+                    .any(|entry| entry.waker.will_wake(&reentrant))
+            );
+        }
+        assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
+        assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);
+    }
 
     #[test]
     fn owner_departure_rehomes_survivors_without_fabricating_readiness() {
@@ -742,7 +1199,11 @@ mod tests {
 
         readiness.remove(retired_owner);
         readiness.remove(survivor_owner);
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "stale departures do not wake");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "stale departures do not wake"
+        );
         assert_eq!(readiness.waiters.lock().len(), 1);
         assert_eq!(readiness.ready.load(Ordering::SeqCst), WRITE);
         assert_eq!(readiness.armed.load(Ordering::SeqCst), READ);

@@ -672,6 +672,50 @@
     }
 
     #[test]
+    fn connect_waiter_leaves_live_driver_for_driverless_context() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let client = net::TcpStream::connect(listener.local_addr().unwrap()).expect("connect");
+        let (_server, _) = listener.accept().expect("accept");
+        client.set_nonblocking(true).expect("nonblocking");
+        let reactor = CountingReactor::new();
+        let driver = IoDriverHandle::new(reactor.clone());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountingWaker {
+            hits: Arc::clone(&hits),
+        }));
+        let task = Context::from_waker(&waker);
+        let mut registration = Some(
+            driver
+                .register(&client, Interest::WRITABLE, waker.clone())
+                .expect("connect registration"),
+        );
+        let token = registration.as_ref().unwrap().token();
+        let _manual = Cx::set_current(None);
+        rearm_connect_registration(&mut registration, &task).expect("manual driver rearm");
+        assert_eq!(registration.as_ref().unwrap().token(), token);
+        assert_eq!(reactor.modify_calls(), 1);
+
+        let ambient = Cx::new_with_observability(
+            RegionId::new_for_test(0, 1),
+            TaskId::new_for_test(0, 0),
+            Budget::INFINITE,
+            None,
+            None,
+            None,
+        );
+        let _current = Cx::set_current(Some(ambient));
+        rearm_connect_registration(&mut registration, &task).expect("driverless handoff");
+
+        // Clearing the old waiter lets wait_for_connect enter its fallback
+        // branch immediately, without a wake or turn from the old runtime.
+        assert!(registration.is_none());
+        assert!(driver.is_empty());
+        assert_eq!(reactor.registration_count(), 0);
+        assert_eq!(reactor.modify_calls(), 1);
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
     fn connect_waiter_rearms_existing_registration_with_unchanged_interest() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("local addr");
