@@ -28,8 +28,9 @@ use crate::tracing_compat::{error, warn};
 use crate::types::{Budget, CancelKind};
 use crate::web::WebBodyDiagnostic;
 use crate::web::request_region::{
-    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, ServerHopOutcome, ServerProducerCancellation,
-    ServerRequestRegion, classify_server_producer_cancellation, derive_request_budget,
+    HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC, RequestBudgetSource, ServerHopOutcome,
+    ServerProducerCancellation, ServerRequestRegion, classify_server_producer_cancellation,
+    derive_request_budget,
 };
 use crate::web::sse::{
     Http1SseResponse, StreamingSse, StreamingSseSource, StreamingSseTransportError,
@@ -43,6 +44,67 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod owned;
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) use owned::OwnedRequests;
+
+/// Inputs shared by legacy and opt-in scheduler-owned buffered dispatch.
+pub(super) struct RequestExecutionConfig {
+    budget: Budget,
+    started_at: crate::types::Time,
+    source: RequestBudgetSource,
+    drain_grace: Duration,
+    connection: Option<Cx>,
+    shutdown: Option<ShutdownSignal>,
+}
+
+/// Legacy dispatch retains borrowed handlers and response conversion timing.
+async fn execute_legacy<F, Fut, R>(
+    handler: Arc<F>,
+    request: Request,
+    config: RequestExecutionConfig,
+) -> Result<Option<ServerHopOutcome<Http1Response>>, HttpError>
+where
+    F: Fn(Request) -> Fut + Send + Sync,
+    Fut: Future<Output = R> + Send,
+    R: IntoHttp1Response,
+{
+    let region = match config.connection.as_ref() {
+        Some(connection) => Some(ServerRequestRegion::mint_from_connection(
+            "h1",
+            config.budget,
+            config.started_at,
+            connection,
+        )),
+        None => ServerRequestRegion::mint("h1", config.budget, config.started_at),
+    };
+    let output = match region {
+        Some(region) => {
+            race_force_close(
+                config.shutdown.as_ref(),
+                region.run_with_protocol_drain(
+                    config.source,
+                    config.connection,
+                    config.drain_grace,
+                    handler(request),
+                ),
+            )
+            .await
+        }
+        None => race_force_close(config.shutdown.as_ref(), handler(request))
+            .await
+            .map(ServerHopOutcome::Ok),
+    };
+    Ok(output.map(|output| match output {
+        ServerHopOutcome::Ok(response) => ServerHopOutcome::Ok(response.into_h1_response()),
+        ServerHopOutcome::Cancelled => ServerHopOutcome::Cancelled,
+        ServerHopOutcome::ConnectionLost => ServerHopOutcome::ConnectionLost,
+        ServerHopOutcome::DeadlineExceeded => ServerHopOutcome::DeadlineExceeded,
+        ServerHopOutcome::Panicked(message) => ServerHopOutcome::Panicked(message),
+    }))
+}
 
 /// Host header validation policy for security against Host header injection attacks.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -820,7 +882,7 @@ impl IntoHttp1Response for Http1Response {
 
 /// Which upgrade actions a serve path may hand the connection to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UpgradeAdmission {
+pub(super) enum UpgradeAdmission {
     /// None: the compatibility `serve` path.
     Refused,
     /// TCP-typed and transport-generic actions: a listener's TCP connection.
@@ -930,7 +992,7 @@ impl ConnectionState {
 /// server.serve(tcp_stream).await?;
 /// ```
 pub struct Http1Server<F> {
-    handler: F,
+    handler: Arc<F>,
     config: Http1Config,
     shutdown_signal: Option<ShutdownSignal>,
     in_flight_requests: Option<Arc<AtomicUsize>>,
@@ -963,7 +1025,7 @@ where
     /// Create a server that accepts an explicit [`Http1Response`] envelope.
     pub fn new_upgradeable(handler: F) -> Self {
         Self {
-            handler,
+            handler: Arc::new(handler),
             config: Http1Config::default(),
             shutdown_signal: None,
             in_flight_requests: None,
@@ -973,7 +1035,7 @@ where
     /// Create an upgrade-aware response server with custom configuration.
     pub fn with_config_upgradeable(handler: F, config: Http1Config) -> Self {
         Self {
-            handler,
+            handler: Arc::new(handler),
             config,
             shutdown_signal: None,
             in_flight_requests: None,
@@ -1007,11 +1069,18 @@ where
         &self,
         framed: &mut Framed<T, Http1Codec>,
         _state: &ConnectionState,
+        connection_owner: Option<&Cx>,
     ) -> Option<ReadOutcome>
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let read_future = async {
+            let mut owner_cancel =
+                crate::http::listener_cancel::ListenerCancellation::new(connection_owner.cloned());
+            let mut polling_cancel =
+                crate::http::listener_cancel::ListenerCancellation::new(
+                    connection_owner.and_then(|_| Cx::current()),
+                );
             let mut pending_expectation_flush = None;
             let mut handled_expectation = false;
             let mut shutdown_fut: Option<ShutdownWaitFuture<'_>> =
@@ -1023,7 +1092,10 @@ where
 
             poll_fn(|cx| {
                 loop {
-                    if self.should_stop_reading(cx, shutdown_fut.as_mut()) {
+                    let owner_cancelled = owner_cancel.poll_cancelled(cx);
+                    let polling_cancelled = polling_cancel.poll_cancelled(cx);
+                    let stopping = self.should_stop_reading(cx, shutdown_fut.as_mut());
+                    if owner_cancelled || polling_cancelled || stopping {
                         return Poll::Ready(ReadOutcome::Shutdown);
                     }
 
@@ -1067,10 +1139,9 @@ where
         };
 
         if let Some(idle_timeout) = self.config.idle_timeout {
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
-            timeout(now, idle_timeout, read_future).await.ok()
+            timeout_with_owner(connection_owner, idle_timeout, read_future)
+                .await
+                .ok()
         } else {
             Some(read_future.await)
         }
@@ -1152,7 +1223,6 @@ where
             .await
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn serve_connection_with_peer_addr<T>(
         self,
         io: T,
@@ -1161,6 +1231,30 @@ where
     ) -> Result<Http1ServeOutcome<T>, HttpError>
     where
         T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_connection_using(
+            io,
+            peer_addr,
+            admit_upgrade,
+            None,
+            execute_legacy::<F, Fut, R>,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) async fn serve_connection_using<T, Execute, Execution>(
+        self,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+        admit_upgrade: UpgradeAdmission,
+        connection_owner: Option<Cx>,
+        execute_request: Execute,
+    ) -> Result<Http1ServeOutcome<T>, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+        Execute: Fn(Arc<F>, Request, RequestExecutionConfig) -> Execution + Send + Sync,
+        Execution: Future<Output = Result<Option<ServerHopOutcome<Http1Response>>, HttpError>>,
     {
         let codec = Http1Codec::new()
             .max_headers_size(self.config.max_headers_size)
@@ -1177,12 +1271,9 @@ where
             .max(crate::codec::framed_read::DEFAULT_MAX_BUFFER_LEN);
         let mut framed = Framed::new(io, codec).with_max_buffer_len(max_buffer_len);
         let response_write =
-            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref());
-        let mut state = ConnectionState::new(
-            Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now()),
-        );
+            ResponseWritePolicy::new(self.config.idle_timeout, self.shutdown_signal.as_ref())
+                .with_owner(connection_owner.as_ref());
+        let mut state = ConnectionState::new(buffered_connection_now(connection_owner.as_ref()));
 
         loop {
             state.phase = ConnectionPhase::Idle;
@@ -1196,7 +1287,12 @@ where
                 break;
             }
 
-            if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
+            let owner_cancelled = connection_owner
+                .as_ref()
+                .is_some_and(|cx| cx.checkpoint().is_err());
+            let polling_cancelled =
+                Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false);
+            if owner_cancelled || polling_cancelled {
                 state.phase = ConnectionPhase::Closing;
                 break;
             }
@@ -1207,9 +1303,7 @@ where
                 break;
             }
 
-            let now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
+            let now = buffered_connection_now(connection_owner.as_ref());
 
             // Check idle timeout
             if state.exceeded_idle_timeout(self.config.idle_timeout, now) {
@@ -1219,7 +1313,10 @@ where
 
             state.phase = ConnectionPhase::Reading;
 
-            let Some(read_outcome) = self.read_next(&mut framed, &state).await else {
+            let Some(read_outcome) = self
+                .read_next(&mut framed, &state, connection_owner.as_ref())
+                .await
+            else {
                 state.phase = ConnectionPhase::Closing;
                 break;
             };
@@ -1227,9 +1324,7 @@ where
             let (req, continue_sent) = match read_outcome {
                 ReadOutcome::ExpectationRejected => {
                     state.requests_served += 1;
-                    state.last_request_at = Cx::current()
-                        .and_then(|cx| cx.timer_driver())
-                        .map_or_else(wall_now, |timer| timer.now());
+                    state.last_request_at = buffered_connection_now(connection_owner.as_ref());
                     state.phase = ConnectionPhase::Closing;
                     break;
                 }
@@ -1355,10 +1450,8 @@ where
             // cancel -> request cancel and enforces the deadline with a
             // bounded protocol drain. When no runtime is installed on this
             // thread, the legacy direct-call path is preserved unchanged.
-            let request_now = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
-            let conn_cx = Cx::current();
+            let request_now = buffered_connection_now(connection_owner.as_ref());
+            let conn_cx = connection_owner.clone().or_else(Cx::current);
             let base_budget = conn_cx.as_ref().map_or(Budget::INFINITE, Cx::budget);
             let header_timeout = parse_request_timeout_header(&req.headers);
             let (request_budget, budget_source) = derive_request_budget(
@@ -1378,79 +1471,47 @@ where
                 && req.trailers.is_empty())
             .then(|| req.clone());
             let mut forced_close = false;
-            // The request context derives from the connection's own context
-            // when there is one, so work a handler spawns belongs to the
-            // connection's region instead of the root
-            // (br-asupersync-vqppo5). Callers outside any task keep the
-            // runtime mint.
-            let region = match conn_cx.as_ref() {
-                Some(connection_cx) => Some(ServerRequestRegion::mint_from_connection(
-                    "h1",
-                    request_budget,
-                    request_now,
-                    connection_cx,
-                )),
-                None => ServerRequestRegion::mint("h1", request_budget, request_now),
-            };
-            let output = match region {
-                Some(region) => {
-                    // Race the whole hop against ForceClosing so slow
-                    // handlers don't block shutdown (drop is the backstop).
-                    let hop = race_force_close(
-                        self.shutdown_signal.as_ref(),
-                        region.run_with_protocol_drain(
-                            budget_source,
-                            conn_cx,
-                            self.config.request_drain_grace,
-                            (self.handler)(req),
-                        ),
-                    )
-                    .await;
-                    match hop {
-                        None => {
-                            // Force-close interrupted the handler.
-                            state.phase = ConnectionPhase::Closing;
-                            break;
-                        }
-                        Some(ServerHopOutcome::Ok(resp)) => resp.into_h1_response(),
-                        Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
-                            // The connection is cancelled or the peer is
-                            // gone: nothing useful can be written back.
-                            state.requests_served += 1;
-                            state.phase = ConnectionPhase::Closing;
-                            break;
-                        }
-                        Some(ServerHopOutcome::Panicked(_)) => {
-                            // Panic isolation: the server survives; this
-                            // connection closes defensively after the 500.
-                            forced_close = true;
-                            Http1Response::new(hop_error_response(
-                                request_version,
-                                500,
-                                "Internal Server Error",
-                            ))
-                        }
-                        Some(ServerHopOutcome::DeadlineExceeded) => {
-                            // The request was fully read and the response
-                            // framing is clean, so keep-alive may continue.
-                            Http1Response::new(hop_error_response(
-                                request_version,
-                                503,
-                                HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC,
-                            ))
-                        }
-                    }
-                }
+            // The legacy executor retains connection-scoped spawn behavior.
+            // Explicit owned serving instead admits and drains a real request
+            // subtree. Both paths share this codec, response and reuse policy.
+            let hop = execute_request(
+                Arc::clone(&self.handler),
+                req,
+                RequestExecutionConfig {
+                    budget: request_budget,
+                    started_at: request_now,
+                    source: budget_source,
+                    drain_grace: self.config.request_drain_grace,
+                    connection: conn_cx,
+                    shutdown: self.shutdown_signal.clone(),
+                },
+            )
+            .await?;
+            let output = match hop {
                 None => {
-                    // Legacy path: no runtime context on this thread.
-                    let Some(resp) =
-                        race_force_close(self.shutdown_signal.as_ref(), (self.handler)(req)).await
-                    else {
-                        // Force-close interrupted the handler.
-                        state.phase = ConnectionPhase::Closing;
-                        break;
-                    };
-                    resp.into_h1_response()
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+                Some(ServerHopOutcome::Ok(response)) => response,
+                Some(ServerHopOutcome::Cancelled | ServerHopOutcome::ConnectionLost) => {
+                    state.requests_served += 1;
+                    state.phase = ConnectionPhase::Closing;
+                    break;
+                }
+                Some(ServerHopOutcome::Panicked(_)) => {
+                    forced_close = true;
+                    Http1Response::new(hop_error_response(
+                        request_version,
+                        500,
+                        "Internal Server Error",
+                    ))
+                }
+                Some(ServerHopOutcome::DeadlineExceeded) => {
+                    Http1Response::new(hop_error_response(
+                        request_version,
+                        503,
+                        HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC,
+                    ))
                 }
             };
 
@@ -1544,9 +1605,7 @@ where
             response_write.flush_framed(&mut framed).await?;
 
             state.requests_served += 1;
-            state.last_request_at = Cx::current()
-                .and_then(|cx| cx.timer_driver())
-                .map_or_else(wall_now, |timer| timer.now());
+            state.last_request_at = buffered_connection_now(connection_owner.as_ref());
 
             if let Some(upgrade) = upgrade {
                 let parts = framed.into_parts();
@@ -1574,6 +1633,110 @@ where
 
         Ok(Http1ServeOutcome::Closed(state))
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl<F, Fut, R> Http1Server<F>
+where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response,
+{
+    /// Serve buffered HTTP/1.1 requests in actual runtime-owned child regions.
+    ///
+    /// Each admitted handler runs in its own task and region. Its ambient Cx
+    /// carries that admitted identity, so tasks it spawns remain in the request
+    /// subtree. Before writing a response or reusing the connection, serving
+    /// cancels remaining descendants and awaits their retirement and finalizers.
+    ///
+    /// The supplied context owns the request regions. Its cancellation, the
+    /// polling task's cancellation, and listener force-close request cleanup;
+    /// serving continues to drain admitted work. Handler drain retains the
+    /// configured request timeout and request_drain_grace. Non-cooperative
+    /// descendants can still delay quiescence; they are never called drained
+    /// merely because a timer elapsed.
+    ///
+    /// Dropping the serving future closes its transport and requests child
+    /// cleanup through the runtime backstop. Continue polling, or drain the
+    /// owning region, to observe actual quiescence.
+    ///
+    /// Existing serve methods retain their legacy request-context behavior.
+    /// This opt-in requires a native runtime gateway and timer and accepts only
+    /// owned handler factories/futures. Bodies remain bounded and buffered by
+    /// Http1Config; this is not the streaming-body API.
+    pub async fn serve_owned<T>(self, cx: &Cx, io: T) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        self.serve_owned_with_peer_addr(cx, io, None).await
+    }
+
+    /// Like serve_owned, attaching an optional peer address to every request.
+    pub async fn serve_owned_with_peer_addr<T>(
+        self,
+        cx: &Cx,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        let executor = OwnedRequests::new(cx.clone())?;
+        match self
+            .serve_connection_using(
+                io,
+                peer_addr,
+                UpgradeAdmission::Refused,
+                Some(cx.clone()),
+                move |handler, request, config| executor.clone().execute(handler, request, config),
+            )
+            .await?
+        {
+            Http1ServeOutcome::Closed(state) => Ok(state),
+            Http1ServeOutcome::Upgraded { .. } => {
+                unreachable!("owned single-connection serving does not admit upgrades")
+            }
+        }
+    }
+}
+
+fn buffered_connection_now(owner: Option<&Cx>) -> crate::types::Time {
+    owner
+        .cloned()
+        .or_else(Cx::current)
+        .and_then(|cx| cx.timer_driver())
+        .map_or_else(wall_now, |timer| timer.now())
+}
+
+/// Bound explicit-owner I/O to that owner's clock without replacing the
+/// actual polling task's context or treating cancellation as elapsed time.
+async fn timeout_with_owner<F: Future>(
+    owner: Option<&Cx>,
+    duration: Duration,
+    future: F,
+) -> Result<F::Output, crate::time::Elapsed> {
+    let Some(driver) = owner.and_then(Cx::timer_driver) else {
+        return timeout(buffered_connection_now(None), duration, future).await;
+    };
+    let deadline = driver.now() + duration;
+    let mut future = std::pin::pin!(future);
+    let mut deadline_wait = std::pin::pin!(crate::time::Sleep::with_timer_driver(
+        deadline,
+        driver.clone(),
+    ));
+    poll_fn(|task| {
+        if driver.now() > deadline {
+            return Poll::Ready(Err(crate::time::Elapsed::new(deadline)));
+        }
+        if let Poll::Ready(value) = future.as_mut().poll(task) {
+            return Poll::Ready(Ok(value));
+        }
+        deadline_wait
+            .as_mut()
+            .poll_deadline(task)
+            .map(|()| Err(crate::time::Elapsed::new(deadline)))
+    })
+    .await
 }
 
 /// HTTP/1.1 server that publishes a validated request head before reading its body.
@@ -3359,6 +3522,7 @@ impl Drop for InFlightRequestGuard {
 struct ResponseWritePolicy<'a> {
     idle_timeout: Option<Duration>,
     shutdown_signal: Option<&'a ShutdownSignal>,
+    connection_owner: Option<&'a Cx>,
 }
 
 impl<'a> ResponseWritePolicy<'a> {
@@ -3369,7 +3533,13 @@ impl<'a> ResponseWritePolicy<'a> {
         Self {
             idle_timeout,
             shutdown_signal,
+            connection_owner: None,
         }
+    }
+
+    const fn with_owner(mut self, owner: Option<&'a Cx>) -> Self {
+        self.connection_owner = owner;
+        self
     }
 
     async fn run<F, T>(self, progress: F) -> std::io::Result<T>
@@ -3379,20 +3549,37 @@ impl<'a> ResponseWritePolicy<'a> {
         let bounded = async {
             match self.idle_timeout {
                 Some(idle) => {
-                    let now = Cx::current()
-                        .and_then(|cx| cx.timer_driver())
-                        .map_or_else(wall_now, |timer| timer.now());
-                    timeout(now, idle, progress).await.unwrap_or_else(|_| {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "HTTP/1 response progress timed out",
-                        ))
-                    })
+                    timeout_with_owner(self.connection_owner, idle, progress)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::TimedOut,
+                                "HTTP/1 response progress timed out",
+                            ))
+                        })
                 }
                 None => progress.await,
             }
         };
-        race_force_close(self.shutdown_signal, bounded)
+        let mut owner_cancel = crate::http::listener_cancel::ListenerCancellation::new(
+            self.connection_owner.cloned(),
+        );
+        let mut polling_cancel = crate::http::listener_cancel::ListenerCancellation::new(
+            self.connection_owner.and_then(|_| Cx::current()),
+        );
+        let mut bounded = std::pin::pin!(bounded);
+        let progress = poll_fn(|cx| {
+            let owner_cancelled = owner_cancel.poll_cancelled(cx);
+            let polling_cancelled = polling_cancel.poll_cancelled(cx);
+            if owner_cancelled || polling_cancelled {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "HTTP/1 response owner cancelled",
+                )));
+            }
+            bounded.as_mut().poll(cx)
+        });
+        race_force_close(self.shutdown_signal, progress)
             .await
             .unwrap_or_else(|| {
                 Err(std::io::Error::new(

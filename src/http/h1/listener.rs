@@ -832,6 +832,47 @@ where
         .await
     }
 
+    /// Serve buffered requests in actual child regions owned by this listener.
+    ///
+    /// Connections belong to `cx`, and each accepted request gets a separate
+    /// task and child region under its connection. A handler's descendants and
+    /// finalizers finish before its response is written or keep-alive is reused.
+    /// Request timeouts and force-close initiate cancellation while the listener
+    /// continues to join admitted cleanup. Non-cooperative descendants can delay
+    /// quiescence; elapsed drain timers alone never certify their retirement.
+    ///
+    /// This explicit opt-in preserves the established `run` and `run_in`
+    /// behavior. It supports the existing TCP, Unix and handed-off connection
+    /// sources. Upgrade sessions retain their separate connection-owned lifetime
+    /// after the HTTP request closes. Streaming handlers use their existing
+    /// serving APIs and are not implicitly changed by this method.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        // Refuse a detached owner before accepting a connection.
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown_signal, in_flight_requests| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_stream_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown_signal,
+                            in_flight_requests,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
     /// Run the accept loop over TLS until shutdown.
     ///
     /// This is the HTTPS/1.1 counterpart to [`Self::run`]. The supplied
@@ -1415,6 +1456,72 @@ where
             in_flight_requests,
         )),
     }
+}
+
+/// Opt-in request ownership on every accepted native transport.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_stream_connection<F, Fut, R>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Request) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = R> + Send + 'static,
+    R: IntoHttp1Response + Send + 'static,
+{
+    use crate::http::h1::server::{OwnedRequests, UpgradeAdmission};
+
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let admission = match &stream {
+        H1Stream::Tcp(_) => UpgradeAdmission::Any,
+        #[cfg(unix)]
+        H1Stream::Unix(_) => UpgradeAdmission::TransportGeneric,
+        H1Stream::Handoff(_, _) => UpgradeAdmission::TransportGeneric,
+    };
+    let executor = match OwnedRequests::new(cx.clone()) {
+        Ok(executor) => executor,
+        Err(error) => {
+            cx.trace(&format!("h1_owned_connection_refused: {error}"));
+            return;
+        }
+    };
+    let server = Http1Server::with_config_upgradeable(move |request| handler(request), config)
+        .with_shutdown_signal(shutdown_signal.clone())
+        .with_in_flight_requests(in_flight_requests);
+    match server
+        .serve_connection_using(
+            stream,
+            peer_addr,
+            admission,
+            Some(cx.clone()),
+            move |handler, request, config| executor.clone().execute(handler, request, config),
+        )
+        .await
+    {
+        Ok(Http1ServeOutcome::Closed(_)) => {}
+        Ok(Http1ServeOutcome::Upgraded { io, read_ahead, upgrade }) => {
+            match io {
+                H1Stream::Tcp(stream) => {
+                    let session = upgrade.run(cx.clone(), stream, read_ahead);
+                    run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+                }
+                stream => {
+                    if let Some(session) = upgrade.run_on(cx.clone(), stream, read_ahead) {
+                        run_upgrade_session(&shutdown_signal, cx.clone(), session).await;
+                    }
+                }
+            }
+        }
+        Err(error) => cx.trace(&format!("h1_owned_connection_failed: {error}")),
+    }
+    // Preserve terminal bookkeeping through ordinary Cx::spawn after the
+    // connection has completed its protocol and request-subtree cleanup.
+    let _ = cx.checkpoint();
 }
 
 /// [`serve_connection`] for a connection of either transport.

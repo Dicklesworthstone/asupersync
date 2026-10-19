@@ -25,7 +25,8 @@ where
     assert_eq!(lab.state.live_task_count(), 0);
     assert_eq!(lab.state.pending_obligation_count(), 0);
     assert_eq!(lab.state.leak_count(), 0);
-    let mailbox = lab.state.obligation_gateway().unwrap().mailbox();
+    let gateway = lab.state.obligation_gateway().unwrap();
+    let mailbox = gateway.mailbox();
     assert_eq!(mailbox.stats().leaked, 0);
     assert_eq!(mailbox.open_tickets(), 0);
     if lab.state.region(root).is_some() {
