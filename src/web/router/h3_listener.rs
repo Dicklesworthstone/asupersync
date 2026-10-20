@@ -13,7 +13,8 @@ use crate::channel::oneshot;
 use crate::cx::{ChildRegion, ChildRegionError, ChildRegionOpening, ChildRegionSpec};
 use crate::http::body::{Frame, HeaderMap, HeaderName, HeaderValue};
 use crate::http::h1::stream::{
-    FramedIncomingRequestBodyWriter, IncomingBodyError, IncomingRequestBody,
+    FramedIncomingRequestBodyWriter, IncomingBodyAdmissionError, IncomingBodyError,
+    IncomingRequestBody,
 };
 use crate::http::h3::NativeH3SessionError;
 use crate::net::quic_core::{ConnectionId, TransportParameters};
@@ -688,6 +689,7 @@ impl RequestBodyReservations {
 
 type RegionClose = Pin<Box<dyn Future<Output = Result<bool, ChildRegionError>> + Send>>;
 type RequestBodySource = (Cx, FramedIncomingRequestBodyWriter);
+type RequestBodyPublication = Result<RequestBodySource, IncomingBodyAdmissionError>;
 
 const STREAMING_REQUEST_FRAME_CAPACITY: usize = 8;
 const MAX_STREAMING_REQUEST_CHUNK_BYTES: usize = 16 * 1024;
@@ -740,8 +742,9 @@ fn request_stream_credit(config: &NativeH3ListenerConfig, finished: u64) -> u64 
 /// the framed writer owns at most one pending DATA or trailer frame while its
 /// queue is full, and its capacity waiter wakes the UDP callback directly.
 struct RequestBodyWork {
-    publication: Option<oneshot::Receiver<RequestBodySource>>,
+    publication: Option<oneshot::Receiver<RequestBodyPublication>>,
     source: Option<RequestBodySource>,
+    admission_error_code: Option<u64>,
     paused: bool,
     finished: bool,
     stopped: bool,
@@ -752,10 +755,11 @@ struct RequestBodyWork {
 }
 
 impl RequestBodyWork {
-    fn new(publication: oneshot::Receiver<RequestBodySource>) -> Self {
+    fn new(publication: oneshot::Receiver<RequestBodyPublication>) -> Self {
         Self {
             publication: Some(publication),
             source: None,
+            admission_error_code: None,
             paused: true,
             finished: false,
             stopped: false,
@@ -772,13 +776,13 @@ impl RequestBodyWork {
         self.stopped = true;
     }
 
-    /// Returns whether publication or a previously blocked frame advanced.
-    /// No socket event is required for either progress edge.
-    fn poll(&mut self, task_cx: &mut TaskContext<'_>) -> Result<bool, IncomingBodyError> {
-        if self.stopped {
-            return Ok(false);
-        }
-        let mut progress = false;
+    /// Also observed at task completion, before cancellation drops publication.
+    /// A fast checked-admission refusal must keep its internal-error code even
+    /// when the task retires before the connection pump gets another turn.
+    fn poll_publication(
+        &mut self,
+        task_cx: &mut TaskContext<'_>,
+    ) -> Result<bool, IncomingBodyError> {
         if let Some(publication) = &mut self.publication {
             match publication.poll_recv_uninterruptible(task_cx) {
                 Poll::Pending => return Ok(false),
@@ -786,12 +790,45 @@ impl RequestBodyWork {
                     self.publication = None;
                     return Err(IncomingBodyError::SourceDisconnected);
                 }
-                Poll::Ready(Ok(source)) => {
+                Poll::Ready(Ok(Ok(source))) => {
                     self.publication = None;
                     self.source = Some(source);
-                    progress = true;
+                    return Ok(true);
+                }
+                Poll::Ready(Ok(Err(error))) => {
+                    self.publication = None;
+                    let error = match error {
+                        IncomingBodyAdmissionError::Policy(error) => error,
+                        IncomingBodyAdmissionError::Cancelled { kind } => {
+                            IncomingBodyError::Cancelled { kind }
+                        }
+                        IncomingBodyAdmissionError::Runtime(_)
+                        | IncomingBodyAdmissionError::RuntimeRequired => {
+                            self.admission_error_code = Some(H3_INTERNAL_ERROR);
+                            IncomingBodyError::SourceDisconnected
+                        }
+                    };
+                    return Err(error);
                 }
             }
+        }
+        Ok(false)
+    }
+
+    fn error_code(&self, error: &IncomingBodyError) -> u64 {
+        self.admission_error_code
+            .unwrap_or_else(|| request_body_error_code(error))
+    }
+
+    /// Returns whether publication or a previously blocked frame advanced.
+    /// No socket event is required for either progress edge.
+    fn poll(&mut self, task_cx: &mut TaskContext<'_>) -> Result<bool, IncomingBodyError> {
+        if self.stopped {
+            return Ok(false);
+        }
+        let mut progress = self.poll_publication(task_cx)?;
+        if self.publication.is_some() {
+            return Ok(progress);
         }
         let Some((request_cx, writer)) = &mut self.source else {
             return Err(IncomingBodyError::SourceDisconnected);
@@ -826,7 +863,10 @@ impl RequestBodyWork {
     /// stop that `complete` injected; that is the end of its input, not a
     /// failure of the finished request (br-asupersync-1u6l5r item 1).
     fn request_failure(&mut self, task_cx: &mut TaskContext<'_>) -> Option<IncomingBodyError> {
-        let error = self.consumer_failure(task_cx)?;
+        let error = self
+            .poll_publication(task_cx)
+            .err()
+            .or_else(|| self.consumer_failure(task_cx))?;
         let stopped_by_response = self.stopped_by_response
             && error
                 == IncomingBodyError::Cancelled {
@@ -908,7 +948,7 @@ struct RequestWork {
     region: Option<ChildRegion>,
     dispatch: Option<NativeH3RouterDispatch>,
     body: Option<RequestBodyWork>,
-    body_publisher: Option<oneshot::Sender<RequestBodySource>>,
+    body_publisher: Option<oneshot::Sender<RequestBodyPublication>>,
     response_budget: Arc<ResponseBudget>,
     task: Option<TaskHandle<ServerHopOutcome<bool>>>,
     reply: Option<oneshot::Receiver<RequestReply>>,
@@ -1055,6 +1095,18 @@ impl RequestWork {
         Ok(())
     }
 
+    fn record_input_failure(&mut self, task_cx: &mut TaskContext<'_>) -> bool {
+        let Some(body) = &mut self.body else {
+            return false;
+        };
+        let Some(error) = body.request_failure(task_cx) else {
+            return false;
+        };
+        self.input_error_code = Some(body.error_code(&error));
+        body.fail(error);
+        true
+    }
+
     /// Drive only runtime ownership. Application code executes in the spawned
     /// body task; the UDP callback never polls a handler or producer directly.
     fn poll_owner(
@@ -1067,17 +1119,7 @@ impl RequestWork {
         // after middleware tightens the body policy. Preserve that failure
         // even if its handler catches the error and returns a response in the
         // same driver turn. The observer lives through task/region completion.
-        if let Some(error) = self
-            .body
-            .as_mut()
-            .and_then(|body| body.request_failure(task_cx))
-            && self.terminal != Some(false)
-        {
-            self.input_error_code = Some(request_body_error_code(&error));
-            self.body
-                .as_mut()
-                .expect("body observer exists")
-                .fail(error);
+        if self.terminal != Some(false) && self.record_input_failure(task_cx) {
             self.terminal = None;
             self.cancel(cx, config.request_drain_timeout);
         }
@@ -1121,59 +1163,81 @@ impl RequestWork {
                                     request_cx.now(),
                                 );
                                 let work = async {
-                                    let prepared = if let Some(body_publisher) = body_publisher {
+                                    let (body, guard) = if let Some(body_publisher) = body_publisher {
                                         let queue_bytes = body_queue_bytes
                                             .expect("streaming request has a queue budget")
                                             .get();
-                                        let (writer, body) =
-                                            IncomingRequestBody::framed_channel_with_limits(
+                                        let (writer, body, guard) = match
+                                            IncomingRequestBody::framed_channel_with_limits_checked(
                                                 &request_cx,
                                                 dispatch.declared_content_length(),
                                                 STREAMING_REQUEST_FRAME_CAPACITY,
                                                 queue_bytes,
-                                            );
-                                        let writer = writer
-                                            .max_body_size(dispatch.max_request_body_size())
-                                            .max_trailers_size(
-                                                queue_bytes.min(MAX_STREAMING_REQUEST_CHUNK_BYTES),
-                                            );
+                                                dispatch.max_request_body_size(),
+                                            )
+                                        {
+                                            Ok(admitted) => admitted,
+                                            Err(error) => {
+                                                let _ = body_publisher.send_blocking(Err(error));
+                                                return false;
+                                            }
+                                        };
+                                        let writer = writer.max_trailers_size(
+                                            queue_bytes.min(MAX_STREAMING_REQUEST_CHUNK_BYTES),
+                                        );
                                         if body_publisher
-                                            .send_blocking((request_cx.clone(), writer))
+                                            .send_blocking(Ok((request_cx.clone(), writer)))
                                             .is_err()
                                         {
                                             return false;
                                         }
-                                        dispatch.run_produced_streaming(&request_cx, body).await
+                                        (Some(body), Some(guard))
                                     } else {
-                                        dispatch.run_produced(&request_cx).await
+                                        (None, None)
                                     };
-                                    let reply = match prepared {
-                                        NativeH3RouterProducedDispatch::Buffered(prepared) => {
-                                            let Ok((_, head, body)) = prepared.response else {
-                                                return false;
-                                            };
-                                            let Some(body) = response_budget.try_retain(body, response_limit) else {
-                                                return false;
-                                            };
-                                            RequestReply::Buffered { head, body }
+                                    let response = async {
+                                        let prepared = if let Some(body) = body {
+                                            dispatch.run_produced_streaming(&request_cx, body).await
+                                        } else {
+                                            dispatch.run_produced(&request_cx).await
+                                        };
+                                        let reply = match prepared {
+                                            NativeH3RouterProducedDispatch::Buffered(prepared) => {
+                                                let Ok((_, head, body)) = prepared.response else {
+                                                    return false;
+                                                };
+                                                let Some(body) = response_budget.try_retain(body, response_limit) else {
+                                                    return false;
+                                                };
+                                                RequestReply::Buffered { head, body }
+                                            }
+                                            NativeH3RouterProducedDispatch::Produced(prepared) => {
+                                                RequestReply::Produced { cx: request_cx.clone(), prepared }
+                                            }
+                                        };
+                                        if reply_tx.send_blocking(reply).is_ok() {
+                                            match command_rx.recv(&request_cx).await {
+                                                Ok(Some(producer)) => producer.await,
+                                                Ok(None) => {}
+                                                Err(_) => return false,
+                                            }
+                                            // A producer can finish while final
+                                            // DATA/trailers remain flow-blocked.
+                                            // Retain the task and its absolute
+                                            // deadline until transport drain.
+                                            return completion_rx.recv(&request_cx).await.is_ok();
                                         }
-                                        NativeH3RouterProducedDispatch::Produced(prepared) => {
-                                            RequestReply::Produced { cx: request_cx.clone(), prepared }
-                                        }
+                                        false
                                     };
-                                    if reply_tx.send_blocking(reply).is_ok() {
-                                        match command_rx.recv(&request_cx).await {
-                                            Ok(Some(producer)) => producer.await,
-                                            Ok(None) => {}
-                                            Err(_) => return false,
-                                        }
-                                        // A producer can finish while final
-                                        // DATA/trailers remain flow-blocked.
-                                        // Retain the task and its absolute
-                                        // deadline until transport drain.
-                                        return completion_rx.recv(&request_cx).await.is_ok();
+                                    if let Some(guard) = guard {
+                                        // The callback owns the writer, but its
+                                        // credit stays with this live request
+                                        // task through handler, producer and
+                                        // response drain, including unwinding.
+                                        guard.run(response).await
+                                    } else {
+                                        response.await
                                     }
-                                    false
                                 };
                                 hop.run_with_protocol_drain(
                                     RequestBudgetSource::ServerConfig,
@@ -1206,7 +1270,12 @@ impl RequestWork {
         {
             self.task = None;
             self.task_completed = true;
-            if !matches!(result, Ok(ServerHopOutcome::Ok(true)))
+            // A worker may have published a checked-admission refusal and
+            // retired during this same owner poll. Observe it before cancel
+            // drops the publication receiver and applies a generic reset.
+            let input_failed = self.record_input_failure(task_cx);
+            if input_failed
+                || !matches!(result, Ok(ServerHopOutcome::Ok(true)))
                 || !self.response_started
                 || self.terminal != Some(true)
             {
@@ -1239,16 +1308,7 @@ impl RequestWork {
         if let Some(close) = &mut self.close {
             match close.as_mut().poll(task_cx) {
                 Poll::Ready(Ok(true)) => {
-                    if let Some(error) = self
-                        .body
-                        .as_mut()
-                        .and_then(|body| body.request_failure(task_cx))
-                    {
-                        self.input_error_code = Some(request_body_error_code(&error));
-                        self.body
-                            .as_mut()
-                            .expect("body observer exists")
-                            .fail(error);
+                    if self.record_input_failure(task_cx) {
                         self.terminal = Some(false);
                     }
                     return Poll::Ready(Ok(true));
@@ -1299,7 +1359,10 @@ fn retire_request_input(
     error: IncomingBodyError,
 ) -> Result<(), NativeH3SessionError> {
     let consumer_dropped = error == IncomingBodyError::ConsumerDropped;
-    let error_code = request_body_error_code(&error);
+    let error_code = request.body.as_ref().map_or_else(
+        || request_body_error_code(&error),
+        |body| body.error_code(&error),
+    );
     if let Some(body) = &mut request.body {
         let need_receive_stop = !body.finished && !body.stopped;
         body.fail(error);
