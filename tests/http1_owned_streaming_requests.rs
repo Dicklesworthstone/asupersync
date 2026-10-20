@@ -16,9 +16,11 @@ use asupersync::http::h1::stream::{IncomingBodyError, StreamingServerRequest};
 use asupersync::http::h1::types::Response;
 use asupersync::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use asupersync::net::TcpStream;
-use asupersync::runtime::{JoinError, RootDrainOutcome, RuntimeBuilder};
+use asupersync::record::{ObligationAbortReason, ObligationKind};
+use asupersync::runtime::{JoinError, RootDrainOutcome, RuntimeBuilder, RuntimeHandle};
 use asupersync::server::shutdown::ShutdownSignal;
-use asupersync::types::{CancelKind, CancelReason};
+use asupersync::trace::{TraceData, TraceEvent, TraceEventKind};
+use asupersync::types::{CancelKind, CancelReason, ObligationId};
 use std::future::{Future, poll_fn};
 use std::io::{self, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -31,6 +33,14 @@ use std::time::Duration;
 fn native<F, Fut>(scenario: F)
 where
     F: Fn(Cx) -> Fut + Copy + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    native_with_trace(move |cx, _runtime| scenario(cx));
+}
+
+fn native_with_trace<F, Fut>(scenario: F)
+where
+    F: Fn(Cx, RuntimeHandle) -> Fut + Copy + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
     let (send, receive) = mpsc::channel();
@@ -50,7 +60,8 @@ where
                         .unwrap();
                     runtime.block_on(async {
                         let root = Cx::current().unwrap();
-                        let mut owner = root.spawn(scenario).unwrap();
+                        let handle = runtime.handle();
+                        let mut owner = root.spawn(move |cx| scenario(cx, handle)).unwrap();
                         owner.join(&root).await.unwrap();
                     });
                     let report = runtime.shutdown_drained(Duration::from_secs(5));
@@ -400,7 +411,8 @@ async fn cancellation_drains_pending_stream(cx: Cx) {
         }).unwrap();
         body_parked.recv(&cx).await.unwrap();
         if forced {
-            shutdown.begin_force_close();
+            assert!(shutdown.begin_drain(Duration::from_secs(5)));
+            assert!(shutdown.begin_force_close());
         } else {
             serving.abort_with_reason(CancelReason::user("cancel owned streaming request"));
         }
@@ -781,4 +793,187 @@ async fn streaming_listener_drains_owned_requests(cx: Cx) {
 #[test]
 fn owned_streaming_listener_drains_live_request_and_descendants_before_quiescence() {
     native(streaming_listener_drains_owned_requests);
+}
+
+fn body_events<'trace>(
+    trace: &'trace [TraceEvent],
+    request: &Cx,
+) -> Vec<(usize, &'trace TraceEvent)> {
+    trace.iter().enumerate().filter(|(_, event)| matches!(event.data,
+        TraceData::Obligation { task, region, kind: ObligationKind::IoOp, .. }
+        if task == request.task_id() && region == request.region_id()
+    )).collect()
+}
+
+async fn pending_body_obligation(runtime: &RuntimeHandle, request: &Cx) -> ObligationId {
+    loop {
+        let trace = runtime.trace_snapshot().expect("live runtime trace");
+        let events = body_events(&trace, request);
+        if let Some((_, reserved)) = events.iter().find(|(_, event)| {
+            event.kind == TraceEventKind::ObligationReserve
+        }) {
+            assert_eq!(events.len(), 1, "a parked live body has one unresolved credit");
+            let TraceData::Obligation { obligation, .. } = reserved.data else {
+                unreachable!("filtered obligation event");
+            };
+            return obligation;
+        }
+        // A checked admission owns its quota before the runtime projects its
+        // mailbox record. Wait for that actual record, never a scheduling delay.
+        asupersync::runtime::yield_now().await;
+    }
+}
+
+fn assert_body_retired(
+    runtime: &RuntimeHandle,
+    request: &Cx,
+    obligation: ObligationId,
+    abort: Option<ObligationAbortReason>,
+) {
+    let trace = runtime.trace_snapshot().expect("live runtime trace");
+    let events = body_events(&trace, request);
+    assert_eq!(events.len(), 2, "one reserve and one terminal event for the body");
+    assert_eq!(events[0].1.kind, TraceEventKind::ObligationReserve);
+    let terminal = events[1];
+    assert_eq!(terminal.1.kind, if abort.is_some() {
+        TraceEventKind::ObligationAbort
+    } else {
+        TraceEventKind::ObligationCommit
+    });
+    assert!(matches!(terminal.1.data,
+        TraceData::Obligation { obligation: id, abort_reason, .. }
+        if id == obligation && abort_reason == abort
+    ));
+    let complete = trace.iter().position(|event| event.kind == TraceEventKind::Complete
+        && matches!(event.data, TraceData::Task { task, .. } if task == request.task_id())
+    ).expect("actual request task retired");
+    assert!(terminal.0 < complete, "body credit settles before its holder retires");
+}
+
+async fn streaming_body_credit_tracks_eof_and_unread_drain(cx: Cx, runtime: RuntimeHandle) {
+    for unread in [false, true] {
+        let (socket, mut peer, wire) = pair(
+            b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\n",
+        );
+        let (body_ready, mut body_parked) = oneshot::channel();
+        let (read_ready, mut read_parked) = oneshot::channel();
+        *wire.read_pending.lock().unwrap() = Some(read_ready);
+        let ready = Arc::new(Mutex::new(Some(body_ready)));
+        let handler_wire = Arc::clone(&wire);
+        let server = Http1StreamingServer::with_config(
+            move |request_cx: Cx, mut request: StreamingServerRequest| {
+                let mut ready = ready.lock().unwrap().take();
+                let wire = Arc::clone(&handler_wire);
+                async move {
+                    if unread {
+                        drop(request.body);
+                        wire.read_pending_armed.store(true, Ordering::SeqCst);
+                        ready.take().unwrap().send_blocking(request_cx.clone()).unwrap();
+                    } else {
+                        let mut received = Vec::new();
+                        loop {
+                            let frame = poll_fn(|task| {
+                                let result = Pin::new(&mut request.body).poll_frame(task);
+                                if result.is_pending()
+                                    && let Some(ready) = ready.take()
+                                {
+                                    wire.read_pending_armed.store(true, Ordering::SeqCst);
+                                    ready.send_blocking(request_cx.clone()).unwrap();
+                                }
+                                result
+                            }).await;
+                            match frame {
+                                Some(Ok(Frame::Data(bytes))) => {
+                                    received.extend_from_slice(bytes.into_inner().as_ref());
+                                }
+                                None => break,
+                                other => panic!("valid Content-Length body: {other:?}"),
+                            }
+                        }
+                        assert_eq!(received, b"hello");
+                    }
+                    Response::new(200, "OK", b"settled".to_vec())
+                }
+            },
+            config(),
+        );
+        let mut serving = cx.spawn(move |connection_cx| async move {
+            server.serve_owned(&connection_cx, socket).await
+        }).unwrap();
+        let request = body_parked.recv(&cx).await.unwrap();
+        let driver = read_parked.recv(&cx).await.unwrap();
+        assert_eq!(request.task_id(), driver.task_id());
+        assert_eq!(request.region_id(), driver.region_id());
+        assert_ne!(request.task_id(), serving.task_id());
+        assert_ne!(request.region_id(), cx.region_id());
+        let credit = pending_body_obligation(&runtime, &request).await;
+        assert_eq!(wire.written.load(Ordering::SeqCst), 0);
+        peer.write_all(b"hello").await.unwrap();
+        let reply = response(&mut peer).await;
+        assert_eq!(serving.join(&cx).await.unwrap().unwrap().requests_served, 1);
+        assert!(reply.starts_with("HTTP/1.1 200"), "{reply}");
+        assert!(reply.ends_with("settled"), "{reply}");
+        assert_body_retired(&runtime, &request, credit, None);
+    }
+}
+
+#[test]
+fn owned_streaming_body_credit_survives_pending_consumer_and_unread_drain_until_eof() {
+    native_with_trace(streaming_body_credit_tracks_eof_and_unread_drain);
+}
+
+async fn streaming_body_credit_aborts_on_force_close(cx: Cx, runtime: RuntimeHandle) {
+    let (socket, mut peer, wire) = pair(
+        b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\n\r\n",
+    );
+    let (body_ready, mut body_parked) = oneshot::channel();
+    let (read_ready, mut read_parked) = oneshot::channel();
+    *wire.read_pending.lock().unwrap() = Some(read_ready);
+    let ready = Arc::new(Mutex::new(Some(body_ready)));
+    let handler_wire = Arc::clone(&wire);
+    let shutdown = ShutdownSignal::new();
+    let acknowledged = Arc::new(AtomicBool::new(false));
+    let handler_acknowledged = Arc::clone(&acknowledged);
+    let server = Http1StreamingServer::with_config(
+        move |request_cx: Cx, mut request: StreamingServerRequest| {
+            let mut ready = ready.lock().unwrap().take();
+            let wire = Arc::clone(&handler_wire);
+            let acknowledged = Arc::clone(&handler_acknowledged);
+            async move {
+                let frame = poll_fn(|task| {
+                    let result = Pin::new(&mut request.body).poll_frame(task);
+                    if result.is_pending() && let Some(ready) = ready.take() {
+                        wire.read_pending_armed.store(true, Ordering::SeqCst);
+                        ready.send_blocking(request_cx.clone()).unwrap();
+                    }
+                    result
+                }).await;
+                assert!(matches!(frame, Some(Err(IncomingBodyError::Cancelled {
+                    kind: CancelKind::Shutdown,
+                }))));
+                request_cx.checkpoint().expect_err("request acknowledged force close");
+                acknowledged.store(true, Ordering::SeqCst);
+                Response::new(200, "OK", b"must stay private".to_vec())
+            }
+        },
+        config(),
+    ).with_shutdown_signal(shutdown.clone());
+    let mut serving = cx.spawn(move |connection_cx| async move {
+        server.serve_owned(&connection_cx, socket).await
+    }).unwrap();
+    let request = body_parked.recv(&cx).await.unwrap();
+    let driver = read_parked.recv(&cx).await.unwrap();
+    assert_eq!(request.task_id(), driver.task_id());
+    let credit = pending_body_obligation(&runtime, &request).await;
+    assert!(shutdown.begin_drain(Duration::from_secs(5)));
+    assert!(shutdown.begin_force_close());
+    serving.join(&cx).await.unwrap().unwrap();
+    assert!(acknowledged.load(Ordering::SeqCst));
+    assert!(response(&mut peer).await.is_empty());
+    assert_body_retired(&runtime, &request, credit, Some(ObligationAbortReason::Cancel));
+}
+
+#[test]
+fn owned_streaming_force_close_aborts_one_body_credit_before_task_retirement() {
+    native_with_trace(streaming_body_credit_aborts_on_force_close);
 }

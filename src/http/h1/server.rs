@@ -51,6 +51,7 @@ mod owned;
 pub(super) use owned::OwnedRequests;
 
 /// Inputs shared by legacy and opt-in scheduler-owned dispatch.
+#[derive(Clone)]
 pub(super) struct RequestExecutionConfig {
     budget: Budget,
     started_at: crate::types::Time,
@@ -2276,27 +2277,7 @@ impl<F> Http1StreamingServer<F> {
         let handler = self.handler;
         let adapted = move |request_cx: Cx, request: StreamingServerRequest| {
             let response = handler(request_cx.clone(), request);
-            async move {
-                let (stream, capacity) = response.await.into_parts();
-                // One serialized event is one produced frame, so the frame
-                // cap must admit the stream's own event bound; the channel's
-                // 64 KiB default would end the stream without a terminator
-                // on the first larger event.
-                let max_frame_bytes = std::num::NonZeroUsize::new(stream.event_bytes_limit())
-                    .unwrap_or(std::num::NonZeroUsize::MIN);
-                let guard = LiveSseCancelGuard::new(stream, request_cx);
-                let mut response = Http1ProducedResponse::chunked_with_max_frame_bytes(
-                    capacity,
-                    max_frame_bytes,
-                    200,
-                    default_reason(200),
-                    move |_producer_cx, sender| produce_live_sse(guard, sender),
-                );
-                for (name, value) in StreamingSse::<VecSseSource>::headers() {
-                    response = response.with_header(name, value);
-                }
-                response
-            }
+            async move { live_sse_produced_response(request_cx, response.await) }
         };
         serve_produced_connection(
             cx,
@@ -2352,16 +2333,221 @@ impl<F> Http1StreamingServer<F> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl<F> Http1StreamingServer<F> {
+    /// Serves one produced response in a real request child region and task.
+    ///
+    /// Handler and producer factories, future polls, body synchronization, and
+    /// transport writes use the actual request task's [`Cx`]. The connection
+    /// keeps its transport and in-flight slot until that task, descendants,
+    /// and finalizers retire. A successful final chunk, trailers, or fixed
+    /// length tail is published only after the request subtree closes.
+    ///
+    /// This additive API requires owned, `'static` handler and transport state.
+    /// [`Self::serve_produced`] retains its borrowed-state contract. Production
+    /// remains one response followed by connection close. Arbitrary futures
+    /// and destructors must return control for cooperative draining; dropping
+    /// the serving future requests cancellation through the region backstop,
+    /// and the enclosing runtime region still owns the remaining cleanup.
+    ///
+    /// Opaque I/O error sources retire inside the request task so they cannot
+    /// retain request obligations across close. The returned error preserves
+    /// its OS code, or its kind and display text when no OS code is available.
+    pub async fn serve_produced_owned<Fut, T>(
+        self,
+        cx: &Cx,
+        io: T,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.serve_produced_owned_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves a scheduler-owned produced response and records its peer address.
+    pub async fn serve_produced_owned_with_peer_addr<Fut, T>(
+        self,
+        cx: &Cx,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let owned = OwnedRequests::new(cx.clone())?;
+        serve_produced_connection_using(
+            cx,
+            io,
+            peer_addr,
+            self.handler,
+            self.config,
+            self.shutdown_signal,
+            self.in_flight_requests,
+            ProducedResponsePolicy::Generic,
+            true,
+            move |handler, io, buffer, execution| {
+                owned.execute_produced(handler, io, buffer, execution)
+            },
+        )
+        .await
+    }
+
+    /// Serves one live SSE response in a real request child region and task.
+    ///
+    /// Source construction, polls, cancellation, and destruction run in the
+    /// request task. The clean terminating chunk waits for descendant cleanup
+    /// and finalizers, using the same retirement barrier as
+    /// [`Self::serve_produced_owned`]. Existing event limits, bounded frames,
+    /// heartbeats, and the one-response-and-close policy are preserved.
+    /// [`Self::serve_sse`] retains the borrowed handler and transport contract.
+    pub async fn serve_sse_owned<Fut, S, T>(
+        self,
+        cx: &Cx,
+        io: T,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+        S: StreamingSseSource + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        self.serve_sse_owned_with_peer_addr(cx, io, None).await
+    }
+
+    /// Serves scheduler-owned live SSE and records its peer address.
+    pub async fn serve_sse_owned_with_peer_addr<Fut, S, T>(
+        self,
+        cx: &Cx,
+        io: T,
+        peer_addr: Option<SocketAddr>,
+    ) -> Result<ConnectionState, HttpError>
+    where
+        F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+        S: StreamingSseSource + Send + 'static,
+        T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let owned = OwnedRequests::new(cx.clone())?;
+        let handler = self.handler;
+        let adapted = move |request_cx: Cx, request: StreamingServerRequest| {
+            let response = handler(request_cx.clone(), request);
+            async move { live_sse_produced_response(request_cx, response.await) }
+        };
+        serve_produced_connection_using(
+            cx,
+            io,
+            peer_addr,
+            adapted,
+            self.config,
+            self.shutdown_signal,
+            self.in_flight_requests,
+            ProducedResponsePolicy::Sse,
+            true,
+            move |handler, io, buffer, execution| {
+                owned.execute_produced(handler, io, buffer, execution)
+            },
+        )
+        .await
+    }
+}
+
+fn live_sse_produced_response<S>(cx: Cx, response: Http1SseResponse<S>) -> Http1ProducedResponse
+where
+    S: StreamingSseSource + Send + 'static,
+{
+    let (stream, capacity) = response.into_parts();
+    // One serialized event is one frame, so admit the stream's own event
+    // bound instead of imposing the generic channel's 64 KiB default.
+    let max_frame_bytes = std::num::NonZeroUsize::new(stream.event_bytes_limit())
+        .unwrap_or(std::num::NonZeroUsize::MIN);
+    let guard = LiveSseCancelGuard::new(stream, cx);
+    let mut response = Http1ProducedResponse::chunked_with_max_frame_bytes(
+        capacity,
+        max_frame_bytes,
+        200,
+        default_reason(200),
+        move |_producer_cx, sender| produce_live_sse(guard, sender),
+    );
+    for (name, value) in StreamingSse::<VecSseSource>::headers() {
+        response = response.with_header(name, value);
+    }
+    response
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProducedResponsePolicy {
     Sse,
     Generic,
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+struct ProducedRequestExecution {
+    streaming: StreamingRequestExecution,
+    policy: ProducedResponsePolicy,
+    head_committed: Arc<AtomicBool>,
+}
+
+/// Only plain response data crosses the subtree retirement barrier. Never
+/// retain a sender, source, producer future, or checked request obligation here.
+enum ProducedCompletion {
+    Complete,
+    Buffered(Response),
+    Bytes(BytesMut),
+}
+
+type ProducedHopOutcome = Option<ServerHopOutcome<Result<ProducedCompletion, HttpError>>>;
+
+impl ProducedCompletion {
+    async fn publish<T>(
+        self,
+        cx: &Cx,
+        io: &mut T,
+        response_write: ResponseWritePolicy<'_>,
+    ) -> Result<(), HttpError>
+    where
+        T: AsyncWrite + Unpin,
+    {
+        match self {
+            Self::Complete => Ok(()),
+            Self::Buffered(response) => {
+                response_write.write_streaming_response(cx, io, response).await
+            }
+            Self::Bytes(bytes) => {
+                write_all_within_idle(io, bytes.as_ref(), response_write)
+                    .await
+                    .map_err(HttpError::Io)?;
+                flush_within_idle(io, response_write).await.map_err(HttpError::Io)
+            }
+        }
+    }
+}
+
+async fn write_or_defer_produced_response<T>(
+    cx: &Cx,
+    io: &mut T,
+    response: Response,
+    response_write: ResponseWritePolicy<'_>,
+    head_committed: &AtomicBool,
+    defer_completion: bool,
+) -> Result<ProducedCompletion, HttpError>
+where
+    T: AsyncWrite + Unpin,
+{
+    if defer_completion {
+        return Ok(ProducedCompletion::Buffered(response));
+    }
+    head_committed.store(true, Ordering::Release);
+    response_write.write_streaming_response(cx, io, response).await?;
+    Ok(ProducedCompletion::Complete)
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_produced_connection<F, Fut, T>(
     cx: &Cx,
-    mut io: T,
+    io: T,
     peer_addr: Option<SocketAddr>,
     handler: F,
     config: Http1StreamingConfig,
@@ -2374,9 +2560,45 @@ where
     Fut: Future<Output = Http1ProducedResponse> + Send,
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    serve_produced_connection_using(
+        cx,
+        io,
+        peer_addr,
+        handler,
+        config,
+        shutdown_signal,
+        in_flight_requests,
+        policy,
+        false,
+        execute_legacy_produced::<F, Fut, T>,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn serve_produced_connection_using<F, Fut, T, Execute, Execution>(
+    cx: &Cx,
+    mut io: T,
+    peer_addr: Option<SocketAddr>,
+    handler: F,
+    config: Http1StreamingConfig,
+    shutdown_signal: Option<ShutdownSignal>,
+    in_flight_requests: Option<Arc<AtomicUsize>>,
+    policy: ProducedResponsePolicy,
+    owned: bool,
+    execute: Execute,
+) -> Result<ConnectionState, HttpError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Http1ProducedResponse> + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    Execute: FnOnce(Arc<F>, T, BytesMut, ProducedRequestExecution) -> Execution,
+    Execution: Future<Output = Result<(T, ProducedHopOutcome), HttpError>>,
+{
     let mut read_buffer = BytesMut::with_capacity(8192);
     let mut state = ConnectionState::new(connection_now(cx));
-    let response_write = ResponseWritePolicy::new(config.idle_timeout, shutdown_signal.as_ref());
+    let response_write = ResponseWritePolicy::new(config.idle_timeout, shutdown_signal.as_ref())
+        .with_owner(owned.then_some(cx));
 
     if cx.checkpoint().is_err()
         || shutdown_signal
@@ -2485,187 +2707,33 @@ where
         parse_request_timeout_header(&head.headers),
         config.request_timeout_header_cap,
     );
-    let region_name = match policy {
-        ProducedResponsePolicy::Sse => "h1-sse",
-        ProducedResponsePolicy::Generic => "h1-produced",
-    };
-    let region =
-        ServerRequestRegion::mint_from_connection(region_name, request_budget, request_now, cx);
-    let request_cx = region.cx().clone();
-    let body_cx = request_cx.clone();
-    let (writer, body) = IncomingRequestBody::channel_with_limits(
-        &request_cx,
-        body_kind,
-        config.incoming_body_frame_capacity,
-        config.incoming_body_queued_bytes,
-    );
-    let request = StreamingServerRequest {
-        head,
-        peer_addr,
-        body,
-    };
-    let handler = handler(request_cx.clone(), request);
-    let handler = async move { Some(handler.await) };
-    let head_committed = AtomicBool::new(false);
-
+    let head_committed = Arc::new(AtomicBool::new(false));
     state.phase = ConnectionPhase::Processing;
-    let request_flow = async {
-        let body_driver = drive_incoming_body(
-            &body_cx,
-            &mut io,
-            &mut read_buffer,
-            writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
-            &config,
-        );
-        let (produced, writer) = match join_streaming_handler_and_body(
-            &request_cx,
-            handler,
-            body_driver,
-            &config,
-            shutdown_signal.as_ref(),
-        )
-        .await
-        {
-            Ok(Some(joined)) => joined,
-            Ok(None) => {
-                return Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "request handler ended before synchronized body EOF",
-                )));
-            }
-            Err(body_error) => {
-                record_incoming_body_failure(&body_error);
-                // br-asupersync-hw83se: mirror the buffered path — a
-                // DrainLimitExceeded body error (mapped to None by
-                // incoming_body_failure_response) still owes the client an
-                // explicit 413 + close rather than a bare I/O error.
-                let refusal =
-                    incoming_body_failure_response(request_version, &body_error).or_else(|| {
-                        matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. }).then(
-                            || {
-                                hop_error_response(
-                                    request_version,
-                                    413,
-                                    "[ASUP-E505] request body exceeds the configured limit",
-                                )
-                            },
-                        )
-                    });
-                if let Some(mut response) = refusal {
-                    add_connection_close(&mut response);
-                    if request_method == Method::Head {
-                        suppress_response_body_for_head(&mut response);
-                    }
-                    head_committed.store(true, Ordering::Release);
-                    return response_write
-                        .write_streaming_response(&request_cx, &mut io, response)
-                        .await;
-                }
-                return Err(HttpError::Io(std::io::Error::new(
-                    std::io::ErrorKind::ConnectionAborted,
-                    body_error,
-                )));
-            }
-        };
-        // br-asupersync-hw83se: an unread-body drain overrun owes the client a
-        // status before the (unreusable) connection closes, instead of dropping
-        // it and returning an I/O error. incoming_body_failure_response maps
-        // DrainTimeout to 408 but DrainLimitExceeded to None, so fall back to an
-        // explicit 413 + Connection: close. The produced streaming body is
-        // intentionally not started.
-        if let Err(error) = validate_unread_drain(writer.drain_progress(), &config) {
-            record_incoming_body_failure(&error);
-            let mut response =
-                incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
-                    hop_error_response(
-                        request_version,
-                        413,
-                        "[ASUP-E505] request body exceeds the configured limit",
-                    )
-                });
-            add_connection_close(&mut response);
-            if request_method == Method::Head {
-                suppress_response_body_for_head(&mut response);
-            }
-            head_committed.store(true, Ordering::Release);
-            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
-        }
-
-        let rejected_method = match policy {
-            ProducedResponsePolicy::Sse => {
-                request_method != Method::Get && request_method != Method::Head
-            }
-            ProducedResponsePolicy::Generic => request_method == Method::Connect,
-        };
-        if rejected_method {
-            let message = match policy {
-                ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
-                ProducedResponsePolicy::Generic => {
-                    "generic produced responses do not support CONNECT tunnels"
-                }
-            };
-            let mut response = hop_error_response(request_version, 405, message);
-            if policy == ProducedResponsePolicy::Sse {
-                response
-                    .headers
-                    .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
-            }
-            add_connection_close(&mut response);
-            head_committed.store(true, Ordering::Release);
-            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
-        }
-
-        if request_version != Version::Http11 {
-            let message = match policy {
-                ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
-                ProducedResponsePolicy::Generic => {
-                    "generic produced responses require HTTP/1.1 framing"
-                }
-            };
-            let mut response = hop_error_response(request_version, 505, message);
-            add_connection_close(&mut response);
-            if request_method == Method::Head {
-                suppress_response_body_for_head(&mut response);
-            }
-            head_committed.store(true, Ordering::Release);
-            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
-        }
-
-        if request_method == Method::Head {
-            let response = match policy {
-                ProducedResponsePolicy::Sse => live_sse_head_only_response(request_version),
-                ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
-            };
-            head_committed.store(true, Ordering::Release);
-            return response_write.write_streaming_response(&request_cx, &mut io, response).await;
-        }
-
-        let mut produced = produced;
-        let body_kind = produced.body_kind();
-        validate_produced_response_head(produced.head_mut(), body_kind)?;
-        let (response, producer) = produced.into_parts(&request_cx);
-        drive_produced_response(
-            &request_cx,
-            &mut io,
-            response,
-            producer,
-            policy == ProducedResponsePolicy::Generic,
-            config.request_drain_grace,
-            response_write,
-            &head_committed,
-        )
-        .await
-    };
-    let hop = race_force_close(
-        shutdown_signal.as_ref(),
-        region.run_with_protocol_drain(
-            budget_source,
-            Some(cx.clone()),
-            config.request_drain_grace,
-            request_flow,
-        ),
+    let (returned_io, hop) = execute(
+        Arc::new(handler),
+        io,
+        read_buffer,
+        ProducedRequestExecution {
+            streaming: StreamingRequestExecution {
+                head,
+                body_kind,
+                peer_addr,
+                config: Arc::new(config.clone()),
+                request: RequestExecutionConfig {
+                    budget: request_budget,
+                    started_at: request_now,
+                    source: budget_source,
+                    drain_grace: config.request_drain_grace,
+                    connection: Some(cx.clone()),
+                    shutdown: shutdown_signal.clone(),
+                },
+            },
+            policy,
+            head_committed: Arc::clone(&head_committed),
+        },
     )
-    .await;
+    .await?;
+    io = returned_io;
 
     state.requests_served = 1;
     state.last_request_at = connection_now(cx);
@@ -2679,7 +2747,10 @@ where
             );
             Ok(())
         }
-        Some(ServerHopOutcome::Ok(result)) => result,
+        Some(ServerHopOutcome::Ok(result)) => match result {
+            Ok(completion) => completion.publish(cx, &mut io, response_write).await,
+            Err(error) => Err(error),
+        },
         Some(ServerHopOutcome::Panicked(_)) => {
             if !head_committed.load(Ordering::Acquire) {
                 let mut response =
@@ -2717,6 +2788,282 @@ where
     };
     let _ = response_write.close_transport(&mut io).await;
     result.map(|()| state)
+}
+
+async fn execute_legacy_produced<F, Fut, T>(
+    handler: Arc<F>,
+    mut io: T,
+    mut read_buffer: BytesMut,
+    execution: ProducedRequestExecution,
+) -> Result<(T, ProducedHopOutcome), HttpError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Http1ProducedResponse> + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let config = execution.streaming.request.clone();
+    let cx = config.connection.as_ref().expect("produced connection context");
+    let region_name = match execution.policy {
+        ProducedResponsePolicy::Sse => "h1-sse",
+        ProducedResponsePolicy::Generic => "h1-produced",
+    };
+    let region = ServerRequestRegion::mint_from_connection(
+        region_name, config.budget, config.started_at, cx,
+    );
+    let request_cx = region.cx().clone();
+    let flow = execute_produced_request_flow(
+        &request_cx, &mut io, &mut read_buffer, handler, execution, false,
+    );
+    let hop = race_force_close(
+        config.shutdown.as_ref(),
+        region.run_with_protocol_drain(
+            config.source, Some(cx.clone()), config.drain_grace, flow,
+        ),
+    )
+    .await;
+    Ok((io, hop))
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_produced_request_flow<F, Fut, T>(
+    request_cx: &Cx,
+    io: &mut T,
+    read_buffer: &mut BytesMut,
+    handler: Arc<F>,
+    execution: ProducedRequestExecution,
+    defer_completion: bool,
+) -> Result<ProducedCompletion, HttpError>
+where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync,
+    Fut: Future<Output = Http1ProducedResponse> + Send,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let ProducedRequestExecution { streaming, policy, head_committed } = execution;
+    let config = streaming.config;
+    let shutdown_signal = streaming.request.shutdown;
+    let request_version = streaming.head.version;
+    let request_method = streaming.head.method.clone();
+    // The actual task context supplies the timer. Keep committed-frame and
+    // finished-sender ordering under the enclosing protocol's cancellation
+    // boundary; connection cancellation gates final publication after close.
+    let response_write = ResponseWritePolicy::new(config.idle_timeout, shutdown_signal.as_ref());
+    #[cfg(not(target_arch = "wasm32"))]
+    let (writer, body) = if defer_completion {
+        use crate::http::h1::stream::IncomingBodyAdmissionError;
+        match IncomingRequestBody::channel_with_limits_checked(
+            request_cx,
+            streaming.body_kind,
+            config.incoming_body_frame_capacity,
+            config.incoming_body_queued_bytes,
+            u64::try_from(config.max_body_size).unwrap_or(u64::MAX),
+        ) {
+            Ok(channel) => channel,
+            Err(error) => {
+                let mut refusal = match error {
+                    IncomingBodyAdmissionError::Policy(error) => {
+                        incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
+                            hop_error_response(request_version, 413, "request body exceeds the configured limit")
+                        })
+                    }
+                    IncomingBodyAdmissionError::Cancelled { kind }
+                        if matches!(kind, CancelKind::Deadline | CancelKind::Timeout) =>
+                    {
+                        hop_error_response(request_version, 503, HTTP_DEADLINE_EXHAUSTED_DIAGNOSTIC)
+                    }
+                    IncomingBodyAdmissionError::Cancelled { .. } => {
+                        return Err(HttpError::BodyCancelled);
+                    }
+                    IncomingBodyAdmissionError::Runtime(_)
+                    | IncomingBodyAdmissionError::RuntimeRequired => {
+                        hop_error_response(request_version, 503, "request body admission unavailable")
+                    }
+                };
+                add_connection_close(&mut refusal);
+                if request_method == Method::Head {
+                    suppress_response_body_for_head(&mut refusal);
+                }
+                return Ok(ProducedCompletion::Buffered(refusal));
+            }
+        }
+    } else {
+        IncomingRequestBody::channel_with_limits(
+            request_cx,
+            streaming.body_kind,
+            config.incoming_body_frame_capacity,
+            config.incoming_body_queued_bytes,
+        )
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (writer, body) = IncomingRequestBody::channel_with_limits(
+        request_cx,
+        streaming.body_kind,
+        config.incoming_body_frame_capacity,
+        config.incoming_body_queued_bytes,
+    );
+    let request = StreamingServerRequest {
+        head: streaming.head,
+        peer_addr: streaming.peer_addr,
+        body,
+    };
+    let handler = handler(request_cx.clone(), request);
+    let handler = async move { Some(handler.await) };
+    async {
+        let body_driver = drive_incoming_body(
+            request_cx,
+            io,
+            read_buffer,
+            writer.max_body_size(u64::try_from(config.max_body_size).unwrap_or(u64::MAX)),
+            &config,
+        );
+        let (produced, writer) = match join_streaming_handler_and_body(
+            request_cx,
+            handler,
+            body_driver,
+            &config,
+            shutdown_signal.as_ref(),
+        )
+        .await
+        {
+            Ok(Some(joined)) => joined,
+            Ok(None) => {
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "request handler ended before synchronized body EOF",
+                )));
+            }
+            Err(body_error) => {
+                record_incoming_body_failure(&body_error);
+                // br-asupersync-hw83se: mirror the buffered path — a
+                // DrainLimitExceeded body error (mapped to None by
+                // incoming_body_failure_response) still owes the client an
+                // explicit 413 + close rather than a bare I/O error.
+                let refusal =
+                    incoming_body_failure_response(request_version, &body_error).or_else(|| {
+                        matches!(body_error, IncomingBodyError::DrainLimitExceeded { .. }).then(
+                            || {
+                                hop_error_response(
+                                    request_version,
+                                    413,
+                                    "[ASUP-E505] request body exceeds the configured limit",
+                                )
+                            },
+                        )
+                    });
+                if let Some(mut response) = refusal {
+                    add_connection_close(&mut response);
+                    if request_method == Method::Head {
+                        suppress_response_body_for_head(&mut response);
+                    }
+                    return write_or_defer_produced_response(
+                        request_cx, io, response, response_write, &head_committed, defer_completion,
+                    )
+                    .await;
+                }
+                return Err(HttpError::Io(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    body_error,
+                )));
+            }
+        };
+        // br-asupersync-hw83se: an unread-body drain overrun owes the client a
+        // status before the (unreusable) connection closes, instead of dropping
+        // it and returning an I/O error. incoming_body_failure_response maps
+        // DrainTimeout to 408 but DrainLimitExceeded to None, so fall back to an
+        // explicit 413 + Connection: close. The produced streaming body is
+        // intentionally not started.
+        if let Err(error) = validate_unread_drain(writer.drain_progress(), &config) {
+            record_incoming_body_failure(&error);
+            let mut response =
+                incoming_body_failure_response(request_version, &error).unwrap_or_else(|| {
+                    hop_error_response(
+                        request_version,
+                        413,
+                        "[ASUP-E505] request body exceeds the configured limit",
+                    )
+                });
+            add_connection_close(&mut response);
+            if request_method == Method::Head {
+                suppress_response_body_for_head(&mut response);
+            }
+            return write_or_defer_produced_response(
+                request_cx, io, response, response_write, &head_committed, defer_completion,
+            )
+            .await;
+        }
+
+        let rejected_method = match policy {
+            ProducedResponsePolicy::Sse => {
+                request_method != Method::Get && request_method != Method::Head
+            }
+            ProducedResponsePolicy::Generic => request_method == Method::Connect,
+        };
+        if rejected_method {
+            let message = match policy {
+                ProducedResponsePolicy::Sse => "live SSE requires GET or HEAD",
+                ProducedResponsePolicy::Generic => {
+                    "generic produced responses do not support CONNECT tunnels"
+                }
+            };
+            let mut response = hop_error_response(request_version, 405, message);
+            if policy == ProducedResponsePolicy::Sse {
+                response
+                    .headers
+                    .push(("Allow".to_owned(), "GET, HEAD".to_owned()));
+            }
+            add_connection_close(&mut response);
+            return write_or_defer_produced_response(
+                request_cx, io, response, response_write, &head_committed, defer_completion,
+            )
+            .await;
+        }
+
+        if request_version != Version::Http11 {
+            let message = match policy {
+                ProducedResponsePolicy::Sse => "live SSE requires HTTP/1.1 chunked framing",
+                ProducedResponsePolicy::Generic => {
+                    "generic produced responses require HTTP/1.1 framing"
+                }
+            };
+            let mut response = hop_error_response(request_version, 505, message);
+            add_connection_close(&mut response);
+            if request_method == Method::Head {
+                suppress_response_body_for_head(&mut response);
+            }
+            return write_or_defer_produced_response(
+                request_cx, io, response, response_write, &head_committed, defer_completion,
+            )
+            .await;
+        }
+
+        if request_method == Method::Head {
+            let response = match policy {
+                ProducedResponsePolicy::Sse => live_sse_head_only_response(request_version),
+                ProducedResponsePolicy::Generic => produced_head_only_response(produced)?,
+            };
+            return write_or_defer_produced_response(
+                request_cx, io, response, response_write, &head_committed, defer_completion,
+            )
+            .await;
+        }
+
+        let mut produced = produced;
+        let body_kind = produced.body_kind();
+        validate_produced_response_head(produced.head_mut(), body_kind)?;
+        let (response, producer) = produced.into_parts(request_cx);
+        drive_produced_response(
+            request_cx,
+            io,
+            response,
+            producer,
+            policy == ProducedResponsePolicy::Generic,
+            config.request_drain_grace,
+            response_write,
+            &head_committed,
+            defer_completion,
+        )
+        .await
+    }
+    .await
 }
 
 fn connection_now(cx: &Cx) -> crate::types::Time {
@@ -2968,6 +3315,7 @@ fn record_h1_produced_error(cx: &Cx, error_value: &HttpError, cause: &'static st
     record_h1_body_diagnostic(WebBodyDiagnostic::ResponseProducerFailure, cause);
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn drive_produced_response<T>(
     cx: &Cx,
     io: &mut T,
@@ -2977,38 +3325,47 @@ async fn drive_produced_response<T>(
     drain_grace: Duration,
     response_write: ResponseWritePolicy<'_>,
     head_committed: &AtomicBool,
-) -> Result<(), HttpError>
+    defer_completion: bool,
+) -> Result<ProducedCompletion, HttpError>
 where
     T: AsyncWrite + Unpin,
 {
     validate_produced_response_head(&mut response.head, response.body.kind())?;
     let encoded_head = response.head.serialize();
     let mut producer_result = None;
-
-    // Once this write is attempted, a partial head may be visible. Every
-    // subsequent failure therefore closes the connection without a fallback
-    // status or a clean chunk terminator.
-    head_committed.store(true, Ordering::Release);
-    if let Err(error) = write_all_within_idle(io, encoded_head.as_ref(), response_write).await {
-        record_h1_body_diagnostic(
-            WebBodyDiagnostic::ClientAbort,
-            "client transport failed while writing the response head",
-        );
-        drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
-            .await;
-        return Err(HttpError::Io(error));
-    }
-    if let Err(error) = flush_within_idle(io, response_write).await {
-        record_h1_body_diagnostic(
-            WebBodyDiagnostic::ClientAbort,
-            "client transport failed while flushing the response head",
-        );
-        drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
-            .await;
-        return Err(HttpError::Io(error));
-    }
-
     let body_kind = response.body.kind();
+    let mut remaining = body_kind.exact_size();
+    let defer_head = defer_completion && body_kind.is_empty();
+    let mut terminal_bytes = None;
+
+    if defer_head {
+        // An empty fixed body completes with its head, so that head belongs
+        // behind the same retirement barrier as a final chunk or DATA tail.
+        terminal_bytes = Some(encoded_head);
+    } else {
+        // Once attempted, a partial head may be visible. Later failures must
+        // close without a fallback status or successful message boundary.
+        head_committed.store(true, Ordering::Release);
+        if let Err(error) = write_all_within_idle(io, encoded_head.as_ref(), response_write).await {
+            record_h1_body_diagnostic(
+                WebBodyDiagnostic::ClientAbort,
+                "client transport failed while writing the response head",
+            );
+            drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
+                .await;
+            return Err(HttpError::Io(error));
+        }
+        if let Err(error) = flush_within_idle(io, response_write).await {
+            record_h1_body_diagnostic(
+                WebBodyDiagnostic::ClientAbort,
+                "client transport failed while flushing the response head",
+            );
+            drain_producer_after_write_error(cx, producer.as_mut(), &mut producer_result, drain_grace)
+                .await;
+            return Err(HttpError::Io(error));
+        }
+    }
+
     let mut encoder = ChunkedEncoder::new();
     loop {
         // A body producer can park without ever yielding a frame. Socket
@@ -3074,10 +3431,21 @@ where
                 return Err(HttpError::BodyChannelClosed);
             }
             if !body_kind.is_chunked() {
-                return Ok(());
+                if defer_completion {
+                    if remaining != Some(0) {
+                        return Err(HttpError::BodyChannelClosed);
+                    }
+                    return terminal_bytes
+                        .map(ProducedCompletion::Bytes)
+                        .ok_or(HttpError::BodyChannelClosed);
+                }
+                return Ok(ProducedCompletion::Complete);
             }
             let mut final_chunk = BytesMut::new();
             encoder.finalize(None, &mut final_chunk);
+            if defer_completion {
+                return Ok(ProducedCompletion::Bytes(final_chunk));
+            }
             if let Err(error) = write_all_within_idle(io, final_chunk.as_ref(), response_write).await {
                 record_h1_body_diagnostic(
                     WebBodyDiagnostic::ClientAbort,
@@ -3092,7 +3460,7 @@ where
                 );
                 return Err(HttpError::Io(error));
             }
-            return Ok(());
+            return Ok(ProducedCompletion::Complete);
         };
 
         let frame = match frame {
@@ -3172,6 +3540,9 @@ where
                 }
                 debug_assert!(sender.is_finished());
                 encoder.finalize(Some(&trailers), &mut encoded_frame);
+                if defer_completion {
+                    return Ok(ProducedCompletion::Bytes(encoded_frame));
+                }
 
                 if let Err(error) =
                     write_all_within_idle(io, encoded_frame.as_ref(), response_write).await
@@ -3197,7 +3568,23 @@ where
                     );
                     return Err(HttpError::Io(error));
                 }
-                return Ok(());
+                return Ok(ProducedCompletion::Complete);
+            }
+        }
+        if defer_completion && let Some(remaining) = remaining.as_mut() {
+            let length = u64::try_from(encoded_frame.len()).map_err(|_| HttpError::BodyTooLarge)?;
+            *remaining = remaining.checked_sub(length).ok_or(HttpError::BadContentLength)?;
+            if !encoded_frame.is_empty() && *remaining == 0 {
+                // Retain only the final bounded transport frame. The producer,
+                // sender, and any obligations settle before these plain bytes
+                // leave the request task. No extra DATA frame is buffered.
+                terminal_bytes = Some(encoded_frame);
+                crate::runtime::yield_now().await;
+                continue;
+            }
+            if encoded_frame.is_empty() {
+                crate::runtime::yield_now().await;
+                continue;
             }
         }
         // Do not poll application production while this frame is waiting for
@@ -3218,7 +3605,7 @@ where
         match write_result {
             Ok(()) => {
                 if body_kind.is_chunked() && encoder.is_finished() {
-                    return Ok(());
+                    return Ok(ProducedCompletion::Complete);
                 }
                 // A fast in-memory or kernel-buffered writer can otherwise
                 // keep an infinite source inside one poll forever. Yield at

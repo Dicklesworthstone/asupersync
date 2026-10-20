@@ -712,6 +712,41 @@ where
         self.run_with(runtime, spawn_sse_connection::<F, Fut, S>)
             .await
     }
+
+    /// Serve live SSE with a real request task and child region per response.
+    ///
+    /// The handler, incoming-body driver, SSE source, and response writes run
+    /// under the request's task context. Successful terminal framing waits
+    /// for that task, its descendants, and its finalizers to retire. Listener
+    /// drain includes the complete request lifetime; cancellation after the
+    /// response starts closes the stream without a successful terminator.
+    /// Each produced response uses the established one-response connection
+    /// policy of [`Http1StreamingServer::serve_sse_owned`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_sse_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_sse_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F> Http1Listener<F> {
@@ -1016,6 +1051,41 @@ where
     pub async fn run_produced(self, runtime: &RuntimeHandle) -> io::Result<ShutdownStats> {
         self.run_with(runtime, spawn_produced_connection::<F, Fut>)
             .await
+    }
+
+    /// Serve framed responses in actual request tasks and child regions.
+    ///
+    /// Incoming-body delivery, the handler, response producer, and wire
+    /// progress share the request task's capability context. Successful final
+    /// framing is withheld until the request subtree closes, without buffering
+    /// the whole response. A cancellation or failed finalizer after response
+    /// admission closes the connection without certifying a complete response.
+    /// This keeps the established one-response connection policy and accepts
+    /// the listener's TCP, Unix, and handed-off transports.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn run_produced_owned_in(self, cx: &Cx) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                spawner
+                    .spawn(move |connection_cx| {
+                        serve_owned_produced_connection(
+                            connection_cx,
+                            stream,
+                            guard,
+                            handler,
+                            config,
+                            shutdown,
+                            in_flight,
+                        )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
     }
 }
 
@@ -1972,6 +2042,69 @@ async fn serve_owned_streaming_connection<F, Fut>(
     .with_in_flight_requests(in_flight_requests);
     if let Err(error) = server.serve_owned_with_peer_addr(&cx, stream, peer_addr).await {
         cx.trace(&format!("h1_owned_streaming_connection_failed: {error}"));
+    }
+    let _ = cx.checkpoint();
+}
+
+/// Serve a native connection with an owned produced-response exchange.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_produced_connection<F, Fut>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1ProducedResponse> + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config_produced(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server
+        .serve_produced_owned_with_peer_addr(&cx, stream, peer_addr)
+        .await
+    {
+        cx.trace(&format!("h1_owned_produced_connection_failed: {error}"));
+    }
+    let _ = cx.checkpoint();
+}
+
+/// Serve a native connection with an owned live-SSE exchange.
+#[cfg(not(target_arch = "wasm32"))]
+async fn serve_owned_sse_connection<F, Fut, S>(
+    cx: Cx,
+    stream: H1Stream,
+    guard: ConnectionGuard,
+    handler: Arc<F>,
+    config: Http1Config,
+    shutdown_signal: ShutdownSignal,
+    in_flight_requests: Arc<AtomicUsize>,
+) where
+    F: Fn(Cx, StreamingServerRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Http1SseResponse<S>> + Send + 'static,
+    S: StreamingSseSource + Send + 'static,
+{
+    let _guard = guard;
+    let peer_addr = stream.peer_addr();
+    let server = Http1StreamingServer::with_config_sse(
+        move |request_cx, request| handler(request_cx, request),
+        config,
+    )
+    .with_shutdown_signal(shutdown_signal)
+    .with_in_flight_requests(in_flight_requests);
+    if let Err(error) = server
+        .serve_sse_owned_with_peer_addr(&cx, stream, peer_addr)
+        .await
+    {
+        cx.trace(&format!("h1_owned_sse_connection_failed: {error}"));
     }
     let _ = cx.checkpoint();
 }

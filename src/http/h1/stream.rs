@@ -34,6 +34,13 @@ use crate::http::h1::codec::{
 };
 use crate::types::CancelKind;
 
+#[cfg(not(target_arch = "wasm32"))]
+mod obligation;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use obligation::IncomingBodyAdmissionError;
+#[cfg(not(target_arch = "wasm32"))]
+use obligation::IncomingBodyObligation;
+
 /// Chunk-extension bytes a request body may carry beyond its data bytes.
 const CHUNK_EXTENSION_ALLOWANCE_BYTES: u64 = 16 * 1024;
 const DEFAULT_MAX_BODY_SIZE: u64 = 16 * 1024 * 1024;
@@ -756,6 +763,45 @@ impl IncomingRequestBody {
         (writer, body)
     }
 
+    /// Create a body only after transport and caller-selected static policy
+    /// admission, with a checked credit owned by the actual request task.
+    ///
+    /// The writer must remain in that task until synchronized EOF or a
+    /// terminal failure. Moving the consumer to a descendant does not move
+    /// the writer's holder liability. Legacy constructors remain untracked.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn channel_with_limits_checked(
+        cx: &Cx,
+        kind: BodyKind,
+        frame_capacity: usize,
+        queued_byte_limit: usize,
+        max_body_size: u64,
+    ) -> Result<(IncomingRequestBodyWriter, Self), IncomingBodyAdmissionError> {
+        if let Some(actual) = kind.exact_size()
+            && actual > max_body_size
+        {
+            return Err(IncomingBodyAdmissionError::Policy(
+                IncomingBodyError::BodyTooLarge {
+                    actual: Some(actual),
+                    limit: max_body_size,
+                },
+            ));
+        }
+        let mut obligation = IncomingBodyObligation::admit(cx)?;
+        let (mut writer, body) =
+            Self::channel_with_limits(cx, kind, frame_capacity, queued_byte_limit);
+        body.tighten_max_body_size(max_body_size);
+        writer.max_body_size = max_body_size;
+        if kind.is_empty() {
+            // A validated zero-length H1 body is already synchronized. It
+            // still passes checked admission and settles that one credit.
+            obligation.commit();
+        } else {
+            writer.obligation = Some(obligation);
+        }
+        Ok((writer, body))
+    }
+
     /// Adapt already decoded protocol frames without parsing HTTP/1 bytes.
     ///
     /// Only the protocol driver's explicit `finish` publishes EOF. A declared
@@ -1054,13 +1100,8 @@ impl Body for IncomingRequestBody {
                 // cancelling its owned handler. Preserve that earlier cause
                 // instead of turning a concrete transport failure into the
                 // subsequent region's generic cancellation classification.
-                #[cfg(all(
-                    not(target_arch = "wasm32"),
-                    any(feature = "http2-streaming", all(feature = "http3", feature = "tls"))
-                ))]
-                let error = if self.framed
-                    && IncomingProducerTerminal::load(&self.shared.producer_terminal)
-                        == IncomingProducerTerminal::Failed
+                let error = if IncomingProducerTerminal::load(&self.shared.producer_terminal)
+                    == IncomingProducerTerminal::Failed
                 {
                     self.shared.terminal_error.lock().clone().unwrap_or(error)
                 } else {
@@ -1610,6 +1651,8 @@ impl Drop for FramedIncomingRequestBodyWriter {
 pub struct IncomingRequestBodyWriter {
     sender: Option<mpsc::Sender<QueuedIncomingFrame>>,
     shared: Arc<IncomingBodyShared>,
+    #[cfg(not(target_arch = "wasm32"))]
+    obligation: Option<IncomingBodyObligation>,
     buffer: BytesMut,
     kind: BodyKind,
     remaining: u64,
@@ -1658,6 +1701,8 @@ impl IncomingRequestBodyWriter {
         let mut writer = Self {
             sender: Some(sender),
             shared,
+            #[cfg(not(target_arch = "wasm32"))]
+            obligation: None,
             buffer: BytesMut::with_capacity(8192),
             kind,
             remaining,
@@ -1728,7 +1773,7 @@ impl IncomingRequestBodyWriter {
     /// These bytes belong to the next pipelined request and must be restored
     /// to the connection decoder before HTTP/1 reuse.
     pub fn take_remainder(&mut self) -> BytesMut {
-        if self.done {
+        if self.synchronized_eof() {
             std::mem::take(&mut self.buffer)
         } else {
             BytesMut::new()
@@ -1745,8 +1790,14 @@ impl IncomingRequestBodyWriter {
             bytes: self
                 .discarded_bytes
                 .saturating_add(self.shared.abandoned_bytes.load(Ordering::Acquire)),
-            synchronized_eof: self.done,
+            synchronized_eof: self.synchronized_eof(),
         }
+    }
+
+    fn synchronized_eof(&self) -> bool {
+        self.done
+            && IncomingProducerTerminal::load(&self.shared.producer_terminal)
+                == IncomingProducerTerminal::Finished
     }
 
     /// Parses and discards unread wire bytes after the consumer was dropped.
@@ -1930,23 +1981,42 @@ impl IncomingRequestBodyWriter {
     }
 
     fn finish_sender(&mut self) {
-        let _ = self.shared.producer_terminal.compare_exchange(
-            IncomingProducerTerminal::Open as u8,
-            IncomingProducerTerminal::Finished as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let completed = self
+            .shared
+            .producer_terminal
+            .compare_exchange(
+                IncomingProducerTerminal::Open as u8,
+                IncomingProducerTerminal::Finished as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok();
+        #[cfg(not(target_arch = "wasm32"))]
+        if completed
+            && let Some(mut obligation) = self.obligation.take()
+        {
+            obligation.commit();
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = completed;
         self.sender.take();
     }
 
     fn fail_sender(&mut self, error: IncomingBodyError) {
-        *self.shared.terminal_error.lock() = Some(error);
-        let _ = self.shared.producer_terminal.compare_exchange(
-            IncomingProducerTerminal::Open as u8,
-            IncomingProducerTerminal::Failed as u8,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        // The sole mutable writer selects the first terminal cause. Later
+        // cancellation or drop must not replace a concrete framing failure.
+        if IncomingProducerTerminal::load(&self.shared.producer_terminal)
+            == IncomingProducerTerminal::Open
+        {
+            *self.shared.terminal_error.lock() = Some(error.clone());
+            self.shared
+                .producer_terminal
+                .store(IncomingProducerTerminal::Failed as u8, Ordering::Release);
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(mut obligation) = self.obligation.take() {
+                obligation.abort(&error);
+            }
+        }
         self.done = true;
         self.sender.take();
     }
@@ -2217,14 +2287,21 @@ impl IncomingRequestBodyWriter {
 
 impl Drop for IncomingRequestBodyWriter {
     fn drop(&mut self) {
-        if self.sender.is_some() {
-            *self.shared.terminal_error.lock() = Some(IncomingBodyError::SourceDisconnected);
-            let _ = self.shared.producer_terminal.compare_exchange(
-                IncomingProducerTerminal::Open as u8,
-                IncomingProducerTerminal::Failed as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
+        #[cfg(not(target_arch = "wasm32"))]
+        let obligation_open = self.obligation.is_some();
+        #[cfg(target_arch = "wasm32")]
+        let obligation_open = false;
+        if self.sender.is_some() || obligation_open {
+            #[cfg(not(target_arch = "wasm32"))]
+            let error = self.obligation.as_ref().map_or(
+                IncomingBodyError::SourceDisconnected,
+                IncomingBodyObligation::abandoned_error,
             );
+            #[cfg(target_arch = "wasm32")]
+            let error = IncomingBodyError::SourceDisconnected;
+            // Consumer abandonment has already removed `sender`; the
+            // protocol credit must survive until this drain-or-close edge.
+            self.fail_sender(error);
         }
     }
 }
@@ -3354,3 +3431,7 @@ impl StreamingResponse {
 #[cfg(test)]
 #[path = "stream_inline_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "stream_obligation_inline_tests.rs"]
+mod obligation_tests;
