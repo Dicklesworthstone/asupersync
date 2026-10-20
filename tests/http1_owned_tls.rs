@@ -309,6 +309,7 @@ async fn silent_handshake_retires(cx: Cx) {
         // No ClientHello is sent and neither handshake nor idle timeout is
         // enabled. Only cancellation or force-close can release this slot.
         if force_close {
+            assert!(manager.begin_drain(Duration::from_secs(5)));
             assert!(manager.begin_force_close());
         } else {
             owner.cancel(CancelReason::user("cancel owned HTTPS service region")).unwrap();

@@ -699,6 +699,63 @@ where
         )
         .await
     }
+
+    /// Serve live incoming request bodies over HTTPS in owned request tasks.
+    ///
+    /// This has [`Self::run_streaming_owned_in`]'s bounded body delivery and
+    /// request-subtree retirement guarantees. TLS handshakes use the acceptor's
+    /// timeout or the HTTP idle timeout, admit only HTTP/1.1 ALPN (or absent
+    /// ALPN), and participate in connection capacity and cancellation. Buffered
+    /// responses and TLS reuse wait for the complete request subtree to close.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_streaming_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_owned_with_peer_addr(&connection_cx, stream, peer_addr)
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_streaming_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
 }
 
 impl<F, Fut, S> Http1Listener<F>
@@ -741,6 +798,63 @@ where
                             shutdown,
                             in_flight,
                         )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
+    /// Serve owned live SSE responses over HTTPS.
+    ///
+    /// The SSE source and body writes run in an actual request task, with
+    /// successful terminal framing released only after request-subtree close.
+    /// The acceptor controls TLS policy; non-HTTP/1.1 ALPN is refused before
+    /// dispatch, and handshake cancellation releases the connection slot.
+    /// Request cancellation after response admission truncates the stream.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_sse_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config_sse(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_sse_owned_with_peer_addr(&connection_cx, stream, peer_addr)
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_sse_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
                     })
                     .map(ConnectionTask::Owned)
             },
@@ -1081,6 +1195,66 @@ where
                             shutdown,
                             in_flight,
                         )
+                    })
+                    .map(ConnectionTask::Owned)
+            },
+        )
+        .await
+    }
+
+    /// Serve owned framed response producers over HTTPS.
+    ///
+    /// This combines [`Self::run_produced_owned_in`]'s request ownership and
+    /// final-framing barrier with bounded, cancellation-aware TLS handshakes.
+    /// Only HTTP/1.1 (or absent) ALPN reaches the handler. Connection accounting
+    /// covers both the handshake and the complete produced-response lifetime.
+    #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
+    pub async fn run_produced_tls_owned_in(
+        self,
+        cx: &Cx,
+        acceptor: TlsAcceptor,
+    ) -> io::Result<ShutdownStats> {
+        let _ = crate::http::h1::server::OwnedRequests::new(cx.clone())
+            .map_err(io::Error::other)?;
+        let spawner = cx.clone();
+        self.run_with_spawner(
+            Some(cx.clone()),
+            move |stream, guard, handler, config, shutdown, in_flight| {
+                let acceptor = acceptor.clone();
+                spawner
+                    .spawn(move |connection_cx| async move {
+                        let _guard = guard;
+                        let peer_addr = stream.peer_addr();
+                        let Some(stream) = accept_http1_tls(
+                            stream,
+                            acceptor,
+                            config.idle_timeout,
+                            &shutdown,
+                            Some(connection_cx.clone()),
+                        )
+                        .await
+                        else {
+                            return;
+                        };
+                        let server = Http1StreamingServer::with_config_produced(
+                            move |request_cx, request| handler(request_cx, request),
+                            config,
+                        )
+                        .with_shutdown_signal(shutdown)
+                        .with_in_flight_requests(in_flight);
+                        if let Err(error) = server
+                            .serve_produced_owned_with_peer_addr(
+                                &connection_cx,
+                                stream,
+                                peer_addr,
+                            )
+                            .await
+                        {
+                            connection_cx.trace(&format!(
+                                "h1_owned_produced_tls_connection_failed: {error}"
+                            ));
+                        }
+                        let _ = connection_cx.checkpoint();
                     })
                     .map(ConnectionTask::Owned)
             },
