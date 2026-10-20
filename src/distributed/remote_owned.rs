@@ -502,7 +502,7 @@ pub fn spawn_remote_owned(
     Ok(RemoteRunHandle { task, deadline })
 }
 
-fn prepare_run(
+pub(crate) fn prepare_run(
     cx: &Cx,
     config: &RemoteRunConfig,
 ) -> Result<(TimerDriverHandle, Time), RemoteRunError> {

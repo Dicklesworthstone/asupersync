@@ -32,6 +32,12 @@ use std::sync::Arc;
 #[cfg(all(feature = "tls", not(target_arch = "wasm32")))]
 use std::time::Duration;
 
+mod owned;
+pub use owned::{
+    TypedRemoteRunError, TypedRemoteRunHandle, TypedRemoteRunReply, TypedRemoteRunReport,
+    spawn_remote_typed_owned,
+};
+
 const CODEC_VERSION: u16 = 1;
 const MAX_COMPUTATION_NAME_BYTES: usize = 255;
 

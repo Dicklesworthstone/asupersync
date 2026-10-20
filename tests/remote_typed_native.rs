@@ -5,6 +5,10 @@
 #![recursion_limit = "256"]
 
 use asupersync::channel::oneshot;
+use asupersync::cx::ChildRegionSpec;
+use asupersync::distributed::remote_owned::{
+    RemoteLeaseSettlement, RemoteRunConfig, RemoteRunHandleError, RemoteRunTrigger,
+};
 use asupersync::remote::{
     AdmittedNativeRemoteRuntime, ComputationName, IdempotencyKey, NativeRemoteAdmissionLimits,
     NativeRemotePeerAdmissionLimits, NativeRemoteRoute, NativeRemoteRuntime, NativeRemoteRuntimeConfig,
@@ -14,16 +18,16 @@ use asupersync::remote::{
     RemoteError, RemoteInput, RemoteOutcome, RemotePeerAdmissionPolicy, RemoteProtocolVersion,
     RemoteServiceWireLimits, RemoteServiceWireRequest, RemoteServiceWireResponse, RemoteTaskId,
     SpawnRequest, TypedRemoteComputation, TypedRemoteError, TypedRemoteLimits, TypedRemoteOutcome,
-    spawn_remote, spawn_remote_typed,
+    TypedRemoteStage, spawn_remote, spawn_remote_typed, spawn_remote_typed_owned,
 };
-use asupersync::runtime::{RootDrainOutcome, RuntimeBuilder, RuntimeHandle, TaskHandle};
+use asupersync::runtime::{JoinError, RootDrainOutcome, RuntimeBuilder, RuntimeHandle, TaskHandle};
 use asupersync::sync::Notify;
 use asupersync::tls::{
     Certificate, CertificateChain, CertificatePin, CertificatePinSet, ClientAuth, PrivateKey,
     RootCertStore, TlsAcceptorBuilder, TlsConnectorBuilder,
 };
 use asupersync::{Cx, Outcome};
-use asupersync::types::CancelReason;
+use asupersync::types::{CancelKind, CancelReason};
 use std::future::{Future, poll_fn};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::pin::pin;
@@ -440,6 +444,186 @@ fn dropping_typed_native_work_retains_credit_until_remote_cleanup_finishes() {
         assert!(fixture.gate.retired.load(Ordering::Acquire));
         let mut healthy = next.commit(&cx, reservation, LEASE).unwrap();
         assert!(matches!(healthy.join(&cx).await, Outcome::Ok(TypedRemoteOutcome::Success(13))));
+        fixture.finish(&cx).await;
+    });
+}
+
+fn owned_config() -> RemoteRunConfig {
+    RemoteRunConfig {
+        timeout: WAIT,
+        child: ChildRegionSpec::inherit(),
+    }
+}
+
+#[test]
+fn typed_owned_native_success_and_application_failure_retain_actual_close_receipts() {
+    native(|cx, runtime| async move {
+        let mut fixture = Fixture::new(&cx, runtime).await;
+        let remote = fixture.remote_cx(&cx);
+        let prepared = PreparedTypedRemoteCall::<Add>::encode(&(20, 22), limits()).unwrap();
+        let mut call = prepared.spawn_owned(&remote, NodeId::new("worker"), owned_config()).unwrap();
+        assert_ne!(call.local_task_id(), cx.task_id());
+        let report = call.join(&cx).await.unwrap();
+        assert!(call.is_finished());
+        assert!(report.is_success(), "{report:?}");
+        assert_ne!(report.close.as_ref().unwrap().region_id, cx.region_id());
+        assert!(matches!(report.close.as_ref().unwrap().outcome, Outcome::Ok(())));
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Committed);
+        assert!(reply.cancellation.is_none());
+        assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Success(42))));
+        assert!(matches!(call.try_join(),
+            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+
+        let mut failed = spawn_remote_typed_owned::<Add>(
+            &remote, NodeId::new("worker"), &(u64::MAX, 0), limits(), owned_config(),
+        ).unwrap();
+        let report = failed.join(&cx).await.unwrap();
+        assert!(failed.is_finished());
+        assert!(!report.is_success());
+        assert!(report.close.is_ok());
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+        assert!(matches!(reply.outcome,
+            Outcome::Ok(TypedRemoteOutcome::Failed(message)) if message == "declared application failure"));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        fixture.finish(&cx).await;
+    });
+}
+
+#[test]
+fn typed_owned_response_limit_refuses_decoding_after_retirement_and_preserves_protocol_commit() {
+    native(|cx, runtime| async move {
+        let mut fixture = Fixture::new(&cx, runtime).await;
+        let remote = fixture.remote_cx(&cx);
+        let mut call = spawn_remote_typed_owned::<Add>(
+            &remote,
+            NodeId::new("worker"),
+            &(21, 21),
+            TypedRemoteLimits::new(1024, 1),
+            owned_config(),
+        ).unwrap();
+        let report = call.join(&cx).await.unwrap();
+        assert!(call.is_finished(), "codec failure cannot discard the owner retirement barrier");
+        assert!(!report.is_success());
+        assert!(matches!(report.trigger, RemoteRunTrigger::Finished));
+        assert!(report.cancel_error.is_none());
+        let close = report.close.unwrap();
+        assert_ne!(close.region_id, cx.region_id());
+        assert!(matches!(close.outcome, Outcome::Ok(())));
+        assert!(close.cleanup_outcome.as_ref().is_none_or(|value| matches!(value, Outcome::Ok(()))));
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Committed,
+            "application decoding must not rewrite acknowledged remote execution");
+        assert!(reply.cancellation.is_none());
+        assert!(matches!(reply.outcome, Outcome::Err(TypedRemoteError::LimitExceeded {
+            stage: TypedRemoteStage::Response, limit: 1,
+        })));
+        assert!(matches!(call.try_join(),
+            Err(RemoteRunHandleError::Join(JoinError::PolledAfterCompletion))));
+        let mut healthy = spawn_remote_typed_owned::<Add>(
+            &remote, NodeId::new("worker"), &(6, 7), limits(), owned_config(),
+        ).unwrap();
+        assert!(healthy.join(&cx).await.unwrap().is_success());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
+        fixture.finish(&cx).await;
+    });
+}
+
+#[test]
+fn typed_owned_parent_close_and_handle_drop_wait_for_inflight_remote_cleanup() {
+    native(|cx, runtime| async move {
+        for drop_handle in [false, true] {
+            let mut fixture = Fixture::new(&cx, runtime.clone()).await;
+            let remote = fixture.remote_cx(&cx);
+            let boundary = remote.open_child_region(ChildRegionSpec::inherit()).await.unwrap();
+            let mut call = Some(spawn_remote_typed_owned::<Wait>(
+                boundary.cx(), NodeId::new("worker"), &(), limits(), owned_config(),
+            ).unwrap());
+            // The typed result handle has never been polled. The production
+            // remote handler's actual Pending poll proves the work is live.
+            fixture.gate.wait(&fixture.gate.parked).await;
+            assert!(!call.as_ref().unwrap().is_finished());
+            if drop_handle {
+                drop(call.take());
+            }
+            let mut closing = Box::pin(boundary.close());
+            {
+                let mut cancelled = pin!(fixture.gate.wait(&fixture.gate.cancelled));
+                poll_fn(|task| {
+                    assert!(closing.as_mut().poll(task).is_pending(),
+                        "the region cannot close before the peer retires its handler");
+                    cancelled.as_mut().poll(task)
+                }).await;
+            }
+            assert!(!fixture.gate.retired.load(Ordering::Acquire));
+            assert_eq!(fixture.legacy.active_operations(), 1);
+            if let Some(call) = call.as_mut() {
+                assert!(call.try_join().unwrap().is_none());
+            }
+            fixture.gate.release();
+            if let Some(call) = call.as_mut() {
+                let report = call.join(&cx).await.unwrap();
+                assert!(call.is_finished());
+                assert!(!report.is_success());
+                assert!(matches!(report.trigger, RemoteRunTrigger::Cancelled(_)));
+                assert!(report.close.is_ok());
+                let reply = report.task.unwrap();
+                assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+                assert!(reply.cancellation.is_some());
+                assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Cancelled(_))));
+            }
+            closing.await.unwrap();
+            assert!(fixture.gate.retired.load(Ordering::Acquire));
+            assert!(!cx.is_cancel_requested(), "the enclosing test owner remains live");
+            fixture.finish(&cx).await;
+        }
+    });
+}
+
+#[test]
+fn typed_owned_cancelled_and_dropped_observations_preserve_the_later_cleanup_report() {
+    native(|cx, runtime| async move {
+        let mut fixture = Fixture::new(&cx, runtime).await;
+        let remote = fixture.remote_cx(&cx);
+        let mut call = spawn_remote_typed_owned::<Wait>(
+            &remote, NodeId::new("worker"), &(), limits(), owned_config(),
+        ).unwrap();
+        fixture.gate.wait(&fixture.gate.parked).await;
+        let observer = Cx::for_testing();
+        observer.cancel_with(CancelKind::User, Some("cancel only owned typed observation"));
+        {
+            let mut observation = pin!(call.join(&observer));
+            poll_fn(|task| {
+                assert!(observation.as_mut().poll(task).is_pending(),
+                    "owned join is an uninterruptible observation of retained cleanup");
+                Poll::Ready(())
+            }).await;
+        }
+        assert!(!fixture.gate.cancelled.load(Ordering::Acquire));
+        assert!(!call.is_finished());
+        {
+            let mut closing = pin!(call.close(&cx));
+            poll_fn(|task| {
+                assert!(closing.as_mut().poll(task).is_pending());
+                Poll::Ready(())
+            }).await;
+        }
+        // Dropping the close observation keeps its requested cancellation and
+        // the actual owner; it cannot turn unfinished remote cleanup terminal.
+        fixture.gate.wait(&fixture.gate.cancelled).await;
+        assert!(!fixture.gate.retired.load(Ordering::Acquire));
+        assert!(call.try_join().unwrap().is_none());
+        assert_eq!(fixture.legacy.active_operations(), 1);
+        fixture.gate.release();
+        let report = call.join(&cx).await.unwrap();
+        assert!(call.is_finished());
+        assert!(report.close.is_ok());
+        assert!(!report.is_success());
+        let reply = report.task.unwrap();
+        assert_eq!(reply.settlement, RemoteLeaseSettlement::Aborted);
+        assert!(matches!(reply.outcome, Outcome::Ok(TypedRemoteOutcome::Cancelled(_))));
+        assert!(fixture.gate.retired.load(Ordering::Acquire));
         fixture.finish(&cx).await;
     });
 }
