@@ -69,7 +69,9 @@ use std::time::Duration;
 mod queued;
 #[cfg(not(target_arch = "wasm32"))]
 pub use queued::{
-    OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES, OtlpExportQueueStats,
+    ManagedOtlpControl, ManagedOtlpError, ManagedOtlpExporter, ManagedOtlpOutcome,
+    ManagedOtlpReport, OTLP_EXPORT_QUEUE_MAX_BATCHES, OTLP_EXPORT_QUEUE_MAX_BYTES,
+    OtlpExportQueueStats,
 };
 
 // =============================================================================

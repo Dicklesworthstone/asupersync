@@ -1,10 +1,17 @@
-//! Bounded synchronous admission and caller-owned asynchronous OTLP delivery.
+//! Bounded synchronous admission and caller- or region-owned asynchronous OTLP delivery.
 
 // This split implementation intentionally uses its parent module's private
 // exporter machinery as one cohesive unit (as transport_rq/bonded.rs does).
 #[allow(clippy::wildcard_imports)]
 use super::*;
 use std::collections::VecDeque;
+
+#[path = "queued_managed.rs"]
+mod managed;
+pub use managed::{
+    ManagedOtlpControl, ManagedOtlpError, ManagedOtlpExporter, ManagedOtlpOutcome,
+    ManagedOtlpReport,
+};
 
 /// Maximum admitted batches, including the batch currently being delivered.
 pub const OTLP_EXPORT_QUEUE_MAX_BATCHES: usize = 64;
@@ -22,11 +29,12 @@ pub struct OtlpExportQueueStats {
     pub queued_batches: usize,
     /// Batches admitted but not yet retired, including the current request.
     pub retained_batches: usize,
-    /// Admitted snapshot and configuration string bytes.
+    /// Admitted snapshot/configuration string bytes and encoded trace bytes.
     pub retained_bytes: usize,
     /// Batches fully acknowledged by the collector.
     pub delivered_batches: u64,
-    /// Failed or abandoned delivery attempts. These are never requeued.
+    /// Failed or abandoned batches, including unattempted managed backlog.
+    /// These are never requeued.
     pub failed_batches: u64,
     /// Whether a caller currently owns the async consumer.
     pub consumer_active: bool,
@@ -42,6 +50,9 @@ pub(super) struct ExportQueue {
 struct QueueState {
     pending: VecDeque<Batch>,
     stats: OtlpExportQueueStats,
+    managed: bool,
+    sealed: bool,
+    aborted: bool,
 }
 
 #[derive(Debug)]
@@ -87,6 +98,9 @@ impl ExportQueue {
             .checked_add(config_bytes(&config)?)
             .ok_or_else(queue_full)?;
         let mut state = self.state.lock();
+        if state.sealed {
+            return Err(ExportError::new("otlp.queue.closed"));
+        }
         let retained = state
             .stats
             .retained_bytes
@@ -115,7 +129,7 @@ impl ExportQueue {
 
     fn consumer(&self) -> Result<Consumer<'_>, ExportError> {
         let mut state = self.state.lock();
-        if state.stats.consumer_active {
+        if state.stats.consumer_active || state.managed {
             return Err(ExportError::new("otlp.queue.consumer_busy"));
         }
         state.stats.consumer_active = true;
@@ -141,6 +155,9 @@ impl ExportQueue {
             add_bytes(&mut bytes, request.len())?;
         }
         let mut state = self.state.lock();
+        if state.sealed {
+            return Err(ExportError::new("otlp.queue.closed"));
+        }
         let retained_batches = state.stats.retained_batches.checked_add(count).ok_or_else(queue_full)?;
         let retained_bytes = state.stats.retained_bytes.checked_add(bytes).ok_or_else(queue_full)?;
         if retained_batches > OTLP_EXPORT_QUEUE_MAX_BATCHES
